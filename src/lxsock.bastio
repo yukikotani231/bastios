@@ -33,6 +33,8 @@ const SOCK_SEQPACKET: u64 = 5;
 const IPPROTO_UDP: u64 = 17;
 const SOCK_RAW: u64 = 3;
 const IPPROTO_ICMP: u64 = 1;
+const IPPROTO_ICMPV6: u64 = 58;
+const SOL_RAW: u64 = 255;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
@@ -264,11 +266,20 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   if domain != AF_INET && domain != AF_INET6 {
     return EAFNOSUPPORT;
   }
-  let fd = lx_inet_socket(&mut k, pid, kind, proto);
+  // A raw ICMPv6 socket (ping6) is a raw ICMP one that carries ICMPv6.
+  let icmp6 = domain == AF_INET6 && kind % 16 == SOCK_RAW && proto == IPPROTO_ICMPV6;
+  let mut p = proto;
+  if icmp6 {
+    p = IPPROTO_ICMP;
+  }
+  let fd = lx_inet_socket(&mut k, pid, kind, p);
   if domain == AF_INET6 {
     let h = fd_ofd(k, pid, fd);
     if h < OFD_N {
       k.inet6 = set(k.inet6, h, 1);
+      if icmp6 {
+        sock_make_raw6(&mut k.nic, of_get(k.ofd, h, 2));
+      }
     }
   }
   return fd;
@@ -713,7 +724,7 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     }
     return 0;
   }
-  let inet = !unix && (lv == 0 || lv == 41 || (tcp && lv == SOL_TCP) || (!tcp && lv == IPPROTO_UDP));
+  let inet = !unix && (lv == 0 || lv == 41 || (tcp && lv == SOL_TCP) || (!tcp && (lv == IPPROTO_UDP || lv == IPPROTO_ICMPV6 || lv == SOL_RAW)));
   if !inet || name % 0x100000000 >= 0x80000000 {
     return ENOPROTOOPT;
   }
@@ -739,7 +750,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   if level != SOL_SOCKET && !(tcp && level == SOL_TCP) {
     // As Linux: an internet level this socket has, with an option it
     // does not know, is ENOPROTOOPT; any other level EOPNOTSUPP.
-    let inet = !is_unix(k, pid, fd) && (level == 0 || level == 41 || (!tcp && level == IPPROTO_UDP));
+    let inet = !is_unix(k, pid, fd) && (level == 0 || level == 41 || (!tcp && (level == IPPROTO_UDP || level == IPPROTO_ICMPV6 || level == SOL_RAW)));
     if inet || (tcp && level == SOL_TCP) {
       return ENOPROTOOPT;
     }

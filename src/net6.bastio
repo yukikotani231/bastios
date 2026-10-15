@@ -264,7 +264,7 @@ fn v6_out(n: &mut Net, flen: u64) -> bool
   let total = be16(n.out, 16);
   let nh = cast[u64](bget(n.out, 23));
   let dst = be32(n.out, 30);
-  if total < 28 || 14 + total > flen || !is_v6tok(dst) || l4_csum_at(nh) == 0 || nh == NH_ICMP6 {
+  if total < 28 || 14 + total > flen || !is_v6tok(dst) || l4_csum_at(nh) == 0 {
     return false;
   }
   let plen = total - 20;
@@ -385,6 +385,76 @@ fn v6_in(n: &mut Net, flen: u64)
   ip_in(&mut n, 34 + plen);
 }
 
+// ---------------------------------------------------------------- raw sockets
+
+/// The queue slot a message for raw ICMPv6 socket s goes in, or RXQ if s
+/// is not one of namespace n.ns's or its queue is full.
+fn raw6_slot(n: &Net, s: u64) -> u64
+  requires net_ok(n) && s < SOCKS
+  ensures result <= RXQ
+{
+  let count = sk_get(n, s, S_COUNT);
+  if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP6 && sk_get(n, s, S_NS) == n.ns && count < RXQ {
+    return (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
+  }
+  return RXQ;
+}
+
+/// Queues the ICMPv6 message of plen bytes at 54 of the packet that came
+/// in, from IPv6 peer token src, on every raw ICMPv6 socket of namespace
+/// n.ns, without the IPv6 header (as Linux does).
+fn raw6_deliver(n: &mut Net, plen: u64, src: u64)
+  requires net_ok(n) && plen <= UDP_MAX && 54 + plen <= blen(n.pkt)
+  ensures net_ok(n)
+{
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS && net_ok(n) && plen <= UDP_MAX
+  {
+    let slot = raw6_slot(n, s);
+    let count = sk_get(n, s, S_COUNT);
+    if slot < RXQ && count < RXQ {
+      bcopy(&mut n.dq, (s * RXQ + slot) * UDP_MAX, n.pkt, 54, plen);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, src);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 0);
+      sk_set(&mut n, s, S_COUNT, count + 1);
+    }
+    s = s + 1;
+  }
+}
+
+/// A raw ICMPv6 message (size bytes of buf) to ::1 or to our own address,
+/// which stay inside: an echo request is answered with the echo reply on
+/// the raw ICMPv6 sockets of the namespace, from the address it was sent
+/// to. Anything else is dropped. Returns size.
+fn raw6_local(n: &mut Net, ip: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n) && 8 <= size && size <= UDP_MAX + 8 && size <= blen(buf)
+  ensures net_ok(n)
+{
+  if cast[u64](bget(buf, 0)) != ICMP6_ECHO || size > UDP_MAX {
+    return size;
+  }
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS && net_ok(n) && size <= UDP_MAX
+  {
+    let slot = raw6_slot(n, s);
+    let count = sk_get(n, s, S_COUNT);
+    if slot < RXQ && count < RXQ {
+      let at = (s * RXQ + slot) * UDP_MAX;
+      bcopy(&mut n.dq, at, buf, 0, size);
+      bset(&mut n.dq, at, cast[u8](ICMP6_ECHO_REPLY));
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, size);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, ip);
+      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 0);
+      sk_set(&mut n, s, S_COUNT, count + 1);
+    }
+    s = s + 1;
+  }
+  return size;
+}
+
 /// An ICMPv6 message (checked) of plen bytes at 54, from shi:slo at MAC
 /// smac.
 fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
@@ -418,6 +488,11 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
     }
   } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI {
     ra_in(&mut n, plen, smac);
+  } else if (kind == ICMP6_ECHO_REPLY || (1 <= kind && kind <= 4)) && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46))
+    && shi / TWO48 != 0xFF02 {
+    // An echo reply, or an error report: for the raw ICMPv6 sockets (ping6).
+    let tok = v6_token(&mut n, shi, slo, smac);
+    raw6_deliver(&mut n, smaller(plen, UDP_MAX), tok);
   }
 }
 

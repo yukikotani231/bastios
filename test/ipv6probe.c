@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <netinet/icmp6.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <stdio.h>
@@ -54,6 +55,50 @@ static int udp_echo(const char *a, int port, const char *msg, char *from, size_t
     return 0;
 }
 
+/* What busybox ping6 does: a raw ICMPv6 socket, the filter and checksum
+ * options it sets, an echo request to a:, the reply read back with its
+ * source address. 0 on failure. */
+static int ping6(const char *a, char *from, size_t fl) {
+    int s = socket(AF_INET6, SOCK_RAW, IPPROTO_ICMPV6);
+    if (s < 0) return 0;
+    struct icmp6_filter filt;
+    ICMP6_FILTER_SETBLOCKALL(&filt);
+    ICMP6_FILTER_SETPASS(ICMP6_ECHO_REPLY, &filt);
+    int off = 2, one = 1;
+    if (setsockopt(s, IPPROTO_ICMPV6, ICMP6_FILTER, &filt, sizeof filt) < 0 ||
+        setsockopt(s, IPPROTO_RAW, IPV6_CHECKSUM, &off, sizeof off) < 0 ||
+        setsockopt(s, IPPROTO_IPV6, IPV6_RECVHOPLIMIT, &one, sizeof one) < 0) {
+        close(s);
+        return 0;
+    }
+    struct sockaddr_in6 to = addr(a, 0);
+    for (int tries = 0; tries < 20; tries++) {
+        struct icmp6_hdr h = {.icmp6_type = ICMP6_ECHO_REQUEST};
+        char pkt[8 + 16];
+        h.icmp6_id = htons(0x4242);
+        h.icmp6_seq = htons(tries);
+        memcpy(pkt, &h, 8);
+        memcpy(pkt + 8, "bastios ping6 ok", 16);
+        if (sendto(s, pkt, sizeof pkt, 0, (void *)&to, sizeof to) < 0) {
+            usleep(300000);
+            continue;
+        }
+        struct pollfd p = {.fd = s, .events = POLLIN};
+        if (poll(&p, 1, 500) == 1) {
+            char b[256];
+            struct sockaddr_in6 f;
+            socklen_t l = sizeof f;
+            ssize_t n = recvfrom(s, b, sizeof b, 0, (void *)&f, &l);
+            close(s);
+            inet_ntop(AF_INET6, &f.sin6_addr, from, fl);
+            return n == sizeof pkt && (unsigned char)b[0] == ICMP6_ECHO_REPLY && memcmp(b + 8, "bastios ping6 ok", 16) == 0 &&
+                   f.sin6_family == AF_INET6;
+        }
+    }
+    close(s);
+    return 0;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     char from[64] = "";
@@ -64,6 +109,13 @@ int main(void) {
            "UDP echo from a link-local address", from);
     report(udp_echo("2001:db8:99::5", 7, "via the router", from, sizeof from) && strcmp(from, "2001:db8:99::5") == 0,
            "UDP echo from off the link, through the router", from);
+
+    report(ping6("2001:db8:1::2", from, sizeof from) && strcmp(from, "2001:db8:1::2") == 0,
+           "ping6 of a host on the link", from);
+    report(ping6("fe80::2", from, sizeof from) && strcmp(from, "fe80::2") == 0, "ping6 of a link-local host", from);
+    report(ping6("2001:db8:99::5", from, sizeof from) && strcmp(from, "2001:db8:99::5") == 0,
+           "ping6 of a host through the router", from);
+    report(ping6("::1", from, sizeof from) && strcmp(from, "::1") == 0, "ping6 of ::1", from);
 
     /* TCP: a request, the whole reply, the server's close. */
     int c = socket(AF_INET6, SOCK_STREAM, 0);

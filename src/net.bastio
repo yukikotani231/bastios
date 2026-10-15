@@ -36,6 +36,7 @@ const NETMASK: u64 = 0xFFFFFF00;      // /24
 const DNS_SERVER: u64 = 0x0A000203;   // 10.0.2.3, QEMU's resolver, with the static address
 
 const IP_ICMP: u64 = 1;
+const IP_ICMP6: u64 = 58;               // ICMPv6, as the protocol of the IPv4 frame that stands for it
 const IP_UDP: u64 = 17;
 const IP_TCP: u64 = 6;
 const ICMP_ECHO_REPLY: u64 = 0;
@@ -103,6 +104,7 @@ const SLOT_W: u64 = 3;
 const S_CORK: u64 = 54;               // bytes held back by MSG_MORE, in cork
 const S_NS: u64 = 55;                 // its network namespace (src/netns.bastio)
 const RAW_ICMP: u64 = 65537;           // S_PORT of a raw ICMP socket (no port number is)
+const RAW_ICMP6: u64 = 65538;          // S_PORT of a raw ICMPv6 socket (src/net6.bastio)
 const SOCK_FIELDS: u64 = 56;          // S_SLOTS + RXQ * SLOT_W + 2
 
 // Network namespaces and interfaces (src/netns.bastio).
@@ -1302,11 +1304,24 @@ fn raw_sendto(n: &mut Net, s: u64, to: u64, buf: &Bytes, size: u64) -> u64
   ensures net_ok(n)
 {
   let ip = dst_ip(to);
-  if !udp_is_open(n, s) || sk_get(n, s, S_PORT) != RAW_ICMP || ip > IP_MAX || ip == 0
+  if !udp_is_open(n, s) {
+    return NO_SOCK;
+  }
+  let kind = sk_get(n, s, S_PORT);
+  if (kind != RAW_ICMP && kind != RAW_ICMP6) || ip > IP_MAX || ip == 0
     || size < 8 || size > UDP_MAX + 8 || size > blen(buf) {
     return NO_SOCK;
   }
   sk_enter(&mut n, s);
+  let mut proto = IP_ICMP;
+  if kind == RAW_ICMP6 {
+    proto = IP_ICMP6;
+    if !is_v6tok(ip) {
+      return raw6_local(&mut n, ip, buf, size);   // ::1 or our own address
+    }
+  } else if is_v6tok(ip) {
+    return NO_SOCK;                   // an ICMPv4 message cannot go to an IPv6 peer
+  }
   if !can_reach(n, ip) {
     return NO_SOCK;
   }
@@ -1315,7 +1330,7 @@ fn raw_sendto(n: &mut Net, s: u64, to: u64, buf: &Bytes, size: u64) -> u64
     return NO_SOCK;
   }
   eth_header(&mut n, 0, ETH_IP);
-  ip_header(&mut n, 20 + size, IP_ICMP, ip);
+  ip_header(&mut n, 20 + size, proto, ip);
   bcopy(&mut n.out, 34, buf, 0, size);
   if !send_via(&mut n, hop, 34 + size) {
     return NO_SOCK;
@@ -2076,12 +2091,28 @@ fn sock_make_raw(c: &mut Nic, s: u64)
   }
 }
 
+/// Makes socket s (just opened) a raw ICMPv6 socket.
+fn sock_make_raw6(c: &mut Nic, s: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) {
+        sk_set(&mut n, s, S_PORT, RAW_ICMP6);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
 fn sock_is_raw(c: &Nic, s: u64) -> bool
   requires nic_ok(c)
 {
   match c {
     Nic::None => { return false; },
-    Nic::Up(n) => { return udp_is_open(n, s) && sk_get(n, s, S_PORT) == RAW_ICMP; },
+    Nic::Up(n) => { return udp_is_open(n, s) && (sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6); },
   }
 }
 
@@ -2259,7 +2290,7 @@ fn sock_row(c: &Nic, s: u64, ns: u64, f: u64) -> u64
   match c {
     Nic::None => { return 0; },
     Nic::Up(n) => {
-      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP {
+      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 {
         return 0;
       }
       if f == 0 {

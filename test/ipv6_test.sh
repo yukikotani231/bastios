@@ -118,6 +118,9 @@ class Wire:
             self.got.append(("na", p[8:24], p[26:32] if len(p) >= 32 else b"", hops))
         elif kind == 129:
             self.got.append(("echo-reply", src, dst, p[4:]))
+        elif kind == 128 and dst in OURS:   # a ping from the guest
+            self.got.append(("ping", dst, f[0:6]))
+            self.send(ip6(58, dst, src, bytes([129, 0, 0, 0]) + p[4:], at=2))
 
     def ra(self):
         ra = struct.pack("!BBHBBHII", 134, 0, 0, 64, 0, 1800, 0, 0)
@@ -235,12 +238,14 @@ for line in text.split("\n"):
     if line.startswith("ok ") or line.startswith("FAIL "):
         check(line.startswith("ok "), "guest: " + line.split(" ", 1)[1])
 check(done and "done 0" in text, "the guest program finished with every check passing")
-if not done:
+if not done or os.environ.get("V6DEBUG"):
     print(text[-2000:])
 check(any(g[0] == "ns" and g[1] == ON_LINK for g in wire.got), "asked for a neighbor's MAC before sending to it")
 off = [g for g in wire.got if g[0] == "udp" and g[1] == OFF_LINK]
 check(off and all(g[2] == HOST_MAC for g in off), "sent off-link traffic to the router's MAC")
 check(any(g[0] == "tcp-served" for g in wire.got), "TCP reached the server over IPv6")
+ping = [g for g in wire.got if g[0] == "ping" and g[1] == OFF_LINK]
+check(ping and all(g[2] == HOST_MAC for g in ping), "sent a ping to an off-link host to the router's MAC")
 check(not wire.bad, f"every frame from the guest had a right checksum {wire.bad[:3]}")
 
 qemu.kill()
