@@ -36,8 +36,10 @@ const XATTR_FIRST: u64 = 188;              // setxattr .. fremovexattr (src/lxxa
 const XATTR_LAST: u64 = 199;               // path, l-path, fd for each
 
 /// The file system types mount knows, in /proc/filesystems's order (sysfs
-/// numbers them so too). Only the last, the disk's, needs a device.
-const FS_TYPES: u64 = 4;
+/// numbers them so too). Only the last, the disk's, needs a device. The
+/// special ones (sysfs to overlay) are what a mount namespace mounts, and
+/// devtmpfs is how OpenRC's devfs service finds out that /dev can be.
+const FS_TYPES: u64 = 10;
 
 fn fs_type_name(t: u64) -> Str {
   if t == 0 {
@@ -48,6 +50,24 @@ fn fs_type_name(t: u64) -> Str {
   }
   if t == 2 {
     return "tmpfs";
+  }
+  if t == 3 {
+    return "sysfs";
+  }
+  if t == 4 {
+    return "devtmpfs";
+  }
+  if t == 5 {
+    return "devpts";
+  }
+  if t == 6 {
+    return "mqueue";
+  }
+  if t == 7 {
+    return "cgroup2";
+  }
+  if t == 8 {
+    return "overlay";
   }
   return "bstdisk3";
 }

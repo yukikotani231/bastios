@@ -330,8 +330,32 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       ret(&mut k.procs, pid, EINVAL);
       return KEEP;
     }
-    ret(&mut k.procs, pid, 0);
     let cmd = c % 0x100000000;                // an int: HALT, POWER_OFF and CAD_ON are negative
+    if nsk_of(k, NSK_PID, pid) != 0 {
+      // In a PID namespace the call restarts or powers off that namespace,
+      // not the machine: its init is killed and the caller ends, the init
+      // showing as ended by SIGHUP (restart) or SIGINT (halt, power off).
+      // Anything else (CAD_ON, CAD_OFF) is EINVAL there, as in Linux.
+      if cmd != 0x01234567 && cmd != 0x4321FEDC && cmd != 0xCDEF0123 {
+        ret(&mut k.procs, pid, EINVAL);
+        return KEEP;
+      }
+      let mut sig = 2;                        // SIGINT
+      if cmd == 0x01234567 {
+        sig = 1;                              // SIGHUP
+      }
+      if vpid_of(k, pid, pid) == 1 {
+        terminate(&mut k, mmu, pid, SIG_DEATH + sig);
+        return SWITCH;
+      }
+      let init = pidns_init(k, pid);
+      if init != 0 {
+        post_from(&mut k, init, 9, 0);
+      }
+      terminate(&mut k, mmu, pid, SIG_DEATH + sig);
+      return SWITCH;
+    }
+    ret(&mut k.procs, pid, 0);
     if cmd == 0x01234567 {
       return REBOOT;
     }
@@ -1069,6 +1093,18 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_RANDOM && req % 0x100000000 == RNDGETENTCNT {
     xfer_u64(&mut k.fs.xfer, 0, 256);       // the pool is always full: /proc/sys/kernel/random/entropy_avail
     return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if d.kind == K_DEV && d.x == DEV_RANDOM && (req % 0x100000000 == RNDADDTOENTCNT || req % 0x100000000 == RNDADDENTROPY
+     || req % 0x100000000 == RNDZAPENTCNT || req % 0x100000000 == RNDCLEARPOOL || req % 0x100000000 == RNDRESEEDCRNG) {
+    // Crediting entropy (seedrng does it at every boot), zeroing the count
+    // and reseeding: for root, and nothing to do, as the pool is always full.
+    if !cap_has(k, pid, CAP_SYS_ADMIN) {
+      return EPERM;
+    }
+    if req % 0x100000000 == RNDADDENTROPY && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;                          // struct rand_pool_info: the count, the size, then the bytes
+    }
+    return 0;
   }
   if d.kind == K_DEV && (is_loop(d.x) || d.x == DEV_LOOPCTL) {
     return loop_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // the request is an unsigned int
