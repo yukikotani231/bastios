@@ -144,6 +144,16 @@ static int fdlink_after_pivot(void) {
             return 0;
         }
     }
+    /* Mounting on a file through its descriptor (runc's way to bind devices into a container) */
+    mkdir("/proc", 0755);
+    if (mount("proc", "/proc", "proc", 0, 0) != 0) return 0;
+    int tf = open("/m/f2", O_PATH | O_CLOEXEC);
+    char tp[64];
+    snprintf(tp, sizeof tp, "/proc/self/fd/%d", tf);
+    if (tf < 0 || mount("/sub/f1", tp, 0, MS_BIND, 0) != 0) {
+        printf("bind onto %s: errno %d\n", tp, errno);
+        return 0;
+    }
     return 1;
 }
 
