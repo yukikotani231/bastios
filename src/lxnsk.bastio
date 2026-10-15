@@ -1651,9 +1651,8 @@ fn ns_fd_new(k: &mut Kernel, pid: u64, f: u64, id: u64) -> u64
 /// namespace's parent), NS_GET_PARENT (the parent of a user or PID
 /// namespace), NS_GET_NSTYPE (its CLONE_NEW* flag) and NS_GET_OWNER_UID
 /// (the creator of a user namespace, as the caller sees ids). Parents and
-/// owners are only given to a caller that is in them or inside one that
-/// is, as on Linux, and namespaces are two levels deep, so every parent is
-/// the first one. A namespace other than a user namespace is owned by the
+/// owners are only given to a caller that is in them or in a namespace
+/// around them, as on Linux. A namespace other than a user namespace is owned by the
 /// user namespace of the process whose link was opened (the first
 /// namespaces by the first one).
 fn ns_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u64
@@ -1688,18 +1687,53 @@ fn ns_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u6
     if f != NF_USER && f != NF_PID && f != NF_PIDC {
       return EINVAL;                        // not hierarchical
     }
-    let mut here = mine;
-    if f != NF_USER {
-      here = nsk_of(k, NSK_PID, pid);
-    }
-    if id == 0 || here != 0 {
-      return EPERM;
+    if id == 0 {
+      return EPERM;                         // the first has no parent
     }
     let mut g = f;
     if f == NF_PIDC {
       g = NF_PID;
     }
-    return ns_fd_new(&mut k, pid, g, 0);
+    let mut par = 0;
+    let mut here = mine;
+    if f == NF_USER {
+      let us = usr_slot(k, id);
+      if us >= USR_N {
+        return EPERM;
+      }
+      par = usr_get(k, us, UMW_PAR) % MNS_MAX;
+    } else {
+      par = pn_parent(k, id);
+      here = nsk_of(k, NSK_PID, pid);
+    }
+    // The caller is in the parent or in a namespace around it, as on Linux.
+    let mut seen = false;
+    let mut stop = false;
+    let mut v = par;
+    let mut n = 0;
+    while n < USR_N && !seen && !stop
+      invariant n <= USR_N && v < MNS_MAX && kok(k)
+    {
+      if v == here {
+        seen = true;
+      } else if v == 0 {
+        stop = true;
+      } else if f == NF_USER {
+        let vs = usr_slot(k, v);
+        if vs >= USR_N {
+          stop = true;
+        } else {
+          v = usr_get(k, vs, UMW_PAR) % MNS_MAX;
+        }
+      } else {
+        v = pn_parent(k, v);
+      }
+      n = n + 1;
+    }
+    if !seen {
+      return EPERM;
+    }
+    return ns_fd_new(&mut k, pid, g, par);
   }
   if req == NS_GET_OWNER_UID {
     if f != NF_USER {
