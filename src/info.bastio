@@ -561,6 +561,8 @@ fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
     puts(&mut con, " e1000 network (82574)");
   } else if e1k_model(vendor, device) == E1K_IGB {
     puts(&mut con, " e1000 network (igb)");
+  } else if e1k_model(vendor, device) == E1K_IGC {
+    puts(&mut con, " e1000 network (I225/I226, untested on hardware)");
   } else if e1k_model(vendor, device) >= E1K_PCH {
     puts(&mut con, " e1000 network (I217-I219, untested on hardware)");
   } else if rtl_model(vendor, device) {

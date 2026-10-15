@@ -162,7 +162,7 @@ fn nic_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, a
   let mut regs = mmio_claim(&mut win, bar, E1K_LEN);
   let id = pci_read(&mut pci, e, PCI_ID);
   let model = e1k_model(id % 65536, id / 65536 % 65536);
-  if model >= E1K_PCH {
+  if model == E1K_PCH || model == E1K_PCH_LPT {
     regs = e1k_pch_reset(regs, &mut pci, e, model == E1K_PCH_LPT);
   }
   return net_up(Card::E1000(e1k_new(regs, model, r, b0, b1, b2, b3, t)));

@@ -19,7 +19,11 @@
 //              uses the legacy descriptors of the 8254x, but the PHY sits
 //              behind the ME and the chipset's SMBus, and `e1k_pch_reset`
 //              must run (x86-64 `nic_new` does it) before `e1k_new`.
-// The I225/I226 are another design, not driven.
+//   E1K_IGC    the I225 and I226 (2.5 Gb/s; 8086:15F2 ... 125E). Untested: QEMU
+//              has no model. Their queues, descriptors and reset are the igb's
+//              (Linux's igc driver uses the same offsets); the PHY answers at
+//              address 0, and the MAC address comes from the receive-address
+//              registers the card loads from its NVM.
 // Polled like the virtio card: its registers are a 128 KiB
 // block of the device window, claimed as an `Mmio`, and every page it can
 // touch is a `Dma` lent at start and taken back after a reset at power off.
@@ -37,6 +41,7 @@ const E1K_82574: u64 = 2;
 const E1K_IGB: u64 = 3;
 const E1K_PCH: u64 = 4;
 const E1K_PCH_LPT: u64 = 5;           // I217 and two I218: no ultra-low-power state to leave
+const E1K_IGC: u64 = 6;               // I225 and I226: the igb's queues and descriptors, another PHY
 const E1K_LEN: u64 = 0x20000;         // the register block
 const E1K_TOP: u64 = 0xFEC00000;      // its BAR must lie below the I/O APIC, HPET and local APIC
 const E1K_PAGES: u64 = 6;
@@ -115,6 +120,7 @@ const MDIC_READ_ID1: u64 = 0x08220000; // read register 2 of the PHY at address 
 // MDIC: write PHY 1's control register (0) with autonegotiation on and
 // restarted (and power-down off), then bit 28 says it is done.
 const MDIC_AUTONEG: u64 = 0x04201200;
+const MDIC_AUTONEG_IGC: u64 = 0x04001200; // the same, to the PHY at address 0
 const MDIC_READY: u64 = 0x10000000;
 const TX_CMD: u64 = 0x0B;             // end of packet, insert the CRC, report status
 const DESC_DD: u64 = 1;               // descriptor done
@@ -131,7 +137,7 @@ struct E1k {
   tb: Dma,            // the frame being sent
   rx_next: u64,       // the next receive descriptor the card fills
   tx_next: u64,       // the next transmit descriptor
-  model: u64,         // E1K_8254X, E1K_82574 or E1K_IGB
+  model: u64,         // E1K_8254X, E1K_82574, E1K_IGB, E1K_IGC ...
   rq: u64,            // where queue 0's registers are
   tq: u64,
   mac: u64,
@@ -147,7 +153,7 @@ spec fn e1k_ok(e: &E1k) -> bool {
 
 /// Which family PCI id `vendor:device` is, or E1K_NONE.
 fn e1k_model(vendor: u64, device: u64) -> u64
-  ensures result <= E1K_PCH_LPT
+  ensures result <= E1K_IGC
 {
   if vendor != E1K_VENDOR {
     return E1K_NONE;
@@ -172,6 +178,11 @@ fn e1k_model(vendor: u64, device: u64) -> u64
   }
   if device == 0x10D3 {
     return E1K_82574;
+  }
+  if device == 0x15F2 || device == 0x15F3 || device == 0x15F8 || device == 0x15F7 || device == 0x3100
+    || device == 0x3101 || device == 0x3102 || device == 0x5502 || device == 0x5503 || device == 0x0D9F
+    || device == 0x125B || device == 0x125C || device == 0x125D || device == 0x125E {
+    return E1K_IGC;                   // I225-LM/V/I/K/K2/IT, I220-V, I226-K/LM/V/IT/LMVP, I221-V
   }
   if device == 0x10C9 || device == 0x1521 || device == 0x1533 || device == 0x157B || device == 0x1539 {
     return E1K_IGB;                   // 82576, I350, I210 (and without flash), I211
@@ -572,7 +583,7 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
 {
   let mut rq = E1K_RQ;
   let mut tq = E1K_TQ;
-  if model == E1K_IGB {
+  if model == E1K_IGB || model == E1K_IGC {
     rq = IGB_RQ;
     tq = IGB_TQ;
   }
@@ -580,7 +591,7 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
     rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, model: model, rq: rq, tq: tq, mac: 0, live: false, irq: false };
   let ra = dma_addr(e.ring);
   // (An I217-I219 was reset by e1k_pch_reset.)
-  if ra > ADDR_LIMIT - 4096 || (model < E1K_PCH && !e1k_reset(&mut e)) {
+  if ra > ADDR_LIMIT - 4096 || (model != E1K_PCH && model != E1K_PCH_LPT && !e1k_reset(&mut e)) {
     return e;
   }
   e1k_read(&mut e, E1K_ICR);           // clears anything pending
@@ -595,8 +606,12 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   e1k_write(&mut e, E1K_CTRL, up);
   // igb: the PHY negotiates the link only when told to (QEMU's waits
   // for it; a real one may be powered down), as Linux's igb does.
-  if model == E1K_IGB {
-    e1k_write(&mut e, E1K_MDIC, MDIC_AUTONEG);
+  if model == E1K_IGB || model == E1K_IGC {
+    if model == E1K_IGC {
+      e1k_write(&mut e, E1K_MDIC, MDIC_AUTONEG_IGC);
+    } else {
+      e1k_write(&mut e, E1K_MDIC, MDIC_AUTONEG);
+    }
     let mut spins = 0;
     while spins < VIO_SPINS && e1k_read(&mut e, E1K_MDIC) / MDIC_READY % 2 == 0
       invariant e1k_ok(e) && e.rq == rq && e.tq == tq && !e.live
@@ -621,7 +636,7 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   // card loads them from its EEPROM), else read from the EEPROM directly.
   let mut lo = e1k_read(&mut e, E1K_RAL);
   let mut hi = e1k_read(&mut e, E1K_RAH);
-  if hi / RAH_AV % 2 == 0 && model >= E1K_PCH {
+  if hi / RAH_AV % 2 == 0 && (model >= E1K_PCH) {
     return e;                         // no EEPROM to read: the address lives in the flash the card loaded it from
   }
   if hi / RAH_AV % 2 == 0 {
@@ -660,7 +675,7 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   }
   let rq0 = e.rq;
   let tq0 = e.tq;
-  if model >= E1K_PCH {
+  if model == E1K_PCH || model == E1K_PCH_LPT {
     e1k_pch_bits(&mut e);
   }
   e1k_write(&mut e, rq0 + Q_BAL, ra);
@@ -669,10 +684,10 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   e1k_write(&mut e, rq0 + Q_H, 0);
   // igb: advanced descriptors, and the queue is enabled on its own,
   // before its tail is written.
-  if model == E1K_IGB {
+  if model == E1K_IGB || model == E1K_IGC {
     e1k_write(&mut e, rq0 + Q_SRRCTL, SRRCTL_ADV);
   }
-  if model == E1K_IGB && (!e1k_queue_on(&mut e, rq0) || !e1k_queue_on(&mut e, tq0)) {
+  if (model == E1K_IGB || model == E1K_IGC) && (!e1k_queue_on(&mut e, rq0) || !e1k_queue_on(&mut e, tq0)) {
     return e;
   }
   e1k_write(&mut e, rq0 + Q_T, E1K_DESCS - 1);
@@ -683,9 +698,9 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   e1k_write(&mut e, tq0 + Q_LEN, E1K_DESCS * 16);
   e1k_write(&mut e, tq0 + Q_H, 0);
   e1k_write(&mut e, tq0 + Q_T, 0);
-  if model >= E1K_PCH {
+  if model == E1K_PCH || model == E1K_PCH_LPT {
     e1k_write(&mut e, E1K_TIPG, TIPG_PCH);
-  } else {
+  } else if model != E1K_IGC {      // the I225/I226 keep their default
     e1k_write(&mut e, E1K_TIPG, TIPG_STD);
   }
   e1k_write(&mut e, E1K_TCTL, TCTL_ON);
@@ -781,7 +796,7 @@ fn e1k_recv(e: &mut E1k, pkt: &mut Bytes) -> u64
   let b = e.rx_next;
   let mut st_at = 12;
   let mut len_at = 8;
-  if e.model == E1K_IGB {
+  if e.model == E1K_IGB || e.model == E1K_IGC {
     st_at = 8;
     len_at = 12;
   }
@@ -797,7 +812,7 @@ fn e1k_recv(e: &mut E1k, pkt: &mut Bytes) -> u64
   e1k_rxbuf_copy(&mut e, b, &mut pkt, n);
   // Back to the card: clear its status (and give the address again),
   // then move the tail onto it.
-  if e.model == E1K_IGB {
+  if e.model == E1K_IGB || e.model == E1K_IGC {
     dma_write64(&mut e.ring, b * 16, e1k_rxbuf_addr(e, b));
   }
   dma_write64(&mut e.ring, b * 16 + 8, 0);
@@ -819,7 +834,7 @@ fn e1k_send(e: &mut E1k, pkt: &Bytes, n: u64) -> bool
   bytes_to_dma(&mut e.tb, 0, pkt, 0, n);
   let d = E1K_TXR + e.tx_next * 16;
   dma_write64(&mut e.ring, d, dma_addr(e.tb));
-  if e.model == E1K_IGB {
+  if e.model == E1K_IGB || e.model == E1K_IGC {
     dma_write64(&mut e.ring, d + 8, n + ADV_TX + n * 70368744177664);   // the payload length at bit 46
   } else {
     dma_write64(&mut e.ring, d + 8, n + TX_CMD * 16777216);
