@@ -99,8 +99,80 @@ static int ping6(const char *a, char *from, size_t fl) {
     return 0;
 }
 
-int main(void) {
+/* The server half, started in the background by the test script, which
+ * plays the clients: a dual-stack UDP echo on 9001 and a dual-stack TCP
+ * greeter on 9002, after checks that an IPv6-only socket and an IPv4 one
+ * can share a port and that a dual-stack one cannot. */
+static int bound(int family, int type, int v6only, int port) {
+    int s = socket(family, type, 0);
+    int one = v6only;
+    if (s < 0) return -1;
+    if (family == AF_INET6 && setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one) < 0) return -1;
+    if (family == AF_INET6) {
+        struct sockaddr_in6 a = {.sin6_family = AF_INET6, .sin6_port = htons(port)};
+        if (bind(s, (void *)&a, sizeof a) < 0) { close(s); return -2; }
+    } else {
+        struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port)};
+        if (bind(s, (void *)&a, sizeof a) < 0) { close(s); return -2; }
+    }
+    if (type == SOCK_STREAM && listen(s, 4) < 0) { close(s); return -2; }
+    return s;
+}
+
+static int serve(void) {
+    printf("\n");                          /* the shell's job notice comes before the first line */
+    static const int types[2] = {SOCK_DGRAM, SOCK_STREAM};
+    for (int t = 0; t < 2; t++) {
+        int a = bound(AF_INET6, types[t], 1, 9003 + t);
+        int b = bound(AF_INET, types[t], 0, 9003 + t);
+        report(a >= 0 && b >= 0, t ? "TCP: an IPv6-only listener and an IPv4 one share a port" :
+               "UDP: an IPv6-only socket and an IPv4 one share a port", "bind");
+        int c = bound(AF_INET6, types[t], 0, 9003 + t);
+        report(c == -2 && errno == EADDRINUSE, t ? "TCP: a dual-stack listener cannot share it" :
+               "UDP: a dual-stack socket cannot share it", "bound twice");
+        int v = -1;
+        socklen_t vl = sizeof v;
+        report(a >= 0 && getsockopt(a, IPPROTO_IPV6, IPV6_V6ONLY, &v, &vl) == 0 && v == 1,
+               "IPV6_V6ONLY reads back", "getsockopt");
+        if (a >= 0) close(a);
+        if (b >= 0) close(b);
+        if (c >= 0) close(c);
+    }
+    int u = bound(AF_INET6, SOCK_DGRAM, 0, 9001);
+    int l = bound(AF_INET6, SOCK_STREAM, 0, 9002);
+    if (u < 0 || l < 0) { report(0, "the servers listen", "bind"); return 1; }
+    printf("ready\n");
+    for (;;) {
+        struct pollfd p[2] = {{.fd = u, .events = POLLIN}, {.fd = l, .events = POLLIN}};
+        if (poll(p, 2, 60000) <= 0) return 1;
+        if (p[0].revents & POLLIN) {
+            char b[256];
+            struct sockaddr_in6 f;
+            socklen_t fl = sizeof f;
+            ssize_t n = recvfrom(u, b, sizeof b, 0, (void *)&f, &fl);
+            if (n > 0) sendto(u, b, n, 0, (void *)&f, fl);
+        }
+        if (p[1].revents & POLLIN) {
+            struct sockaddr_in6 f, me;
+            socklen_t fl = sizeof f, ml = sizeof me;
+            int c = accept(l, (void *)&f, &fl);
+            if (c < 0) continue;
+            char b[64], peer[64] = "?", own[64] = "?", out[200];
+            getsockname(c, (void *)&me, &ml);
+            inet_ntop(AF_INET6, &f.sin6_addr, peer, sizeof peer);
+            inet_ntop(AF_INET6, &me.sin6_addr, own, sizeof own);
+            if (read(c, b, sizeof b) > 0) {
+                int m = snprintf(out, sizeof out, "peer %s port %d own %s\n", peer, ntohs(f.sin6_port), own);
+                write(c, out, m);
+            }
+            close(c);
+        }
+    }
+}
+
+int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc > 1) return serve();
     char from[64] = "";
 
     report(udp_echo("2001:db8:1::2", 7, "over ipv6", from, sizeof from) && strcmp(from, "2001:db8:1::2") == 0,

@@ -80,6 +80,7 @@ const W_RXHEAD: u64 = 24;             // where the next byte to read is in the r
 const W_WS: u64 = 25;                 // the peer's window scale + 1, once both sides scale; 0: neither does
 const W_SACK: u64 = 26;               // 1 if the peer takes SACK blocks (it sent SACK-permitted)
 const W_NS: u64 = 27;                 // its network namespace (src/netns.bastio)
+const W_FAM: u64 = 28;                // a listener's FAM_* (net.bastio)
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
 // Connection t's rings (src/tcpbuf.bastio).
@@ -452,6 +453,7 @@ fn tcb_init(n: &mut Net, t: u64, st: u64, lport: u64, rip: u64, rport: u64, pare
   tset(&mut n, t, W_PARENT, parent);
   tset(&mut n, t, W_HELD, held);
   tset(&mut n, t, W_NS, n.ns);
+  tset(&mut n, t, W_FAM, FAM_V4);
 }
 
 /// The connection a segment from rip:rport to our lport belongs to: an
@@ -468,7 +470,9 @@ fn tcb_find(n: &Net, lport: u64, rip: u64, rport: u64) -> u64
     let st = tw(n, t, W_STATE);
     if st != T_CLOSED && tw(n, t, W_LPORT) == lport && tw(n, t, W_NS) == n.ns {
       if st == T_LISTEN {
-        lis = t;
+        if fam_takes(tw(n, t, W_FAM), is_v6tok(rip)) {
+          lis = t;
+        }
       } else if tw(n, t, W_RIP) == rip && tw(n, t, W_RPORT) == rport {
         return t;
       }
@@ -499,7 +503,7 @@ fn tcp_port_used(n: &Net, port: u64) -> bool
 /// does not keep a new listener off its port: segments go to the
 /// connection whose addresses they carry first (tcb_find), so the two
 /// never mix. This is Linux with SO_REUSEADDR, which servers set.
-fn tcp_port_taken(n: &Net, port: u64) -> bool
+fn tcp_port_taken(n: &Net, port: u64, fam: u64) -> bool
   requires net_ok(n)
 {
   let mut t = 0;
@@ -507,7 +511,8 @@ fn tcp_port_taken(n: &Net, port: u64) -> bool
     invariant t <= TCBS
   {
     let st = tw(n, t, W_STATE);
-    if (st == T_LISTEN || tw(n, t, W_HELD) == 1) && tw(n, t, W_LPORT) == port && tw(n, t, W_NS) == n.ns {
+    if (st == T_LISTEN || tw(n, t, W_HELD) == 1) && tw(n, t, W_LPORT) == port && tw(n, t, W_NS) == n.ns
+      && !(st == T_LISTEN && fam_apart(tw(n, t, W_FAM), fam)) {
       return true;
     }
     t = t + 1;
@@ -994,7 +999,7 @@ fn tcb_held(n: &Net, t: u64) -> bool
 
 /// Listens on `port` (0: an ephemeral one): the listener's number, or
 /// NO_SOCK.
-fn tcp_listen_on(n: &mut Net, want: u64) -> u64
+fn tcp_listen_on(n: &mut Net, want: u64, fam: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
 {
@@ -1002,7 +1007,7 @@ fn tcp_listen_on(n: &mut Net, want: u64) -> u64
   if port == 0 {
     port = tcp_eph_port(&mut n);
   }
-  if port == 0 || port > 65535 || (n.ns == 0 && n.ip == 0) || tcp_port_taken(n, port) {
+  if port == 0 || port > 65535 || (n.ns == 0 && n.ip == 0) || tcp_port_taken(n, port, fam) {
     return NO_SOCK;
   }
   let t = tcb_free_slot(n);
@@ -1010,6 +1015,7 @@ fn tcp_listen_on(n: &mut Net, want: u64) -> u64
     return NO_SOCK;
   }
   tcb_init(&mut n, t, T_LISTEN, port, 0, 0, TCBS, 1);
+  tset(&mut n, t, W_FAM, fam);
   return t;
 }
 
@@ -1267,7 +1273,7 @@ fn tcp_shut(n: &mut Net, t: u64) -> bool
 // Each takes the card or none; with none, every call fails.
 
 /// tcp_listen and tcp_connect make the connection in namespace ns.
-fn tcp_listen(c: &mut Nic, ns: u64, port: u64) -> u64
+fn tcp_listen(c: &mut Nic, ns: u64, port: u64, fam: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c)
 {
@@ -1279,7 +1285,7 @@ fn tcp_listen(c: &mut Nic, ns: u64, port: u64) -> u64
         return NO_SOCK;
       }
       n.ns = ns;
-      let r = tcp_listen_on(&mut n, port);
+      let r = tcp_listen_on(&mut n, port, fam);
       c = Nic::Up(n);
       return r;
     },

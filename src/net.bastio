@@ -80,6 +80,7 @@ const NO_SOCK: u64 = 18446744073709551615;
 const V6N: u64 = 16;                  // IPv6 peers (src/net6.bastio)
 const V6W: u64 = 4;                   // words per peer: address (2), MAC, in use
 const V6_BASE: u64 = 0xF0000000;      // 240.0.0.0: the first peer's token
+const V6_SELF: u64 = 0xF0000010;      // V6_BASE + V6N: in a socket's name, our own IPv6 address
 const LOQ: u64 = 64;                  // frames the loopback queue holds at most ...
 const LO_BYTES: u64 = 98304;         // ... in this many bytes (a ring: a frame is as long as it is)
 // The frame buffers (pkt, out, and the loopback queue's slots) are far larger
@@ -105,7 +106,14 @@ const S_CORK: u64 = 54;               // bytes held back by MSG_MORE, in cork
 const S_NS: u64 = 55;                 // its network namespace (src/netns.bastio)
 const RAW_ICMP: u64 = 65537;           // S_PORT of a raw ICMP socket (no port number is)
 const RAW_ICMP6: u64 = 65538;          // S_PORT of a raw ICMPv6 socket (src/net6.bastio)
-const SOCK_FIELDS: u64 = 56;          // S_SLOTS + RXQ * SLOT_W + 2
+const S_FAM: u64 = 56;                // FAM_*: which peers it takes datagrams from
+const SOCK_FIELDS: u64 = 57;          // S_SLOTS + RXQ * SLOT_W + 2, then S_NS and S_FAM
+// Which address family a socket (UDP here, TCP listeners in tcp.bastio)
+// answers to. The IPv4 and IPv6 sides share one port space, as on Linux,
+// except that an IPv6-only socket and an IPv4 one may hold the same port.
+const FAM_BOTH: u64 = 0;               // an AF_INET6 socket that takes IPv4 peers too (the default)
+const FAM_V4: u64 = 4;                 // an AF_INET socket
+const FAM_V6: u64 = 6;                 // an AF_INET6 socket with IPV6_V6ONLY
 
 // Network namespaces and interfaces (src/netns.bastio).
 const NNET: u64 = 16;                  // network namespaces
@@ -166,7 +174,7 @@ const NAT_NONE: u64 = 18446744073709551615;
 
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 240;                // connections (listeners and TIME_WAIT hold some)
-const TCB_W: u64 = 28;                // words per connection (TCP_RING, the size of
+const TCB_W: u64 = 29;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
 struct Net {
@@ -800,7 +808,7 @@ fn udp_in(n: &mut Net, total: u64)
   if be32(n.pkt, 30) == IP_MAX {
     return;                           // other broadcasts: nobody listens
   }
-  let s = sock_find(n, dport);
+  let s = sock_find_in(n, dport, is_v6tok(be32(n.pkt, 26)));
   if s < SOCKS {
     udp_deliver(&mut n, s, ulen);
   } else if dport == UDP_ECHO_PORT {
@@ -1252,6 +1260,65 @@ fn sock_find(n: &Net, port: u64) -> u64
   return SOCKS;
 }
 
+/// Can a socket of family a and one of family b hold the same port? Only
+/// an IPv4 socket and an IPv6-only one can.
+fn fam_apart(a: u64, b: u64) -> bool
+{
+  return (a == FAM_V4 && b == FAM_V6) || (a == FAM_V6 && b == FAM_V4);
+}
+
+/// Does a socket of family fam take what comes from an IPv6 peer (v6) or
+/// an IPv4 one?
+fn fam_takes(fam: u64, v6: bool) -> bool
+{
+  if v6 {
+    return fam != FAM_V4;
+  }
+  return fam != FAM_V6;
+}
+
+/// The socket a datagram from an IPv6 (v6) or IPv4 peer to `port` goes
+/// to; SOCKS if none.
+fn sock_find_in(n: &Net, port: u64, v6: bool) -> u64
+  requires net_ok(n)
+  ensures result <= SOCKS
+{
+  if port == 0 {
+    return SOCKS;
+  }
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS
+  {
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == port && sk_get(n, s, S_NS) == n.ns
+      && fam_takes(sk_get(n, s, S_FAM), v6) {
+      return s;
+    }
+    s = s + 1;
+  }
+  return SOCKS;
+}
+
+/// Does a socket of family fam keep another from `port`?
+fn port_busy(n: &Net, port: u64, fam: u64) -> bool
+  requires net_ok(n)
+{
+  if port == 0 {
+    return false;
+  }
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS
+  {
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == port && sk_get(n, s, S_NS) == n.ns
+      && !fam_apart(sk_get(n, s, S_FAM), fam) {
+      return true;
+    }
+    s = s + 1;
+  }
+  return false;
+}
+
 /// Queues the payload of the received UDP datagram (ulen bytes with its
 /// header, at 34) on socket s. A datagram arriving at a full queue is
 /// dropped, which UDP allows.
@@ -1360,6 +1427,7 @@ fn udp_open(n: &mut Net) -> u64
       sk_set(&mut n, s, S_PEER_PORT, 0);
       sk_set(&mut n, s, S_CORK, 0);
       sk_set(&mut n, s, S_NS, n.ns);
+      sk_set(&mut n, s, S_FAM, FAM_V4);
       return s;
     }
     s = s + 1;
@@ -1430,7 +1498,7 @@ fn udp_bind(n: &mut Net, s: u64, port: u64) -> bool
   if port == 0 {
     return udp_bind_any(&mut n, s) != 0;
   }
-  if sock_find(n, port) != SOCKS {
+  if port_busy(n, port, sk_get(n, s, S_FAM)) {
     return false;
   }
   sk_set(&mut n, s, S_PORT, port);
@@ -2089,6 +2157,22 @@ fn sock_make_raw(c: &mut Nic, s: u64)
     Nic::Up(mut n) => {
       if udp_is_open(n, s) {
         sk_set(&mut n, s, S_PORT, RAW_ICMP);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// Sets the address family socket s answers to (FAM_*).
+fn sock_set_fam(c: &mut Nic, s: u64, fam: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) && sk_get(n, s, S_PORT) == 0 {
+        sk_set(&mut n, s, S_FAM, fam);
       }
       c = Nic::Up(n);
     },
