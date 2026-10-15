@@ -353,3 +353,95 @@ fn process_vm(k: &mut Kernel, pid: u64, write: bool, p: u64, local: u64, lcnt: u
   }
   return done;
 }
+
+// ---------------------------------------------------------------- PIDFD_GET_INFO
+
+const PIDFD_INFO_PID: u64 = 1;
+const PIDFD_INFO_CREDS: u64 = 2;
+const PIDFD_INFO_EXIT: u64 = 8;
+const PIDFD_INFO_VER0: u64 = 64;                   // the size of struct pidfd_info before Linux 6.15 added coredump_mask
+const PIDFD_INFO_FULL: u64 = 72;
+
+/// Two 32-bit fields of a structure as one little-endian word.
+fn pair(lo: u64, hi: u64) -> u64 {
+  return lo % 0x100000000 + hi % 0x100000000 * 0x100000000;
+}
+
+/// ioctl(pidfd, PIDFD_GET_INFO, info) for a pidfd on row p (NPROC if the
+/// process is gone): the ids of the process (PIDFD_INFO_PID, always) and
+/// its credentials as the caller sees them (PIDFD_INFO_CREDS, when asked
+/// for), and, once the process has ended (a zombie, or reaped as long as
+/// its slot has not been taken again), its wait status (PIDFD_INFO_EXIT).
+/// A process the caller's PID namespace does not contain, and a reaped one
+/// when no exit status was asked for, is -ESRCH. The control groups id is
+/// not given (PIDFD_INFO_CGROUPID is never set in the answer).
+fn pidfd_ioctl(k: &mut Kernel, pid: u64, p: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC && p <= NPROC
+  ensures kok(k)
+{
+  if req % 256 != 11 || req / 256 % 256 != 0xFF || req / 0x40000000 != 3 {
+    return ENOTTY;                          // _IOWR(PIDFS_IOCTL_MAGIC, 11, struct pidfd_info)
+  }
+  let size = req / 65536 % 16384;
+  if arg == 0 || size < PIDFD_INFO_VER0 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  let want = load_le64(k.fs.xfer, 0);
+  let me = nsk_of(k, NSK_PID, pid);
+  if p >= NPROC || (me != 0 && nsk_of(k, NSK_PID, p) != me) {
+    return ESRCH;
+  }
+  let st = state(k.procs, p);
+  let dead = st == FREE || st == ZOMBIE;
+  let code = pget(k.procs, p, F_CODE);
+  let has_exit = dead && want / PIDFD_INFO_EXIT % 2 == 1 && code < EXIT_PENDING;
+  if st == FREE && !has_exit {
+    return ESRCH;
+  }
+  let mut got = 0;
+  let mut ids = 0;                          // pid, tgid
+  let mut par = 0;                          // ppid, ruid
+  let mut gs = 0;                           // rgid, euid
+  let mut es = 0;                           // egid, suid
+  let mut sg = 0;                           // sgid, fsuid
+  let mut fx = 0;                           // fsgid, exit_code
+  if st != FREE {
+    let v = vpid_of(k, pid, p);
+    let pp = pget(k.procs, p, F_PARENT);
+    let mut ppid = 0;
+    if pp < NPROC {
+      ppid = vpid_of(k, pid, pp);
+    }
+    got = PIDFD_INFO_PID;
+    ids = pair(v, v);
+    par = ppid;
+    if want / PIDFD_INFO_CREDS % 2 == 1 {
+      got = got + PIDFD_INFO_CREDS;
+      par = pair(ppid, id_out(k, pid, 0, id_get(k.procs, p, F_UID, false)));
+      gs = pair(id_out(k, pid, 1, id_get(k.procs, p, F_GID, false)), id_out(k, pid, 0, id_get(k.procs, p, F_UID, true)));
+      es = pair(id_out(k, pid, 1, id_get(k.procs, p, F_GID, true)), id_out(k, pid, 0, id_get(k.procs, p, F_SUID, false)));
+      sg = pair(id_out(k, pid, 1, id_get(k.procs, p, F_SGID, false)), id_out(k, pid, 0, fs_id(k.procs, p, false)));
+      fx = id_out(k, pid, 1, fs_id(k.procs, p, true));
+    }
+  }
+  if has_exit {
+    got = got + PIDFD_INFO_EXIT;
+    let mut status = code % 256 * 256;
+    if code >= SIG_DEATH {
+      status = code % 128 + code / 128 % 2 * 128;       // as wait4 reports it
+    }
+    fx = pair(fx, status);
+  }
+  lx_fill(&mut k, 0, PIDFD_INFO_FULL);
+  xfer_u64(&mut k.fs.xfer, 0, got);
+  xfer_u64(&mut k.fs.xfer, 16, ids);
+  xfer_u64(&mut k.fs.xfer, 24, par);
+  xfer_u64(&mut k.fs.xfer, 32, gs);
+  xfer_u64(&mut k.fs.xfer, 40, es);
+  xfer_u64(&mut k.fs.xfer, 48, sg);
+  xfer_u64(&mut k.fs.xfer, 56, fx);
+  return lx_put_out(&mut k, pid, arg, smaller(size, PIDFD_INFO_FULL));
+}

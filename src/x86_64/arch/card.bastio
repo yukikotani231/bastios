@@ -1,14 +1,15 @@
-// The network card under the IPv4 stack: virtio, e1000 or ENA. The stack sees
+// The network card under the IPv4 stack: virtio, e1000, RTL8168 or ENA. The stack sees
 // only these calls.
 
 import "virtio_net.bastio";
 import "e1000.bastio";
 import "ena.bastio";
+import "rtl8169.bastio";
 
-enum Card { Virtio(VNet), E1000(E1k), Ena(Ena) }
+enum Card { Virtio(VNet), E1000(E1k), Rtl(Rtl), Ena(Ena) }
 
 spec fn card_ok(d: &Card) -> bool {
-  (d is Card::Virtio ==> vnet_ok(d.Virtio)) && (d is Card::E1000 ==> e1k_ok(d.E1000)) && (d is Card::Ena ==> ena_ok(d.Ena))
+  (d is Card::Virtio ==> vnet_ok(d.Virtio)) && (d is Card::E1000 ==> e1k_ok(d.E1000)) && (d is Card::Rtl ==> rtl_ok(d.Rtl)) && (d is Card::Ena ==> ena_ok(d.Ena))
 }
 
 fn card_mac(d: &Card) -> u64
@@ -17,6 +18,7 @@ fn card_mac(d: &Card) -> u64
   match d {
     Card::Virtio(v) => { return v.mac % 281474976710656; },
     Card::E1000(e) => { return e.mac % 281474976710656; },
+    Card::Rtl(t) => { return t.mac % 281474976710656; },
     Card::Ena(a) => { return a.mac % 281474976710656; },
   }
 }
@@ -25,12 +27,19 @@ fn card_live(d: &Card) -> bool {
   match d {
     Card::Virtio(v) => { return v.live; },
     Card::E1000(e) => { return e.live; },
+    Card::Rtl(t) => { return t.live; },
     Card::Ena(a) => { return a.live; },
   }
 }
 
+/// Whether the card signals a received frame on a PCI interrupt line, which
+/// goes through the 8259 (an e1000 or an RTL8168: neither has MSI here).
 fn card_is_e1000(d: &Card) -> bool {
-  return d is Card::E1000;
+  return d is Card::E1000 || d is Card::Rtl;
+}
+
+fn card_is_rtl(d: &Card) -> bool {
+  return d is Card::Rtl;
 }
 
 fn card_is_ena(d: &Card) -> bool {
@@ -43,6 +52,7 @@ fn card_why(d: &Card) -> u64 {
     Card::Ena(a) => { return a.why; },
     Card::Virtio(v) => { return 0; },
     Card::E1000(e) => { return 0; },
+    Card::Rtl(t) => { return 0; },
   }
 }
 
@@ -51,11 +61,12 @@ fn card_irq(d: &Card) -> bool {
   match d {
     Card::Virtio(v) => { return v.irq; },
     Card::E1000(e) => { return e.irq; },
+    Card::Rtl(t) => { return t.irq; },
     Card::Ena(a) => { return false; },
   }
 }
 
-/// An e1000's line is unmasked at the 8259 (see `e1k_irq_on`).
+/// An e1000's or RTL8168's line is unmasked at the 8259 (see `e1k_irq_on`).
 fn card_irq_on(d: &mut Card)
   requires card_ok(d)
   ensures card_ok(d)
@@ -65,6 +76,10 @@ fn card_irq_on(d: &mut Card)
     Card::E1000(mut e) => {
       e1k_irq_on(&mut e);
       d = Card::E1000(e);
+    },
+    Card::Rtl(mut t) => {
+      rtl_irq_on(&mut t);
+      d = Card::Rtl(t);
     },
     Card::Ena(a) => { d = Card::Ena(a); },
   }
@@ -84,6 +99,10 @@ fn card_irq_set(d: &mut Card, on: bool)
       e1k_irq(&mut e, on);
       d = Card::E1000(e);
     },
+    Card::Rtl(mut t) => {
+      rtl_irq(&mut t, on);
+      d = Card::Rtl(t);
+    },
     Card::Ena(a) => { d = Card::Ena(a); },
   }
 }
@@ -98,6 +117,10 @@ fn card_ack(d: &mut Card)
     Card::E1000(mut e) => {
       e1k_ack(&mut e);
       d = Card::E1000(e);
+    },
+    Card::Rtl(mut t) => {
+      rtl_ack(&mut t);
+      d = Card::Rtl(t);
     },
     Card::Ena(a) => { d = Card::Ena(a); },
   }
@@ -116,6 +139,11 @@ fn card_recv(d: &mut Card, pkt: &mut Bytes) -> u64
     Card::E1000(mut e) => {
       let n = e1k_recv(&mut e, &mut pkt);
       d = Card::E1000(e);
+      return n;
+    },
+    Card::Rtl(mut t) => {
+      let n = rtl_recv(&mut t, &mut pkt);
+      d = Card::Rtl(t);
       return n;
     },
     Card::Ena(mut a) => {
@@ -137,6 +165,7 @@ fn card_rx_flush(d: &mut Card)
       d = Card::Virtio(v);
     },
     Card::E1000(e) => { d = Card::E1000(e); },
+    Card::Rtl(t) => { d = Card::Rtl(t); },
     Card::Ena(mut a) => {
       ena_rx_flush(&mut a);
       d = Card::Ena(a);
@@ -159,6 +188,11 @@ fn card_send(d: &mut Card, pkt: &Bytes, n: u64) -> bool
       d = Card::E1000(e);
       return ok;
     },
+    Card::Rtl(mut t) => {
+      let ok = rtl_send(&mut t, pkt, n);
+      d = Card::Rtl(t);
+      return ok;
+    },
     Card::Ena(mut a) => {
       let ok = ena_send(&mut a, pkt, n);
       d = Card::Ena(a);
@@ -176,6 +210,7 @@ fn card_free(ports: &mut Ports, win: &mut MmioSpace, d: Card, m: &mut Mem)
   match d {
     Card::Virtio(v) => { vt_release(&mut ports, &mut win, vnet_free(v, &mut m)); },
     Card::E1000(e) => { mmio_release(&mut win, e1k_free(e, &mut m)); },
+    Card::Rtl(t) => { mmio_release(&mut win, rtl_free(t, &mut m)); },
     Card::Ena(a) => { mmio_release(&mut win, ena_free(a, &mut m)); },
   }
 }

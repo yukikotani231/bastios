@@ -66,6 +66,35 @@ const IN_ONESHOT: u64 = 0x80000000;
 const IN_KEEP: u64 = 0x84000FFF;              // what a watch keeps of its mask: the events, ONESHOT, EXCL_UNLINK
 const IN_EVENT: u64 = 16;                     // struct inotify_event before its name
 
+// fanotify (below)
+const LX_FANOTIFY_INIT: u64 = 300;
+const LX_FANOTIFY_MARK: u64 = 301;
+const FD_QUIET: u64 = 32;                     // in a file's FD_MODE: opened by fanotify, no events for it
+const FAN_CLOEXEC: u64 = 1;
+const FAN_NONBLOCK: u64 = 2;
+const FAN_UNLIMITED_QUEUE: u64 = 0x10;
+const FAN_UNLIMITED_MARKS: u64 = 0x20;
+const FAN_REPORT_TID: u64 = 0x100;
+const FAN_ACCESS: u64 = 0x1;
+const FAN_MODIFY: u64 = 0x2;
+const FAN_OPEN_EXEC: u64 = 0x1000;
+const FAN_Q_OVERFLOW: u64 = 0x4000;
+const FAN_ONDIR: u64 = 0x40000000;
+const FAN_EVENT_ON_CHILD: u64 = 0x8000000;
+const FAN_EVENTS: u64 = 0x103B;               // access, modify, close (both), open, open for exec
+const FAN_MASKS: u64 = 0x4800103B;            // and the two flags
+const FM_ADD: u64 = 1;
+const FM_REMOVE: u64 = 2;
+const FM_DONT_FOLLOW: u64 = 4;
+const FM_ONLYDIR: u64 = 8;
+const FM_MOUNT: u64 = 0x10;
+const FM_IGNORED_MASK: u64 = 0x20;
+const FM_IGNORED_SURV: u64 = 0x40;
+const FM_FLUSH: u64 = 0x80;
+const FM_FILESYSTEM: u64 = 0x100;
+const FAN_META: u64 = 24;                     // struct fanotify_event_metadata
+const FAN_PREFIX: u64 = 48;                   // bytes of a mount mark's path
+
 // The calls ino_before and ino_after look at, besides those named elsewhere.
 const IX_LSETXATTR: u64 = 189;
 const IX_FSETXATTR: u64 = 190;
@@ -84,6 +113,8 @@ const P2: u64 = 42;
 const P3: u64 = 80;                            // P1 + 2 * P_LEN; INO_GLEN is P3 + P_LEN
 const P_LEN: u64 = 38;
 const G_A0: u64 = 118;                         // the call's first argument (the result may overwrite its register)
+const G_PID: u64 = 119;
+const G_FANM: u64 = 120;
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -92,7 +123,8 @@ const P_NAMELEN: u64 = 4;                      // its last part, in the next INO
 const P_NAME: u64 = 5;
 
 fn is_inotify_call(n: u64) -> bool {
-  return n == LX_INOTIFY_INIT || n == LX_INOTIFY_INIT1 || n == LX_INOTIFY_ADD_WATCH || n == LX_INOTIFY_RM_WATCH;
+  return n == LX_INOTIFY_INIT || n == LX_INOTIFY_INIT1 || n == LX_INOTIFY_ADD_WATCH || n == LX_INOTIFY_RM_WATCH
+    || n == LX_FANOTIFY_INIT || n == LX_FANOTIFY_MARK;
 }
 
 fn lx_inotify_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
@@ -106,6 +138,10 @@ fn lx_inotify_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> 
     r = ino_init(&mut k, pid, a);
   } else if n == LX_INOTIFY_ADD_WATCH {
     r = ino_add_watch(&mut k, pid, a, b, c);
+  } else if n == LX_FANOTIFY_INIT {
+    r = fan_init(&mut k, pid, a, b);
+  } else if n == LX_FANOTIFY_MARK {
+    r = fan_mark(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
   } else {
     r = ino_rm_watch(&mut k, pid, a, b);
   }
@@ -193,6 +229,10 @@ fn ino_free(k: &mut Kernel, i: u64)
   requires kok(k) && i < INO_N
   ensures kok(k)
 {
+  if iget(k, ino_base(i)) == 2 {
+    fan_free(&mut k, i);
+    return;
+  }
   let mut w = 0;
   while w < INO_W
     invariant w <= INO_W && kok(k)
@@ -227,7 +267,7 @@ fn ino_of(k: &Kernel, pid: u64, fd: u64) -> u64
   if d.kind == K_BAD {
     return INO_N + 1;
   }
-  if d.kind != K_INOTIFY || d.x >= INO_N {
+  if d.kind != K_INOTIFY || d.x >= INO_N || iget(k, ino_base(d.x)) != 1 {
     return INO_N;
   }
   return d.x;
@@ -430,7 +470,7 @@ fn ino_note(k: &mut Kernel, h: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
   while i < INO_N
     invariant i <= INO_N && kok(k)
   {
-    if iget(k, ino_base(i)) != 0 {
+    if iget(k, ino_base(i)) == 1 {
       let mut w = 0;
       while w < INO_W
         invariant w <= INO_W && i < INO_N && kok(k)
@@ -466,7 +506,7 @@ fn ino_gone(k: &mut Kernel, h: u64)
   while i < INO_N
     invariant i <= INO_N && kok(k)
   {
-    if iget(k, ino_base(i)) != 0 {
+    if iget(k, ino_base(i)) == 1 {
       let mut w = 0;
       while w < INO_W
         invariant w <= INO_W && i < INO_N && kok(k)
@@ -615,6 +655,7 @@ fn ino_child(k: &mut Kernel, f: u64, mask: u64)
   if vfs_is_dir(&mut k.fs, f) {
     m = m | IN_ISDIR;
   }
+  fan_event(&mut k, f, m);
   if f < HFILES {
     let n = vfs_dirent(&mut k.fs, f);
     if n > 0 && n <= FNAME_MAX {
@@ -634,6 +675,9 @@ fn ino_fd(k: &mut Kernel, pid: u64, fd: u64, mask: u64)
 {
   let d = fd_look(k, pid, fd);
   if d.kind == K_FILE {
+    if fget(k.fs.ftab, d.x, FD_MODE) / FD_QUIET % 2 == 1 {
+      return;                               // opened for a fanotify event: it makes none
+    }
     ino_child(&mut k, vfs_row_file(k.fs, d.x), mask);
   } else if d.kind == K_DIR && d.x >= DIR_VFS && d.x < DIR_PROC {
     ino_child(&mut k, d.x - DIR_VFS, mask);
@@ -658,6 +702,9 @@ fn ino_closed(k: &mut Kernel, x: u64, dir: bool)
       f = x - DIR_VFS;
     }
   } else if x < FD_ROWS {
+    if fget(k.fs.ftab, x, FD_MODE) / FD_QUIET % 2 == 1 {
+      return;
+    }
     f = vfs_row_file(k.fs, x);
     if fget(k.fs.ftab, x, FD_MODE) / O_WRITE % 2 == 1 {
       mask = IN_CLOSE_WRITE;
@@ -692,7 +739,7 @@ fn ino_closed(k: &mut Kernel, x: u64, dir: bool)
 
 /// read on instance i: as many whole events as fit in n bytes, -EINVAL if
 /// not even the first does, -EAGAIN if none is queued.
-fn ino_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && i < INO_N
   ensures kok(k)
 {
@@ -784,6 +831,7 @@ fn ino_before(k: &mut Kernel, pid: u64)
 {
   iput(&mut k, INO_G + G_CALL, 0);
   iput(&mut k, INO_G + G_KEPT, 0);
+  iput(&mut k, INO_G + G_PID, pid);
   if iget(k, INO_G + G_WATCHES) == 0 && !xa_any(k) {
     return;
   }
@@ -794,6 +842,9 @@ fn ino_before(k: &mut Kernel, pid: u64)
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
   if n >= 0x10000 {
     return;
+  }
+  if n == 0 {
+    fan_prep(&mut k, pid, a, c);         // read
   }
   iput(&mut k, INO_G + G_CALL, n + 1);
   iput(&mut k, INO_G + G_A0, a);
@@ -1047,4 +1098,634 @@ fn next_cookie(k: &mut Kernel) -> u64
   let c = iget(k, INO_G + G_COOKIE) % 0xFFFFFFFF + 1;
   iput(&mut k, INO_G + G_COOKIE, c);
   return c;
+}
+
+// ---------------------------------------------------------------- fanotify
+//
+// fanotify_init and fanotify_mark, for notification only: the events an
+// inotify watch on a file reports to its directory and to itself (access,
+// modification, open, close), told with a descriptor of the file instead of
+// a name. An instance is FAN_M marks at most, each on a file or directory,
+// or (FAN_MARK_MOUNT, FAN_MARK_FILESYSTEM) on every file under a directory
+// by its path, kept to its first 48 bytes; events queue up to FAN_Q - 1,
+// and an event of a process and a file already queued is merged into it,
+// as on Linux. The file of an event is opened when it is read, and that
+// descriptor makes no events itself (FD_QUIET in the open file's mode).
+//
+// Not done: permission events and the other classes, the events that need
+// FAN_REPORT_FID (create, delete, move, attributes), pidfds, unlimited queues
+// and marks beyond the fixed limits, and the ignore mask's eviction.
+
+/// Where mark m of fanotify instance i (a slot of the inotify table) starts.
+fn fm_at(i: u64, m: u64) -> u64
+  requires i < INO_N && m < FAN_M
+  ensures result + FAN_MK <= INO_G
+{
+  return ino_base(i) + 6 + m * FAN_MK;
+}
+
+/// Where event slot e of fanotify instance i starts.
+fn fe_at(i: u64, e: u64) -> u64
+  requires i < INO_N && e < FAN_Q
+  ensures result + FAN_EV <= INO_G
+{
+  return ino_base(i) + INO_HEAD + INO_W * INO_WAT + e * FAN_EV;
+}
+
+/// fanotify_init(flags, event_f_flags): a new, empty instance. Root only.
+fn fan_init(k: &mut Kernel, pid: u64, flags: u64, evf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  if flags >= 0x100000000 || flags & !(FAN_CLOEXEC | FAN_NONBLOCK | FAN_UNLIMITED_QUEUE | FAN_UNLIMITED_MARKS | FAN_REPORT_TID) != 0 {
+    return EINVAL;                          // the other classes and the FID reports are not offered
+  }
+  let okf = LO_ACCMODE | LO_APPEND | LO_NONBLOCK | 0x101000 | LO_NOATIME | LO_CLOEXEC | 0x8000;
+  if evf >= 0x100000000 || evf & !okf != 0 || evf & LO_ACCMODE == 3 {
+    return EINVAL;
+  }
+  let mut i = 0;
+  while i < INO_N && iget(k, ino_base(i)) != 0
+    invariant i <= INO_N && kok(k)
+  {
+    i = i + 1;
+  }
+  if i >= INO_N {
+    return EMFILE;
+  }
+  let fd = ev_install(&mut k, pid, OF_INOTIFY, i, flags / FAN_NONBLOCK % 2, flags & FAN_CLOEXEC != 0);
+  if fd >= LXNFD {
+    return fd;
+  }
+  let b = ino_base(i);
+  iput(&mut k, b, 2);
+  iput(&mut k, b + 1, flags);
+  iput(&mut k, b + 2, 0);
+  iput(&mut k, b + 3, 0);
+  iput(&mut k, b + 4, evf);
+  let mut m = 0;
+  while m < FAN_M
+    invariant m <= FAN_M && i < INO_N && kok(k)
+  {
+    iput(&mut k, fm_at(i, m), 0);
+    m = m + 1;
+  }
+  return fd;
+}
+
+/// Frees mark m of instance i.
+fn fm_drop(k: &mut Kernel, i: u64, m: u64)
+  requires kok(k) && i < INO_N && m < FAN_M
+  ensures kok(k)
+{
+  iput(&mut k, fm_at(i, m), 0);
+  let all = iget(k, INO_G + G_FANM);
+  if all > 0 {
+    iput(&mut k, INO_G + G_FANM, all - 1);
+  }
+  let w = iget(k, INO_G + G_WATCHES);
+  if w > 0 {
+    iput(&mut k, INO_G + G_WATCHES, w - 1);
+  }
+}
+
+/// The last description of instance i has closed.
+fn fan_free(k: &mut Kernel, i: u64)
+  requires kok(k) && i < INO_N
+  ensures kok(k)
+{
+  let mut m = 0;
+  while m < FAN_M
+    invariant m <= FAN_M && i < INO_N && kok(k)
+  {
+    if iget(k, fm_at(i, m)) != 0 {
+      fm_drop(&mut k, i, m);
+    }
+    m = m + 1;
+  }
+  iput(&mut k, ino_base(i), 0);
+}
+
+/// The instance descriptor fd of process pid names, INO_N if fd is open
+/// but is not one, or INO_N + 1 if it is not open.
+fn fan_of(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= INO_N + 1
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return INO_N + 1;
+  }
+  if d.kind != K_INOTIFY || d.x >= INO_N || iget(k, ino_base(d.x)) != 2 {
+    return INO_N;
+  }
+  return d.x;
+}
+
+/// Keeps the first bytes of the n-byte path in the transfer buffer in mark
+/// at (6 words after its fifth).
+fn fan_keep_prefix(k: &mut Kernel, at: u64, n: u64)
+  requires kok(k) && at + FAN_MK <= EVT_LEN && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let pl = smaller(n, FAN_PREFIX);
+  iput(&mut k, at + 5, pl);
+  let mut j = 0;
+  while j < 6
+    invariant j <= 6 && kok(k) && at + FAN_MK <= EVT_LEN
+  {
+    let s = 8 * j;
+    let b7 = byte_or0(k.fs.xfer, s + 7, pl);
+    let b6 = byte_or0(k.fs.xfer, s + 6, pl) + 256 * b7;
+    let b5 = byte_or0(k.fs.xfer, s + 5, pl) + 256 * b6;
+    let b4 = byte_or0(k.fs.xfer, s + 4, pl) + 256 * b5;
+    let b3 = byte_or0(k.fs.xfer, s + 3, pl) + 256 * b4;
+    let b2 = byte_or0(k.fs.xfer, s + 2, pl) + 256 * b3;
+    let b1 = byte_or0(k.fs.xfer, s + 1, pl) + 256 * b2;
+    let w = byte_or0(k.fs.xfer, s, pl) + 256 * b1;
+    iput(&mut k, at + 6 + j, w);
+    j = j + 1;
+  }
+}
+
+/// fanotify_mark(fd, flags, mask, dirfd, path).
+fn fan_mark(k: &mut Kernel, pid: u64, fd: u64, flags: u64, mask: u64, dirfd: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let i = fan_of(k, pid, fd % 0x100000000);
+  if i == INO_N + 1 {
+    return EBADF;
+  }
+  if i >= INO_N {
+    return EINVAL;
+  }
+  if flags >= 0x100000000 {
+    return EINVAL;
+  }
+  let known = FM_ADD | FM_REMOVE | FM_DONT_FOLLOW | FM_ONLYDIR | FM_MOUNT | FM_IGNORED_MASK | FM_IGNORED_SURV | FM_FLUSH | FM_FILESYSTEM;
+  if flags & !known != 0 {
+    return EINVAL;                          // evictable and ignore marks are newer than this
+  }
+  let ops = flags & (FM_ADD | FM_REMOVE | FM_FLUSH);
+  if ops != FM_ADD && ops != FM_REMOVE && ops != FM_FLUSH {
+    return EINVAL;                          // exactly one of them
+  }
+  let ty = flags & (FM_MOUNT | FM_FILESYSTEM);
+  if ty == FM_MOUNT + FM_FILESYSTEM {
+    return EINVAL;
+  }
+  let mut kind = 0;
+  if ty == FM_MOUNT {
+    kind = 1;
+  } else if ty == FM_FILESYSTEM {
+    kind = 2;
+  }
+  if ops == FM_FLUSH {
+    if mask != 0 {
+      return EINVAL;
+    }
+    let mut m = 0;
+    while m < FAN_M
+      invariant m <= FAN_M && i < INO_N && kok(k)
+    {
+      if iget(k, fm_at(i, m)) != 0 && iget(k, fm_at(i, m) + 1) == kind {
+        fm_drop(&mut k, i, m);
+      }
+      m = m + 1;
+    }
+    return 0;
+  }
+  if mask == 0 || mask & !FAN_MASKS != 0 {
+    return EINVAL;
+  }
+  if flags & FM_IGNORED_SURV != 0 && flags & FM_IGNORED_MASK == 0 {
+    return EINVAL;
+  }
+  if kind != 0 && !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  // The file or directory.
+  let mut f = NO_FILE;
+  let mut n = 0;
+  if va == 0 {
+    let d = fd_look(k, pid, dirfd % 0x100000000);
+    if d.kind == K_BAD {
+      return EBADF;
+    }
+    if d.kind == K_FILE {
+      f = vfs_row_file(k.fs, d.x);
+    } else if d.kind == K_DIR && d.x >= DIR_VFS && d.x < DIR_PROC {
+      f = d.x - DIR_VFS;
+    } else {
+      return EINVAL;
+    }
+    if f == NO_FILE {
+      return EBADF;
+    }
+    if f < HFILES {
+      n = vfs_dirent(&mut k.fs, f);
+    } else if f == VDIR_ROOT {
+      n = 0;
+    }
+    if n == NO_FILE || n > FNAME_MAX {
+      return ENOENT;
+    }
+  } else {
+    if flags & FM_DONT_FOLLOW != 0 {
+      n = lx_path_at_nf(&mut k, pid, dirfd % 0x100000000, va);
+    } else {
+      n = lx_path_at(&mut k, pid, dirfd % 0x100000000, va);
+    }
+    if n == NO_RESULT {
+      return k.perr;
+    }
+    f = node_at(&mut k, n);
+    if f == NO_FILE {
+      return ENOENT;
+    }
+  }
+  if flags & FM_ONLYDIR != 0 && !vfs_is_dir(&mut k.fs, f) {
+    return ENOTDIR;
+  }
+  if may_path(&mut k, pid, n, MAY_R) != 0 {
+    return EACCES;
+  }
+  let isdir = vfs_is_dir(&mut k.fs, f);
+  if kind == 0 && mask & FAN_EVENT_ON_CHILD != 0 && !isdir {
+    // a file has no children: Linux accepts the flag and ignores it
+  }
+  // An existing mark of the same object and type.
+  let mut free = FAN_M;
+  let mut found = FAN_M;
+  let mut m = 0;
+  while m < FAN_M
+    invariant m <= FAN_M && free <= FAN_M && found <= FAN_M && i < INO_N && kok(k)
+  {
+    let at = fm_at(i, m);
+    let w0 = iget(k, at);
+    if w0 == 0 && free == FAN_M {
+      free = m;
+    }
+    if w0 == f + 1 && iget(k, at + 1) == kind && found == FAN_M {
+      found = m;
+    }
+    m = m + 1;
+  }
+  let ign = flags & FM_IGNORED_MASK != 0;
+  if ops == FM_REMOVE {
+    if found >= FAN_M {
+      return ENOENT;
+    }
+    let at = fm_at(i, found);
+    if ign {
+      iput(&mut k, at + 3, iget(k, at + 3) & !mask);
+    } else {
+      iput(&mut k, at + 2, iget(k, at + 2) & !mask);
+    }
+    if iget(k, at + 2) & FAN_EVENTS == 0 && iget(k, at + 3) & FAN_EVENTS == 0 {
+      fm_drop(&mut k, i, found);
+    }
+    return 0;
+  }
+  let mut at = 0;
+  if found < FAN_M {
+    at = fm_at(i, found);
+  } else {
+    if free >= FAN_M {
+      return ENOSPC;
+    }
+    at = fm_at(i, free);
+    iput(&mut k, at, f + 1);
+    iput(&mut k, at + 1, kind);
+    iput(&mut k, at + 2, 0);
+    iput(&mut k, at + 3, 0);
+    iput(&mut k, at + 4, 0);
+    if kind != 0 {
+      fan_keep_prefix(&mut k, at, n);
+    } else {
+      iput(&mut k, at + 5, 0);
+    }
+    let all = iget(k, INO_G + G_FANM);
+    if all < INO_N * FAN_M {
+      iput(&mut k, INO_G + G_FANM, all + 1);
+    }
+    let w = iget(k, INO_G + G_WATCHES);
+    if w < INO_N * INO_W + INO_N * FAN_M {
+      iput(&mut k, INO_G + G_WATCHES, w + 1);
+    }
+  }
+  if ign {
+    iput(&mut k, at + 3, iget(k, at + 3) | (mask & FAN_MASKS));
+    if flags & FM_IGNORED_SURV != 0 {
+      iput(&mut k, at + 4, iget(k, at + 4) | 1);
+    }
+  } else {
+    iput(&mut k, at + 2, iget(k, at + 2) | (mask & FAN_MASKS));
+  }
+  return 0;
+}
+
+/// Is the path in the first n bytes of the transfer buffer under the
+/// directory mark at names (its first FAN_PREFIX bytes)?
+fn fan_prefix(k: &Kernel, at: u64, n: u64) -> bool
+  requires kok(k) && at + FAN_MK <= EVT_LEN && n <= FNAME_MAX
+{
+  let pl = smaller(iget(k, at + 5), FAN_PREFIX);
+  if pl == 0 {
+    return true;
+  }
+  if n < pl {
+    return false;
+  }
+  if n > pl && pl < FAN_PREFIX && bget(k.fs.xfer, pl) != 47 {
+    return false;
+  }
+  let mut j = 0;
+  while j < pl
+    invariant j <= pl && pl <= FAN_PREFIX && pl <= n && n <= FNAME_MAX && kok(k)
+  {
+    let c = iget(k, at + 6 + j / 8) / ino_pow(j % 8) % 256;
+    if cast[u64](bget(k.fs.xfer, j)) % 256 != c {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// Queues an event of mask for process tg (thread tid) on handle f in
+/// instance i, or merges it into one already queued for them.
+fn fan_queue(k: &mut Kernel, i: u64, mask: u64, tg: u64, tid: u64, f: u64)
+  requires kok(k) && i < INO_N && f < 0xFFFFFFFFFFFF
+  ensures kok(k)
+{
+  let b = ino_base(i);
+  let q = smaller(iget(k, b + 2), FAN_Q);
+  let first = iget(k, b + 3) % FAN_Q;
+  let perthread = iget(k, b + 1) & FAN_REPORT_TID != 0;
+  let mut j = 0;
+  while j < q
+    invariant j <= q && q <= FAN_Q && i < INO_N && kok(k)
+  {
+    let e = fe_at(i, (first + j) % FAN_Q);
+    if iget(k, e + 2) == f + 1 && iget(k, e + 1) == tg && (!perthread || iget(k, e + 3) == tid) && iget(k, e) != FAN_Q_OVERFLOW {
+      iput(&mut k, e, iget(k, e) | mask);
+      return;
+    }
+    j = j + 1;
+  }
+  if q >= FAN_Q {
+    return;
+  }
+  let e = fe_at(i, (first + q) % FAN_Q);
+  if q == FAN_Q - 1 {
+    iput(&mut k, e, FAN_Q_OVERFLOW);        // the last place is the overflow
+    iput(&mut k, e + 1, 0);
+    iput(&mut k, e + 2, 0);
+    iput(&mut k, e + 3, 0);
+    iput(&mut k, e + 4, 0);
+  } else {
+    iput(&mut k, e, mask);
+    iput(&mut k, e + 1, tg);
+    iput(&mut k, e + 2, f + 1);
+    iput(&mut k, e + 3, tid);
+    iput(&mut k, e + 4, 0);
+  }
+  iput(&mut k, b + 2, q + 1);
+}
+
+/// An event of mask (inotify's bits, IN_ISDIR for a directory) on handle
+/// f, caused by the process whose call is running: to the instances with
+/// a mark on f, on its directory with FAN_EVENT_ON_CHILD, or on a
+/// directory above it for a mount or file system mark. The transfer
+/// buffer is used up.
+fn fan_event(k: &mut Kernel, f: u64, mask: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if iget(k, INO_G + G_FANM) == 0 || f >= 0xFFFFFFFFFFFF {
+    return;
+  }
+  let evm = mask & FAN_EVENTS;
+  if evm == 0 {
+    return;
+  }
+  let isdir = mask & IN_ISDIR != 0;
+  let cur = smaller(iget(k, INO_G + G_PID), NPROC - 1);
+  let tg = tgid(k.procs, cur);
+  let mut n = NO_FILE;
+  if f < HFILES {
+    n = vfs_dirent(&mut k.fs, f);
+  }
+  let mut parent = NO_FILE;
+  let mut have = false;
+  if n != NO_FILE && n <= FNAME_MAX {
+    have = true;
+    let mut s = n;
+    while s > 0 && bget(k.fs.xfer, s - 1) != 47
+      invariant s <= n && n <= FNAME_MAX && kok(k)
+    {
+      s = s - 1;
+    }
+    let mut pl = 0;
+    if s > 0 {
+      pl = s - 1;
+    }
+    parent = vfs_dir_lookup(&mut k.fs, pl);
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    if iget(k, ino_base(i)) == 2 {
+      let mut comb = 0;
+      let mut ign = 0;
+      let mut mk = 0;
+      while mk < FAN_M
+        invariant mk <= FAN_M && i < INO_N && kok(k)
+      {
+        let at = fm_at(i, mk);
+        let w0 = iget(k, at);
+        if w0 != 0 {
+          let ty = iget(k, at + 1);
+          let mm = iget(k, at + 2);
+          let mut hit = false;
+          if ty == 0 {
+            if w0 == f + 1 {
+              hit = true;
+            } else if parent != NO_FILE && w0 == parent + 1 && mm & FAN_EVENT_ON_CHILD != 0 {
+              hit = true;
+            }
+          } else if have && n <= FNAME_MAX && fan_prefix(k, at, n) {
+            hit = true;
+          }
+          if hit {
+            if evm & FAN_MODIFY != 0 && iget(k, at + 4) % 2 == 0 {
+              iput(&mut k, at + 3, 0);      // a change ends what was ignored
+            }
+            if !isdir || mm & FAN_ONDIR != 0 {
+              comb = comb | mm;             // a mark speaks for directories only with FAN_ONDIR
+            }
+            ign = ign | iget(k, at + 3);
+          }
+        }
+        mk = mk + 1;
+      }
+      let mut eff = evm & comb & !ign;
+      if eff != 0 {
+        if isdir {
+          eff = eff | FAN_ONDIR;
+        }
+        fan_queue(&mut k, i, eff, tg, cur, f);
+      }
+    }
+    i = i + 1;
+  }
+}
+
+/// A descriptor of handle h for an event: opened as the instance asked,
+/// and silent. EMFILE or ENFILE if there is no room, else the descriptor
+/// or LXNFD if the file cannot be opened.
+fn fan_open(k: &mut Kernel, pid: u64, h: u64, evf: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut n = NO_FILE;
+  if h == VDIR_ROOT {
+    n = 0;
+  } else if h == VDIR_DISK {
+    n = name_out(&mut k.fs.xfer, "disk");
+  } else if h < HFILES {
+    n = vfs_dirent(&mut k.fs, h);
+  }
+  if n == NO_FILE || n > FNAME_MAX || (n == 0 && h != VDIR_ROOT) {
+    return LXNFD;
+  }
+  let fd = lx_open_n(&mut k, pid, n, evf % 0x100000000, 0);
+  if fd == EMFILE || fd == ENFILE {
+    return fd;
+  }
+  if fd >= LXNFD {
+    return LXNFD;
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_FILE {
+    let m = fget(k.fs.ftab, d.x, FD_MODE);
+    if m / FD_QUIET % 2 == 0 {
+      fset(&mut k.fs.ftab, d.x, FD_MODE, m + FD_QUIET);
+    }
+  }
+  return fd;
+}
+
+/// Before a read(fd, buf, n) of process pid: if fd is a fanotify instance,
+/// opens the files of the first n / FAN_META events queued, so that the
+/// read itself only copies. (Opening files in the read itself does not
+/// verify: it grows linux_syscall past the solver's limit.)
+fn fan_prep(k: &mut Kernel, pid: u64, fd: u64, n: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let i = fan_of(k, pid, fd);
+  if i >= INO_N {
+    return;
+  }
+  let b = ino_base(i);
+  let q = smaller(smaller(iget(k, b + 2), FAN_Q), n / FAN_META);
+  let first = iget(k, b + 3) % FAN_Q;
+  let evf = iget(k, b + 4);
+  let mut j = 0;
+  while j < q
+    invariant j <= q && q <= FAN_Q && i < INO_N && kok(k) && pid < NPROC
+  {
+    let e = fe_at(i, (first + j) % FAN_Q);
+    let h = iget(k, e + 2);
+    if h != 0 && iget(k, e + 4) == 0 {
+      let r = fan_open(&mut k, pid, h - 1, evf);
+      if r == EMFILE || r == ENFILE {
+        return;
+      }
+      if r < LXNFD {
+        iput(&mut k, e + 4, r + 1);
+      }
+    }
+    j = j + 1;
+  }
+}
+
+/// read on instance i: as many whole events as fit in n bytes, -EINVAL if
+/// not even one does, -EAGAIN if none is queued.
+fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && i < INO_N
+  ensures kok(k)
+{
+  let b = ino_base(i);
+  let q = smaller(iget(k, b + 2), FAN_Q);
+  if q == 0 {
+    return EAGAIN;
+  }
+  if n < FAN_META {
+    return EINVAL;
+  }
+  let first = iget(k, b + 3) % FAN_Q;
+  let flags = iget(k, b + 1);
+  let mut taken = 0;
+  let mut off = 0;
+  let mut err = 0;
+  while taken < q && off + FAN_META <= n && err == 0 && off < XFER
+    invariant taken <= q && q <= FAN_Q && off <= XFER + FAN_META && i < INO_N && kok(k)
+  {
+    let e = fe_at(i, (first + taken) % FAN_Q);
+    let mask = iget(k, e);
+    let h = iget(k, e + 2);
+    let mut fd = 0xFFFFFFFF;                // no descriptor
+    let pre = iget(k, e + 4);
+    if h != 0 && pre != 0 {
+      fd = smaller(pre - 1, LXNFD - 1);   // opened before the call (fan_prep)
+    }
+    if err == 0 {
+      let mut row = iget(k, e + 1);
+      if flags & FAN_REPORT_TID != 0 {
+        row = iget(k, e + 3);
+      }
+      let mut rp = 0;
+      if h != 0 {
+        rp = vpid_of(k, pid, smaller(row, NPROC - 1));
+      }
+      lx_fill(&mut k, 0, FAN_META);
+      store_le32(&mut k.fs.xfer, 0, cast[u32](FAN_META));
+      bset(&mut k.fs.xfer, 4, 3);           // FANOTIFY_METADATA_VERSION
+      bset(&mut k.fs.xfer, 6, cast[u8](FAN_META));
+      xfer_u64(&mut k.fs.xfer, 8, mask & !FAN_ONDIR);
+      store_le32(&mut k.fs.xfer, 16, cast[u32](fd));
+      store_le32(&mut k.fs.xfer, 20, cast[u32](rp % 0x100000000));
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, smaller(va, 0xFFFFFFFFFFFF) + off, k.fs.xfer, FAN_META) != FAN_META {
+        err = EFAULT;
+      } else {
+        off = off + FAN_META;
+        taken = taken + 1;
+      }
+    }
+  }
+  iput(&mut k, b + 3, (first + taken) % FAN_Q);
+  iput(&mut k, b + 2, q - smaller(taken, q));
+  if off == 0 {
+    return err;
+  }
+  return off;
+}
+
+/// read on instance i of either kind.
+fn ino_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && i < INO_N
+  ensures kok(k)
+{
+  if iget(k, ino_base(i)) == 2 {
+    return fan_read(&mut k, pid, i, va, n);
+  }
+  return ino_read_in(&mut k, pid, i, va, n);
 }

@@ -1433,6 +1433,16 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
     return NO_SOCK;
   }
   sk_enter(&mut n, s);
+  // A datagram to this machine waits for room in the loopback queue, as TCP
+  // does, instead of being dropped: the queue may still hold the frames of
+  // connections that were just closed.
+  let mut spin = 0;
+  while spin < 16 && lo_full(n, ip)
+    invariant spin <= 16 && net_ok(n)
+  {
+    net_poll(&mut n);
+    spin = spin + 1;
+  }
   if !can_reach(n, ip) {
     return NO_SOCK;
   }
@@ -1945,6 +1955,13 @@ fn nic_e1000(c: &Nic) -> bool {
   match c {
     Nic::None => { return false; },
     Nic::Up(n) => { return card_is_e1000(n.dev); },
+  }
+}
+
+fn nic_rtl(c: &Nic) -> bool {
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return card_is_rtl(n.dev); },
   }
 }
 

@@ -93,6 +93,55 @@ static int map_own_after_unshare(void) {
         && write_trunc("/proc/self/gid_map", map, n) == n;
 }
 
+/* A user namespace inside one: its map names ids of the namespace around
+ * it (an id that one does not map is refused), and reads back the same way
+ * while the host ids stay what permissions use. */
+static int nested_userns(void) {
+    if (!map_own_after_unshare() || getuid() != 0) return 0;
+    if (unshare(CLONE_NEWUSER) != 0) return 0;
+    if (write_trunc("/proc/self/setgroups", "deny", 4) != 4) return 0;
+    if (write_trunc("/proc/self/uid_map", "0 5 1\n", 6) != -1 || errno != EPERM) return 0;
+    if (write_trunc("/proc/self/uid_map", "7 0 1\n", 6) != 6) return 0;
+    if (write_trunc("/proc/self/gid_map", "7 0 1\n", 6) != 6) return 0;
+    char t[64];
+    int f = open("/proc/self/uid_map", O_RDONLY);
+    int n = f < 0 ? -1 : read(f, t, sizeof t - 1);
+    if (f >= 0) close(f);
+    if (n <= 0) return 0;
+    t[n] = 0;
+    return getuid() == 7 && strstr(t, "         7          0          1") != NULL;
+}
+
+/* The user who made a user namespace joins it again with setns (rootless
+ * podman's way back into the namespace its pause process holds), and is
+ * root there, but cannot go to the first one. */
+static int join_userns(void) {
+    int up[2], down[2];
+    if (pipe(up) || pipe(down)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        if (!as_nobody() || unshare(CLONE_NEWUSER) != 0) _exit(10);
+        char map[32];
+        int n = snprintf(map, sizeof map, "0 %d 1\n", NOBODY);
+        if (write_trunc("/proc/self/setgroups", "deny", 4) != 4 || write_trunc("/proc/self/uid_map", map, n) != n
+            || write_trunc("/proc/self/gid_map", map, n) != n) _exit(11);
+        if (write(up[1], "x", 1) != 1 || read(down[0], &b, 1) != 1) _exit(12);
+        _exit(0);
+    }
+    char b, path[64];
+    int ok = as_nobody() && read(up[0], &b, 1) == 1;
+    snprintf(path, sizeof path, "/proc/%d/ns/user", c);
+    int f = open(path, O_RDONLY);
+    int first = open("/proc/1/ns/user", O_RDONLY);
+    ok = ok && f >= 0 && first >= 0 && getuid() == NOBODY;
+    ok = ok && setns(f, CLONE_NEWUSER) == 0 && getuid() == 0;
+    ok = ok && setns(first, CLONE_NEWUSER) == -1 && errno == EPERM;
+    ok = ok && write(down[1], "y", 1) == 1;
+    int st;
+    return waitpid(c, &st, 0) == c && ok && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
 /* The root of a user namespace that made its own network namespace brings
  * its loopback up (crun does at start), but not in the first one. */
 static int lo_up(void) {
@@ -210,6 +259,8 @@ int main(void) {
     EXPECT("the first ids of a user namespace are set from one register", in_userns(ids_with_junk, 0));
     EXPECT("uid_map takes text that ends in a NUL", in_userns(map_text, 0));
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
+    EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
+    EXPECT("whoever made a user namespace joins it with setns, and not the first one", in_child(join_userns));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
     EXPECT("nor in one that another user namespace made", in_child(lo_up_in_foreign_netns));
