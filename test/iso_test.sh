@@ -27,6 +27,20 @@ for c in range(32, 127):
     glyphs[g] = chr(c)
     glyphs[tuple(255 - b for b in g)] = chr(c)              # under the cursor
 
+# src/font16.bin (layout in tools/mkfont.py): one-cell glyphs of 16 rows, and
+# two-cell ones of 16 rows of two bytes, by code point.
+f16 = open("src/font16.bin", "rb").read()
+nw, nn = int.from_bytes(f16[0:4], "little"), int.from_bytes(f16[4:8], "little")
+wcp = [int.from_bytes(f16[8 + 2 * i:10 + 2 * i], "little") for i in range(nw)]
+ncp = [int.from_bytes(f16[8 + 2 * nw + 2 * i:10 + 2 * nw + 2 * i], "little") for i in range(nn)]
+wbase, nbase = 8 + 2 * nw + 2 * nn, 8 + 2 * nw + 2 * nn + 32 * nw
+wide = {tuple(f16[wbase + 32 * i:wbase + 32 * i + 32]): chr(c) for i, c in enumerate(wcp)}
+for i, c in enumerate(ncp):
+    g = tuple(f16[nbase + 16 * i:nbase + 16 * i + 16])
+    if g not in glyphs:                                     # Greek capitals look like Latin ones
+        glyphs[g] = chr(c)
+        glyphs[tuple(255 - b for b in g)] = chr(c)
+
 def screen_text(ppm):
     # The lines of text on a screendump (binary PPM), read cell by cell.
     head, rest = ppm.split(b"\n", 1)
@@ -35,13 +49,23 @@ def screen_text(ppm):
     w, h = map(int, dims.split())
     lines = []
     for cy in range(h // 16):
-        line = ""
+        line, cells = "", []
         for cx in range(w // 8):
             cell = []
             for r in range(16):
                 i = ((cy * 16 + r) * w + cx * 8) * 3
                 cell.append(sum(1 << p for p in range(8) if px[i + p * 3] > 0x40))
-            line += glyphs.get(tuple(cell), "?")
+            cells.append(tuple(cell))
+        i = 0
+        while i < len(cells):
+            if cells[i] in glyphs:
+                line += glyphs[cells[i]]
+            elif i + 1 < len(cells) and tuple(b for r in range(16) for b in (cells[i][r], cells[i + 1][r])) in wide:
+                line += wide[tuple(b for r in range(16) for b in (cells[i][r], cells[i + 1][r]))]
+                i += 1
+            else:
+                line += "?"
+            i += 1
         lines.append(line.rstrip())
     return lines
 
@@ -197,6 +221,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if firmware != []:
                 print(("ok  " if high else "FAIL"), f"({name}) the 64-bit BARs lie above 4 GiB")
                 fails += not high
+        # UTF-8 on the screen: the serial line takes the bytes, the screen
+        # draws them (kana and kanji in two cells, accented letters, box
+        # drawing and half-width katakana in one; a two-cell character that
+        # would straddle the right edge wraps whole: the typed line is 113 letters
+        # after the prompt, and the kanji after them starts the next line).
+        mark = len(out)
+        q.stdin.write("echo 日本語かな café ─│ ｱｲｳ\r".encode()); q.stdin.flush()
+        until(b"bastios> ", mark)
+        mark = len(out)
+        q.stdin.write(("echo " + "x" * 113 + "日\r").encode()); q.stdin.flush()
+        until(b"bastios> ", mark)
         dump = os.path.join(tmp.name, "screen.ppm")
         mon.sendall(f"screendump {dump}\n".encode())
         text = []
@@ -206,7 +241,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 text = screen_text(open(dump, "rb").read())
                 break
         mon.close()
-        want = ["screen: 1024x768 framebuffer", "bastios> echo On_screen", "On_screen"]
+        want = ["screen: 1024x768 framebuffer", "bastios> echo On_screen", "On_screen",
+                "日本語かな café ─│ ｱｲｳ", "bastios> echo " + "x" * 113, "日", "x" * 113 + "日"]
         good = all(w in text for w in want)
         print(("ok  " if good else "FAIL"), f"({name}) the framebuffer console shows it")
         if not good:
