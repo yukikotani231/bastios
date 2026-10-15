@@ -1,0 +1,57 @@
+# The Go toolchain on BastiOS, for the compatibility suite (test/compat): the
+# compiler, linker and standard library of the official golang:alpine image,
+# entered with chroot. Go programs are static, so the root holds only
+# /usr/local/go. The Go disk (godisk.py) holds it as /disk/g and a BusyBox as
+# /disk/busybox. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root.
+
+== go: make the device nodes
+$ cd /disk/g && bb mkdir -p dev proc tmp etc work; for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb ls /disk/g/dev | bb cat; bb mount -t proc proc /disk/g/proc
+console
+null
+random
+tty
+urandom
+zero
+
+== go: version
+$ bb chroot /disk/g /usr/local/go/bin/go version | bb sed 's/ [a-z0-9_]*\/[a-z0-9_]*$//'
+go version go1.24.13
+
+== go: run a program
+$ bb printf 'package main\nimport "fmt"\nfunc main() { fmt.Println("hello", 6*7) }\n' > /disk/g/work/h.go; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GO111MODULE=off GOFLAGS=-p=1; bb chroot /disk/g /usr/local/go/bin/go run /work/h.go
+hello 42
+
+== go: goroutines, channels and the collector
+$ bb printf 'package main\nimport ("fmt"; "runtime"; "sync")\nfunc main() {\n var wg sync.WaitGroup\n ch := make(chan int, 100)\n for i := 0; i < 100; i++ { wg.Add(1); go func(n int) { defer wg.Done(); b := make([]byte, 1<<16); b[0] = byte(n); ch <- int(b[0]) }(i) }\n wg.Wait(); close(ch)\n sum := 0\n for v := range ch { sum += v }\n runtime.GC()\n var m runtime.MemStats\n runtime.ReadMemStats(&m)\n fmt.Println("sum", sum, "gc", m.NumGC > 0)\n}\n' > /disk/g/work/g.go; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GO111MODULE=off GOFLAGS=-p=1; bb chroot /disk/g /usr/local/go/bin/go run /work/g.go
+sum 4950 gc true
+
+== go: build a program and run it, and its exit status
+$ bb printf 'package main\nimport ("fmt"; "os")\nfunc main() { fmt.Println("args", len(os.Args)); os.Exit(3) }\n' > /disk/g/work/x.go; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GO111MODULE=off GOFLAGS=-p=1; bb chroot /disk/g /usr/local/go/bin/go build -o /work/x /work/x.go; bb chroot /disk/g /work/x a b; echo status $?
+args 3
+status 3
+
+== go: a program that panics dies with status 2
+$ bb printf 'package main\nfunc main() { var m map[string]int; m["a"] = 1 }\n' > /disk/g/work/p.go; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GO111MODULE=off GOFLAGS=-p=1; bb chroot /disk/g /usr/local/go/bin/go build -o /work/p /work/p.go; bb chroot /disk/g /work/p 2>&1 | bb head -1
+panic: assignment to entry in nil map
+
+== go: files, directories and the clock
+$ bb printf 'package main\nimport ("fmt"; "os"; "time")\nfunc main() {\n os.MkdirAll("/tmp/gd/a", 0755)\n os.WriteFile("/tmp/gd/a/f", []byte("data\\n"), 0644)\n b, err := os.ReadFile("/tmp/gd/a/f")\n es, _ := os.ReadDir("/tmp/gd/a")\n fmt.Print(string(b), err, " ", len(es), " ", time.Now().Year() >= 2024, "\\n")\n}\n' > /disk/g/work/f.go; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GO111MODULE=off GOFLAGS=-p=1; bb chroot /disk/g /usr/local/go/bin/go run /work/f.go
+data
+<nil> 1 true
+
+== go: gofmt rewrites a program
+$ bb printf 'package main\nfunc main(){println(1)}\n' > /disk/g/work/q.go; bb chroot /disk/g /usr/local/go/bin/gofmt /work/q.go | bb head -4
+package main
+
+func main() { println(1) }
+
+== go: go test
+$ bb mkdir -p /disk/g/work/t; bb printf 'package t\nfunc Add(a, b int) int { return a + b }\n' > /disk/g/work/t/t.go; bb printf 'package t\nimport "testing"\nfunc TestAdd(t *testing.T) { if Add(2, 3) != 5 { t.Fatal("no") } }\n' > /disk/g/work/t/t_test.go; bb printf 'module t\ngo 1.24\n' > /disk/g/work/t/go.mod; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GO111MODULE=off GOFLAGS=-p=1; GO111MODULE=on bb chroot /disk/g /usr/local/go/bin/go -C /work/t test -vet=off ./... 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//'
+ok  	t
