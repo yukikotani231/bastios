@@ -1923,6 +1923,7 @@ fn nic_quiet(c: &mut Nic)
     Nic::Up(mut n) => {
       if n.irq_on {
         card_irq_set(&mut n.dev, false);
+        card_ack(&mut n.dev);                 // a cause left pending would fire the moment it is unmasked again
         n.irq_on = false;
       }
       c = Nic::Up(n);
