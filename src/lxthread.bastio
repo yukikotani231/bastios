@@ -225,7 +225,9 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
     swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
   }
   swap_words(&mut k.alarms, h * 2, p * 2, 2);
-  swap_words(&mut k.maps, h * MAP_N * MAP_W, p * MAP_N * MAP_W, MAP_N * MAP_W);
+  if (h + 1) * MAP_N * MAP_W <= len(k.maps) && (p + 1) * MAP_N * MAP_W <= len(k.maps) {
+    swap_words(&mut k.maps, h * MAP_N * MAP_W, p * MAP_N * MAP_W, MAP_N * MAP_W);
+  }
   swap_words(&mut k.holes, h * HOLE_N * 2, p * HOLE_N * 2, HOLE_N * 2);
   swap_words(&mut k.lazy, h * LZ_W, p * LZ_W, LZ_W);
   swap_words(&mut k.anon, h * AN_N * 2, p * AN_N * 2, AN_N * 2);
