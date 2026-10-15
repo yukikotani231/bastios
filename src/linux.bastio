@@ -1610,13 +1610,17 @@ fn line_take(l: &mut Buf, t: u64)
 
 /// read from the file open on native row `row`: up to READ_MAX bytes, a
 /// transfer buffer at a time, so a regular file is not read short (as
-/// programs expect of one) unless it ends or the disk must be waited for.
+/// programs expect of one, and the JDK's jimage reader takes the count for
+/// granted) unless it ends. When the disk lags after some pieces the
+/// offset goes back to where the call began and the whole call restarts
+/// once the disk has caught up.
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
   ensures lx_count_or_fail(result, n)
 {
   let want = smaller(n, READ_MAX);
+  let start = vfs_offset(k.fs, row);
   let mut done = 0;
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
@@ -1627,7 +1631,7 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
     }
     if got == VFS_MISS {
       if done > 0 {
-        return done;                        // what came so far; the rest waits
+        vfs_seek(&mut k.fs, row, start);    // undo the pieces; the call restarts whole
       }
       return DISK_RETRY;                    // sleep until the disk catches up
     }
