@@ -183,6 +183,15 @@ treats the two kernels differently:
   22.8 to 5.8 us, `pipelat` from 97 to 26 us and `open@tmp` from 95 to 27
   us. On real hardware the share is smaller but real, since a CR3 load
   without PCID flushes the TLB there too.
+- **A system call costs the pages it touches, not its instructions.**
+  After each flush every distinct 4 KiB page the kernel touches (code, data,
+  the entry area, and the page-table pages the walk reads) is a refill of
+  about 100 ns. `getppid` takes about 90 refills; removing 120 instructions
+  from the register copies changed nothing measurable, while not saving and
+  restoring the FPU state (`fxsave` pages) and not picking a process again
+  when the caller is simply resumed took it from 15.0 to 12.8 us.
+  `bench/tlbfills.py` lists the refills per return to user mode and the
+  pages behind them, which is the number to bring down.
 - **QEMU's software TLB grows only when the guest flushes it.** Linux
   rarely flushes, so a working set over about 1 MiB thrashes it.
   `memcpy` uses 256 KiB buffers for this reason (1 MiB buffers cost Linux
