@@ -476,6 +476,7 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_ipc: splice from an empty pipe into a read-only, O_PATH or non-writable descriptor fails at once
 t_isol: a loop-mounted image is nosuid
 t_isol: /dev/console is root's
 t_isol: SHM_LOCK needs RLIMIT_MEMLOCK or root
