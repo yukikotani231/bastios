@@ -129,8 +129,8 @@ static int pidns(void)
             _exit(20);
         if (getpid() != me)
             _exit(21);
-        if (unshare(CLONE_NEWPID) != -1)
-            _exit(22);                      /* it has children of a new one already */
+        if (unshare(CLONE_NEWPID) != 0)
+            _exit(22);                      /* another one nests inside it, as on Linux */
         pid_t e = fork();
         if (e == 0)
             _exit(getpid() == 1 ? 0 : 23);
@@ -140,6 +140,65 @@ static int pidns(void)
     }
     if (waitpid(d, &st, 0) != d || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
         printf("mns: unshare(CLONE_NEWPID) said %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
+        return 1;
+    }
+    return 0;
+}
+
+/* PID namespaces inside one another: the init of the inner one is 1 there
+ * and 2 in the outer one, which sees it by that, and the host sees the
+ * outer init with both ids; the fourth level is refused. */
+static int pidnest(void)
+{
+    int st;
+    pid_t a = syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
+    if (a < 0)
+        return fail("clone(CLONE_NEWPID) for the outer one");
+    if (a == 0) {
+        if (getpid() != 1)
+            _exit(10);
+        pid_t b = syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
+        if (b == 0) {
+            if (getpid() != 1 || getppid() != 0)
+                _exit(11);
+            pid_t c = syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
+            if (c == 0) {
+                errno = 0;
+                if (getpid() != 1)
+                    _exit(12);
+                _exit(syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0) == -1 && errno == ENOSPC ? 0 : 13);
+            }
+            if (c != 2 || waitpid(c, &st, 0) != c)
+                _exit(14);
+            _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 15);
+        }
+        if (b != 2 || kill(b, 0) != 0)
+            _exit(16);
+        char path[32], text[512];
+        snprintf(path, sizeof path, "/proc/%d/status", b);
+        int f = open(path, O_RDONLY);
+        int n = f < 0 ? -1 : read(f, text, sizeof text - 1);
+        if (f >= 0)
+            close(f);
+        if (n <= 0)
+            _exit(17);
+        text[n] = 0;
+        if (!strstr(text, "NSpid:\t2\t1\n"))
+            _exit(18);                      /* its id here, then in its own */
+        if (waitpid(b, &st, 0) != b)
+            _exit(19);
+        _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 20);
+    }
+    char path[32], text[512];
+    snprintf(path, sizeof path, "/proc/%d/status", a);
+    int f = open(path, O_RDONLY);
+    int n = f < 0 ? -1 : read(f, text, sizeof text - 1);
+    if (f >= 0)
+        close(f);
+    if (n <= 0 || (text[n] = 0, !strstr(text, "\t1\n")))
+        return fail("NSpid of the outer init");
+    if (waitpid(a, &st, 0) != a || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+        printf("mns: nested PID namespaces said %d\n", WIFEXITED(st) ? WEXITSTATUS(st) : -1);
         return 1;
     }
     return 0;
@@ -275,7 +334,7 @@ int main(void)
         return 1;
     if (!WIFEXITED(st) || WEXITSTATUS(st) != 0)
         return 1;                           /* the child said what */
-    if (utsback() || pidns() || userns())
+    if (utsback() || pidns() || pidnest() || userns())
         return 1;
     puts("mns: ok");
     return 0;
