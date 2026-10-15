@@ -9,7 +9,7 @@ test/trusted_base.sh            # compare with test/trusted_base.txt (the first 
 test/trusted_base.sh --update   # after a deliberate change: rewrite it, and review the diff
 ```
 
-`boot/multiboot.c`, which reads the boot loader's information before anything is proved, is also fuzzed on the host (`test/multiboot_test.sh`, part of `make test`): the real file runs against a fake identity-mapped memory with guard pages around the information, so a read outside the structure the loader described faults, and each parse is followed by the checks the kernel relies on (bounded region and command-line counts, `bst_boot_take` returning memory inside the map).
+`boot/multiboot.c`, which reads the boot loader's information before anything is proved, is also fuzzed on the host (`test/multiboot_test.sh`, part of `make test`): the real file runs against a fake identity-mapped memory with guard pages around the information, so a read outside the structure the loader described faults, and each parse is followed by the checks the kernel relies on (bounded region and command-line counts, `bst_boot_take` returning memory inside the map). The ACPI search in `boot/smp.c` (`bst_platform_acpi`: the RSDP, the XSDT and RSDT walk, table lengths and checksums, the page-table check) gets the same treatment from `test/acpi_test.sh`, with random and lying tables, and checks the answer the prover relies on (a byte, or 256 past a table's end).
 
 The hand-written C in `boot/` is compiled with `-Wall -Wextra -Werror`; the generated C is not, because it declares temporaries it may not use.
 
