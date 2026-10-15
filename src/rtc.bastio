@@ -1,6 +1,6 @@
 // The CMOS real-time clock (the MC146818 behind ports 0x70 and 0x71), read
-// once at boot to give CLOCK_REALTIME its starting point. After that the
-// clock (src/tsc.bastio) keeps time; the RTC is not read again, and it is never written.
+// at boot to give CLOCK_REALTIME its starting point. After that the
+// clock (src/tsc.bastio) keeps time; /dev/rtc0 (src/lxrtc.bastio) reads and writes it on request.
 
 const RTC: u64 = 0x70;
 
@@ -85,4 +85,123 @@ fn rtc_seconds(r: &mut Rtc) -> u64
     return 0;
   }
   return days_from_civil(year, month, day) * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+/// A date and time of day (UTC), as the clock's registers and
+/// struct rtc_time hold them.
+struct Civil { year: u64, month: u64, day: u64, hour: u64, min: u64, sec: u64, wday: u64, yday: u64 }
+
+/// The date `days` days after 1970-01-01 (the proleptic Gregorian
+/// calendar; the years 2000 to 2099 the clock can hold), by whole years
+/// and months. wday counts from Sunday = 0, yday from 1 January = 0.
+fn civil_from_days(days: u64) -> Civil
+  requires 10957 <= days && days <= 47500
+  ensures 2000 <= result.year && result.year <= 2099 && 1 <= result.month && result.month <= 12
+  ensures 1 <= result.day && result.day <= 31 && result.wday < 7 && result.yday < 366
+{
+  let mut y = 2000;
+  let mut left = days - 10957;             // days since 2000-01-01
+  let mut len = 366;
+  while left >= len && y < 2099
+    invariant 2000 <= y && y <= 2099 && len >= 365 && len <= 366
+  {
+    left = left - len;
+    y = y + 1;
+    len = 365;
+    if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+      len = 366;
+    }
+  }
+  if left >= len {
+    left = len - 1;                        // unreachable below the year 2100; keeps the result in range
+  }
+  let yday = left;
+  let leap = len == 366;
+  let mut m = 1;
+  let mut dim = 31;
+  while m < 12 && left >= dim
+    invariant 1 <= m && m <= 12 && 28 <= dim && dim <= 31
+  {
+    left = left - dim;
+    m = m + 1;
+    if m == 2 {
+      dim = 28;
+      if leap {
+        dim = 29;
+      }
+    } else if m == 4 || m == 6 || m == 9 || m == 11 {
+      dim = 30;
+    } else {
+      dim = 31;
+    }
+  }
+  if left >= 31 {
+    left = 30;
+  }
+  return Civil { year: y, month: m, day: left + 1, hour: 0, min: 0, sec: 0, wday: (days + 4) % 7, yday: yday % 366 };
+}
+
+/// t seconds since 1970-01-01 00:00 UTC as a date and time of day.
+fn civil_from_seconds(t: u64) -> Civil
+  requires 946684800 <= t && t < 4102444800
+  ensures 2000 <= result.year && result.year <= 2099 && 1 <= result.month && result.month <= 12
+  ensures 1 <= result.day && result.day <= 31 && result.hour < 24 && result.min < 60 && result.sec < 60
+  ensures result.wday < 7 && result.yday < 366
+{
+  let c = civil_from_days(t / 86400);
+  let s = t % 86400;
+  return Civil { year: c.year, month: c.month, day: c.day, hour: s / 3600, min: s / 60 % 60, sec: s % 60, wday: c.wday, yday: c.yday };
+}
+
+/// Writes register `reg`.
+fn rtc_put(r: &mut Rtc, reg: u64, v: u64)
+  requires rtc_ok(r) && reg < 0x80 && v < 256
+  ensures rtc_ok(r)
+{
+  pio_out8(&mut r.io, 0, cast[u8](reg));
+  pio_out8(&mut r.io, 1, cast[u8](v));
+}
+
+/// A number below 100 in the clock's format: BCD or binary.
+fn rtc_enc(v: u64, bcd: bool) -> u64
+  requires v < 100
+  ensures result < 256
+{
+  if bcd {
+    return v / 10 * 16 + v % 10;
+  }
+  return v;
+}
+
+/// Sets the clock to t seconds since 1970-01-01 00:00 UTC (the years 2000
+/// to 2099). Updates are halted (status B bit 7) while the registers are
+/// written, so the clock does not carry between them.
+fn rtc_set_seconds(r: &mut Rtc, t: u64)
+  requires rtc_ok(r) && 946684800 <= t && t < 4102444800
+  ensures rtc_ok(r)
+{
+  let c = civil_from_seconds(t);
+  let b = rtc_reg(&mut r, 0x0B);
+  let bcd = b / 4 % 2 == 0;
+  let mut hour = c.hour;
+  let mut pm = 0;
+  if b / 2 % 2 == 0 {
+    // 12-hour mode: 12 stands for 0, and bit 7 of the hour is PM.
+    if hour >= 12 {
+      pm = 128;
+    }
+    hour = hour % 12;
+    if hour == 0 {
+      hour = 12;
+    }
+  }
+  rtc_put(&mut r, 0x0B, b % 128 + 128);     // SET: halt the update cycle
+  rtc_put(&mut r, 0x00, rtc_enc(c.sec, bcd));
+  rtc_put(&mut r, 0x02, rtc_enc(c.min, bcd));
+  rtc_put(&mut r, 0x04, rtc_enc(hour, bcd) % 128 + pm);
+  rtc_put(&mut r, 0x06, c.wday + 1);        // 1 = Sunday
+  rtc_put(&mut r, 0x07, rtc_enc(c.day, bcd));
+  rtc_put(&mut r, 0x08, rtc_enc(c.month, bcd));
+  rtc_put(&mut r, 0x09, rtc_enc(c.year - 2000, bcd));
+  rtc_put(&mut r, 0x0B, b % 128);           // and let it run again
 }

@@ -86,6 +86,7 @@ import "lxanon.bastio";
 import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
+import "lxrtc.bastio";
 import "lxmouse.bastio";
 import "arch/rnghw.bastio";
 import "kernel.bastio";
@@ -1227,7 +1228,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // The wall clock: the RTC's reading, less the time since boot it was
   // read at, so CLOCK_REALTIME = epoch + the clock (src/tsc.bastio).
   let wall = rtc_seconds(&mut rtc) * 1000000000;
-  port_release(&mut ports, rtc.io);         // read once; the clock keeps time from here
+  let rtc_hw = RtcHw::Cmos(rtc);            // kept: /dev/rtc0 reads and sets it (src/lxrtc.bastio)
   let at = tsc_now(tsc, 0, cpu);
   let mut epoch = 0;
   if wall > at {
@@ -1441,7 +1442,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, "---- end of the hardware report ----\r\n");
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
   }
-  let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
+  let mut k = kernel_new(m, disk, nic, snd, rtc_hw, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
   let mut hi = 0;
   while hi < hw_n
     invariant hi <= hw_n && hw_n <= VRNG_WORDS && len(hw) == VRNG_WORDS && kok(k)
@@ -1495,6 +1496,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   blk_free(&mut ports, &mut win, devs.disk, &mut sys.k.mem);
   nic_free(&mut ports, &mut win, sys.k.nic, &mut sys.k.mem);
   snd_free(&mut win, sys.k.snd, &mut sys.k.mem);
+  rtchw_free(&mut ports, sys.k.rtc);
   usb_off(&mut devices.usb, &mut win, &mut sys.k.mem);
   puts(&mut sys.con, "BastiOS: ");
   put_num(&mut sys.con, count_free(sys.k.mem.bm));

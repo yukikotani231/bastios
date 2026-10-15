@@ -1,0 +1,66 @@
+// The hardware clock on x86-64: the CMOS clock (src/rtc.bastio). The
+// kernel keeps it so /dev/rtc0 (src/lxrtc.bastio) can read and set it.
+
+import "rtc.bastio";
+
+enum RtcHw { None, Cmos(Rtc) }
+
+spec fn rtchw_ok(h: &RtcHw) -> bool {
+  h is RtcHw::Cmos ==> rtc_ok(h.Cmos)
+}
+
+fn rtchw_live(h: &RtcHw) -> bool {
+  match h {
+    RtcHw::Cmos(r) => { return true; },
+    RtcHw::None => { return false; },
+  }
+}
+
+fn rtchw_free(ports: &mut Ports, h: RtcHw) {
+  match h {
+    RtcHw::Cmos(r) => { port_release(&mut ports, r.io); },
+    RtcHw::None => {},
+  }
+}
+
+/// The time the clock says, in seconds since 1970-01-01 00:00 UTC; 0 if
+/// there is no clock or what it says makes no sense.
+fn rtchw_get(h: &mut RtcHw) -> u64
+  requires rtchw_ok(h)
+  ensures rtchw_ok(h) && result < 5000000000
+{
+  match h {
+    RtcHw::Cmos(mut r) => {
+      let t = rtc_seconds(&mut r);
+      h = RtcHw::Cmos(r);
+      return t;
+    },
+    RtcHw::None => {
+      h = RtcHw::None;
+      return 0;
+    },
+  }
+}
+
+/// Sets the clock to t seconds since 1970-01-01 00:00 UTC; false if there
+/// is none or it cannot hold t (the years 2000 to 2099).
+fn rtchw_set(h: &mut RtcHw, t: u64) -> bool
+  requires rtchw_ok(h)
+  ensures rtchw_ok(h)
+{
+  match h {
+    RtcHw::Cmos(mut r) => {
+      if t < 946684800 || t >= 4102444800 {
+        h = RtcHw::Cmos(r);
+        return false;
+      }
+      rtc_set_seconds(&mut r, t);
+      h = RtcHw::Cmos(r);
+      return true;
+    },
+    RtcHw::None => {
+      h = RtcHw::None;
+      return false;
+    },
+  }
+}

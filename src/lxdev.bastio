@@ -40,6 +40,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/tty") || xfer_is(x, 0, n, "dev/console") {
     return DEV_TTY;
   }
+  if xfer_is(x, 0, n, "dev/rtc") || xfer_is(x, 0, n, "dev/rtc0") {
+    return DEV_RTC;                         // src/lxrtc.bastio
+  }
   if xfer_is(x, 0, n, "dev/dsp") {
     return DEV_DSP;                         // src/lxsnd.bastio
   }
@@ -76,6 +79,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_TTY {
     return 0x500;
   }
+  if d == DEV_RTC {
+    return 0xA87;                           // 10:135, /dev/rtc
+  }
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return 0x700 + d - DEV_LOOP;            // block major 7
   }
@@ -111,6 +117,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev == 0xAED {
     return DEV_LOOPCTL;
   }
+  if rdev == 0xA87 {
+    return DEV_RTC;
+  }
   if rdev == 0xD3F || rdev == 0xA01 {
     return DEV_MICE;                        // /dev/input/mice, /dev/psaux (10:1)
   }
@@ -139,6 +148,9 @@ fn dev_meta(d: u64) -> Meta {
   }
   if d >= DEV_PTM && d < DEV_PTS + PTY_N {
     return Meta { ok: true, mode: S_IFCHR, size: 0, ino: 200 + d - DEV_PTM, mtime: 0, own: 0 };
+  }
+  if d == DEV_RTC {
+    return Meta { ok: true, mode: 0x2180, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: 0 };   // crw-------
   }
   return Meta { ok: true, mode: S_IFCHR, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: 0 };
 }

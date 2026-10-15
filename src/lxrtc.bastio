@@ -1,0 +1,74 @@
+// /dev/rtc and /dev/rtc0 for Linux programs: the hardware clock
+// (src/rtchw.bastio). hwclock reads it with RTC_RD_TIME and sets it with
+// RTC_SET_TIME (root's, like settimeofday); the clock holds UTC, a date
+// from 2000 to 2099. Alarm and update interrupts are not supported
+// (RTC_UIE_ON and the rest answer EINVAL, as for a clock without an
+// interrupt line), and neither is read(2). Without a clock (AArch64), opening
+// the device fails with ENODEV.
+
+import "lxcred.bastio";
+
+const RTC_RD_TIME: u64 = 0x80247009;   // _IOR('p', 0x09, struct rtc_time)
+const RTC_SET_TIME: u64 = 0x4024700A;  // _IOW('p', 0x0a, struct rtc_time)
+const RTC_TM_SIZE: u64 = 36;           // nine ints
+
+/// ioctl(fd, req, arg) on /dev/rtc0.
+fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == RTC_RD_TIME {
+    let t = rtchw_get(&mut k.rtc);
+    if t < 946684800 || t >= 4102444800 {
+      return EINVAL;                        // no clock, or it holds no valid time
+    }
+    let c = civil_from_seconds(t);
+    // struct rtc_time { int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst; }
+    xfer_u64(&mut k.fs.xfer, 0, c.sec + c.min * 4294967296);
+    xfer_u64(&mut k.fs.xfer, 8, c.hour + c.day * 4294967296);
+    xfer_u64(&mut k.fs.xfer, 16, c.month - 1 + (c.year - 1900) * 4294967296);
+    xfer_u64(&mut k.fs.xfer, 24, c.wday + c.yday * 4294967296);
+    xfer_u64(&mut k.fs.xfer, 32, 0);
+    return lx_put_out(&mut k, pid, arg, RTC_TM_SIZE);
+  }
+  if req == RTC_SET_TIME {
+    if !cap_has(k, pid, CAP_SYS_TIME) {
+      return EACCES;                        // Linux: not root, not allowed to set the clock
+    }
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, RTC_TM_SIZE) != RTC_TM_SIZE {
+      return EFAULT;
+    }
+    let w0 = get_u64(k.fs.xfer, 0);
+    let w1 = get_u64(k.fs.xfer, 8);
+    let w2 = get_u64(k.fs.xfer, 16);
+    let sec = w0 % 4294967296;
+    let min = w0 / 4294967296;
+    let hour = w1 % 4294967296;
+    let day = w1 / 4294967296;
+    let mon = w2 % 4294967296 + 1;
+    let year = w2 / 4294967296 + 1900;
+    if sec > 59 || min > 59 || hour > 23 || day < 1 || day > 31 || mon < 1 || mon > 12 || year < 2000 || year > 2099 {
+      return EINVAL;
+    }
+    let t = days_from_civil(year, mon, day) * 86400 + hour * 3600 + min * 60 + sec;
+    if t < 946684800 || t >= 4102444800 {
+      return EINVAL;
+    }
+    let back = civil_from_seconds(t);
+    if back.day != day || back.month != mon {
+      return EINVAL;                        // a day the month does not have
+    }
+    if !rtchw_set(&mut k.rtc, t) {
+      return EINVAL;
+    }
+    return 0;
+  }
+  return EINVAL;
+}
+
+/// open(2) of /dev/rtc: ENODEV if there is no clock.
+fn rtc_open_ok(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return rtchw_live(k.rtc);
+}

@@ -11,10 +11,14 @@
 //   NM_SET                      bit 0: a host name was set; bit 1: a domain name
 //   [TX_BASE, ...)              what adjtimex keeps, TX_* below
 //
-// The NTP values are kept and handed back, nothing more: the clock does
-// not slew to an ADJ_OFFSET, run faster for ADJ_FREQUENCY or ADJ_TICK, or
-// insert a leap second for STA_INS. Setting the clock moves CLOCK_REALTIME
-// only; CLOCK_MONOTONIC and the boot clock are not settable, as on Linux.
+// The NTP discipline moves CLOCK_REALTIME (clock_slew, run on every timer
+// tick): ADJ_FREQUENCY and ADJ_TICK make it run fast or slow, ADJ_OFFSET
+// with STA_PLL (what ntpd and chronyd use) is worked off exponentially,
+// 1/2^(4 + time constant) of what is left each second, as Linux's PLL does,
+// and adjtime (ADJ_OFFSET_SINGLESHOT) is slewed at 500 ppm. There is no
+// leap second for STA_INS, and no PPS. Setting the clock moves
+// CLOCK_REALTIME only; CLOCK_MONOTONIC and the boot clock are not settable
+// (nor slewed), as on Linux.
 
 import "lxcred.bastio";
 import "lxtime.bastio";
@@ -38,7 +42,10 @@ const TX_ESTERR: u64 = 134;
 const TX_STATUS: u64 = 135;            // kept XOR STA_UNSYNC, so zero is unsynchronised
 const TX_CONST: u64 = 136;
 const TX_OFFSET: u64 = 137;
-const TX_ADJ: u64 = 138;               // what the last ADJ_OFFSET_SINGLESHOT asked for
+const TX_ADJ: u64 = 138;               // what an ADJ_OFFSET_SINGLESHOT asked for and has not yet moved, in ns (two's complement)
+const TX_LAST: u64 = 139;              // the clock (k.ns) at the last slew; 0 before the first
+const TX_RES: u64 = 140;               // the part of a ns the frequency has not yet moved the clock by
+const TX_PEND: u64 = 141;              // what an ADJ_OFFSET with STA_PLL still has to move the clock by, in ns (two's complement)
 
 const MAX_CLOCKS: u64 = 16;
 const TIMEX_SIZE: u64 = 208;           // struct timex on x86_64
@@ -54,6 +61,7 @@ const ADJ_NANO: u64 = 0x2000;
 const ADJ_TICK: u64 = 0x4000;
 const ADJ_ADJTIME: u64 = 0x8000;       // with ADJ_OFFSET: ADJ_OFFSET_SINGLESHOT
 const ADJ_OFFSET_READONLY: u64 = 0x2000;
+const STA_PLL: u64 = 0x0001;
 const STA_UNSYNC: u64 = 0x0040;
 const STA_NANO: u64 = 0x2000;
 const STA_RONLY: u64 = 0xFF00;         // the bits ADJ_STATUS may not set
@@ -363,6 +371,124 @@ fn clamp_signed(v: u64, lim: u64) -> u64
   return smaller(v, lim);
 }
 
+/// The magnitude of two's-complement v.
+fn s_mag(v: u64) -> u64 {
+  if v >= 0x8000000000000000 {
+    return 0xFFFFFFFFFFFFFFFF - v + 1;
+  }
+  return v;
+}
+
+/// n with the sign of two's-complement s, as a two's-complement word.
+fn s_with(n: u64, neg: bool) -> u64
+  requires n < 0x8000000000000000
+{
+  if neg && n != 0 {
+    return 0xFFFFFFFFFFFFFFFF - n + 1;
+  }
+  return n;
+}
+
+/// v / d, rounded towards zero, for two's-complement v.
+fn s_div(v: u64, d: u64) -> u64
+  requires 1 <= d
+{
+  return s_with(s_mag(v) / d % 0x8000000000000000, v >= 0x8000000000000000);
+}
+
+/// Moves CLOCK_REALTIME by n ns, forward or (neg) back; it stops at the
+/// boot (set_wall refuses to go before it) and at FOREVER.
+fn epoch_move(k: &mut Kernel, neg: bool, n: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if neg {
+    k.epoch = k.epoch - smaller(n, k.epoch);
+  } else {
+    let e = sat_add(k.epoch, n);
+    if e < FOREVER {
+      k.epoch = e;
+    }
+  }
+}
+
+/// On a timer tick, with k.ns just read: carries out the discipline
+/// adjtimex asked for over the time since the last tick: the frequency
+/// offset (and the tick length's, 100 ppm a usec of tick), what is left of
+/// a PLL offset, and what is left of an adjtime. Running slow or fast
+/// changes CLOCK_REALTIME only, and not by more than 10% either way, so it
+/// still runs forward; the monotonic clocks are never touched.
+fn clock_slew(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let last = get(k.sys, TX_LAST);
+  k.sys = set(k.sys, TX_LAST, k.ns);
+  if last == 0 || k.ns <= last {
+    return;
+  }
+  let dt = smaller(k.ns - last, NS_PER_S);
+  // The rate: freq (ppm << 16) and (tick - USER_TICK) * 100 ppm, signed.
+  let freq = get(k.sys, TX_FREQ);
+  let mut fneg = freq >= 0x8000000000000000;
+  let mut fmag = smaller(s_mag(freq), MAXFREQ);
+  let tick = get(k.sys, TX_TICK);
+  let mut tneg = false;
+  let mut tmag = 0;
+  if tick >= MIN_TICK && tick <= MAX_TICK {
+    tneg = tick < USER_TICK;
+    if tneg {
+      tmag = (USER_TICK - tick) * 6553600;
+    } else {
+      tmag = (tick - USER_TICK) * 6553600;
+    }
+  }
+  let mut mag = fmag + tmag;
+  let mut neg = fneg;
+  if fneg != tneg {
+    if fmag >= tmag {
+      mag = fmag - tmag;
+    } else {
+      mag = tmag - fmag;
+      neg = tneg;
+    }
+  }
+  if mag != 0 {
+    let unit = 65536000000;                 // (ppm << 16) * ns per ns
+    let acc = smaller(get(k.sys, TX_RES), unit) + mag * dt;
+    k.sys = set(k.sys, TX_RES, acc % unit);
+    epoch_move(&mut k, neg, acc / unit);
+  }
+  // A PLL offset: a fraction of what is left each second.
+  let pend = get(k.sys, TX_PEND);
+  if pend != 0 {
+    let left = smaller(s_mag(pend), 500000000);
+    let tc = smaller(get(k.sys, TX_CONST), MAXTC);
+    let mut step = left * dt / NS_PER_S / 16;
+    let mut i = 0;
+    while i < tc
+      invariant i <= tc && tc <= MAXTC
+    {
+      step = step / 2;
+      i = i + 1;
+    }
+    if step == 0 {
+      step = 1;
+    }
+    step = smaller(step, left);
+    epoch_move(&mut k, pend >= 0x8000000000000000, step);
+    k.sys = set(k.sys, TX_PEND, s_with(left - step, pend >= 0x8000000000000000));
+  }
+  // An adjtime: 500 ppm until it is done.
+  let adj = get(k.sys, TX_ADJ);
+  if adj != 0 {
+    let left = smaller(s_mag(adj), 500000000);
+    let step = smaller(left, dt / 2000);
+    epoch_move(&mut k, adj >= 0x8000000000000000, step);
+    k.sys = set(k.sys, TX_ADJ, s_with(left - step, adj >= 0x8000000000000000));
+  }
+}
+
 /// ADJ_SETOFFSET: moves the wall clock by the struct timeval (or, with
 /// ADJ_NANO, timespec) at offset 72 of the struct timex.
 fn shift_wall(k: &mut Kernel, nano: bool) -> u64
@@ -426,7 +552,18 @@ fn tx_apply(k: &mut Kernel, modes: u64) -> u64
     if status / STA_NANO % 2 == 1 {
       lim = 500000000;
     }
-    k.sys = set(k.sys, TX_OFFSET, clamp_signed(get_u64(k.fs.xfer, 8), lim));
+    let off = clamp_signed(get_u64(k.fs.xfer, 8), lim);
+    k.sys = set(k.sys, TX_OFFSET, off);
+    // With STA_PLL the clock works the offset off; otherwise Linux keeps it (and zero) unused.
+    let mut ns = off;
+    if status / STA_NANO % 2 == 0 {
+      ns = s_with(smaller(s_mag(off), 500000000) * 1000, off >= 0x8000000000000000);
+    }
+    if status % 2 == 1 {
+      k.sys = set(k.sys, TX_PEND, ns);
+    } else {
+      k.sys = set(k.sys, TX_PEND, 0);
+    }
   }
   if modes / ADJ_FREQUENCY % 2 == 1 {
     k.sys = set(k.sys, TX_FREQ, clamp_signed(get_u64(k.fs.xfer, 16), MAXFREQ));
@@ -504,7 +641,7 @@ fn lx_adjtimex(k: &mut Kernel, pid: u64, va: u64) -> u64
   }
   let modes = get_u64(k.fs.xfer, 0) % 0x100000000;
   let root = cap_has(k, pid, CAP_SYS_TIME);
-  let mut offset = get(k.sys, TX_ADJ);
+  let mut offset = s_div(get(k.sys, TX_ADJ), 1000);   // what is left, in usec
   if modes / ADJ_ADJTIME % 2 == 1 {
     if modes % 2 == 0 {
       return EINVAL;                        // ADJ_ADJTIME only goes with ADJ_OFFSET
@@ -513,7 +650,8 @@ fn lx_adjtimex(k: &mut Kernel, pid: u64, va: u64) -> u64
       if !root {
         return EPERM;
       }
-      k.sys = set(k.sys, TX_ADJ, clamp_signed(get_u64(k.fs.xfer, 8), 500000));
+      let us = clamp_signed(get_u64(k.fs.xfer, 8), 500000);
+      k.sys = set(k.sys, TX_ADJ, s_with(smaller(s_mag(us), 500000) * 1000, us >= 0x8000000000000000));
     }
   } else {
     if modes != 0 && !root {
@@ -524,6 +662,13 @@ fn lx_adjtimex(k: &mut Kernel, pid: u64, va: u64) -> u64
       return r;
     }
     offset = get(k.sys, TX_OFFSET);
+    if (get(k.sys, TX_STATUS) ^ STA_UNSYNC) % 2 == 1 {
+      // STA_PLL: the part of the offset the clock has not worked off yet.
+      offset = s_div(get(k.sys, TX_PEND), 1000);
+      if (get(k.sys, TX_STATUS) ^ STA_UNSYNC) / STA_NANO % 2 == 1 {
+        offset = get(k.sys, TX_PEND);
+      }
+    }
   }
   tx_fill(&mut k, modes, offset);
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, TIMEX_SIZE) != TIMEX_SIZE {

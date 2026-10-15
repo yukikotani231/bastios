@@ -1,0 +1,26 @@
+// The hardware clock on AArch64: none kept after boot (the PL031 is read
+// once, in src/aarch64/main.bastio), so /dev/rtc0 has no device.
+
+enum RtcHw { None }
+
+spec fn rtchw_ok(h: &RtcHw) -> bool {
+  true
+}
+
+fn rtchw_live(h: &RtcHw) -> bool {
+  return false;
+}
+
+fn rtchw_get(h: &mut RtcHw) -> u64
+  requires rtchw_ok(h)
+  ensures rtchw_ok(h) && result < 5000000000
+{
+  return 0;
+}
+
+fn rtchw_set(h: &mut RtcHw, t: u64) -> bool
+  requires rtchw_ok(h)
+  ensures rtchw_ok(h)
+{
+  return false;
+}

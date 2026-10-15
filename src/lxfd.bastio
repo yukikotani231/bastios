@@ -935,6 +935,21 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if dev == DEV_DSP && !snd_live(k.snd) {
     return 18446744073709551597;                      // -ENODEV: no sound card
   }
+  if dev == DEV_RTC && flags & LO_PATH == 0 {
+    if !rtc_open_ok(k) {
+      return 18446744073709551597;                    // -ENODEV: no hardware clock
+    }
+    let mut rwant = 0;                                // crw------- for root (dev_meta)
+    if flags % 4 != LO_WRONLY {
+      rwant = MAY_R;
+    }
+    if flags % 4 != 0 {
+      rwant = rwant + MAY_W;
+    }
+    if !may_meta(k.procs, pid, 0x2180, 0, rwant) {
+      return EACCES;
+    }
+  }
   if dev >= DEV_PTS && dev < DEV_PTS + PTY_N {
     return pty_open_slave(&mut k, pid, dev - DEV_PTS, flags);
   }
