@@ -2253,13 +2253,7 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
           bset(&mut out, o, 47);
           o = o + 1;
         }
-        let mut c = 0;
-        while c < w
-          invariant c <= w && i + w <= e && e < XFER && o + w <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
-        {
-          bset(&mut out, o + c, bget(k.fs.xfer, i + c));
-          c = c + 1;
-        }
+        bytes_copy_span(&mut out, o, k.fs.xfer, i, j);
         o = o + w;
       }
       i = j;
@@ -2283,13 +2277,7 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
     k.perr = ENAMETOOLONG;
     return bad;
   }
-  let mut c = 0;
-  while c < o
-    invariant c <= o && o <= FNAME_MAX && blen(out) == PATH_OUT && kok(k)
-  {
-    bset(&mut k.fs.xfer, c, bget(out, c));
-    c = c + 1;
-  }
+  bytes_copy_span(&mut k.fs.xfer, 0, out, 0, o);
   bfree(out);
   return Lex { n: o, floor: floor, trail: trail, abs: abs, esc: esc, dirend: dirend };
 }
