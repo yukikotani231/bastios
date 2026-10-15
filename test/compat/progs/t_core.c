@@ -117,12 +117,12 @@ int main(void) {
 #ifdef __x86_64__
     struct stat sb;
     if (plain_pattern()) {
-        EXPECT("RLIMIT_CORE above 0 leaves a core file", stat("co_a/core", &sb) == 0 && sb.st_size > 4096);
+        EXPECT("RLIMIT_CORE above 0 leaves a core file, and the wait status says so", stat("co_a/core", &sb) == 0 && sb.st_size > 4096 && WCOREDUMP(st));
         const char *why = "";
         int ok = inspect("co_a/core", pid, &why);
         EXPECT("the core file names the signal, the program counter and the variable", ok || (fprintf(stderr, "why: %s\n", why), 0));
         st = crash("co_b", 0, &pid);
-        EXPECT("RLIMIT_CORE 0 leaves no core file", WIFSIGNALED(st) && stat("co_b/core", &sb) != 0);
+        EXPECT("RLIMIT_CORE 0 leaves no core file, and the status has no core flag", WIFSIGNALED(st) && !WCOREDUMP(st) && stat("co_b/core", &sb) != 0);
     }
 #endif
     return done();

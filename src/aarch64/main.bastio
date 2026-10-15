@@ -413,8 +413,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   puts(&mut s.con, ", address ");
   put_hex(&mut s.con, addr);
   puts(&mut s.con, "; killed]\r\n");
-  core_dump(&mut s.k, p, sig);
-  terminate(&mut s.k, mmu, p, SIG_DEATH + sig);
+  let dumped = core_dump(&mut s.k, p, sig);
+  terminate(&mut s.k, mmu, p, death_code(sig, dumped));
   return (p + 1) % NPROC;
 }
 
