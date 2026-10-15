@@ -323,7 +323,7 @@ int main(void)
            int r = ptrace(PTRACE_CONT, c, 0, 0); int e = errno; kill(c, SIGKILL); wst(c); ok && r == -1 && e == ESRCH; }));
     EXPECT("a request on a process that is not a tracee of the caller is ESRCH", ({
            c = fork(); if (c == 0) { for (;;) pause(); }
-           int r = ptrace(PTRACE_GETREGS, c, 0, 0); int e = errno; kill(c, SIGKILL); wst(c); r == -1 && e == ESRCH; }));
+           siginfo_t si; int r = ptrace(PTRACE_GETSIGINFO, c, 0, &si); int e = errno; kill(c, SIGKILL); wst(c); r == -1 && e == ESRCH; }));
     EXPECT("an unknown request is EIO", ({ c = traced_child(body_exit5); int ok = stopped_with(c, SIGSTOP);
            int r = ptrace(0x7777, c, 0, 0); int e = errno; kill(c, SIGKILL); wst(c); ok && r == -1 && e == EIO; }));
     EXPECT("a tracer attaching to a stopped process sees it stop", ({
