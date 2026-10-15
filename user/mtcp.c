@@ -10,6 +10,10 @@
  *                          127.0.0.1 (a forked child writes, we read and
  *                          check every byte): loopback segments are longer
  *                          than a card's frames
+ *   mtcp many N            N connections to ourselves over 127.0.0.1 at once
+ *                          (2N connections in the kernel), a byte each way
+ *                          on every one, then 30 UDP sockets that each get
+ *                          a datagram
  *   mtcp                   serve 7001; the line read names a port on
  *                          10.0.2.2 (QEMU's host) to get from next. The
  *                          BastiOS shell passes no arguments, so the test
@@ -173,8 +177,72 @@ static int loop(unsigned long total)
     return got == total && bad == 0 ? 0 : 1;
 }
 
+#define MANY_MAX 200
+
+/* N connections open at once to ourselves, then UDP sockets side by side:
+ * the kernel's tables of connections and sockets hold more than a handful. */
+static int many(int n)
+{
+    static int cl[MANY_MAX], sv[MANY_MAX];
+    if (n < 1 || n > MANY_MAX)
+        return 2;
+    int l = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(9101) };
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 128) != 0)
+        return fail("listen");
+    for (int i = 0; i < n; i++) {
+        cl[i] = socket(AF_INET, SOCK_STREAM, 0);
+        if (cl[i] < 0 || connect(cl[i], (struct sockaddr *)&a, sizeof a) != 0)
+            return fail("connect");
+    }
+    for (int i = 0; i < n; i++) {
+        sv[i] = accept(l, 0, 0);
+        if (sv[i] < 0)
+            return fail("accept");
+    }
+    for (int i = 0; i < n; i++) {
+        char b = (char)('a' + i % 26), got = 0;
+        if (write(cl[i], &b, 1) != 1 || read(sv[i], &got, 1) != 1 || got != b)
+            return fail("client to server");
+        b = (char)('A' + i % 26);
+        if (write(sv[i], &b, 1) != 1 || read(cl[i], &got, 1) != 1 || got != b)
+            return fail("server to client");
+    }
+    for (int i = 0; i < n; i++) {
+        close(cl[i]);
+        close(sv[i]);
+    }
+    close(l);
+    int us[30], tx = socket(AF_INET, SOCK_DGRAM, 0);
+    if (tx < 0)
+        return fail("udp socket");
+    for (int i = 0; i < 30; i++) {
+        struct sockaddr_in u = { .sin_family = AF_INET, .sin_port = htons(9200 + i) };
+        u.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        us[i] = socket(AF_INET, SOCK_DGRAM, 0);
+        if (us[i] < 0 || bind(us[i], (struct sockaddr *)&u, sizeof u) != 0)
+            return fail("udp bind");
+    }
+    for (int i = 0; i < 30; i++) {
+        struct sockaddr_in u = { .sin_family = AF_INET, .sin_port = htons(9200 + i) };
+        u.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        char b = (char)('0' + i % 10), got = 0;
+        if (sendto(tx, &b, 1, 0, (struct sockaddr *)&u, sizeof u) != 1
+            || recv(us[i], &got, 1, 0) != 1 || got != b)
+            return fail("udp datagram");
+    }
+    for (int i = 0; i < 30; i++)
+        close(us[i]);
+    close(tx);
+    printf("mtcp: %d connections and 30 udp sockets\n", n);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "many") == 0)
+        return many(atoi(argv[2]));
     if (argc == 3 && strcmp(argv[1], "loop") == 0)
         return loop(strtoul(argv[2], 0, 10));
     if (argc == 3 && strcmp(argv[1], "echo") == 0)
@@ -188,6 +256,6 @@ int main(int argc, char **argv)
     }
     if (argc == 5 && strcmp(argv[1], "get") == 0)
         return get(argv[2], atoi(argv[3]), argv[4]);
-    printf("usage: mtcp serve PORT | mtcp echo PORT | mtcp loop BYTES | mtcp get A.B.C.D PORT TEXT\n");
+    printf("usage: mtcp serve PORT | mtcp echo PORT | mtcp loop BYTES | mtcp many N | mtcp get A.B.C.D PORT TEXT\n");
     return 2;
 }
