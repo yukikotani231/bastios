@@ -36,11 +36,24 @@ jobs:
           code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
           guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
           if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+  # test/all.sh in two parts that run on runners of their own (LANES, see
+  # test/all.sh): the x86-64 boots, whose longest is the shell test, and the
+  # AArch64 kernel's. Each part keeps a proof cache of its own, since the
+  # caches are saved and restored whole.
   test:
+    name: test (${{ matrix.part }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: x86-64
+            lanes: a b c
+          - part: aarch64
+            lanes: d
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -61,17 +74,20 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
-          restore-keys: proof-
+          key: proof-${{ matrix.part }}-none
+          restore-keys: |
+            proof-${{ matrix.part }}-
+            proof-
           path: build/proof-cache
       - run: make test BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
         env:
           AARCH64_REQUIRED: 1
+          LANES: ${{ matrix.lanes }}
       - name: Save the proof cache
         if: always() && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          key: proof-${{ hashFiles('build/proof-cache/**') }}
+          key: proof-${{ matrix.part }}-${{ hashFiles('build/proof-cache/**') }}
           path: build/proof-cache
         continue-on-error: true
   # The same suite with the kernel and the Bastio user programs built by the
@@ -95,9 +111,11 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: proof-none
-          restore-keys: proof-
+          restore-keys: |
+            proof-x86-64-
+            proof-
           path: build/proof-cache
-      - run: make test NATIVE=1 BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - run: make test NATIVE=1 LANES='a b c' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
   # the model's sources). The `test` job skips these boots; here they run
@@ -142,7 +160,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: proof-none
-          restore-keys: proof-
+          restore-keys: |
+            proof-x86-64-
+            proof-
           path: build/proof-cache
       - run: make build/bastios.elf
       - run: NIC=ena test/dhcp_test.sh
@@ -223,7 +243,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: proof-none
-          restore-keys: proof-
+          restore-keys: |
+            proof-x86-64-
+            proof-
           path: build/proof-cache
       - name: Make room
         run: |
@@ -314,7 +336,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: proof-none
-          restore-keys: proof-
+          restore-keys: |
+            proof-aarch64-
+            proof-
           path: build/proof-cache
       - name: Cache keys
         id: keys
@@ -419,7 +443,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: proof-none
-          restore-keys: proof-
+          restore-keys: |
+            proof-x86-64-
+            proof-
           path: build/proof-cache
       - run: make -j4 build/bastios.elf build/ltp/.built
       - name: Save LTP
