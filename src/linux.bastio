@@ -137,6 +137,7 @@ const CLONE_NEWIPC: u64 = 0x08000000;
 const CLONE_NEWUSER: u64 = 0x10000000;
 const CLONE_NEWPID: u64 = 0x20000000;
 const CLONE_NEWNET: u64 = 0x40000000;
+const CLONE_NEWTIME: u64 = 0x80;           // unshare and setns only: clone has the exit signal there
 const LX_FORK: u64 = 57;
 const LX_VFORK: u64 = 58;
 const LX_EXECVE: u64 = 59;
