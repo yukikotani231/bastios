@@ -166,13 +166,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   put_space(&mut k.spaces, c, Space::Mapped(t));
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, c));
   put_fpu(&mut k.fpus, c, Fpu::State(fpu));
-  let mut f = 0;
-  while f < STRIDE
-    invariant f <= STRIDE && ptab_ok(k.procs)
-  {
-    pset(&mut k.procs, c, f, pget(k.procs, pid, f));
-    f = f + 1;
-  }
+  wcopy(&mut k.procs, c * STRIDE, pid * STRIDE, STRIDE);
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
