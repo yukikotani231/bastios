@@ -432,6 +432,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Build and test
 
+- For contributors: `tools/setup-dev.sh` sets up a Debian or Ubuntu machine in one command (and a dev container runs it), CONTRIBUTING.md explains the issue labels and where to find a first issue, and a feature-request issue template and `.github/labels.yml` (synced by a workflow) were added.
 - `test/stackdepth.py` checks that the deepest chain of kernel calls in a native kernel fits the kernel stack (it fails above 64 KiB of the 92 KiB; today 41 KiB). It was written after a native kernel built with an older compiler overflowed its stack in the UDP path under a loaded test run: its functions had frames up to 19 KiB where the current compiler's are under 4.5 KiB (the boot function aside).
 
 ### Files and disks
