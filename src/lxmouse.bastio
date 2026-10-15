@@ -33,7 +33,7 @@
 import "linux.bastio";
 
 const MICE_HDR: u64 = 56;
-const MICE_CAP: u64 = 768;              // MICE_LEN - MICE_HDR: 192 packets
+const MICE_CAP: u64 = 768;              // 192 packets
 const M_HEAD: u64 = 0;
 const M_COUNT: u64 = 8;
 const M_PRESENT: u64 = 16;
@@ -48,8 +48,8 @@ fn mice_new(present: bool) -> Bytes
 {
   let mut b = balloc(MICE_LEN);
   let mut i = 0;
-  while i < MICE_HDR
-    invariant blen(b) == MICE_LEN && i <= MICE_HDR
+  while i < 952
+    invariant blen(b) == MICE_LEN && i <= 952
   {
     bset(&mut b, i, 0);
     i = i + 1;

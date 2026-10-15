@@ -723,7 +723,6 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.ptys);
   bfree(s.k.ptyb);
   bfree(s.k.mice);
-  bfree(s.k.ser);
   free(s.k.ipc);
   bfree(s.k.ipcb);
   free(s.k.sys);

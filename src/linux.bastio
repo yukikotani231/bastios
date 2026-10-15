@@ -376,11 +376,8 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     if d.kind == K_CONSOLE {
       return console_read(&mut k, pid, va, cnt, was);
     }
-    if d.kind == K_DEV && d.x == DEV_MICE {
-      return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio
-    }
-    if d.kind == K_DEV && d.x == DEV_SER {
-      return ser_read(&mut k, pid, n, a, va, cnt);    // src/lxserial.bastio
+    if d.kind == K_DEV && is_mice_or_ser(d.x) {
+      return mice_or_ser_read(&mut k, pid, n, a, d.x, va, cnt);   // src/lxserial.bastio
     }
     let mut r = EBADF;
     if d.kind == K_FILE {

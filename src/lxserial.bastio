@@ -5,7 +5,7 @@
 // sends bytes, and termios calls are answered and kept but change nothing
 // (the line speed is set when the port is found).
 //
-// k.ser holds a header (SER_HDR bytes: where the oldest received byte is
+// k.mice holds, after the mouse's ring, a header (SER_HDR bytes: where the oldest received byte is
 // and how many there are, the same for the bytes waiting to be sent, what
 // kind of port there is, and the termios settings) and two rings of
 // SER_CAP bytes: received (SER_RX_AT) and to send (SER_TX_AT). The console
@@ -24,17 +24,18 @@
 
 import "linux.bastio";
 
+const SER_OFF: u64 = 824;               // where the port's buffer starts in k.mice (after the mouse's)
 const SER_HDR: u64 = 128;
 const SER_CAP: u64 = 1024;
-const SER_RX_AT: u64 = 128;
-const SER_TX_AT: u64 = 1152;
-const S_RHEAD: u64 = 0;
-const S_RCOUNT: u64 = 8;
-const S_THEAD: u64 = 16;
-const S_TCOUNT: u64 = 24;
-const S_KIND: u64 = 32;                 // SER_NONE, SER_FTDI or SER_ACM
-const S_TT_SET: u64 = 48;
-const S_TT: u64 = 64;                   // struct termios, TERMIOS_SIZE bytes
+const SER_RX_AT: u64 = SER_OFF + 128;
+const SER_TX_AT: u64 = SER_OFF + 1152;
+const S_RHEAD: u64 = SER_OFF + 0;
+const S_RCOUNT: u64 = SER_OFF + 8;
+const S_THEAD: u64 = SER_OFF + 16;
+const S_TCOUNT: u64 = SER_OFF + 24;
+const S_KIND: u64 = SER_OFF + 32;                 // SER_NONE, SER_FTDI or SER_ACM
+const S_TT_SET: u64 = SER_OFF + 48;
+const S_TT: u64 = SER_OFF + 64;                   // struct termios, TERMIOS_SIZE bytes
 
 const TIOCEXCL: u64 = 0x540C;
 const TIOCNXCL: u64 = 0x540D;
@@ -43,27 +44,12 @@ const TIOCMBIS: u64 = 0x5416;
 const TIOCMBIC: u64 = 0x5417;
 const TIOCMSET: u64 = 0x5418;
 
-/// The buffer, empty, for a machine with no serial port yet.
-fn ser_new() -> Bytes
-  ensures blen(result) == SER_LEN
-{
-  let mut b = balloc(SER_LEN);
-  let mut i = 0;
-  while i < SER_HDR
-    invariant blen(b) == SER_LEN && i <= SER_HDR
-  {
-    bset(&mut b, i, 0);
-    i = i + 1;
-  }
-  return b;
-}
-
 /// SER_NONE, SER_FTDI or SER_ACM: the port the driver found.
 fn ser_kind(k: &Kernel) -> u64
   requires kok(k)
   ensures result <= SER_ACM
 {
-  return smaller(get_u64(k.ser, S_KIND), SER_ACM);
+  return smaller(get_u64(k.mice, S_KIND), SER_ACM);
 }
 
 /// Records the port the driver found (at boot).
@@ -71,7 +57,7 @@ fn ser_set_kind(k: &mut Kernel, kind: u64)
   requires kok(k) && kind <= SER_ACM
   ensures kok(k)
 {
-  put_u64(&mut k.ser, S_KIND, kind);
+  put_u64(&mut k.mice, S_KIND, kind);
 }
 
 /// Bytes received and not yet read.
@@ -79,7 +65,7 @@ fn ser_rx_count(k: &Kernel) -> u64
   requires kok(k)
   ensures result <= SER_CAP
 {
-  return smaller(get_u64(k.ser, S_RCOUNT), SER_CAP);
+  return smaller(get_u64(k.mice, S_RCOUNT), SER_CAP);
 }
 
 /// Bytes written and not yet sent.
@@ -87,7 +73,7 @@ fn ser_tx_count(k: &Kernel) -> u64
   requires kok(k)
   ensures result <= SER_CAP
 {
-  return smaller(get_u64(k.ser, S_TCOUNT), SER_CAP);
+  return smaller(get_u64(k.mice, S_TCOUNT), SER_CAP);
 }
 
 /// Queues byte b as received, unless the ring is full.
@@ -95,13 +81,13 @@ fn ser_put(k: &mut Kernel, b: u64)
   requires kok(k)
   ensures kok(k)
 {
-  let head = get_u64(k.ser, S_RHEAD) % SER_CAP;
+  let head = get_u64(k.mice, S_RHEAD) % SER_CAP;
   let cnt = ser_rx_count(k);
   if cnt >= SER_CAP {
     return;
   }
-  bset(&mut k.ser, SER_RX_AT + (head + cnt) % SER_CAP, cast[u8](b % 256));
-  put_u64(&mut k.ser, S_RCOUNT, cnt + 1);
+  bset(&mut k.mice, SER_RX_AT + (head + cnt) % SER_CAP, cast[u8](b % 256));
+  put_u64(&mut k.mice, S_RCOUNT, cnt + 1);
 }
 
 /// Queues the first n bytes of src as received, as many as fit.
@@ -110,17 +96,17 @@ fn ser_push(k: &mut Kernel, src: &Bytes, n: u64)
   ensures kok(k)
 {
   let m = smaller(n, blen(src));
-  let head = get_u64(k.ser, S_RHEAD) % SER_CAP;
+  let head = get_u64(k.mice, S_RHEAD) % SER_CAP;
   let mut cnt = ser_rx_count(k);
   let mut i = 0;
   while i < m && cnt < SER_CAP
     invariant kok(k) && m <= blen(src) && i <= m && cnt <= SER_CAP && head < SER_CAP
   {
-    bset(&mut k.ser, SER_RX_AT + (head + cnt) % SER_CAP, bget(src, i));
+    bset(&mut k.mice, SER_RX_AT + (head + cnt) % SER_CAP, bget(src, i));
     cnt = cnt + 1;
     i = i + 1;
   }
-  put_u64(&mut k.ser, S_RCOUNT, cnt);
+  put_u64(&mut k.mice, S_RCOUNT, cnt);
 }
 
 /// Copies up to `max` of the bytes waiting to be sent into dst, leaving
@@ -129,14 +115,14 @@ fn ser_peek(k: &Kernel, dst: &mut Bytes, max: u64) -> u64
   requires kok(k)
   ensures result <= max && result <= blen(dst)
 {
-  let head = get_u64(k.ser, S_THEAD) % SER_CAP;
+  let head = get_u64(k.mice, S_THEAD) % SER_CAP;
   let cnt = ser_tx_count(k);
   let m = smaller(smaller(cnt, max), blen(dst));
   let mut i = 0;
   while i < m
     invariant kok(k) && i <= m && m <= blen(dst) && m <= SER_CAP && head < SER_CAP
   {
-    bset(&mut dst, i, bget(k.ser, SER_TX_AT + (head + i) % SER_CAP));
+    bset(&mut dst, i, bget(k.mice, SER_TX_AT + (head + i) % SER_CAP));
     i = i + 1;
   }
   return m;
@@ -149,9 +135,9 @@ fn ser_drop(k: &mut Kernel, n: u64)
 {
   let cnt = ser_tx_count(k);
   let m = smaller(n, cnt);
-  let head = get_u64(k.ser, S_THEAD) % SER_CAP;
-  put_u64(&mut k.ser, S_THEAD, (head + m) % SER_CAP);
-  put_u64(&mut k.ser, S_TCOUNT, cnt - m);
+  let head = get_u64(k.mice, S_THEAD) % SER_CAP;
+  put_u64(&mut k.mice, S_THEAD, (head + m) % SER_CAP);
+  put_u64(&mut k.mice, S_TCOUNT, cnt - m);
 }
 
 /// open(2) of the port with these flags: a descriptor, -ENODEV without a
@@ -205,12 +191,12 @@ fn ser_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
     return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
   }
   let take = smaller(smaller(cnt, len), XFER);
-  let head = get_u64(k.ser, S_RHEAD) % SER_CAP;
+  let head = get_u64(k.mice, S_RHEAD) % SER_CAP;
   let mut i = 0;
   while i < take
     invariant kok(k) && i <= take && take <= XFER && take <= SER_CAP && head < SER_CAP
   {
-    bset(&mut k.fs.xfer, i, bget(k.ser, SER_RX_AT + (head + i) % SER_CAP));
+    bset(&mut k.fs.xfer, i, bget(k.mice, SER_RX_AT + (head + i) % SER_CAP));
     i = i + 1;
   }
   let done = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, take);
@@ -218,10 +204,26 @@ fn ser_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
-  put_u64(&mut k.ser, S_RHEAD, (head + take) % SER_CAP);
-  put_u64(&mut k.ser, S_RCOUNT, cnt - take);
+  put_u64(&mut k.mice, S_RHEAD, (head + take) % SER_CAP);
+  put_u64(&mut k.mice, S_RCOUNT, cnt - take);
   ret(&mut k.procs, pid, take);
   return KEEP;
+}
+
+/// Is device d the mouse or the serial port?
+fn is_mice_or_ser(d: u64) -> bool {
+  return d == DEV_MICE || d == DEV_SER;
+}
+
+/// read(2) on the mouse or the serial port (device d).
+fn mice_or_ser_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, d: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if d == DEV_SER {
+    return ser_read(&mut k, pid, n, fd, va, len);
+  }
+  return mice_read(&mut k, pid, n, fd, va, len);
 }
 
 /// write(2) of n bytes at va to the port: the count queued, or EAGAIN if
@@ -243,15 +245,15 @@ fn ser_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
     return EFAULT;
   }
   let m = smaller(got, want);
-  let head = get_u64(k.ser, S_THEAD) % SER_CAP;
+  let head = get_u64(k.mice, S_THEAD) % SER_CAP;
   let mut i = 0;
   while i < m
     invariant kok(k) && i <= m && m <= XFER && cnt + m <= SER_CAP && head < SER_CAP
   {
-    bset(&mut k.ser, SER_TX_AT + (head + cnt + i) % SER_CAP, bget(k.fs.xfer, i));
+    bset(&mut k.mice, SER_TX_AT + (head + cnt + i) % SER_CAP, bget(k.fs.xfer, i));
     i = i + 1;
   }
-  put_u64(&mut k.ser, S_TCOUNT, cnt + m);
+  put_u64(&mut k.mice, S_TCOUNT, cnt + m);
   return m;
 }
 
@@ -261,8 +263,8 @@ fn ser_tt_byte(k: &Kernel, i: u64) -> u64
   requires kok(k) && i < TERMIOS_SIZE
   ensures result < 256
 {
-  if get_u64(k.ser, S_TT_SET) == 1 {
-    return cast[u64](bget(k.ser, S_TT + i));
+  if get_u64(k.mice, S_TT_SET) == 1 {
+    return cast[u64](bget(k.mice, S_TT + i));
   }
   if i == 8 { return 0xB2; }              // c_cflag: B115200 | CS8 | CREAD | CLOCAL (0x18B2)
   if i == 9 { return 0x18; }
@@ -295,12 +297,12 @@ fn ser_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     while i < TERMIOS_SIZE
       invariant i <= TERMIOS_SIZE && kok(k)
     {
-      bset(&mut k.ser, S_TT + i, bget(k.fs.xfer, i));
+      bset(&mut k.mice, S_TT + i, bget(k.fs.xfer, i));
       i = i + 1;
     }
-    put_u64(&mut k.ser, S_TT_SET, 1);
+    put_u64(&mut k.mice, S_TT_SET, 1);
     if req == TCSETSF {
-      put_u64(&mut k.ser, S_RCOUNT, 0);     // TCSAFLUSH: drop what was received and not read
+      put_u64(&mut k.mice, S_RCOUNT, 0);     // TCSAFLUSH: drop what was received and not read
     }
     return 0;
   }
@@ -314,7 +316,7 @@ fn ser_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   }
   if req == TCFLSH {
     if arg == 0 || arg == 2 {
-      put_u64(&mut k.ser, S_RCOUNT, 0);     // TCIFLUSH, TCIOFLUSH
+      put_u64(&mut k.mice, S_RCOUNT, 0);     // TCIFLUSH, TCIOFLUSH
     }
     return 0;
   }

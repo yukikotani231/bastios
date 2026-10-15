@@ -1592,7 +1592,6 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.ptys);
   bfree(sys.k.ptyb);
   bfree(sys.k.mice);
-  bfree(sys.k.ser);
   free(sys.k.ipc);
   bfree(sys.k.ipcb);
   free(sys.k.sys);
