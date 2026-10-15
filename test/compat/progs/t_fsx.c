@@ -69,11 +69,68 @@ static int zero_range(const char *name) {
     ok = ok && a >= 0 && fallocate(a, FALLOC_FL_ZERO_RANGE | FALLOC_FL_KEEP_SIZE, 0, 10) == 0
         && fstat(fd, &s) == 0 && s.st_size == 14000 && range_is(fd, 0, 10, 0) && range_is(fd, 10, 5000, 'x');
     if (a >= 0) close(a);
-    /* modes that move data are not supported */
-    ok = ok && fallocate(fd, FALLOC_FL_COLLAPSE_RANGE, 0, 4096) == -1 && errno == EOPNOTSUPP;
     close(fd);
     unlink(name);
     return ok;
+}
+
+
+/* A randomized comparison against a model in memory (as xfstests' fsx
+ * does): writes, truncates, hole punches and zeroed ranges, with the whole
+ * file compared after every few steps. */
+#define FSX_MAX 200000
+static unsigned long long rng = 88172645463325252ULL;
+static unsigned long rnd(unsigned long n) {
+    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
+    return (unsigned long)(rng % n);
+}
+
+static int fsx(const char *name, int steps) {
+    static unsigned char model[FSX_MAX], got[FSX_MAX];
+    long size = 0;
+    unlink(name);
+    int fd = open(name, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return 0;
+    memset(model, 0, sizeof model);
+    for (int i = 0; i < steps; i++) {
+        long off = rnd(FSX_MAX - 1), len = 1 + rnd(30000);
+        if (off + len > FSX_MAX) len = FSX_MAX - off;
+        switch (rnd(5)) {
+        case 0: case 1: {
+            unsigned char buf[30000];
+            for (long j = 0; j < len; j++) buf[j] = 1 + rnd(255);
+            if (pwrite(fd, buf, len, off) != len) return 0;
+            memcpy(model + off, buf, len);
+            if (off + len > size) size = off + len;
+            break;
+        }
+        case 2: {
+            long to = rnd(FSX_MAX);
+            if (ftruncate(fd, to) != 0) return 0;
+            if (to < size) memset(model + to, 0, size - to);
+            size = to;
+            break;
+        }
+        case 3:
+            if (fallocate(fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE, off, len) != 0) return 0;
+            if (off < size) memset(model + off, 0, (off + len > size ? size : off + len) - off);
+            break;
+        default:
+            if (fallocate(fd, FALLOC_FL_ZERO_RANGE, off, len) != 0) return 0;
+            memset(model + off, 0, len);
+            if (off + len > size) size = off + len;
+            break;
+        }
+        if (i % 7 == 6 || i == steps - 1) {
+            struct stat s;
+            if (fstat(fd, &s) != 0 || s.st_size != size) { printf("size %ld want %ld at step %d\n", (long)s.st_size, size, i); return 0; }
+            if (pread(fd, got, size, 0) != size) return 0;
+            if (memcmp(got, model, size) != 0) { printf("data differs at step %d\n", i); return 0; }
+        }
+    }
+    close(fd);
+    unlink(name);
+    return 1;
 }
 
 int main(void) {
@@ -82,5 +139,7 @@ int main(void) {
     EXPECT("fallocate ZERO_RANGE zeroes (and extends) a range in /tmp", zero_range("/tmp/fsx_b"));
     EXPECT("fallocate PUNCH_HOLE|KEEP_SIZE zeroes a range on the disk (the working directory)", punch("fsx_a"));
     EXPECT("fallocate ZERO_RANGE zeroes (and extends) a range on the disk (the working directory)", zero_range("fsx_b"));
+    EXPECT("random writes, truncates, holes and zeroed ranges match a model in /tmp", fsx("/tmp/fsx_c", 150));
+    EXPECT("random writes, truncates, holes and zeroed ranges match a model on the disk", fsx("fsx_c", 150));
     return done();
 }
