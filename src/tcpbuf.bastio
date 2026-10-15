@@ -27,8 +27,8 @@ import "pcache.bastio";         // bytes_in, bytes_out
 
 const TCP_RING: u64 = 262144;         // bytes in each receive and send ring
 const RING_PAGES: u64 = 64;           // TCP_RING / 4096
-const RINGS: u64 = 64;                // 2 * TCBS: ring 2t receives for connection t, 2t + 1 sends
-const RING_SPARE: u64 = 64;           // the slot of the spare table in the top table
+const RINGS: u64 = 480;               // 2 * TCBS: ring 2t receives for connection t, 2t + 1 sends
+const RING_SPARE: u64 = 480;          // the slot of the spare table in the top table
 const SPARE_CAP: u64 = 512;           // pages the spare table holds at most
 const SPARE_LOW: u64 = 128;           // rings_feed tops the spare pages up to this ...
 const SPARE_HIGH: u64 = 256;          // ... and gives back those over this
