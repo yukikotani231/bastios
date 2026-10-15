@@ -785,7 +785,10 @@ def main():
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
         lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
                              ("alpine-tty", "programs on the terminal in Alpine",
-                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])]))
+                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])],
+                      # The AArch64 guest leaves less room: the container
+                      # cases alone use more than 128 MB of its 256.
+                      "512M" if args.arch == "aarch64" else "256M"))
     if args.debian_disk:
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
