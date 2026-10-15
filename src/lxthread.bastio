@@ -150,11 +150,16 @@ fn lx_pick(k: &mut Kernel, from: u64) -> u64
   if cap == 0 {
     return 0;
   }
+  let base = from % cap;
   let mut i = 0;
   while i < cap
-    invariant i <= cap && 0 < cap && cap <= NPROC && kok(k)
+    invariant i <= cap && 0 < cap && cap <= NPROC && base < cap && kok(k)
   {
-    let p = (from % cap + i) % cap;
+    // base + i < 2 * cap: one subtraction wraps it, with no division per slot.
+    let mut p = base + i;
+    if p >= cap {
+      p = p - cap;
+    }
     if p != 0 && state(k.procs, p) == READY && !cg_held(k, p) && group_free(&mut k, p) {
       return p;
     }
