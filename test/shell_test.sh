@@ -452,6 +452,11 @@ steps = [
      [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
+    # A symbolic link or a device node belongs to whoever made it and takes
+    # the umask: its owner can set a link's times (touch -h), a root's
+    # mknod under umask 077 leaves mode 600.
+    ("su alice -c 'ln -s nowhere /tmp/al; stat -c \"%u %g\" /tmp/al; touch -h -d @1000000000 /tmp/al; echo t=$?; stat -c %Y /tmp/al'; rm /tmp/al; umask 077; mknod /tmp/mn c 1 3; stat -c 'n%a %u' /tmp/mn; rm /tmp/mn; umask 022",
+     [b"\r\n1000 1000\r\n", b"t=0", b"1000000000", b"n600 0"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),

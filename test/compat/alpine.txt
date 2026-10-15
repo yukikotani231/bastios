@@ -572,3 +572,70 @@ hello from the host
 apk=0
 tig version 2.6.1
 status 0
+
+# Building Alpine packages on BastiOS: abuild, which runs the builds as an
+# ordinary user (builder) under fakeroot, signs the packages and the index
+# with a key abuild-keygen makes, and puts them in a repository that apk then
+# installs from, checking the signatures. The sources are served by the host
+# (aports.tar, whose directories test/compat/aports holds, and the tarballs
+# the APKBUILDs fetch over HTTP). The cases run on x86-64 only.
+
+== abuild: install it with fakeroot and the build tools
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL abuild build-base fakeroot patch pkgconf tar 2>&1 | bb grep -v '^WARNING'; bb chroot /disk/a /bin/sh -c 'abuild -V | cut -d" " -f1; which fakeroot scanelf'
+abuild
+/usr/bin/fakeroot
+/usr/bin/scanelf
+
+== abuild-keygen: a builder user makes a signing key and trusts it
+$ [ %MACHINE% = x86_64 ] && bb chmod 666 /disk/a/dev/null /disk/a/dev/zero /disk/a/dev/random /disk/a/dev/urandom /disk/a/dev/tty && bb chroot /disk/a /bin/sh -lc 'adduser -D builder && addgroup builder abuild && su builder -c "abuild-keygen -a -n -q" >/dev/null 2>&1; cp /home/builder/.abuild/*.rsa.pub /etc/apk/keys/ && ls /home/builder/.abuild | sed "s/-[0-9a-f]*\.rsa/.rsa/" && openssl rsa -in /home/builder/.abuild/*.rsa -check -noout'
+abuild.conf
+builder.rsa
+builder.rsa.pub
+RSA key ok
+
+== symlink: a new symlink belongs to the user who made it, who can set its times
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd /tmp && ln -s nowhere lnk && stat -c \"%u %g\" lnk && touch -h -d @1000000000 lnk && stat -c %Y lnk; rm lnk"'
+1000 1000
+1000000000
+
+== abuild: libgreet: a patch, a test suite, and -dev and -doc packages
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /home/builder && mkdir -p aports && wget -q -O- HOSTURL/aports.tar | tar x -C aports && sed -i "s,@URL@,HOSTURL," aports/*/APKBUILD && chown -R builder:builder aports && su builder -c "cd ~/aports/libgreet && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^patching file|^LD_LIBRARY_PATH" /tmp/ab.log; ls /home/builder/packages/aports/x86_64 | cat'
+abuild=0
+patching file greet.c
+patching file test.c
+LD_LIBRARY_PATH=. ./test
+APKINDEX.tar.gz
+libgreet-1.2-r0.apk
+libgreet-dev-1.2-r0.apk
+libgreet-doc-1.2-r0.apk
+
+== abuild: greeter: build-time dependencies come from the repository just made, and the runtime one is traced
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd ~/aports/greeter && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^[[:space:]]+so:|Installing libgreet-dev" /tmp/ab.log | sed "s/^[[:space:]]*//"; ls /home/builder/packages/aports/x86_64 | grep greeter | cat'
+abuild=0
+(2/3) Installing libgreet-dev (1.2-r0)
+so:libc.musl-x86_64.so.1
+so:libgreet.so.1
+greeter-0.3-r1.apk
+
+== apk: install the built packages from the signed repository, with their scripts
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'apk add -q --no-progress -X /home/builder/packages/aports greeter 2>/dev/null; echo apk=$?; greeter Yuki; cat /var/lib/greeter-installed; apk verify /home/builder/packages/aports/x86_64/greeter-0.3-r1.apk; apk info -R greeter 2>/dev/null | grep so:; apk del -q greeter libgreet >/dev/null 2>&1; ls /var/lib/greeter-installed 2>&1 | cut -c1-40'
+apk=0
+hello, Yuki!
+greeter installed
+/home/builder/packages/aports/x86_64/greeter-0.3-r1.apk: OK
+so:libc.musl-x86_64.so.1
+so:libgreet.so.1
+ls: /var/lib/greeter-installed: No such file or directory
+
+== apk: a repository signed with a key that is not trusted is refused
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'mkdir /root/keys && mv /etc/apk/keys/builder-* /root/keys/ && apk add -q --no-progress -X /home/builder/packages/aports greeter 2>&1 | grep -c "UNTRUSTED signature"; apk info -e greeter; echo installed=$?; mv /root/keys/* /etc/apk/keys/'
+2
+installed=1
+
+== abuild: tinycc: a C compiler built from its source, which then compiles a program
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd ~/aports/tinycc && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^>>> tinycc.*Create .*apk$" /tmp/ab.log; apk add -q --no-progress -X /home/builder/packages/aports tinycc tinycc-dev 2>/dev/null; printf "#include <stdio.h>\nint main(void) { puts(\"built by an apk-built tcc\"); return 0; }\n" > /tmp/t.c && tcc -o /tmp/t /tmp/t.c && /tmp/t'
+abuild=0
+>>> tinycc-dev*: Create tinycc-dev-0.9.28-r0.apk
+>>> tinycc*: Create tinycc-0.9.28-r0.apk
+built by an apk-built tcc

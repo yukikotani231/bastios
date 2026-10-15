@@ -1,0 +1,18 @@
+--- a/greet.c	2026-10-15 13:05:08.825190586 +0000
++++ b/greet.c	2026-10-15 13:05:08.826724997 +0000
+@@ -3,5 +3,5 @@
+ 
+ int greet(char *buf, int size, const char *name)
+ {
+-	return snprintf(buf, size, "hello, %s", name);
++	return snprintf(buf, size, "hello, %s!", name);
+ }
+--- a/test.c	2026-10-15 13:05:08.825215962 +0000
++++ b/test.c	2026-10-15 13:05:08.828146982 +0000
+@@ -6,5 +6,5 @@
+ {
+ 	char buf[32];
+ 	int n = greet(buf, sizeof buf, "abuild");
+-	return n == 13 && strcmp(buf, "hello, abuild") == 0 ? 0 : 1;
++	return n == 14 && strcmp(buf, "hello, abuild!") == 0 ? 0 : 1;
+ }
