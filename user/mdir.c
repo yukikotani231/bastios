@@ -302,22 +302,25 @@ int main(void)
         return fail("removing bw");
     if (open(".", O_TMPFILE | O_RDWR, 0600) != -1 || errno != EOPNOTSUPP)
         return fail("O_TMPFILE refused");
-    /* Making directories until the in-memory table is full ends in ENOSPC. */
+    /* Making files until the in-memory table is full ends in ENOSPC. (Files,
+     * not directories: rmdir looks through the whole table for children.) */
     int made = 0;
     char nm[16];
-    while (made < 20000) {
+    while (made < 100000) {
         snprintf(nm, sizeof nm, "n%d", made);
-        if (mkdir(nm, 0755) != 0)
+        int fd = open(nm, O_CREAT | O_WRONLY, 0644);
+        if (fd < 0)
             break;
+        close(fd);
         made++;
     }
-    if (made == 20000 || errno != ENOSPC)
+    if (made == 100000 || errno != ENOSPC)
         return fail("filling the in-memory table");
-    if (made < 4000) /* the table held 1024 once; it holds thousands now */
-        return fail("the in-memory table holds thousands of names");
+    if (made < 30000) /* the table held 1024 once, then 8192; it holds 32768 nodes */
+        return fail("the in-memory table holds tens of thousands of names");
     while (made > 0) {
         snprintf(nm, sizeof nm, "n%d", --made);
-        if (rmdir(nm) != 0)
+        if (unlink(nm) != 0)
             return fail("emptying the in-memory table");
     }
     /* tmpfs: mounted on an empty directory, listed in /proc/self/mounts,
