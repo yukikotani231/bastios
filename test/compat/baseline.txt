@@ -322,6 +322,8 @@ t_fsx: fallocate PUNCH_HOLE|KEEP_SIZE zeroes a range in /tmp
 t_fsx: fallocate ZERO_RANGE zeroes (and extends) a range in /tmp
 t_fsx: fallocate PUNCH_HOLE|KEEP_SIZE zeroes a range on the disk (the working directory)
 t_fsx: fallocate ZERO_RANGE zeroes (and extends) a range on the disk (the working directory)
+t_fsx: random writes, truncates, holes and zeroed ranges match a model in /tmp
+t_fsx: random writes, truncates, holes and zeroed ranges match a model on the disk
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
