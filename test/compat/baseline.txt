@@ -1388,3 +1388,6 @@ t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+t_server: FIONREAD on a TCP socket counts the bytes waiting
+t_server: a nonblocking connect to a port nobody listens on ends in ECONNREFUSED (SO_ERROR)
+t_server: an IPv6-only listener and an IPv4 one share a port number

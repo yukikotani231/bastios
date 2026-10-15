@@ -106,7 +106,7 @@ $ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r eval 'return redis.c
 OK QUEUED QUEUED 44 45 
 
 == redis: publish and subscribe
-$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; ($r subscribe news > /tmp/sub.out &) ; bb sleep 1; $r publish news hi; bb sleep 1; bb grep -c '^hi' /tmp/sub.out; rm -f /tmp/sub.out
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; ($r subscribe news > /tmp/sub.out 2>&1 &) ; bb sleep 1; $r publish news hi; bb sleep 1; bb grep -c '^hi' /tmp/sub.out; rm -f /tmp/sub.out
 1
 1
 

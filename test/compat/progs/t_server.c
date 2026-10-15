@@ -145,5 +145,36 @@ int main(void) {
            got = 0; sigset_t none; sigemptyset(&none);
            int r = sigsuspend(&none); int e = errno; waitpid(k, 0, 0); sigprocmask(SIG_SETMASK, &old, 0);
            r == -1 && e == EINTR && got == SIGUSR1; }));
+    EXPECT("FIONREAD on a TCP socket counts the bytes waiting", ({
+           int c2, s2; tcp_pair(&c2, &s2); int n = -1;
+           write(c2, "hello", 5);
+           for (int i = 0; i < 100 && n != 5; i++) { n = -1; ioctl(s2, FIONREAD, &n); if (n != 5) usleep(10000); }
+           int r = n == 5; read(s2, b, 5); n = -1; ioctl(s2, FIONREAD, &n);
+           close(c2); close(s2); r && n == 0; }));
+    EXPECT("a nonblocking connect to a port nobody listens on ends in ECONNREFUSED (SO_ERROR)", ({
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+           socklen_t al = sizeof a; int l = socket(AF_INET, SOCK_STREAM, 0);
+           bind(l, (void *)&a, sizeof a); getsockname(l, (void *)&a, &al); close(l);
+           int f = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+           int r = connect(f, (void *)&a, sizeof a), ok;
+           if (r == 0) ok = 0;
+           else if (errno == ECONNREFUSED) ok = 1;
+           else {
+               struct pollfd pf = {f, POLLOUT, 0}; int err = -1; socklen_t el = sizeof err;
+               ok = errno == EINPROGRESS && poll(&pf, 1, 2000) == 1 &&
+                    getsockopt(f, SOL_SOCKET, SO_ERROR, &err, &el) == 0 && err == ECONNREFUSED;
+           }
+           close(f); ok; }));
+    EXPECT("an IPv6-only listener and an IPv4 one share a port number", ({
+           struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_ANY)};
+           socklen_t al = sizeof a; int one = 1;
+           int l4 = socket(AF_INET, SOCK_STREAM, 0);
+           int ok = bind(l4, (void *)&a, sizeof a) == 0 && listen(l4, 4) == 0 && getsockname(l4, (void *)&a, &al) == 0;
+           int l6 = socket(AF_INET6, SOCK_STREAM, 0);
+           struct sockaddr_in6 a6 = {.sin6_family = AF_INET6, .sin6_addr = IN6ADDR_ANY_INIT, .sin6_port = a.sin_port};
+           ok = ok && l6 >= 0 && setsockopt(l6, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one) == 0 &&
+                bind(l6, (void *)&a6, sizeof a6) == 0 && listen(l6, 4) == 0;
+           int nov6 = l6 < 0 && errno == EAFNOSUPPORT;   /* a host without IPv6 */
+           close(l4); if (l6 >= 0) close(l6); ok || nov6; }));
     return done();
 }

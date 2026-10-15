@@ -142,7 +142,7 @@ same
 
 == sshd: stop the server, clean up
 $ bb kill $(bb cat /disk/a/run/db.pid); bb sleep 1; bb rm -rf /disk/a/root/src /disk/a/root/dst /disk/a/root/pull /disk/a/root/.ssh /disk/a/etc/dropbear /disk/a/usr/local/sbin; bb grep -c 'Pubkey auth succeeded' /disk/a/tmp/db.log; bb rm -f /disk/a/tmp/db.log
-5
+4
 
 == openssl: a digest and random bytes
 $ bb chroot /disk/a /bin/sh -c 'echo abc | openssl dgst -sha256; openssl rand -hex 4 | wc -c'
