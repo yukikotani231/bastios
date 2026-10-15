@@ -1874,6 +1874,44 @@ session("after the power cuts", False, [
     ("ls", b"about"),
 ], halt=True)
 fsck("at the end", clean=True)
+# Power cuts with several processes writing at once (user/mpc.c, on a disk
+# that holds it): files grow, are cut back, renamed across directories,
+# made and removed, and replaced whole after an fsync. After each cut the
+# image is checked, and the next boot's mpc finds every byte of every file
+# as it wrote it (test/powercut.py runs many more of these).
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mpc=build/user/mpc.elf"], check=True)
+for n, delay in enumerate([0.6, 1.1, 0.35]):
+    qemu = boot(2, with_disk=n % 2 == 0, virtio=n % 2 == 1)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    if ok:
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        ok = read_until(b"\n# ")
+    mark = len(out)
+    if ok:
+        qemu.stdin.write(b"/disk/mpc run /disk/pc 4\r"); qemu.stdin.flush()
+        ok = read_until(b"mpc: running", mark) and b"mpc: clean" in out[mark:]
+    time.sleep(delay)
+    qemu.kill(); qemu.wait()
+    line = next((l for l in out[mark:].split(b"\n") if b"mpc:" in l), b"(nothing)")
+    print(("ok  " if ok else "FAIL"), f"concurrent writers, power cut {n + 1} after {delay} s:", line.strip().decode(errors="replace"))
+    fails += not ok
+    fsck(f"after concurrent writers' power cut {n + 1}")
+qemu = boot(1, with_disk=True)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ")
+mark = len(out)
+if ok:
+    qemu.stdin.write(b"/disk/mpc check /disk/pc\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ", mark) and b"mpc: clean" in out[mark:]
+qemu.kill(); qemu.wait()
+print(("ok  " if ok else "FAIL"), "after the concurrent writers' power cuts mpc finds every file whole")
+fails += not ok
 # What a power cut inside disk_take_name leaves: a file under the name its
 # hard link still has (disk/b), and a link naming a free entry (disk/c).
 # The mount drops both links; the file stays, and the image is clean. The

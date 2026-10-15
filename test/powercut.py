@@ -21,8 +21,9 @@ ap.add_argument("--smp", type=int, default=1)
 ap.add_argument("--drivers", default="ata,virtio,nvme,ahci,nvme4k")
 ap.add_argument("--max-delay", type=float, default=1.5)
 ap.add_argument("--keep", default=None, help="directory to copy the image of a failure into")
-ap.add_argument("--workload", default="crashme", choices=["crashme", "mpc"],
+ap.add_argument("--workload", default="crashme", choices=["crashme", "mpc", "grow", "big"],
                 help="crashme: the built-in sequential workload; mpc: user/mpc.c, concurrent workers on a disk with programs")
+ap.add_argument("--disk-mb", type=int, default=33)
 ap.add_argument("--workers", type=int, default=4)
 ap.add_argument("--hog", action="store_true", help="mpc: one more process fills the disk and frees it again")
 ap.add_argument("--kernel", default="build/bastios.elf")
@@ -34,13 +35,16 @@ fsck_py = os.path.join(here, "fsck.py")
 rnd = random.Random(args.seed)
 tmp = tempfile.TemporaryDirectory()
 disk = os.path.join(tmp.name, "disk.img")
-if args.workload == "mpc":
+if args.workload in ("mpc", "grow", "big"):
     # A disk holding the program (the same file system code, formatted by
     # test/compat/mkdisk.py); it is mounted at /disk, where mpc works.
     subprocess.run([sys.executable, os.path.join(here, "compat", "mkdisk.py"), disk, "mpc=build/user/mpc.elf"], check=True)
+    if os.path.getsize(disk) < args.disk_mb << 20:
+        with open(disk, "r+b") as f:
+            f.truncate(args.disk_mb << 20)     # the file system takes the size at mount
 else:
     with open(disk, "wb") as f:
-        f.truncate(33 << 20)
+        f.truncate(args.disk_mb << 20)
 
 def drive_args(kind):
     if kind == "ata":
@@ -94,13 +98,14 @@ for n in range(args.rounds):
     buf = [b""]
     ok = read_until(q, buf, b"bastios> ")
     mark = len(buf[0])
-    if args.workload == "mpc":
+    if args.workload in ("mpc", "grow", "big"):
         if ok:
             q.stdin.write(b"ash\r"); q.stdin.flush()
             ok = read_until(q, buf, b"\n# ", mark)
             mark = len(buf[0])
         if ok:
-            q.stdin.write(f"{'MPC_HOG=1 ' if args.hog else ''}/disk/mpc run /disk/pc {args.workers}\r".encode()); q.stdin.flush()
+            cmd = "/disk/mpc grow /disk/pc" if args.workload == "grow" else "/disk/mpc big /disk/pc run" if args.workload == "big" else f"{'MPC_HOG=1 ' if args.hog else ''}/disk/mpc run /disk/pc {args.workers}"
+            q.stdin.write(cmd.encode() + b"\r"); q.stdin.flush()
             ok = read_until(q, buf, b"mpc: running", mark) and b"mpc: clean" in buf[0][mark:]
         time.sleep(delay)
         q.kill(); q.wait()

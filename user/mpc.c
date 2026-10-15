@@ -3,6 +3,7 @@
  *   mpc run DIR [WORKERS]   check DIR, then fork WORKERS (default 4) that
  *                           churn it until killed
  *   mpc check DIR           check DIR and exit
+ *   mpc grow DIR [N]        check DIR/g0.., then add numbered files up to N
  *
  * Worker k owns a set of files and directories, each with an identity
  * (k, id). A file's byte i is pat(k, id, i), never zero, so a block that is
@@ -490,12 +491,146 @@ static void worker(int k)
     }
 }
 
+/* grow DIR [N]: files g0, g1, ... each holding its number as 8 digits,
+ * created one after the other (up to N in all), so the directory outgrows
+ * the blocks the superblock can name while the power is cut. After a cut
+ * the files are a run g0..g(K-1), each whole but the last, which may be
+ * empty (cut between its create and its write). */
+static int grow(const char *dir, long n)
+{
+    char p[1024], want[16], got[16];
+    mkdir(dir, 0755);
+    long k = 0;
+    for (;; k++) {
+        snprintf(p, sizeof p, "%s/g%ld", dir, k);
+        int fd = open(p, O_RDONLY);
+        if (fd < 0)
+            break;
+        ssize_t r = read(fd, got, sizeof got);
+        close(fd);
+        snprintf(want, sizeof want, "%08ld", k);
+        if (r == 0) {
+            /* the last one may be empty: it is rewritten below */
+            break;
+        }
+        if (r != 8 || memcmp(got, want, 8)) {
+            printf("mpc: BAD g%ld holds the wrong bytes\n", k);
+            printf("mpc: damaged\n");
+            return 1;
+        }
+    }
+    /* anything past the run is a gap */
+    long extra = 0;
+    DIR *d = opendir(dir);
+    struct dirent *e;
+    while (d && (e = readdir(d)))
+        if (e->d_name[0] == 'g')
+            extra++;
+    if (d)
+        closedir(d);
+    long have = k;
+    if (extra != have && extra != have + 1) {
+        printf("mpc: BAD %ld names but a run of %ld\n", extra, have);
+        printf("mpc: damaged\n");
+        return 1;
+    }
+    printf("mpc: clean, %ld files\n", have);
+    if (n == 0)
+        return 0;
+    printf("mpc: running\n");
+    fflush(stdout);
+    for (; k < n; k++) {
+        snprintf(p, sizeof p, "%s/g%ld", dir, k);
+        int fd = open(p, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (fd < 0)
+            return 1;
+        snprintf(want, sizeof want, "%08ld", k);
+        write(fd, want, 8);
+        close(fd);
+    }
+    printf("mpc: done %ld\n", k);
+    return 0;
+}
+
+/* big DIR [run]: one file with pieces at offsets from 0 to 4 GiB (past the
+ * 1 GiB a root map reaches: BSTDISK5's super map). Piece i is the 24 bytes
+ * "big i  NNNNNNNNNNNNNN" at i GiB + 4096 * i + 17; the writer puts them
+ * down in turn, cuts the file back to nothing now and then, and grows it
+ * again. After a cut every piece is whole or absent (a hole reads zeros),
+ * and nothing else is in the file. */
+#define NPIECE 5
+static int big(const char *dir, int run)
+{
+    char p[1024], want[32], got[32];
+    mkdir(dir, 0755);
+    snprintf(p, sizeof p, "%s/b", dir);
+    int fd = open(p, O_RDWR | O_CREAT, 0644);
+    if (fd < 0)
+        return 1;
+    struct stat st;
+    fstat(fd, &st);
+    static char buf[65536];
+    for (int i = 0; i < NPIECE; i++) {
+        long long at = ((long long)i << 30) + 4096 * i + 17;
+        ssize_t r = pread(fd, got, 24, at);
+        int zero = 1, whole = 0;
+        if (r == 24) {
+            for (int j = 0; j < 24; j++)
+                zero &= got[j] == 0;
+            whole = got[0] == 'b' && got[1] == 'i' && got[2] == 'g' && got[4] == (char)(48 + i);
+        }
+        if (r > 0 && r < 24)
+            zero = 1;                    /* past the end: absent */
+        if (r > 0 && !zero && !whole) {
+            printf("mpc: BAD piece %d is neither whole nor absent\n", i);
+            printf("mpc: damaged\n");
+            return 1;
+        }
+        (void)buf;
+    }
+    /* Nothing but pieces: scan the file's data with SEEK_DATA is not
+     * available everywhere, so read the blocks around each piece. */
+    for (int i = 0; i < NPIECE; i++) {
+        long long base = ((long long)i << 30) + 4096 * i;
+        if (pread(fd, buf, 4096, base) > 0)
+            for (int j = 0; j < 4096; j++)
+                if (buf[j] && (j < 17 || j >= 41)) {
+                    printf("mpc: BAD stray byte at %lld\n", base + j);
+                    printf("mpc: damaged\n");
+                    return 1;
+                }
+    }
+    printf("mpc: clean, %lld bytes\n", (long long)st.st_size);
+    if (!run)
+        return 0;
+    printf("mpc: running\n");
+    fflush(stdout);
+    unsigned long gen = 0;
+    for (;; gen++) {
+        for (int i = 0; i < NPIECE; i++) {
+            long long at = ((long long)i << 30) + 4096 * i + 17;
+            snprintf(want, sizeof want, "big %d  %014lu", i, gen);
+            if (pwrite(fd, want, 24, at) != 24)
+                break;
+        }
+        if (gen % 3 == 2)
+            ftruncate(fd, 0);
+        else if (gen % 3 == 1)
+            fsync(fd);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 3) {
         printf("usage: mpc run|check DIR [WORKERS]\n");
         return 2;
     }
+    if (!strcmp(argv[1], "big"))
+        return big(argv[2], argc > 3);
+    if (!strcmp(argv[1], "grow"))
+        return grow(argv[2], argc > 3 ? atol(argv[3]) : 100000);
     if (!strcmp(argv[1], "check"))
         return check(argv[2]);
     if (strcmp(argv[1], "run"))
