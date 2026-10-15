@@ -36,7 +36,10 @@
 // little-endian u64s: at 8 its parent (another entry, or DTOP for the top
 // directory, "disk"), at 16 its size, at 24 its root map block (0 for no
 // data), at 32 its mode (the low 16 bits; then its owner's user and group
-// ids, 24 bits each, 0 for root), at 40 its modification time; bytes 56..256 its
+// ids, 24 bits each, 0 for root), at 40 its modification time, at 48 (for a
+// file or directory) its extended attributes' block, 0 for none, written
+// whole before the entry names it and freed after (disk_xa_write), and (for
+// a hard link, which has none of its own) the file it names; bytes 56..256 its
 // name: one path component of up to DNAME_MAX bytes. So a path is a walk
 // from the top, component by component, and full paths can be longer than
 // any entry. A blank disk is formatted when it is mounted; a disk with
@@ -132,6 +135,7 @@ const E_ROOT: u64 = 24;
 const E_MODE: u64 = 32;                // the mode (16 bits), user id (24) and group id (24)
 const E_MTIME: u64 = 40;
 const E_LINK: u64 = 48;
+const E_XATTR: u64 = 48;               // a file's or directory's attribute block (src/lxxattr.bastio), 0 for none; the same word as E_LINK, which only hard links use
 const E_NAME: u64 = 56;
 
 const OWN_ID_MAX: u64 = 0x1000000;     // ids a disk entry can keep: 24 bits each
@@ -953,6 +957,12 @@ fn disk_mount(dev: Blk) -> DiskFs
     if cast[u64](dent_byte(d, i, E_KIND)) == K_LINK {
       seen = true;
     }
+    if dent_byte(d, i, E_KIND) == 1 || dent_byte(d, i, E_KIND) == 2 {
+      let x = get_u64(d.dir, i * DENT + E_XATTR);
+      if x >= DATA_B0 && x < d.blocks && x < MAX_BLOCKS {
+        used_mark(&mut d.used, x, 1);   // its attribute block
+      }
+    }
     if dent_byte(d, i, E_KIND) == 1 {
       let r = tree_in(d, d.dir, i * DENT + E_ROOT);
       if r != 0 {
@@ -1063,6 +1073,81 @@ fn disk_orphan(d: &mut DiskFs, i: u64) -> bool
   if !ent_flush(&mut d, i) {
     dent_setb(&mut d, i, E_KIND, 1);
     return false;
+  }
+  return true;
+}
+
+/// Entry i's attribute block (a file's, a directory's or an orphan's), or
+/// 0 for none: for any other kind of entry the word is a hard link's
+/// target, and a number that is not a data block on this disk is none.
+fn disk_xa_block(d: &DiskFs, i: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS
+  ensures result == 0 || (result >= DATA_B0 && result < MAX_BLOCKS)
+{
+  let k = cast[u64](dent_byte(d, i, E_KIND));
+  if i >= d.slots || (k != 1 && k != 2 && k != K_ORPHAN) {
+    return 0;
+  }
+  let b = dent_get(d, i, E_XATTR);
+  if b < DATA_B0 || b >= d.blocks || b >= MAX_BLOCKS {
+    return 0;
+  }
+  return b;
+}
+
+/// Reads entry i's attribute block into out (BLOCK bytes; zeros for none).
+/// False if the entry is not a file or directory, or the read fails.
+fn disk_xa_read(d: &mut DiskFs, i: u64, out: &mut Bytes) -> bool
+  requires disk_ok(d) && i < DSLOTS && blen(out) == BLOCK
+  ensures disk_ok(d) && blen(out) == BLOCK
+{
+  disk_drain(&mut d);                 // queued writes reach the disk first
+  let k = cast[u64](dent_byte(d, i, E_KIND));
+  if i >= d.slots || (k != 1 && k != 2) {
+    zero(&mut out, 0, BLOCK);
+    return false;
+  }
+  let b = disk_xa_block(d, i);
+  return block_in(&mut d.dev, &mut d.sec, b, &mut out);
+}
+
+/// Makes src (BLOCK bytes) entry i's attribute block, or gives it up when
+/// `none` is set. Copy-on-write like a file's data: the new block is
+/// written and flushed first, then the entry's sector names it in one write
+/// (a power cut leaves the old attributes or the new ones), and the old
+/// block is freed after. False (nothing changed) if the entry is not a file
+/// or directory, the disk is full, or a write fails.
+fn disk_xa_write(d: &mut DiskFs, i: u64, src: &Bytes, none: bool) -> bool
+  requires disk_ok(d) && i < DSLOTS && blen(src) == BLOCK
+  ensures disk_ok(d)
+{
+  disk_drain(&mut d);                 // queued writes reach the disk first
+  let k = cast[u64](dent_byte(d, i, E_KIND));
+  if i >= d.slots || (k != 1 && k != 2) {
+    return false;
+  }
+  let prev = disk_xa_block(d, i);
+  let mut nb = 0;
+  if !none {
+    nb = alloc_block(&mut d);
+    if nb == 0 {
+      return false;
+    }
+    if !block_out(&mut d.dev, &mut d.sec, nb, src) {
+      free_block(&mut d, nb);
+      return false;
+    }
+  }
+  dent_set(&mut d, i, E_XATTR, nb);
+  if !ent_flush(&mut d, i) {
+    dent_set(&mut d, i, E_XATTR, prev);
+    if nb != 0 {
+      free_block(&mut d, nb);
+    }
+    return false;
+  }
+  if prev != 0 {
+    free_block(&mut d, prev);
   }
   return true;
 }
@@ -1659,10 +1744,14 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   }
   let r = dent_tree(d, i);
   let file = dent_byte(d, i, E_KIND) == 1 || cast[u64](dent_byte(d, i, E_KIND)) == K_ORPHAN;
+  let xa = disk_xa_block(d, i);
   dent_setb(&mut d, i, E_KIND, 0);
   d.free0 = 0;
   if !ent_flush(&mut d, i) {
     return false;
+  }
+  if xa != 0 {
+    free_block(&mut d, xa);           // the entry no longer names it
   }
   if dropped {
     if oldroot != 0 {

@@ -1104,6 +1104,17 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
+  if d.kind == K_FILE || d.kind == K_DIR {
+    // The file system ioctls: there are no attribute flags (FS_IOC_GETFLAGS
+    // and SETFLAGS stay ENOTTY, so lsattr and chattr say so, and LTP skips
+    // what needs them), and no reflink, deduplication or extent map, as on
+    // tmpfs. (The request is an unsigned int: a libc that passes it as an
+    // int sign-extends the high bit.)
+    let fsreq = req % 0x100000000;
+    if fsreq == 0x40049409 || fsreq == 0x4020940D || fsreq == 0xC0189436 || fsreq == 0xC020660B {
+      return EOPNOTSUPP;                     // FICLONE, FICLONERANGE, FIDEDUPERANGE, FS_IOC_FIEMAP
+    }
+  }
   if d.kind != K_CONSOLE {
     return ENOTTY;
   }
@@ -1613,13 +1624,26 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
   {
-    let got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+    let mut got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+    if got == VFS_MISS && done > 0 {
+      // A read of a regular file is whole unless it reaches the end: wait
+      // for the disk here (the call has begun, so it cannot be started over)
+      // instead of returning what came so far.
+      let mut tries = 0;
+      while got == VFS_MISS && tries < 64
+        invariant tries <= 64 && kok(k) && row < FD_ROWS && done < want && want <= READ_MAX && (got <= XFER || got == NO_FD || got == VFS_MISS)
+      {
+        disk_wait(&mut k.fs.disk);
+        got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+        tries = tries + 1;
+      }
+    }
     if got == NO_FD {
       return EBADF;
     }
     if got == VFS_MISS {
       if done > 0 {
-        return done;                        // what came so far; the rest waits
+        return done;                        // the disk is not catching up: what came so far
       }
       return DISK_RETRY;                    // sleep until the disk catches up
     }
@@ -1743,7 +1767,19 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
         return total;
       }
     }
-    let w = vfs_write(&mut k.fs, &mut k.mem, d.x, piece);
+    let mut w = vfs_write(&mut k.fs, &mut k.mem, d.x, piece);
+    if w == VFS_MISS && total > 0 {
+      // Wait for the disk here rather than return a short count: a write of
+      // a regular file takes all of its bytes (pwrite has no restart).
+      let mut tries = 0;
+      while w == VFS_MISS && tries < 64
+        invariant tries <= 64 && kok(k) && d.x < FD_ROWS && piece <= XFER && (w <= piece || w == NO_FD || w == VFS_MISS)
+      {
+        disk_wait(&mut k.fs.disk);
+        w = vfs_write(&mut k.fs, &mut k.mem, d.x, piece);
+        tries = tries + 1;
+      }
+    }
     if w == NO_FD {
       return EBADF;
     }
@@ -2308,7 +2344,7 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed
-/// offset. Returns the new offset or -errno.
+/// offset, and SEEK_DATA (3) and SEEK_HOLE (4). Returns the new offset or -errno.
 fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -2346,6 +2382,33 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
       return EBADF;
     }
     base = size;
+  } else if whence == 3 || whence == 4 {
+    // SEEK_DATA and SEEK_HOLE: a file in RAM has holes where a page has no
+    // memory; any other file is one stretch of data (reads of what was never
+    // written give zeros, but the file system does not tell them apart),
+    // with the hole that every file has at its end.
+    let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, row));
+    if size == NO_FILE {
+      return EBADF;
+    }
+    if off >= size {
+      return ENXIO;                         // (a negative offset is a huge one)
+    }
+    let mut at = off;
+    if whence == 4 {
+      at = size;
+    }
+    let n = vfs_next(&mut k.fs, vfs_row_file(k.fs, row), off, whence == 3);
+    if n == NO_FILE {
+      return ENXIO;
+    }
+    if n != NO_FILE - 1 {
+      at = n;
+    }
+    if !vfs_seek(&mut k.fs, row, at) {
+      return EBADF;
+    }
+    return at;
   } else if whence != 0 {
     return EINVAL;
   }

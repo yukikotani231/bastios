@@ -1319,6 +1319,9 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   if m.size % 512 != 0 {
     blocks = blocks + 1;
   }
+  if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES && rdev == 0 {
+    blocks = vfs_blocks(&mut k.fs, m.ino - INO_FILES);   // a file in RAM takes the pages that hold memory
+  }
   xfer_u64(&mut k.fs.xfer, 64, blocks);       // st_blocks
   let mut atime = m.mtime;
   if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {

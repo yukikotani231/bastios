@@ -21,7 +21,9 @@ keeps, without changing anything:
     (a hole) or a block of the disk, no block in two places (two files,
     or twice in one), no data block wholly past the end, and the bytes of
     the last block past the end all zero;
-  - hard links: naming a file entry under another name.
+  - hard links: naming a file entry under another name;
+  - a file's or directory's attribute block (the word at byte 48): in the
+    disk and not used by anything else.
 
 Two states are what a power cut leaves and the next mount clears, so they
 are reported but are not errors: an orphan (a file removed while open)
@@ -213,6 +215,9 @@ def check(img):
         return True
 
     for i, e in enumerate(ents):
+        if e["kind"] in (FILE, DIR) and e["link"]:
+            if block_ok(e["link"], i, "attribute"):   # the word a hard link uses for its file
+                claim(e["link"], i, "attribute block")
         if e["kind"] not in (FILE, ORPHAN):
             continue
         stats["files" if e["kind"] == FILE else "orphans"] += 1

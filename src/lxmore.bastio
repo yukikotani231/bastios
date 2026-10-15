@@ -3,7 +3,7 @@
 //
 // Not done: sendfile and copy_file_range read only from files, and write
 // only to files, pipes, TCP connections and the console. flock is src/lxlock.bastio's.
-// fallocate only grows a file (mode 0).
+// fallocate: modes 0, KEEP_SIZE, PUNCH_HOLE and ZERO_RANGE (a file in RAM gives its pages back; one on a disk keeps its blocks).
 // getcpu says processor 0, node 0, wherever the caller runs.
 
 import "lxmisc.bastio";
@@ -418,10 +418,58 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
 /// UNSHARE_RANGE, WRITE_ZEROES).
 const FALLOC_KNOWN: u64 = 0xFB;
 
+/// Overwrites bytes [from, to) of the file open in `row` with zeros (the
+/// range must lie inside the file), a transfer buffer at a time, and
+/// leaves the row's offset where it was. This is how PUNCH_HOLE and
+/// ZERO_RANGE are done: no blocks are given back, but the range reads as
+/// zeros. False if a write fails (read-only, or the disk is full or dead).
+fn falloc_zero(k: &mut Kernel, row: u64, from: u64, to: u64) -> bool
+  requires kok(k) && row < FD_ROWS && from <= to
+  ensures kok(k)
+{
+  let was = vfs_offset(k.fs, row);
+  let mode = fget(k.fs.ftab, row, FD_MODE);
+  if mode / O_APPEND % 2 == 1 {
+    fset(&mut k.fs.ftab, row, FD_MODE, mode - O_APPEND);   // fallocate ignores O_APPEND
+  }
+  xfer_zero(&mut k, XFER);
+  let mut pos = from;
+  let mut ok = true;
+  while ok && pos < to
+    invariant from <= pos && pos <= to && kok(k) && row < FD_ROWS
+  {
+    let mut n = to - pos;
+    if n > XFER {
+      n = XFER;
+    }
+    vfs_seek(&mut k.fs, row, pos);
+    let mut w = vfs_write(&mut k.fs, &mut k.mem, row, n);
+    let mut tries = 0;
+    while w == VFS_MISS && tries < 64
+      invariant tries <= 64 && kok(k) && row < FD_ROWS
+    {
+      disk_wait(&mut k.fs.disk);
+      w = vfs_write(&mut k.fs, &mut k.mem, row, n);
+      tries = tries + 1;
+    }
+    if w != n {
+      ok = false;
+    } else {
+      pos = pos + n;
+    }
+  }
+  fset(&mut k.fs.ftab, row, FD_MODE, mode);
+  vfs_seek(&mut k.fs, row, was);
+  return ok;
+}
+
 /// fallocate(fd, mode, off, len): mode 0, which grows the file to off +
-/// len if it is shorter, and FALLOC_FL_KEEP_SIZE alone, which succeeds
-/// without changing anything (no blocks are reserved ahead); other known
-/// modes fail with -EOPNOTSUPP after the checks Linux makes first.
+/// len if it is shorter; FALLOC_FL_KEEP_SIZE alone, which succeeds
+/// without changing anything (no blocks are reserved ahead); PUNCH_HOLE
+/// (which needs KEEP_SIZE, as on Linux) and ZERO_RANGE (with or without
+/// KEEP_SIZE), which make the range read as zeros. COLLAPSE_RANGE and
+/// INSERT_RANGE fail with -EOPNOTSUPP, as they do on tmpfs, after the
+/// checks Linux makes first.
 fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -450,18 +498,57 @@ fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64
   if off + len >= 0x8000000000000000 {
     return EFBIG;                           // past the largest file offset
   }
+  let punch = mode / 2 % 2 == 1;
+  let zero = mode / 16 % 2 == 1;
   if mode == 1 {
     return 0;                               // FALLOC_FL_KEEP_SIZE: blocks are not reserved ahead here, so nothing to do
   }
-  if seal_no_resize(&mut k, pid, fd, off + len) && off + len > vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x)) {
-    return EPERM;                           // F_SEAL_GROW
-  }
-  if mode != 0 {
-    return EOPNOTSUPP;                      // no blocks are punched or zeroed
+  if punch && (mode != 3) || zero && mode / 2 % 2 == 1 || mode / 8 % 2 == 1 || mode / 32 % 2 == 1 || mode / 64 % 2 == 1 || mode / 128 % 2 == 1 {
+    return EOPNOTSUPP;                      // PUNCH_HOLE without KEEP_SIZE, mixed modes, COLLAPSE, INSERT, UNSHARE, WRITE_ZEROES
   }
   let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x));
   if size == NO_FILE {
     return EBADF;
+  }
+  let keep = mode % 2 == 1;
+  if !keep && seal_no_resize(&mut k, pid, fd, off + len) && off + len > size {
+    return EPERM;                           // F_SEAL_GROW
+  }
+  if punch || zero {
+    if keep && seal_no_write(&mut k, pid, fd) {
+      return EPERM;                         // F_SEAL_WRITE: the range would change
+    }
+    if !keep && off + len > size {
+      if !vfs_truncate(&mut k.fs, &mut k.mem, d.x, off + len) {
+        return EFBIG;
+      }
+    }
+    let mut end = off + len;
+    if end > size {
+      end = size;                           // the part past the old end already reads as zeros
+    }
+    if off < end && punch && vfs_punch(&mut k.fs, &mut k.mem, d.x, off, end) {
+      // A file in RAM gave its pages back. Pages of it that a mapping or
+      // the page cache holds read as zeros too.
+      xfer_zero(&mut k, XFER);
+      let h = vfs_row_file(k.fs, d.x);
+      let mut pos = off;
+      while pos < end
+        invariant off <= pos && pos <= end && kok(k)
+      {
+        let mut n = end - pos;
+        if n > XFER {
+          n = XFER;
+        }
+        pc_wrote(&mut k.fs.pc, h, pos, k.fs.xfer, n);
+        pos = pos + n;
+      }
+      return 0;
+    }
+    if off < end && !falloc_zero(&mut k, d.x, off, end) {
+      return EIO;
+    }
+    return 0;
   }
   if off + len <= size {
     return 0;

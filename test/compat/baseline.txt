@@ -318,6 +318,19 @@ t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
 t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
 t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
+t_fsx: fallocate PUNCH_HOLE|KEEP_SIZE zeroes a range in /tmp
+t_fsx: fallocate ZERO_RANGE zeroes (and extends) a range in /tmp
+t_fsx: fallocate PUNCH_HOLE|KEEP_SIZE zeroes a range on the disk
+t_fsx: fallocate ZERO_RANGE zeroes (and extends) a range on the disk
+t_fsx: random writes, truncates, holes and zeroed ranges match a model in /tmp
+t_fsx: random writes, truncates, holes and zeroed ranges match a model on the disk
+t_fsx: setxattr, getxattr, listxattr and removexattr on a file in /tmp
+t_fsx: extended attributes on the disk: flags, 3000-byte values, 60 names, links, renames, directories
+t_fsx: extended attributes stay on a bstdisk3 file system when it is mounted again
+t_fsx: SEEK_DATA and SEEK_HOLE in /tmp
+t_fsx: SEEK_DATA and SEEK_HOLE on the disk
+t_fsx: holes in a file in /tmp: SEEK_DATA, SEEK_HOLE, st_blocks, punching and zeroing
+t_fsx: FS_IOC_GETFLAGS answers or is ENOTTY, and FICLONE is refused
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read

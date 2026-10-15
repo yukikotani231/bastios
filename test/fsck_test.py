@@ -129,6 +129,22 @@ def ext_shared(img):
     put(img, get(img, get(img, entry(img, 0) + 24) * BLOCK) * BLOCK, ext)
 
 
+def xattr_block(img):
+    """Entry 0 gets an attribute block of its own, appended to the image."""
+    nb = len(img) // BLOCK
+    img.extend(bytes(BLOCK))
+    put(img, entry(img, 0) + 48, nb)
+
+
+def xattr_shared(img):
+    put(img, entry(img, 0) + 48, data_block(img, 0))
+
+
+def xattr_twice(img):
+    xattr_block(img)
+    put(img, entry(img, 1) + 48, get(img, entry(img, 0) + 48))
+
+
 # On an image with 100 more files, so the directory has grown past its
 # fixed blocks.
 GROWN = [
@@ -152,6 +168,10 @@ CASES = [
     ("a block off the disk", off_disk, "error"),
     ("an unknown kind", lambda img: img.__setitem__(entry(img, 0), 9), "error"),
     ("a slash in a name", lambda img: add_link(img, 5, b"x/y", 0), "error"),
+    ("an attribute block", xattr_block, "clean"),
+    ("an attribute block a file also uses", xattr_shared, "error"),
+    ("an attribute block two files name", xattr_twice, "error"),
+    ("an attribute block off the disk", lambda img: put(img, entry(img, 0) + 48, 1 << 40), "error"),
     ("an extension block", with_ext, "clean"),
     ("an extension chain that loops", ext_loop, "error"),
     ("an extension block off the disk", ext_off_disk, "error"),
