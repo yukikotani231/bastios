@@ -606,6 +606,7 @@ fn node_settle(v: &mut Vfs, mem: &mut Mem, fs: u64, node: u64, h: u64)
 /// The handle of entry i of disk file system fs (FS_DISK or FS_LO).
 fn fs_handle(fs: u64, i: u64) -> u64
   requires i < DSLOTS
+  ensures result < HFILES
 {
   if fs == FS_LO {
     return LO0 + i;
@@ -1720,7 +1721,9 @@ fn dk_readdir(d: &DiskFs, x: &mut Bytes, p: u64, i: u64) -> u64
 
 /// The handle of entry i of directory d, when vfs_readdir(v, d, i) found
 /// one (returned more than 0).
-fn vfs_child(d: u64, i: u64) -> u64 {
+fn vfs_child(d: u64, i: u64) -> u64
+  ensures result < HFILES || result == NO_FILE || result == VDIR_DISK
+{
   if d == VDIR_ROOT && i == NFILES {
     return VDIR_DISK;
   }

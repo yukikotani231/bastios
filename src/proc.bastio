@@ -567,7 +567,8 @@ const AIO_W: u64 = 5 + AIO_EV * 4;
 const SYS_AIOSER: u64 = SYS_AIO + AIO_N * AIO_W;     // how many contexts were made
 const SYS_INOL: u64 = SYS_AIOSER + 1;          // /proc/sys/fs/inotify/{max_queued_events,max_user_instances,max_user_watches} as written, + 1 (0: never written; src/lxprocfs.bastio)
 const SYS_PIDMX: u64 = SYS_INOL + 3;           // /proc/sys/kernel/pid_max as written, + 1 (0: never written; src/lxprocfs.bastio)
-const SYS_LEN: u64 = SYS_PIDMX + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
+const SYS_MSGMNI: u64 = SYS_PIDMX + 1;         // /proc/sys/kernel/msgmni as written, + 1 (0: never written; src/lxipc.bastio)
+const SYS_LEN: u64 = SYS_MSGMNI + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 const AT_N: u64 = 32;
 const LR_N: u64 = 4;
@@ -640,6 +641,14 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // What lx_write_fd returns when the console's ring has no room for the
 // write: not an errno, and never returned to the process.
 const CON_FULL: u64 = 0x8000000000000001;
+
+/// What a read or write that was asked for n bytes may return: a count of
+/// at most n, or a failure (-errno, or an internal marker such as CON_FULL
+/// or DISK_RETRY: all have the top bit set). A call can never claim to
+/// have moved more than it was given room for.
+spec fn lx_count_or_fail(r: u64, n: u64) -> bool {
+  r <= n || r >= 0x8000000000000000
+}
 // What a file read or write returns when the disk has not caught up
 // (VFS_MISS): the caller sleeps in DISKWAIT and its call restarts.
 const DISK_RETRY: u64 = 0x8000000000000002;
@@ -654,7 +663,7 @@ const ME_W: u64 = 5;                  // words per mount
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
 // names are in k.sys), and the IPC namespace of each POSIX queue.
-const NSK_N: u64 = 10;                // kinds, per process:
+const NSK_N: u64 = 12;                // kinds, per process:
 const NSK_UTS: u64 = 0;
 const NSK_IPC: u64 = 1;
 const NSK_PID: u64 = 2;               //   the PID namespace it is in
@@ -665,6 +674,8 @@ const NSK_CG: u64 = 6;                //   the cgroup it belongs to (src/lxcgrou
 const NSK_TIME: u64 = 8;             //   the time namespace it is in (offsets: MNS_TM)
 const NSK_TIMEC: u64 = 9;            //   the time namespace its children are in
 const NSK_CGN: u64 = 7;               //   the root of its cgroup namespace: slot + 1 (0: the first namespace)
+const NSK_VP1: u64 = 10;              //   its id in the PID namespace around its own (0: that is the first)
+const NSK_VP2: u64 = 11;              //   and in the one around that
 const CG_N: u64 = 128;                // cgroups in all (slot 0 is the root, always there)
 const CG_W: u64 = 44;                 // words per cgroup: see CGW_*
 const CGW_USED: u64 = 0;
@@ -702,7 +713,7 @@ const UMW_PAR: u64 = 6 + 2 * UM_N * 3; // the id of the parent user namespace (0
 const UMW_MARK: u64 = UMW_PAR + 1;    // scratch of usr_gc: 1 if a process is in this namespace or a descendant of it
 const USR_W: u64 = UMW_MARK + 1;      // id + 1 (0: free), owner uid, owner gid, setgroups denied, uid and gid extents, then the extents, the parent, the mark
 const PN_N: u64 = 64;                // PID namespaces besides the first
-const PN_W: u64 = 3;                  // id + 1 (0: free), the next id to give, 1 once its init has ended
+const PN_W: u64 = 4;                  // id + 1 (0: free), the next id to give, 1 once its init has ended, the id of the namespace around it (0: the first)
 const UTS_N: u64 = 32;                // UTS namespaces besides the first
 const UTS_W: u64 = 133;               // id + 1 (0: free), then the names as k.sys keeps them, then the id of the user namespace that owns it
 const UTS_OWN: u64 = UTS_W - 1;       // its word of the owner
@@ -1322,7 +1333,8 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, Src { file: false, prog: NPROGS, f: 0, size: 0 }, args, alen, total, false);
+  let rn = layout_rnd(&mut k.rng, k.sys, k.procs, pid);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, rn, k.tsc, k.epoch, pid, src, Src { file: false, prog: NPROGS, f: 0, size: 0 }, args, alen, total, false);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -1522,8 +1534,8 @@ fn start_env(args: &mut Bytes, from: u64) -> u64
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, isrc0: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
-  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs) && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
+fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rnd, t: Tsc, epoch: u64, pid: u64, src: Src, isrc0: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs) && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args) && rnd_ok(rn)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
@@ -1531,13 +1543,18 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   // must be ELF. Check the headers before taking anything.
   let img = prog_image(src.prog);
   let elf = src.file || is_elf(img);
-  let e = elf_parse(&mut v, src);
+  // A PIE lands at PIE_AT plus its random distance; a program too big for
+  // that place goes where it would have without randomization.
+  let e = elf_parse_rnd(&mut v, src, rn);
   let mut size = 0;
   let mut entry = e.entry;
-  let mut rsp = USER_BASE + elf_sp(args, alen, total);
+  let mut rsp = USER_BASE + elf_sp(args, alen, total, rn.shift);
   let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   let mut ie = bad_elf();
   let mut mmap_top = VDSO_PAGE * 4096;     // the vDSO's page is above it
+  if e.ok && rn.mmap_pg * 4096 + (e.end + 4095) / 4096 * 4096 < mmap_top {
+    mmap_top = mmap_top - rn.mmap_pg * 4096;
+  }
   let mut lz = lz_none();
   if elf {
     if !e.ok {
@@ -1561,7 +1578,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
       if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
         return Space::Empty;
       }
-      let place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
+      let mut place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
+      if place >= low + rn.mmap_pg * 4096 {
+        place = place - rn.mmap_pg * 4096;      // moved down, if there is room above the program
+      }
       ie = elf_parse_at(&mut v, isrc, place);
       if !ie.ok {
         return Space::Empty;
@@ -1584,7 +1604,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
       return Space::Empty;
     }
   }
-  let sp = build_space(&mut m, &mut txt, &mut v, src, img, elf, e, isrc, ie, lz, size, args, alen, total, seed, t, epoch);
+  let sp = build_space(&mut m, &mut txt, &mut v, src, img, elf, e, isrc, ie, lz, size, args, alen, total, rn, t, epoch);
   if sp is Space::Empty {
     return sp;
   }
@@ -1604,7 +1624,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   }
   pset(&mut procs, pid, F_ARGS, 0);
   if elf && total <= ARGS_MAX {
-    pset(&mut procs, pid, F_ARGS, str_at(total) + alen * 1099511627776);
+    pset(&mut procs, pid, F_ARGS, str_at(total, rn.shift) + alen * 1099511627776);
   }
   pset(&mut procs, pid, reg_word(R_PC), entry);
   pset(&mut procs, pid, reg_word(R_SP), rsp);
@@ -1617,8 +1637,9 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
     pset(&mut procs, pid, F_ABI, 1);
     // The heap starts on the page after the image; mmap takes pages
     // downward from the stack. Both stay in the window below the stack.
-    pset(&mut procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
-    pset(&mut procs, pid, F_BRK0, (e.end + 4095) / 4096 * 4096);
+    let heap = (e.end + 4095) / 4096 * 4096 + rn.brk_pg * 4096;
+    pset(&mut procs, pid, F_BRK, heap);
+    pset(&mut procs, pid, F_BRK0, heap);
     pset(&mut procs, pid, F_MMAP, mmap_top);
   }
   return sp;
@@ -1673,14 +1694,14 @@ fn interp_src(v: &mut Vfs, src: Src, e: Elf) -> Src
 
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, lz: Lz, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64, t: Tsc, epoch: u64) -> Space
+fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, lz: Lz, size: u64, args: &Bytes, alen: u64, total: u64, rn: Rnd, t: Tsc, epoch: u64) -> Space
   requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie))) && (!elf ==> size <= IMAGE_MAX)
-  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args) && rnd_ok(rn)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, &mut txt, &mut v, src, e, isrc, ie, lz, args, alen, total, seed, t, epoch);
+    return elf_space(&mut m, &mut txt, &mut v, src, e, isrc, ie, lz, args, alen, total, rn, t, epoch);
   }
   return new_space(&mut m, img, size);
 }
