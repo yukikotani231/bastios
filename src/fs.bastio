@@ -434,8 +434,11 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64
     return fd;
   }
   let mut i = ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, n);
-  if i < NFILES && ram_link_of(&mut v.ram, i) < NFILES {
-    i = ram_link_of(&mut v.ram, i);
+  if i < NFILES && v.rlinked {
+    let t = ram_link_of(&mut v.ram, i);
+    if t < NFILES {
+      i = t;
+    }
   }
   if i >= NFILES {
     if flags / O_CREATE % 2 == 0 || !path_ok(v, n) || !parent_ok(&mut v, n) {
@@ -1065,6 +1068,9 @@ fn vfs_target(v: &mut Vfs, f: u64) -> u64
   ensures f >= HFILES ==> result == f
 {
   if f < NFILES {
+    if !v.rlinked {
+      return f;                             // no link node exists: skip taking the node out to look
+    }
     let t = ram_link_of(&mut v.ram, f);
     if t < NFILES {
       return t;
