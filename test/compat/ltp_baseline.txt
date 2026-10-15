@@ -79,6 +79,8 @@ clone303
 clone304
 close01
 close02
+close_range01
+close_range02
 confstr01
 connect01
 connect02
@@ -1036,6 +1038,7 @@ unlink10
 unlinkat01
 unshare01
 unshare02
+unshare03
 ustat01
 ustat02
 utime01
