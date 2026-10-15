@@ -17,7 +17,8 @@ The disk holds at most 1024 entries, so the root leaves out what the
 checks never touch: /usr/share (documentation, locales, terminfo), dpkg's
 per-package file lists, glibc's character set converters (gconv) and
 Perl's modules (the perl binary itself stays). What is left, about 850
-entries, is every program and library of the image.
+entries, is every program and library of the image, and three of the
+time zone files (ZONES) for the cases that read tzdata.
 """
 import gzip, io, os, sys, tarfile
 
@@ -28,8 +29,13 @@ import alpinedisk
 LEFT_OUT = ("usr/share/", "var/lib/dpkg/info/", f"usr/lib/{alpinedisk.ARCH}-linux-gnu/gconv/",
             f"usr/lib/{alpinedisk.ARCH}-linux-gnu/perl")
 
+ZONES = ("Asia/Tokyo", "America/New_York", "Europe/London")
+ZONE_DIRS = ("usr/share/zoneinfo",) + tuple("usr/share/zoneinfo/" + z.split("/")[0] for z in ZONES)
+
 def kept(name):
     n = name[2:] if name.startswith("./") else name
+    if n.rstrip("/") in ZONE_DIRS or n in ["usr/share/zoneinfo/" + z for z in ZONES]:
+        return True
     return not any(n.startswith(p) for p in LEFT_OUT) or n.rstrip("/") + "/" in LEFT_OUT   # the directories stay
 
 def main():

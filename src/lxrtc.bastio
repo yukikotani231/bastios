@@ -7,6 +7,7 @@
 // the device fails with ENODEV.
 
 import "lxcred.bastio";
+import "civil.bastio";
 
 const RTC_RD_TIME: u64 = 0x80247009;   // _IOR('p', 0x09, struct rtc_time)
 const RTC_SET_TIME: u64 = 0x4024700A;  // _IOW('p', 0x0a, struct rtc_time)
