@@ -72,7 +72,7 @@ fn rtl_start(pci: &mut Pci, d: u64, m: &mut Mem, win: &mut MmioSpace, at: u64, f
   return net_up(Card::Rtl(rtl_new(regs, r, b0, b1, b2, b3, t)));
 }
 
-/// A virtio network card over the transport `io`, given the nine pages
+/// A virtio network card over the transport `io`, given the fifteen pages
 /// from page `at` on.
 fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt, msix: bool) -> Nic
   requires mem_ok(m) && vt_ok(io) && at + NET_PAGES <= NPAGES && at + NET_PAGES <= len(m.bm)
@@ -88,7 +88,13 @@ fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt, msix: bool) -> Nic
   let b0 = take_low_page(&mut m, at + 6);
   let b1 = take_low_page(&mut m, at + 7);
   let b2 = take_low_page(&mut m, at + 8);
-  return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, msix)));
+  let b3 = take_low_page(&mut m, at + 9);
+  let b4 = take_low_page(&mut m, at + 10);
+  let b5 = take_low_page(&mut m, at + 11);
+  let b6 = take_low_page(&mut m, at + 12);
+  let b7 = take_low_page(&mut m, at + 13);
+  let b8 = take_low_page(&mut m, at + 14);
+  return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, b3, b4, b5, b6, b7, b8, msix)));
 }
 
 /// Starts the network card: the first virtio card on PCI if its

@@ -7,7 +7,7 @@ import "e1000.bastio";
 import "pci.bastio";
 import "vpci.bastio";
 
-/// A virtio network card over the transport `io`, given the nine pages
+/// A virtio network card over the transport `io`, given the fifteen pages
 /// from page `at` on.
 fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt) -> Nic
   requires mem_ok(m) && vt_ok(io) && at + NET_PAGES <= NPAGES && at + NET_PAGES <= len(m.bm)
@@ -23,11 +23,17 @@ fn virtio_nic_start(m: &mut Mem, at: u64, io: Vt) -> Nic
   let b0 = take_low_page(&mut m, at + 6);
   let b1 = take_low_page(&mut m, at + 7);
   let b2 = take_low_page(&mut m, at + 8);
-  return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, false)));
+  let b3 = take_low_page(&mut m, at + 9);
+  let b4 = take_low_page(&mut m, at + 10);
+  let b5 = take_low_page(&mut m, at + 11);
+  let b6 = take_low_page(&mut m, at + 12);
+  let b7 = take_low_page(&mut m, at + 13);
+  let b8 = take_low_page(&mut m, at + 14);
+  return net_up(Card::Virtio(vnet_new(io, q0, q1, q2, t0, t1, t2, b0, b1, b2, b3, b4, b5, b6, b7, b8, false)));
 }
 
 /// A card on the PCI Express bus whose configuration window starts at
-/// `ecam` (0: the machine has none): a modern virtio network function (nine
+/// `ecam` (0: the machine has none): a modern virtio network function (fifteen
 /// pages from page `at` on), else an Intel e1000 family card (six), if its
 /// registers lie in the device window clear of `dk_lo .. dk_hi`; none
 /// otherwise. BARs are assigned first (a no-op for those the disk probe
@@ -80,7 +86,7 @@ fn pci_nic_start(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u
 }
 
 /// Starts the network card: the first virtio network device in the slots
-/// `vm`, clear of `dk_lo .. dk_hi` (the disk's registers), with nine pages
+/// `vm`, clear of `dk_lo .. dk_hi` (the disk's registers), with fifteen pages
 /// from page `at` on; else a virtio or e1000 family card on the PCI Express bus at
 /// `ecam` (see `pci_nic_start`); none if there is no such device.
 fn nic_find(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u64, vm: VmWhere, ecam: u64) -> Nic

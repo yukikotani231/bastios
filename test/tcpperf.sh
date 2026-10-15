@@ -17,13 +17,13 @@
 #
 #   NIC=name     the QEMU card (default: virtio-net-pci)
 #   ONLY=text    run only scenarios whose name contains text
-#   BYTES=n      the size of a transfer (default 2 MiB; lossy ones use a quarter)
+#   BYTES=n      the size of a transfer (default 4 MiB; lossy ones use a quarter)
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 NIC=${NIC:-virtio-net-pci}
 ONLY=${ONLY:-}
-BYTES=${BYTES:-2097152}
+BYTES=${BYTES:-4194304}
 
 python3 - "$KERNEL" "$NIC" "$ONLY" "$BYTES" <<'PY'
 import os, random, select, socket, struct, subprocess, sys, time
@@ -111,7 +111,7 @@ def run(name, direction, size, fwd, rev, secs=240):
     """One transfer. `fwd` is the path from the peer to the guest and `rev`
     the path from the guest back."""
     global fails
-    if only and only not in name:
+    if only and only not in f"{name} {direction}":
         return
     port = next_port()
     link.out_rule, link.in_rule = fwd, rev
@@ -123,12 +123,17 @@ def run(name, direction, size, fwd, rev, secs=240):
         tune(p)
         p.close_when = lambda q: q.peer_fin
         net.peer = p
-        type_line(f"mtcp send 10.0.2.2 {port} {size}")
+        trace = bool(os.environ.get("TRACE"))
+        type_line(f"mtcp send 10.0.2.2 {port} {size}" + (" &" if trace else ""))
         t0 = time.time()
         done_at = [None]
+        last_poll = [time.time()]
         def fin():
             if done_at[0] is None and len(p.got) >= size:
                 done_at[0] = time.time()
+            if trace and time.time() - last_poll[0] > 0.4:
+                last_poll[0] = time.time()
+                type_line("cat /proc/net/tcp")
             return p.done() or p.state == "RESET"
         until(fin, secs)
         ok = bytes(p.got) == data
@@ -136,11 +141,22 @@ def run(name, direction, size, fwd, rev, secs=240):
         seqs = [s["seq"] for _, s in link.seen if s["data"]]
         extra = len(seqs) - len(set(seqs))
         note = f"{extra} segments sent again"
+        if os.environ.get("TRACE"):
+            ts = [t for t, sg in link.seen if sg["data"]]
+            acks = [sg["ack"] for _, sg in p.log] if False else []
+            order = [sg["seq"] for _, sg in link.seen if sg["data"]]
+            back = sum(1 for a, b in zip(order, order[1:]) if (b - a) % M32 > M32 // 2)
+            for line in out[mark:].decode(errors="replace").replace("\r", "").split("\n"):
+                if f":{port:04X} " in line or f":{port:04x} " in line:
+                    print("    ", line.strip())
+            print(f"     guest segments {len(order)}, backwards jumps {back}, peer dup acks {p.dup_acks}, duplicate data {p.dup_data}")
+            print("     segments per 100 ms:", [sum(1 for t in ts if int((t - ts[0]) * 10) == b) for b in range(int((ts[-1] - ts[0]) * 10) + 1)] if ts else [])
     else:
         type_line(f"mtcp sink {port}")
         until(lambda: b"listening on tcp port %d" % port in out[mark:], 20)
         p = Peer(net, 41000 + port, port, data, active=True)
         tune(p)
+        p.cc = True
         p.close_when = lambda q: len(q.got) >= 0 and q.una >= len(data)
         net.peer = p
         p.emit(SYN, p.iss)
@@ -173,8 +189,10 @@ run("lan, 1% loss", "up", q, Path(seed=2), Path(loss=0.01, seed=3))
 run("rtt 20ms, 1% loss", "up", q, Path(delay=D, seed=2), Path(delay=D, loss=0.01, seed=3))
 run("rtt 20ms, 1% loss", "down", q, Path(delay=D, loss=0.01, seed=2), Path(delay=D, seed=3))
 run("rtt 20ms, 5% loss", "up", q // 2, Path(delay=D, seed=2), Path(delay=D, loss=0.05, seed=3))
-run("rtt 20ms, 10% reordered", "up", q, Path(delay=D, seed=2), Path(delay=D, reorder=0.1, seed=3))
-run("rtt 20ms, 10% reordered", "down", q, Path(delay=D, reorder=0.1, seed=2), Path(delay=D, seed=3))
+run("rtt 20ms, 10% reordered 3ms", "up", q, Path(delay=D, seed=2), Path(delay=D, reorder=0.1, seed=3))
+run("rtt 20ms, 10% reordered 3ms", "down", q, Path(delay=D, reorder=0.1, seed=2), Path(delay=D, seed=3))
+run("rtt 20ms, 10% reordered 30ms", "up", q, Path(delay=D, seed=2), Path(delay=D, reorder=0.1, reorder_by=0.03, seed=3))
+run("rtt 20ms, 10% reordered 30ms", "down", q, Path(delay=D, reorder=0.1, reorder_by=0.03, seed=2), Path(delay=D, seed=3))
 run("rtt 100ms, 1% loss", "up", q // 2, Path(delay=0.05, seed=2), Path(delay=0.05, loss=0.01, seed=3), secs=400)
 
 qemu.kill(); qemu.wait()

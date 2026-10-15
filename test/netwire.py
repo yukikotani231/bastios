@@ -139,6 +139,17 @@ class Peer:
         self.peer_ws = None             # the guest's, once both sides scale
         self.sack_both = False          # both SYNs carried SACK-permitted
         self.last_off = None            # where the segment that arrived last starts
+        self.dsack = None               # a duplicate to report in the next ACK (RFC 2883)
+        self.dup_data = 0               # segments that arrived with nothing new in them
+        self.dup_acks = 0               # ACKs we sent that acknowledged nothing new
+        self.last_ack_sent = None
+        self.cc = False                 # congestion control and SACK recovery as a sender (like a modern stack)
+        self.cwnd = None
+        self.ssthresh = 1 << 30
+        self.dups = 0
+        self.rec_end = None             # in recovery until this offset is acknowledged
+        self.sacked = []                # [(left, right)] offsets the guest reports holding
+        self.rtx_next = 0
         if active:
             self.timer = time.time()
 
@@ -161,13 +172,18 @@ class Peer:
                 opts += bytes([1, 3, 3, self.ws])
             if self.sack_ok:
                 opts += bytes([1, 1, 4, 2])
-        if not flags & SYN and self.sack_both and self.held:
-            blocks = self.sack_ranges()[:3]
+        if not flags & SYN and self.sack_both and (self.held or self.dsack):
+            blocks = ([self.dsack] if self.dsack else []) + self.sack_ranges()[:3]
+            self.dsack = None
             opts = bytes([1, 1, 5, 2 + 8 * len(blocks)]) + b"".join(
-                struct.pack("!II", self.abs_seq(l) % M32, self.abs_seq(r) % M32) for l, r in blocks)
+                struct.pack("!II", (self.irs + 1 + l) % M32, (self.irs + 1 + r) % M32) for l, r in blocks)
         hl = 20 + len(opts)
         seg = struct.pack("!HHIIBBHHH", self.lport, self.rport, seq, ack, hl // 4 << 4,
                           flags | (ACK if self.irs is not None else 0), win, 0, 0)
+        if not flags & SYN and not data:
+            if ack == self.last_ack_sent:
+                self.dup_acks += 1
+            self.last_ack_sent = ack
         seg += opts
         seg += data
         seg = seg[:16] + struct.pack("!H", l4_sum(6, HOST_IP, GUEST_IP, seg)) + seg[18:]
@@ -195,6 +211,10 @@ class Peer:
         if self.state not in ("ESTABLISHED", "CLOSE_WAIT"):
             return
         wnd = max(self.peer_wnd, 1 if probe else 0)
+        if self.cc:
+            if self.cwnd is None:
+                self.cwnd = 10 * self.mss
+            wnd = min(wnd, self.cwnd)
         while self.nxt < len(self.data) and self.nxt < self.una + wnd:
             k = min(self.mss, len(self.data) - self.nxt, self.una + wnd - self.nxt)
             self.emit(PSH, self.abs_seq(self.nxt), self.data[self.nxt:self.nxt + k])
@@ -224,6 +244,67 @@ class Peer:
             self.nxt = self.max = len(self.data) + 1
         self.timer = time.time() + self.rto
 
+    def cc_ack(self, s, a):
+        """A sender with slow start, congestion avoidance, fast retransmit and
+        SACK-driven recovery (RFC 5681, 6675), for peers that send to the guest."""
+        if self.cwnd is None:
+            self.cwnd = 10 * self.mss
+        for l, r in sack_blocks(s):
+            l, r = (l - self.iss - 1) % M32, (r - self.iss - 1) % M32
+            if self.una < l < r <= self.max:
+                self.sacked = [x for x in self.sacked if x[1] < l or x[0] > r] + [
+                    (min([l] + [x[0] for x in self.sacked if not (x[1] < l or x[0] > r)]),
+                     max([r] + [x[1] for x in self.sacked if not (x[1] < l or x[0] > r)]))]
+        if self.una < a <= self.max:
+            acked = a - self.una
+            self.una = a
+            self.nxt = max(self.nxt, a)
+            self.sacked = [(max(l, a), r) for l, r in self.sacked if r > a]
+            self.dups = 0
+            self.timer = None
+            if self.rec_end is not None:
+                if a >= self.rec_end:
+                    self.rec_end = None
+                    self.cwnd = self.ssthresh
+                    self.sacked = []
+                else:
+                    self.rtx_hole()
+            elif self.cwnd < self.ssthresh:
+                self.cwnd += min(acked, 2 * self.mss)
+            else:
+                self.cwnd += max(1, self.mss * self.mss // self.cwnd)
+        elif a == self.una and self.max > self.una and not s["data"]:
+            self.dups += 1
+            hi = max([r for _, r in self.sacked] + [self.una])
+            if self.rec_end is None and (self.dups >= 3 or sum(r - l for l, r in self.sacked) >= 3 * self.mss):
+                flight = self.max - self.una
+                self.ssthresh = self.cwnd = max(flight // 2, 2 * self.mss)
+                self.rec_end = self.max
+                self.rtx_next = self.una
+                self.rtx_hole()
+            elif self.rec_end is not None:
+                self.rtx_hole()
+        if self.timer is None and self.max > self.una:
+            self.timer = time.time() + self.rto
+
+    def rtx_hole(self):
+        """Sends the next segment the guest is not known to hold (below the
+        furthest it reports), if the window allows."""
+        hi = max([r for _, r in self.sacked] + [self.una + 1])
+        o = max(self.rtx_next, self.una)
+        for l, r in sorted(self.sacked):
+            if l <= o < r:
+                o = r
+        if o >= min(hi, len(self.data)) and not (self.sacked == [] and o == self.una):
+            return
+        k = min(self.mss, len(self.data) - o)
+        for l, r in sorted(self.sacked):
+            if l > o:
+                k = min(k, l - o)
+        if k > 0:
+            self.emit(PSH, self.abs_seq(o), self.data[o:o + k])
+            self.rtx_next = o + k
+
     def tick(self):
         if self.timer is None or time.time() < self.timer:
             return
@@ -235,6 +316,13 @@ class Peer:
             # Only the head goes again (no go-back-N): a receiver that
             # dropped what came after the gap is told so by its next ACK.
             self.recover = self.max
+            if self.cc:
+                self.ssthresh = max((self.max - self.una) // 2, 2 * self.mss)
+                self.cwnd = self.mss
+                self.rec_end = None
+                self.dups = 0
+                self.sacked = []
+                self.nxt = self.una
             self.resend_head()
 
     def scaled(self, s):
@@ -284,7 +372,9 @@ class Peer:
         if s["flags"] & ACK:
             a = (s["ack"] - self.iss - 1) % M32
             self.peer_wnd = self.scaled(s)
-            if self.una < a <= self.max:
+            if self.cc:
+                self.cc_ack(s, a)
+            elif self.una < a <= self.max:
                 self.una = a
                 self.nxt = max(self.nxt, a)
                 self.timer = None
@@ -296,6 +386,9 @@ class Peer:
             off -= M32
         d = s["data"]
         room = len(self.got) + self.rwin
+        if d and off + len(d) <= len(self.got):
+            self.dup_data += 1
+            self.dsack = (off, off + len(d))
         if d:
             if off + len(d) > room:
                 d = d[:max(0, room - off)]
@@ -397,11 +490,11 @@ class Net:
 class Path:
     """One direction of a network path for Link.out_rule / Link.in_rule: a
     one-way delay with jitter, random loss, reordering (a frame held back
-    long enough to be overtaken) and, with `rate` (bytes per second), a
+    `reorder_by` seconds, so the ones sent after it overtake it) and, with `rate` (bytes per second), a
     bottleneck link with a drop-tail queue of `queue` bytes. Only TCP
     segments are touched. `drops` and `sent` count what happened."""
-    def __init__(self, delay=0.0, jitter=0.0, loss=0.0, reorder=0.0, rate=None, queue=60000, seed=1):
-        self.delay, self.jitter, self.loss, self.reorder = delay, jitter, loss, reorder
+    def __init__(self, delay=0.0, jitter=0.0, loss=0.0, reorder=0.0, reorder_by=0.003, rate=None, queue=60000, seed=1):
+        self.delay, self.jitter, self.loss, self.reorder, self.reorder_by = delay, jitter, loss, reorder, reorder_by
         self.rate, self.queue = rate, queue
         self.rng = random.Random(seed)
         self.free_at = 0.0              # when the bottleneck has sent what it holds
@@ -427,5 +520,5 @@ class Path:
         if self.jitter:
             d += self.rng.random() * self.jitter
         if self.reorder and self.rng.random() < self.reorder:
-            d += self.delay + 0.02
+            d += self.reorder_by
         return d
