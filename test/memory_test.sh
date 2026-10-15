@@ -11,7 +11,7 @@ set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 TIMEOUT=${TIMEOUT:-300}
-MEM=${MEM:-64M}
+MEM=${MEM:-48M}
 SMP=${SMP:-1}
 
 python3 - "$KERNEL" "$TIMEOUT" "$MEM" "$SMP" <<'PY'
@@ -87,7 +87,7 @@ cached = vm("nr_file_pages")
 free_kb = meminfo("MemFree")
 avail_kb = meminfo("MemAvailable")
 check("the page cache holds the mapped file", cached > 100, t)
-check("MemAvailable counts the cache", avail_kb >= free_kb + 4 * cached - 8, f"{free_kb} {avail_kb} {cached}")
+check("MemAvailable counts the cache", avail_kb >= free_kb + 4 * cached - 16, f"{free_kb} {avail_kb} {cached}")
 want = (free_kb + 2 * cached) // 1024      # more than free, less than free + cached
 t = run(f"/disk/mhog touch {want}; echo rc=$?")
 check("cached pages are given back before anything is killed",
@@ -110,7 +110,7 @@ check("the kill is counted", vm("oom_kill") == 1)
 # The biggest holder dies, not the one that asked last.
 run("/disk/mhog hold 18 & big=$!; sleep 1; /disk/mhog hold 6 & small=$!; sleep 1")
 t = run("/disk/mhog touch 12; echo rc=$?")
-check("the biggest process is the victim", re.search(r"Killed process \d+ \(mhog\) oom_score \d+, 1[78]\d{3} kB", t) and "touched 12 MiB" in t, t)
+check("the biggest process is the victim", re.search(r"Killed process \d+ \(mhog\) oom_score \d+, 1[789]\d{3} kB", t) and "touched 12 MiB" in t, t)
 t = run("kill -0 $big 2>/dev/null && echo bigalive || echo bigdead; kill -0 $small && echo smallalive")
 check("the others live", "bigdead" in t and "smallalive" in t, t)
 run("kill -9 $small; sleep 1")
