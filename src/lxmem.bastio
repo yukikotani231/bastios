@@ -438,6 +438,7 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
 /// part of the window below the stack.
 fn win_range(addr: u64, n: u64) -> u64
   ensures result != 18446744073709551615 ==> (result / 4294967296 < result % 4294967296 && result % 4294967296 <= STACK_FIRST)
+  ensures result != 18446744073709551615 ==> (addr >= USER_BASE && addr - USER_BASE < STACK_FIRST * 4096)
 {
   if addr % 4096 != 0 || addr < USER_BASE || n == 0 || n > USER_SIZE {
     return 18446744073709551615;
@@ -704,6 +705,7 @@ fn hole_fork(k: &mut Kernel, pid: u64, c: u64)
 fn lx_munmap(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == DISK_RETRY
 {
   let r = win_range(addr, n);
   if r == 18446744073709551615 {
@@ -743,6 +745,7 @@ fn prot_access(prot: u64) -> u64
 fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == EACCES
 {
   if addr % 4096 != 0 {
     return EINVAL;
@@ -789,6 +792,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
 fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   let r = win_range(addr, oldn);
   if addr % 4096 != 0 || oldn > USER_SIZE || newn == 0 || newn > USER_SIZE {
@@ -935,6 +939,7 @@ fn map_whole(k: &Kernel, pid: u64, first: u64, pages: u64) -> u64
 fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u64) -> u64
   requires kok(k) && pid < NPROC && ri < MAP_N && from < oend && oend <= WPAGES && oend - from < want && want <= WPAGES
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   let have = oend - from;
   let h = get(k.maps, mp_at(pid, ri, 2));
@@ -995,6 +1000,7 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
 fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC && to_addr >= USER_BASE && newn <= USER_SIZE && to_addr - USER_BASE <= USER_SIZE - newn
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   let from = r / 4294967296;
   let oend = r % 4294967296;
@@ -1225,6 +1231,7 @@ fn map_drop(k: &mut Kernel, pid: u64, i: u64)
 fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
   requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
   ensures kok(k)
+  ensures result == 0 || result == DISK_RETRY
 {
   let mut i = 0;
   while i < MAP_N
@@ -1308,6 +1315,7 @@ fn map_fork(k: &mut Kernel, pid: u64, c: u64)
 fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == DISK_RETRY
 {
   // MS_ASYNC 1, MS_INVALIDATE 2, MS_SYNC 4
   if flags & !7 != 0 || addr % 4096 != 0 || flags & 1 != 0 && flags & 4 != 0 {
@@ -1343,6 +1351,7 @@ fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
 fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == EFAULT
 {
   if addr % 4096 != 0 {
     return EINVAL;
@@ -1422,6 +1431,7 @@ fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
 fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM
 {
   if addr % 4096 != 0 || n >= 0x8000000000000000 {
     return EINVAL;
@@ -1546,6 +1556,7 @@ fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64,
 fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC && first <= WPAGES && pages <= WPAGES - first && off % 4096 == 0
   ensures kok(k)
+  ensures result == 0 || result == ENOMEM
 {
   let mut j = 0;
   while j < pages

@@ -8,6 +8,7 @@
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
+#   make soak       run a mixed workload for a long time (SECS, ALPINE)
 #
 # The kernel and its programs are built with bastioc1, bastiolang's compiler
 # (stage1, written in Bastio), which stage0's bastioc0 builds once into
@@ -373,8 +374,16 @@ run-uefi: build/bastios.iso $(DISK)
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
-test: build/bastios.elf
+test: $(if $(filter d,$(LANES)),build/bastioc1,build/bastios.elf)
 	BASTIOC=$(BASTIOC) BASTIOC0=$(BASTIOC0) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
+
+# The long-run soak (test/soak.py): rounds of a mixed workload for SECS
+# seconds, looking for leaks, hangs and panics. `make soak SECS=3600`;
+# `make soak ALPINE=build/compat/soak-alpine.img` runs gcc builds in Alpine
+# instead (see test/soak.py).
+SECS ?= 600
+soak: build/bastios.elf
+	MUSLCC=$(MUSLCC) test/soak.py --secs $(SECS) $(if $(ALPINE),--alpine $(ALPINE))
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
 # SEED (see test/fuzz_test.sh; `make test` runs a short one).
