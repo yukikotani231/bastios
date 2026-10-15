@@ -1,6 +1,6 @@
 # BastiOS on AArch64
 
-BastiOS builds for AArch64 and boots on QEMU's `virt` machine. This is the first stage of the port tracked in [bastiolang#119](https://github.com/yukikotani231/bastiolang/issues/119) and [#194](https://github.com/yukikotani231/bastios/issues/194): a kernel with the processor and platform parts done, running the native-ABI programs on the same process table, scheduler state, system calls and file system as x86-64. The Linux layer, the network and more than one processor and more than one processor came stage by stage (see "What is not there yet").
+BastiOS builds for AArch64 and boots on QEMU's `virt` machine. This is the first stage of the port tracked in [bastiolang#119](https://github.com/yukikotani231/bastiolang/issues/119) and [#194](https://github.com/yukikotani231/bastios/issues/194): a kernel with the processor and platform parts done, running the native-ABI programs on the same process table, scheduler state, system calls and file system as x86-64. The Linux layer, the network and more than one processor came stage by stage; the sections below say what each does now, and "What is not there yet" what is left.
 
 ```sh
 sudo apt-get install z3 qemu-system-arm gcc-aarch64-linux-gnu   # on an x86-64 host
@@ -54,7 +54,7 @@ The interrupt controller and its addresses come from the device tree (`arm,gic-v
 
 Tracked in [#194](https://github.com/yukikotani231/bastios/issues/194) and its siblings:
 
-- musl, BusyBox and the compat suite on arm64, ptrace register sets ([#196](https://github.com/yukikotani231/bastios/issues/196));
-- the interrupt controller and the UART from the device tree too (the platform still uses QEMU virt's addresses for them), the other drivers, and the clock from the generic timer's counter instead of the tick count;
+- ptrace register sets, so `t_ptrace` and a debugger do not run on arm64 ([#196](https://github.com/yukikotani231/bastios/issues/196));
+- interrupts from PCI devices (the drivers poll), and the clock from the generic timer's counter instead of the tick count;
 - inter-processor interrupts to wake an idle processor, and parked address-space leases ([#195](https://github.com/yukikotani231/bastios/issues/195));
 - real hardware ([#197](https://github.com/yukikotani231/bastios/issues/197)).
