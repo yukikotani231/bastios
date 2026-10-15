@@ -1284,6 +1284,56 @@ fn ns_at(k: &Kernel, ns: u64) -> u64
   return best;
 }
 
+/// The user namespace that made mount namespace ns, or 0 (the first, which
+/// only root owns) if it is the first or has no record.
+fn mo_owner(k: &Kernel, ns: u64) -> u64
+  requires kok(k)
+  ensures result < MNS_MAX
+{
+  let mut i = 0;
+  while ns != 0 && i < MO_N
+    invariant i <= MO_N && kok(k)
+  {
+    if get(k.mns, MNS_MO + i * 2) == ns {
+      return get(k.mns, MNS_MO + i * 2 + 1) % MNS_MAX;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+/// Records the user namespace of process pid as the owner of its mount
+/// namespace, which it has just made (after the user namespace of the same
+/// call, if there was one). With no free record the namespace stays root's.
+fn mntns_own(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let ns = ns_of(k, pid);
+  let mut i = 0;
+  while ns != 0 && i < MO_N
+    invariant i <= MO_N && kok(k)
+  {
+    let cur = get(k.mns, MNS_MO + i * 2);
+    if cur == 0 || !mnt_ns_live(k, cur) {
+      k.mns = set(k.mns, MNS_MO + i * 2, ns);
+      k.mns = set(k.mns, MNS_MO + i * 2 + 1, nsk_of(k, NSK_USER, pid));
+      return;
+    }
+    i = i + 1;
+  }
+}
+
+/// Whether process pid may change the mounts of its mount namespace without
+/// being root: it is not the first one, and pid holds CAP_SYS_ADMIN over the
+/// user namespace that made it.
+fn mnt_admin(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let ns = ns_of(k, pid);
+  return ns != 0 && ns_cap_over(k, pid, mo_owner(k, ns), CAP_SYS_ADMIN);
+}
+
 /// A new mount namespace for process pid, holding a copy of the mounts of
 /// the one it was in. ENOMEM if the table has no room for the copy.
 fn ns_unshare(k: &mut Kernel, pid: u64) -> u64
@@ -2093,7 +2143,7 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if !cap_has(k, pid, CAP_SYS_ADMIN) && !(ns_of(k, pid) != 0 && ns_cap(k, pid, CAP_SYS_ADMIN)) {
+  if !cap_has(k, pid, CAP_SYS_ADMIN) && !mnt_admin(k, pid) {
     return EPERM;
   }
   let ns = ns_of(k, pid);
