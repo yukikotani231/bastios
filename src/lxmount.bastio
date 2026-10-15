@@ -26,6 +26,7 @@ import "linux.bastio";
 import "lxns.bastio";
 import "lxnsk.bastio";
 import "lxxattr.bastio";
+import "ext4.bastio";
 
 const LX_MOUNT: u64 = 165;
 const LX_UMOUNT2: u64 = 166;
@@ -37,6 +38,7 @@ const UMOUNT_NOFOLLOW: u64 = 8;
 const FST_NONE: u64 = 0;
 const FST_TMPFS: u64 = 1;
 const FST_BSTDISK: u64 = 2;
+const FST_EXT4: u64 = 3;                // ext4, and ext2 and ext3 images without a journal to replay (src/ext4.bastio)
 const FST_NS: u64 = 16;                 // FST_NS + MK_*: mounted per namespace (src/lxns.bastio)
 const MS_BIND: u64 = 4096;
 const MS_PROPAGATION: u64 = 0x1E0000;   // MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED
@@ -94,6 +96,9 @@ fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
   if type_is(&mut k, pid, va, "bstdisk3") {
     return FST_BSTDISK;
   }
+  if type_is(&mut k, pid, va, "ext4") || type_is(&mut k, pid, va, "ext2") || type_is(&mut k, pid, va, "ext3") {
+    return FST_EXT4;
+  }
   return FST_NONE;
 }
 
@@ -137,6 +142,53 @@ fn image_file(k: &mut Kernel, pid: u64, va: u64) -> u64
     return NFILES;
   }
   return f;
+}
+
+/// The file holding the ext4 image that the path at user address va names:
+/// a loop device bound to an in-memory file, or any file (on the disk too).
+/// NO_FILE with the -errno in k.perr if there is none.
+fn ext_image(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_at(&mut k, pid, AT_FDCWD, va);
+  if n == NO_RESULT {
+    return NO_FILE;
+  }
+  if is_loop(loop_at(k.fs.xfer, n)) {
+    let lf = image_file(&mut k, pid, va);
+    if lf >= NFILES {
+      return NO_FILE;
+    }
+    return lf;
+  }
+  let f = vfs_lookup(&mut k.fs, n);
+  if f == NO_FILE {
+    k.perr = ENOENT;
+    return NO_FILE;
+  }
+  if vfs_is_dir(&mut k.fs, f) {
+    k.perr = EISDIR;
+    return NO_FILE;
+  }
+  return f;
+}
+
+/// The -errno for a failed ex_import.
+fn ext_errno(r: u64) -> u64 {
+  if r == EX_FULL {
+    return ENOSPC;
+  }
+  if r == EX_LONG {
+    return ENAMETOOLONG;
+  }
+  if r == EX_BIG {
+    return EFBIG;
+  }
+  if r == EX_MEM {
+    return ENOMEM;
+  }
+  return EINVAL;
 }
 
 /// The loop device the source path at user address va names, or LO_NODEV
@@ -229,7 +281,14 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
     return EPERM;                           // a disk image mounts for the machine, not for a user namespace
   }
   let mut img = NFILES;
+  let mut eimg = NO_FILE;
   let mut ldev = LO_NODEV;
+  if t == FST_EXT4 {
+    eimg = ext_image(&mut k, pid, source);
+    if eimg == NO_FILE {
+      return k.perr;
+    }
+  }
   if t == FST_BSTDISK {
     ldev = source_loop(&mut k, pid, source);
     img = image_file(&mut k, pid, source);
@@ -268,6 +327,27 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   }
   if s < MNT_N || i + 1 == k.fs.lo_at || vfs_ram_has_children(&mut k.fs, n) {
     return EBUSY;
+  }
+  if t == FST_EXT4 {
+    // The image is read now and copied into memory below the directory;
+    // the mount is read-only. The transfer buffer still holds the path.
+    if n == 0 || n > FNAME_MAX {
+      return EINVAL;
+    }
+    if !vfs_mount(&mut k.fs, i, false) {
+      return ENOMEM;
+    }
+    let r = ex_import(&mut k.fs, &mut k.mem, eimg, n);
+    let ms = vfs_mount_slot(k.fs, i);
+    if ms >= MNT_N {
+      return EINVAL;
+    }
+    if r != EX_OK {
+      vfs_umount(&mut k.fs, &mut k.mem, ms);
+      return ext_errno(r);
+    }
+    vfs_set_ro(&mut k.fs, ms, true);
+    return 0;
   }
   if t == FST_BSTDISK {
     let r = vfs_lo_mount(&mut k.fs, &mut k.mem, img, i, ldev, flags & MS_RDONLY != 0);
