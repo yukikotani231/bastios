@@ -1398,3 +1398,8 @@ t_pty: without IUTF8 erase takes one byte
 tty: utf-8: erase takes back a whole character on the console
 alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
 alpine-tty: nvim: it counts characters and cells of Japanese text
+t_time: TZ=JST-9 is nine hours ahead
+t_time: TZ with a DST rule
+t_time: and outside the DST period
+t_time: a zone file is written
+t_time: TZ naming a zone file reads it
