@@ -1598,8 +1598,8 @@ fn net_poll(n: &mut Net)
   n.in_if = IF_ETH;
   let mut k = 0;
   let mut more = true;
-  while more && k < RX_BUFS
-    invariant k <= RX_BUFS && net_ok(n)
+  while more && k < NIC_POLL
+    invariant k <= NIC_POLL && net_ok(n)
   {
     let flen = card_recv(&mut n.dev, &mut n.pkt);
     if flen == 0 {
