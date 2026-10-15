@@ -1364,6 +1364,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
 fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let mut r = pipe_ring(k.pipes, p);
   let count = r.n;
@@ -1394,6 +1395,7 @@ fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if pi_get(k.pipes, p, 2) == 0 {
     return EPIPE;
@@ -1421,6 +1423,7 @@ fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let first = pipe_read1(&mut k, pid, p, va, n);
   if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {
@@ -1444,6 +1447,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let first = pipe_write1(&mut k, pid, p, va, n);
   if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {

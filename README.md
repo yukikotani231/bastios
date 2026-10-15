@@ -143,7 +143,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |
 | `files/` | Files installed in memory at boot (built into the kernel image) |
 | `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
-| `docs/` | [Getting started](docs/getting-started.md), [using BastiOS](docs/using.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
+| `docs/` | [Getting started](docs/getting-started.md), [using BastiOS](docs/using.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [proof coverage](docs/proof-coverage.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
 
 ## Contributing
 

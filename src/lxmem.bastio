@@ -1231,6 +1231,7 @@ fn map_drop(k: &mut Kernel, pid: u64, i: u64)
 fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
   requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
   ensures kok(k)
+  ensures result == 0 || result == DISK_RETRY
 {
   let mut i = 0;
   while i < MAP_N
@@ -1314,6 +1315,7 @@ fn map_fork(k: &mut Kernel, pid: u64, c: u64)
 fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == DISK_RETRY
 {
   // MS_ASYNC 1, MS_INVALIDATE 2, MS_SYNC 4
   if flags & !7 != 0 || addr % 4096 != 0 || flags & 1 != 0 && flags & 4 != 0 {
@@ -1349,6 +1351,7 @@ fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
 fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == EFAULT
 {
   if addr % 4096 != 0 {
     return EINVAL;
@@ -1428,6 +1431,7 @@ fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
 fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM
 {
   if addr % 4096 != 0 || n >= 0x8000000000000000 {
     return EINVAL;

@@ -1384,6 +1384,7 @@ fn lx_fill(k: &mut Kernel, v: u64, n: u64)
 fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= 160
   ensures kok(k)
+  ensures result == 0 || result == EFAULT
 {
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
@@ -1396,6 +1397,7 @@ fn lx_put_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
 fn lx_zero_out(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= 64
   ensures kok(k)
+  ensures result == 0 || result == EFAULT
 {
   if va == 0 {
     return 0;
@@ -1598,6 +1600,7 @@ fn line_take(l: &mut Buf, t: u64)
 fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && row < FD_ROWS
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let want = smaller(n, READ_MAX);
   let mut done = 0;

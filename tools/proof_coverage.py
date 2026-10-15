@@ -93,6 +93,7 @@ def all_functions():
     return fns
 
 
+LISTED = 25
 TIERS = ['functional', 'frame', 'requires', 'none']
 
 
@@ -133,12 +134,15 @@ def markdown(fns):
     out.append(table(rows, ['File'] + head[1:]))
     out.append('')
     for area, stems in CRITICAL.items():
-        sel = [f for f in fns if stem(f['file']) in stems and f['tier'] in ('none', 'requires')
-               and f['ret'] and f['ret'] != 'bool' and f['body'] >= 4]
-        out.append('### %s: functions that return a value and promise nothing about it\n' % area)
-        out.append('Bodies of four lines or more, `bool` results left out.\n')
-        rows = [['`%s:%d`' % (f['file'], f['line']), '`%s`' % f['name'], f['tier'], f['ret']] for f in sel]
-        out.append(table(rows, ['Where', 'Function', 'Tier', 'Returns']) if rows else '_None._')
+        sel = [f for f in fns if stem(f['file']) in stems and f['tier'] != 'functional'
+               and f['ret'] == 'u64' and f['body'] >= 20]
+        sel.sort(key=lambda f: -f['body'])
+        out.append('### %s: the longest `u64`-returning functions whose result is not described\n' % area)
+        out.append('%d functions have a body of twenty lines or more and return a `u64` (a count, an address or -errno); '
+                   'the longest %d:\n' % (len(sel), min(len(sel), LISTED)))
+        rows = [['`%s:%d`' % (f['file'], f['line']), '`%s`' % f['name'], f['tier'], f['ret'], f['body']]
+                for f in sel[:LISTED]]
+        out.append(table(rows, ['Where', 'Function', 'Tier', 'Returns', 'Lines']) if rows else '_None._')
         out.append('')
     return '\n'.join(out)
 
