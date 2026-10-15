@@ -918,9 +918,9 @@ fn map_whole(k: &Kernel, pid: u64, first: u64, pages: u64) -> u64
   while i < MAP_N
     invariant i <= MAP_N
   {
-    let h = get(k.maps, mp_at(pid, i, 2));
-    if get(k.maps, mp_at(pid, i, 0)) == first + 1 && get(k.maps, mp_at(pid, i, 1)) == pages
-      && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE && get(k.maps, mp_at(pid, i, 3)) % 4096 == 0 {
+    let h = wget(k.maps, mp_at(pid, i, 2));
+    if wget(k.maps, mp_at(pid, i, 0)) == first + 1 && wget(k.maps, mp_at(pid, i, 1)) == pages
+      && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE && wget(k.maps, mp_at(pid, i, 3)) % 4096 == 0 {
       let row = of_get(k.ofd, h, 2);
       if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 && row_file(k.fs, row) != NO_FILE {
         return i;
@@ -942,8 +942,8 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
   ensures lx_user_addr_or_errno(result)
 {
   let have = oend - from;
-  let h = get(k.maps, mp_at(pid, ri, 2));
-  let off = get(k.maps, mp_at(pid, ri, 3));
+  let h = wget(k.maps, mp_at(pid, ri, 2));
+  let off = wget(k.maps, mp_at(pid, ri, 3));
   if h >= OFD_N || off % 4096 != 0 || off > 0xFFFFFFFFFFFF {
     return EINVAL;
   }
@@ -982,8 +982,8 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
     return ENOMEM;
   }
-  k.maps = set(k.maps, mp_at(pid, ri, 0), at + 1);
-  k.maps = set(k.maps, mp_at(pid, ri, 1), want);
+  wset(&mut k.maps, mp_at(pid, ri, 0), at + 1);
+  wset(&mut k.maps, mp_at(pid, ri, 1), want);
   if fresh {
     pset(&mut k.procs, pid, F_MMAP, at * 4096);
   }
@@ -1072,9 +1072,9 @@ fn map_no_write(k: &Kernel, pid: u64, from: u64, to: u64) -> bool
   while i < MAP_N
     invariant i <= MAP_N
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    let h = get(k.maps, mp_at(pid, i, 2));
-    let len = get(k.maps, mp_at(pid, i, 1));
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    let h = wget(k.maps, mp_at(pid, i, 2));
+    let len = wget(k.maps, mp_at(pid, i, 1));
     if first1 != 0 && h < OFD_N && first1 - 1 < to && (from < first1 - 1 || from - (first1 - 1) < len) {
       let kind = of_get(k.ofd, h, 0);
       let row = of_get(k.ofd, h, 2);
@@ -1103,7 +1103,7 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
     return;
   }
   let mut i = 0;
-  while i < MAP_N && get(k.maps, mp_at(pid, i, 0)) != 0
+  while i < MAP_N && wget(k.maps, mp_at(pid, i, 0)) != 0
     invariant i <= MAP_N && kok(k)
   {
     i = i + 1;
@@ -1122,8 +1122,8 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
       while j < MAP_N && i >= MAP_N
         invariant j <= MAP_N && kok(k)
       {
-        let h2 = get(k.maps, mp_at(pid, j, 2));
-        if get(k.maps, mp_at(pid, j, 0)) != 0 && h2 < OFD_N && of_get(k.ofd, h2, 0) == OF_FILE {
+        let h2 = wget(k.maps, mp_at(pid, j, 2));
+        if wget(k.maps, mp_at(pid, j, 0)) != 0 && h2 < OFD_N && of_get(k.ofd, h2, 0) == OF_FILE {
           let row2 = of_get(k.ofd, h2, 2);
           if row2 < FD_ROWS && fget(k.fs.ftab, row2, FD_MODE) / O_WRITE % 2 == 0 {
             map_drop(&mut k, pid, j);
@@ -1138,10 +1138,10 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
     return;
   }
   of_set(&mut k.ofd, h, 1, sat_add(of_get(k.ofd, h, 1), 1));
-  k.maps = set(k.maps, mp_at(pid, i, 0), first + 1);
-  k.maps = set(k.maps, mp_at(pid, i, 1), pages);
-  k.maps = set(k.maps, mp_at(pid, i, 2), h);
-  k.maps = set(k.maps, mp_at(pid, i, 3), off);
+  wset(&mut k.maps, mp_at(pid, i, 0), first + 1);
+  wset(&mut k.maps, mp_at(pid, i, 1), pages);
+  wset(&mut k.maps, mp_at(pid, i, 2), h);
+  wset(&mut k.maps, mp_at(pid, i, 3), off);
 }
 
 /// Writes the pages of record i of process pid that lie in window pages
@@ -1152,8 +1152,8 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
   requires kok(k) && pid < NPROC && i < MAP_N
   ensures kok(k)
 {
-  let first1 = get(k.maps, mp_at(pid, i, 0));
-  let h = get(k.maps, mp_at(pid, i, 2));
+  let first1 = wget(k.maps, mp_at(pid, i, 0));
+  let h = wget(k.maps, mp_at(pid, i, 2));
   if first1 == 0 || h >= OFD_N || of_get(k.ofd, h, 0) != OF_FILE {
     return 0;
   }
@@ -1166,8 +1166,8 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
     return 0;
   }
   let first = first1 - 1;
-  let end = sat_add(first, get(k.maps, mp_at(pid, i, 1)));
-  let off = get(k.maps, mp_at(pid, i, 3));
+  let end = sat_add(first, wget(k.maps, mp_at(pid, i, 1)));
+  let off = wget(k.maps, mp_at(pid, i, 3));
   let last = smaller(smaller(end, to), WPAGES);
   let mut p = first;
   if p < from {
@@ -1215,9 +1215,9 @@ fn map_drop(k: &mut Kernel, pid: u64, i: u64)
   requires kok(k) && pid < NPROC && i < MAP_N
   ensures kok(k)
 {
-  let first1 = get(k.maps, mp_at(pid, i, 0));
-  let h = get(k.maps, mp_at(pid, i, 2));
-  k.maps = set(k.maps, mp_at(pid, i, 0), 0);
+  let first1 = wget(k.maps, mp_at(pid, i, 0));
+  let h = wget(k.maps, mp_at(pid, i, 2));
+  wset(&mut k.maps, mp_at(pid, i, 0), 0);
   if first1 != 0 && h < OFD_N {
     unref_value(&mut k, FD_OFD + h);
   }
@@ -1246,8 +1246,8 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
   while i < MAP_N
     invariant i <= MAP_N && kok(k)
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    let pages = get(k.maps, mp_at(pid, i, 1));
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    let pages = wget(k.maps, mp_at(pid, i, 1));
     if first1 != 0 {
       let first = first1 - 1;
       let end = sat_add(first, pages);
@@ -1255,11 +1255,11 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
         map_drop(&mut k, pid, i);                     // all of it
       } else if from <= first && first < to {
         // The head goes: the record starts at `to`.
-        k.maps = set(k.maps, mp_at(pid, i, 0), to + 1);
-        k.maps = set(k.maps, mp_at(pid, i, 1), end - to);
-        k.maps = set(k.maps, mp_at(pid, i, 3), sat_add(get(k.maps, mp_at(pid, i, 3)), (to - first) * 4096));
+        wset(&mut k.maps, mp_at(pid, i, 0), to + 1);
+        wset(&mut k.maps, mp_at(pid, i, 1), end - to);
+        wset(&mut k.maps, mp_at(pid, i, 3), sat_add(wget(k.maps, mp_at(pid, i, 3)), (to - first) * 4096));
       } else if first < from && from < end && end <= to {
-        k.maps = set(k.maps, mp_at(pid, i, 1), from - first);   // the tail goes
+        wset(&mut k.maps, mp_at(pid, i, 1), from - first);   // the tail goes
       } else if first < from && to < end {
         // A hole in the middle: one record cannot say that, and a page
         // mapped there later must never reach the file. The rest was
@@ -1293,17 +1293,17 @@ fn map_fork(k: &mut Kernel, pid: u64, c: u64)
   while i < MAP_N
     invariant i <= MAP_N && kok(k)
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    let h = get(k.maps, mp_at(pid, i, 2));
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    let h = wget(k.maps, mp_at(pid, i, 2));
     if first1 != 0 && h < OFD_N {
       of_set(&mut k.ofd, h, 1, sat_add(of_get(k.ofd, h, 1), 1));
-      k.maps = set(k.maps, mp_at(c, i, 0), first1);
+      wset(&mut k.maps, mp_at(c, i, 0), first1);
     } else {
-      k.maps = set(k.maps, mp_at(c, i, 0), 0);
+      wset(&mut k.maps, mp_at(c, i, 0), 0);
     }
-    k.maps = set(k.maps, mp_at(c, i, 1), get(k.maps, mp_at(pid, i, 1)));
-    k.maps = set(k.maps, mp_at(c, i, 2), h);
-    k.maps = set(k.maps, mp_at(c, i, 3), get(k.maps, mp_at(pid, i, 3)));
+    wset(&mut k.maps, mp_at(c, i, 1), wget(k.maps, mp_at(pid, i, 1)));
+    wset(&mut k.maps, mp_at(c, i, 2), h);
+    wset(&mut k.maps, mp_at(c, i, 3), wget(k.maps, mp_at(pid, i, 3)));
     i = i + 1;
   }
 }
@@ -1409,8 +1409,8 @@ fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
   while i < MAP_N
     invariant i <= MAP_N
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < get(k.maps, mp_at(pid, i, 1)) {
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < wget(k.maps, mp_at(pid, i, 1)) {
       return true;
     }
     i = i + 1;
