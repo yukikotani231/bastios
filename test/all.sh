@@ -25,6 +25,7 @@ JOBS=${JOBS:-$( [ "$(nproc 2>/dev/null || echo 1)" -ge 4 ] && echo 3 || echo 1 )
 tests=(
   "trusted_base|c|test/trusted_base.sh"
   "sysfuzz_calls|c|test/sysfuzz_calls.sh"
+  "entry area|c|test/entry_area_test.sh"
   "aarch64|d|test/aarch64_test.sh --build"
   "aarch64 64 cpus|d|BOOT_ONLY=1 SMP=64 TIMEOUT=240 test/aarch64_test.sh"
   "aarch64 gicv2|d|GIC=2 SMP=2 test/aarch64_test.sh"
