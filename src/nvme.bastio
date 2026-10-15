@@ -80,6 +80,9 @@ struct Nvme {
   ns: u32,            // the namespace used: the first active one
   busy: bool,         // a command started by nvme_begin has not been reaped
   irq: bool,          // I/O completions raise MSI-X message 0 (nvme_msix)
+  extra: Vec[Extra],  // empty, or VIO_BATCH pages (nvme_install): the PRP list, then data pages for blocks 1 on
+  pages: u64,         // the first `pages` data pages after the list are there
+  maxn: u64,          // blocks one command may move: the drive's MDTS, at most VIO_BATCH (1: no batches)
 }
 
 spec fn nvme_ok(n: &Nvme) -> bool {
@@ -87,6 +90,7 @@ spec fn nvme_ok(n: &Nvme) -> bool {
   && n.stride % 4 == 0 && 4 <= n.stride && NV_DB + 4 * n.stride <= mmio_len(n.regs)
   && n.asq_at < Q_N && n.sq_at < Q_N && n.acq_at < Q_N * 2 && n.cq_at < Q_N * 2
   && (n.shift == 0 || n.shift == 3) && 1 <= n.ns && n.ns <= 4294967294
+  && n.maxn >= 1 && n.maxn <= VIO_BATCH && n.pages < VIO_BATCH && (n.pages == 0 || vlen(n.extra) == VIO_BATCH)
 }
 
 fn nr32(n: &mut Nvme, off: u64) -> u32
@@ -288,10 +292,11 @@ fn nvme_disable(n: &mut Nvme) -> bool
 /// pages. A drive that cannot be started is left with `sectors` 0.
 fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, irq: bool) -> Nvme
   requires mmio_base(regs) % 4096 == 0 && mmio_len(regs) <= NVME_MAX_LEN && mmio_len(regs) >= 0x2000
-  ensures nvme_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
+  ensures nvme_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs) && vlen(result.extra) == 0
 {
   let mut n = Nvme { regs: regs, asq: dma_lend(f0), acq: dma_lend(f1), sq: dma_lend(f2), cq: dma_lend(f3),
-    buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, ns: 1, busy: false, irq: false };
+    buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, ns: 1, busy: false, irq: false,
+    extra: vec_new[Extra](), pages: 0, maxn: 1 };
   let cap_lo = cast[u64](nr32(&mut n, NV_CAP));
   let cap_hi = cast[u64](nr32(&mut n, NV_CAP + 4));
   let mut stride = 4;
@@ -337,6 +342,17 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
     let first = dma_read32(&mut n.buf, 0);
     if 1 <= first && first <= 4294967294 {
       n.ns = first;
+    }
+  }
+  // Blocks one command may move: MDTS (controller byte 77) is a power of two
+  // in units of the smallest page, 4 KiB here; 0 means no limit. A drive that
+  // does not answer gets single-block commands.
+  if nvme_cmd(&mut n, false, OP_IDENTIFY, 0, dma_phys(n.buf), 1, 0, 0) {
+    let mdts = cast[u64](dma_read8(&mut n.buf, 77)) % 256;
+    if mdts == 0 || mdts >= 5 {
+      n.maxn = VIO_BATCH;
+    } else {
+      n.maxn = 1 << mdts;
     }
   }
   // Its size in blocks (bytes 0-7), and the size of a block from the LBA
@@ -418,6 +434,15 @@ fn nvme_free(n: Nvme, m: &mut Mem) -> Mmio
   give_page(&mut m, dma_take(d.sq));
   give_page(&mut m, dma_take(d.cq));
   give_page(&mut m, dma_take(d.buf));
+  while vec_len(d.extra) > 0
+    invariant mem_ok(m)
+  {
+    match vec_pop(&mut d.extra) {
+      Extra::None => {},
+      Extra::Page(x) => { give_page(&mut m, dma_take(x)); },
+    }
+  }
+  vec_free(d.extra);
   return d.regs;
 }
 
@@ -599,4 +624,183 @@ fn nvme_fetch(n: &mut Nvme, out: &mut Bytes, at: u64)
   ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy) && blen(out) == old(blen(out))
 {
   nvme_out(&mut n.buf, 0, 4096, &mut out, at);
+}
+
+/// Gives the drive the pages of batched commands: `extra` holds VIO_BATCH
+/// entries, the first the PRP list and the rest data pages for blocks 1 on;
+/// `pages` is how many data pages (from the first) are there.
+fn nvme_install(n: &mut Nvme, extra: Vec[Extra], pages: u64)
+  requires nvme_ok(n) && vlen(extra) == VIO_BATCH && pages < VIO_BATCH && vlen(n.extra) == 0
+  ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
+{
+  vec_free(n.extra);
+  n.extra = extra;
+  n.pages = pages;
+}
+
+/// The address of extra page i (0 is the list), or 0 if it is not there.
+fn nvme_extra_addr(n: &mut Nvme, i: u64) -> u64
+  requires nvme_ok(n) && i < VIO_BATCH
+  ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
+{
+  if n.pages == 0 {
+    return 0;
+  }
+  match vec_swap(&mut n.extra, i, Extra::None) {
+    Extra::None => { return 0; },
+    Extra::Page(x) => {
+      let a = dma_phys(x);
+      match vec_swap(&mut n.extra, i, Extra::Page(x)) {
+        Extra::None => {},
+        Extra::Page(_y) => { unreachable; },
+      }
+      return a;
+    },
+  }
+}
+
+/// How many consecutive blocks from sector `lba` one command can take (up
+/// to `want`): the pages there are, the drive's MDTS and the end of the disk.
+fn nvme_room(n: &Nvme, lba: u64, want: u64) -> u64
+  requires nvme_ok(n)
+  ensures result >= 1 && result <= VIO_BATCH
+{
+  if want <= 1 || n.pages == 0 || n.maxn <= 1 || lba >= n.sectors {
+    return 1;
+  }
+  let mut c = want;
+  if c > n.pages + 1 {
+    c = n.pages + 1;
+  }
+  if c > n.maxn {
+    c = n.maxn;
+  }
+  let left = (n.sectors - lba) / 8;
+  if c > left {
+    c = left;
+  }
+  if c < 1 {
+    return 1;
+  }
+  return c;
+}
+
+/// Starts reading `cnt` (from nvme_room) consecutive blocks from sector
+/// `lba` in one command: the first into the data page, the rest into the
+/// extra pages through a PRP list. With `wr`, writes the blocks nvme_stage
+/// put in place instead. False if a command is running or a page is missing.
+fn nvme_begin_n(n: &mut Nvme, lba: u64, cnt: u64, wr: bool) -> bool
+  requires nvme_ok(n) && cnt >= 1 && cnt <= VIO_BATCH
+  ensures nvme_ok(n) && n.sectors == old(n.sectors) && (result ==> n.busy)
+{
+  if n.busy || cnt > n.pages + 1 || cnt > n.maxn || lba % 8 != 0 || lba >= n.sectors || (n.sectors - lba) / 8 < cnt {
+    return false;
+  }
+  let mut prp2 = 0;
+  if cnt == 2 {
+    prp2 = nvme_extra_addr(&mut n, 1);
+    if prp2 == 0 {
+      return false;
+    }
+  } else if cnt > 2 {
+    // The list holds the addresses of pages 1 .. cnt - 1, in 8 bytes each.
+    let mut ok = true;
+    let mut j = 1;
+    while j < cnt
+      invariant j >= 1 && j <= cnt && cnt <= VIO_BATCH && nvme_ok(n)
+    {
+      let a = nvme_extra_addr(&mut n, j);
+      if a == 0 {
+        ok = false;
+      }
+      match vec_swap(&mut n.extra, 0, Extra::None) {
+        Extra::None => { ok = false; },
+        Extra::Page(x) => {
+          let mut d = x;
+          dma_write64(&mut d, (j - 1) * 8, a);
+          match vec_swap(&mut n.extra, 0, Extra::Page(d)) {
+            Extra::None => {},
+            Extra::Page(_y) => { unreachable; },
+          }
+        },
+      }
+      j = j + 1;
+    }
+    prp2 = nvme_extra_addr(&mut n, 0);
+    if !ok || prp2 == 0 {
+      return false;
+    }
+  }
+  let mut dlba = lba;
+  let mut c12 = cast[u32](cnt * 8 - 1);
+  if n.shift == 3 {
+    dlba = lba / 8;
+    c12 = cast[u32](cnt - 1);
+  }
+  let mut code: u8 = OP_READ;
+  if wr {
+    code = OP_WRITE;
+  }
+  sqe(&mut n.sq, n.sq_at, code, n.ns, dma_phys(n.buf), wrap[u32](dlba), cast[u32](dlba / 4294967296), c12);
+  dma_write64(&mut n.sq, n.sq_at * 64 + 32, prp2);
+  n.sq_at = (n.sq_at + 1) % Q_N;
+  ring(&mut n, 2, cast[u32](n.sq_at));
+  n.busy = true;
+  return true;
+}
+
+/// Puts src[at ..] where block j of the next nvme_begin_n write is taken
+/// from. False where there is no such page.
+fn nvme_stage(n: &mut Nvme, j: u64, src: &Bytes, at: u64) -> bool
+  requires nvme_ok(n)
+  ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy)
+{
+  if n.busy || j >= VIO_BATCH || at > blen(src) || blen(src) - at < 4096 {
+    return false;
+  }
+  if j == 0 {
+    nvme_in(&mut n.buf, 0, 4096, src, at);
+    return true;
+  }
+  if n.pages == 0 || j > n.pages {
+    return false;
+  }
+  match vec_swap(&mut n.extra, j, Extra::None) {
+    Extra::None => { return false; },
+    Extra::Page(x) => {
+      let mut d = x;
+      nvme_in(&mut d, 0, 4096, src, at);
+      match vec_swap(&mut n.extra, j, Extra::Page(d)) {
+        Extra::None => {},
+        Extra::Page(_y) => { unreachable; },
+      }
+      return true;
+    },
+  }
+}
+
+/// After a read started by nvme_begin_n has finished well: block j of it
+/// into out[at .. at + 4096].
+fn nvme_fetch_n(n: &mut Nvme, j: u64, out: &mut Bytes, at: u64)
+  requires nvme_ok(n) && at + 4096 <= blen(out)
+  ensures nvme_ok(n) && n.sectors == old(n.sectors) && n.busy == old(n.busy) && blen(out) == old(blen(out))
+{
+  if j == 0 {
+    nvme_out(&mut n.buf, 0, 4096, &mut out, at);
+    return;
+  }
+  if n.pages == 0 || j > n.pages {
+    return;
+  }
+  match vec_swap(&mut n.extra, j, Extra::None) {
+    Extra::None => {},
+    Extra::Page(x) => {
+      let mut d = x;
+      nvme_out(&mut d, 0, 4096, &mut out, at);
+      match vec_swap(&mut n.extra, j, Extra::Page(d)) {
+        Extra::None => {},
+        Extra::Page(_y) => { unreachable; },
+      }
+    },
+  }
 }

@@ -118,6 +118,50 @@ fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, 
     mmio_release(&mut win, nvme_free(n, &mut m));
     return Drive::None;
   }
+  // Pages for batched commands (nvme_begin_n): the PRP list and data pages
+  // for blocks 1 on, free pages from the top of the pool down. Pages that
+  // are not there only make the batches shorter.
+  let mut extra = vec_new[Extra]();
+  let mut pages = 0;
+  let mut more = true;
+  let mut top = len(m.bm);
+  while vec_len(extra) < VIO_BATCH
+    invariant mem_ok(m) && vlen(extra) <= VIO_BATCH && pages <= vlen(extra) && top <= len(m.bm)
+  {
+    let mut a = NPAGES;
+    while top > 0 && a == NPAGES
+      invariant mem_ok(m) && top <= len(m.bm) && (a == NPAGES || (a < len(m.bm) && get(m.bm, a) == 1))
+    {
+      top = top - 1;
+      if get(m.bm, top) == 1 {
+        a = top;
+      }
+    }
+    if more && a < NPAGES {
+      let x = virtio_extra(&mut m, take_low_page(&mut m, a));
+      match x {
+        Extra::None => {
+          more = false;
+          vec_push(&mut extra, Extra::None);
+        },
+        Extra::Page(d) => {
+          vec_push(&mut extra, Extra::Page(d));
+          pages = pages + 1;
+        },
+      }
+    } else {
+      more = false;
+      vec_push(&mut extra, Extra::None);
+    }
+  }
+  // The first page is the list; data pages are the ones after it.
+  if pages > 0 {
+    pages = pages - 1;
+  }
+  if pages >= VIO_BATCH {
+    pages = VIO_BATCH - 1;
+  }
+  nvme_install(&mut n, extra, pages);
   if cap != 0 {
     let on = nvme_msix(&mut n, table, msi, V_DISK);
   }
@@ -737,7 +781,7 @@ fn blk_room(b: &Blk, lba: u64, want: u64) -> u64
   match b {
     Blk::Virtio(v) => { return virtio_room(v, lba, want); },
     Blk::Ata(a) => { return 1; },
-    Blk::Nvme(n) => { return 1; },
+    Blk::Nvme(n) => { return nvme_room(n, lba, want); },
     Blk::Ahci(h) => { return 1; },
     Blk::Usb(x) => { return 1; },
     Blk::Loop(l) => { return 1; },
@@ -758,7 +802,11 @@ fn blk_begin_n(b: &mut Blk, lba: u64, n: u64, wr: bool) -> bool
       return ok;
     },
     Blk::Ata(a) => { b = Blk::Ata(a); return false; },
-    Blk::Nvme(x) => { b = Blk::Nvme(x); return false; },
+    Blk::Nvme(mut x) => {
+      let ok = nvme_begin_n(&mut x, lba, n, wr);
+      b = Blk::Nvme(x);
+      return ok;
+    },
     Blk::Ahci(h) => { b = Blk::Ahci(h); return false; },
     Blk::Usb(x) => { b = Blk::Usb(x); return false; },
     Blk::Loop(l) => { b = Blk::Loop(l); return false; },
@@ -778,7 +826,11 @@ fn blk_stage(b: &mut Blk, j: u64, buf: &Bytes, at: u64) -> bool
       return ok;
     },
     Blk::Ata(a) => { b = Blk::Ata(a); return false; },
-    Blk::Nvme(x) => { b = Blk::Nvme(x); return false; },
+    Blk::Nvme(mut x) => {
+      let ok = nvme_stage(&mut x, j, buf, at);
+      b = Blk::Nvme(x);
+      return ok;
+    },
     Blk::Ahci(h) => { b = Blk::Ahci(h); return false; },
     Blk::Usb(x) => { b = Blk::Usb(x); return false; },
     Blk::Loop(l) => { b = Blk::Loop(l); return false; },
@@ -796,7 +848,10 @@ fn blk_fetch_n(b: &mut Blk, j: u64, buf: &mut Bytes, at: u64)
       b = Blk::Virtio(v);
     },
     Blk::Ata(a) => { b = Blk::Ata(a); },
-    Blk::Nvme(x) => { b = Blk::Nvme(x); },
+    Blk::Nvme(mut x) => {
+      nvme_fetch_n(&mut x, j, &mut buf, at);
+      b = Blk::Nvme(x);
+    },
     Blk::Ahci(h) => { b = Blk::Ahci(h); },
     Blk::Usb(x) => { b = Blk::Usb(x); },
     Blk::Loop(l) => { b = Blk::Loop(l); },
