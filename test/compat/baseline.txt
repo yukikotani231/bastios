@@ -100,6 +100,7 @@ busybox: hostname
 busybox: id -u
 busybox: kill -0
 busybox: ln -s
+busybox: rm -r: a directory whose first name has hard links (the file takes a link's name; the listing must not skip it)
 busybox: ls -l
 busybox: md5sum
 busybox: mkdir -p
@@ -1398,6 +1399,14 @@ alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
 alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+srcbuild: srcbuild: unpack the Alpine root, install gcc, make and the kernel headers
+srcbuild: srcbuild: fetch the source tarballs
+srcbuild: zlib 1.3.1: configure, make, and its own test programs
+srcbuild: lua 5.4.7: make linux, run a script
+srcbuild: sqlite 3.53 (amalgamation): gcc, then SQL
+srcbuild: git 2.53: make install, then commit, clone, gc and fsck
+srcbuild: curl 8.18: configure, make, fetch from the host
+srcbuild: busybox 1.37 (the compat suite's applet set): allnoconfig, make, and BusyBox's own testsuite for sed, grep, sort, cut and tr
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1

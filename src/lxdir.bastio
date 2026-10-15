@@ -188,6 +188,17 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
   let mut out = balloc(DENT_BUF);
   let mut used = 0;
   let mut i = of_get(k.ofd, h, 3);
+  // A file that lost its own name to one of its hard links (disk_take_name)
+  // now sits in a lower entry than the name it took: a listing that has
+  // moved past that entry would never return it, and `rm -r` would stop at
+  // a directory it believes empty. Start again after the dot entries; the
+  // names already removed are gone, the others come twice at worst.
+  if dir >= DIR_VFS && dir < DIR_PROC && i > 2 {
+    if of_get(k.ofd, h, OF_DGEN) != k.fs.disk.take_gen {
+      i = 2;
+    }
+  }
+  of_set(&mut k.ofd, h, OF_DGEN, k.fs.disk.take_gen);
   let mut more = true;
   let mut full = false;
   while more && i < 0x100000000

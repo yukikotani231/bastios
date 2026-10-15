@@ -171,6 +171,7 @@ struct DiskFs {
   free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); 0 after one is freed
   foreign: bool,        // the disk holds something else, and is left alone
   links: bool,          // a hard link entry may exist: false lets disk_links skip counting them
+  take_gen: u64,        // counts disk_take_name: a name that moved to a lower entry, which a directory listing under way may have passed (lx_getdents)
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
@@ -842,7 +843,7 @@ fn disk_mount(dev: Blk) -> DiskFs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
-    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, free0: 0, foreign: false, links: true };
+    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, free0: 0, foreign: false, links: true, take_gen: 0 };
   if n < DATA_B0 + 16 || !blk_read(&mut d.dev, 0, &mut d.sec) {
     return d;
   }
@@ -1484,6 +1485,7 @@ fn disk_take_name(d: &mut DiskFs, i: u64, l: u64) -> bool
     ent_flush(&mut d, l);               // if this fails, the next mount drops l
   }
   ix_add(&mut d, i);
+  d.take_gen = wrap_add(d.take_gen, 1);
   return true;
 }
 
