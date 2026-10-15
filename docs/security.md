@@ -82,6 +82,8 @@ whoever its mode admits.
 | Shared file mappings | `mmap` refuses a writable `MAP_SHARED` mapping of a file opened without write permission, and `mprotect` refuses to make one writable later (`EACCES`). Only a file opened for writing is mapped through the page cache's own pages; from a read-only descriptor, a shared mapping is a copy, so even a mapping `mprotect` cannot see (past the `MAP_N` recorded per process) changes no one else's view of the file. The cost: such a mapping does not see later writes to the file. | `lx_mmap`, `src/linux.bastio`; `map_no_write`, `src/lxmem.bastio` |
 | Unix sockets | `bind` to a path makes a socket file there, with the checks for making any file (write and search permission on the directory) and the umask; `connect` needs write permission on that file, so its mode, owner and group say who may connect. `connect` finds the socket by the file itself, so a renamed socket file or another hard link to it still leads there. | `ux_mkfile`, `ux_may_connect`, `src/lxunix.bastio` |
 | Devices | `/dev/loop0`..`7` and `/dev/loop-control` are `rw-rw----` for root and group disk (6), and open checks it: a loop device reads and writes whatever file it is bound to. `/dev/console` is `rw--w----` for root, and open checks it. `/dev/null`, `zero`, `random`, `urandom` and `tty` are open to everyone; there are no raw disk or memory devices. | `lx_open`, `src/lxfd.bastio`; `dev_meta`, `src/lxdev.bastio` |
+| Address space layout | Each `execve` draws 128 bits from the `/dev/urandom` generator. They become the 16 bytes `AT_RANDOM` points at (what libc takes its stack-protector canary and pointer guard from), and they move the layout, as Linux's `kernel.randomize_va_space` does. Level 1: the stack (up to 512 KiB down, in steps of 16 bytes), the top of the mmap area and the dynamic linker (up to 64 GiB down), and a position-independent program (up to 16 GiB up). Level 2, the default: the program break too (up to 32 MiB above the image). Level 0, or `personality(ADDR_NO_RANDOMIZE)` (kept across `execve`), turns it off. A fixed-address program (`ET_EXEC`) cannot move. | `layout_rnd`, `src/lxdev.bastio`; `load_image`, `src/proc.bastio`; `init_stack`, `src/elf.bastio` |
+| Other users' layout | `/proc/PID/maps`, `auxv`, `mem` and `io` of a process open (`EACCES`) only for a process that could ptrace it: root, or the same real, effective, saved and file-system ids. They would give the layout away. | `proc_secret`, `src/lxprocfs.bastio`; `lx_open_tail`, `src/lxfd.bastio` |
 | Ports | binding a UDP or TCP port below 1024 is root's (`EACCES`). | `may_bind`, `src/lxsock.bastio` |
 | Native calls | Any program can raise `int 0x80`, the native ABI (`src/syscall.bastio`), a Linux program included. Its file, network, power and reboot calls check no permissions, so a process that is not root may make only the calls that touch nothing of anyone else's: console I/O, starting and waiting for its own children (which keep its ids), yielding, its pid, `SYS_INFO`'s counters, the process list, and `SYS_KILL` of a process `may_signal` allows. Everything else gives `NO_RESULT`. | `native_allowed`, `src/syscall.bastio`; `spawn`, `src/proc.bastio` |
 
@@ -109,8 +111,7 @@ Known gaps, most serious first.
    Linux it is `ENXIO` without a controlling terminal); names of unix
    sockets in the abstract namespace (a leading 0 byte) have no
    permissions, as on Linux.
-4. Not implemented, so not a hole: `/proc/PID/mem`, `environ`
-   and `maps`, `chroot`, `iopl` and `ioperm`, `syslog`, `swapon` and
+4. Not implemented, so not a hole: `/proc/PID/environ`, `chroot`, `iopl` and `ioperm`, `syslog`, `swapon` and
    `pivot_root` all fail (`ENOSYS` or missing). `process_vm_readv`,
    `process_vm_writev`, `pidfd_getfd`, `kcmp` and `ptrace` (`PTRACE_ATTACH`
    and `PTRACE_SEIZE`; `PTRACE_TRACEME` lets a process's parent trace it,
@@ -125,3 +126,30 @@ Known gaps, most serious first.
    the arithmetic flags, the trap flag (which a user program may set itself)
    and the fs base from the saved context, and checks rip, rsp and the fs
    base are user addresses.
+
+## Memory protections: where they stand
+
+What the page tables enforce for a user process, and what they do not.
+
+- **Layout.** Randomized as the "Address space layout" row says, with
+  fewer bits than Linux has: the stack moves by 15 bits, the mmap area by
+  24 bits of pages (the window is 512 GiB, Linux's is 128 TiB). The vDSO
+  page still lies at a fixed place just under the stack, and so does the
+  first part of the window (a non-PIE program).
+- **No execute (NX) and W^X: not done.** The CPU's NX bit is off
+  (`EFER.NXE` is never set), so every user page the program may read, it
+  may also run. Stack and heap are executable. The kernel does not
+  record `PROT_EXEC` anywhere. Closing this takes a page-table
+  primitive in bastiolang's prelude (an execute bit next to
+  `pt_set_access`) and every place that maps a page to say whether it may
+  run.
+- **SMEP and SMAP: not needed.** The kernel runs on its own page table
+  and loads it on every entry from user mode (`trap_alias`); the user
+  pages are not in it. A kernel jump to user code, or a kernel read of a
+  user address the kernel was not asked to read, finds nothing mapped.
+  The kernel reads and writes a process's memory only through that
+  process's own tables (`src/usermem.bastio`, proved).
+- **The kernel's own pages.** The kernel image and RAM are mapped by
+  1 GiB pages, read-write and executable. A write through a kernel bug
+  could change kernel code. The proofs say the kernel makes no such write;
+  this would be a second line.
