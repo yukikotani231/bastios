@@ -640,6 +640,14 @@ const SK_WAIT: u64 = 0x8000000000000000;
 // What lx_write_fd returns when the console's ring has no room for the
 // write: not an errno, and never returned to the process.
 const CON_FULL: u64 = 0x8000000000000001;
+
+/// What a read or write that was asked for n bytes may return: a count of
+/// at most n, or a failure (-errno, or an internal marker such as CON_FULL
+/// or DISK_RETRY: all have the top bit set). A call can never claim to
+/// have moved more than it was given room for.
+spec fn lx_count_or_fail(r: u64, n: u64) -> bool {
+  r <= n || r >= 0x8000000000000000
+}
 // What a file read or write returns when the disk has not caught up
 // (VFS_MISS): the caller sleeps in DISKWAIT and its call restarts.
 const DISK_RETRY: u64 = 0x8000000000000002;
