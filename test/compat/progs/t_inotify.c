@@ -199,6 +199,20 @@ int main(void) {
     EXPECT("/proc/sys/fs/inotify/max_queued_events", max > 0);
     EXPECT("/proc/sys/fs/inotify/max_user_instances", proc_num("/proc/sys/fs/inotify/max_user_instances") > 0);
     EXPECT("/proc/sys/fs/inotify/max_user_watches", proc_num("/proc/sys/fs/inotify/max_user_watches") > 0);
+    {
+        /* root may raise a limit; it is kept and read back */
+        long old = proc_num("/proc/sys/fs/inotify/max_user_instances");
+        int lf = open("/proc/sys/fs/inotify/max_user_instances", O_WRONLY);
+        int okw = lf >= 0 && dprintf(lf, "%ld\n", old + 500) > 0;
+        if (lf >= 0)
+            close(lf);
+        EXPECT("max_user_instances is writable and reads back", okw && proc_num("/proc/sys/fs/inotify/max_user_instances") == old + 500);
+        lf = open("/proc/sys/fs/inotify/max_user_instances", O_WRONLY);
+        if (lf >= 0) {
+            dprintf(lf, "%ld\n", old);
+            close(lf);
+        }
+    }
     inotify_add_watch(in, "in_f", IN_ACCESS | IN_MODIFY);
     for (long i = 0; i < max && i < 100000; i++) {
         lseek(fd, 0, SEEK_SET);
