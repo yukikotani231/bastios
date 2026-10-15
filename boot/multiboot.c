@@ -207,6 +207,17 @@ uint64_t bst_boot_take(uint64_t size, uint64_t align) {
         uint64_t at = a > (uint64_t)_end ? a : (uint64_t)_end;
         at = (at + align - 1) & ~(align - 1);
         if (at < a || at + size > end || at + size > IDENT_LIMIT) continue;
+        /* What lies below `at` stays available, as an entry of its own (the
+         * prelude's pool takes RAM between 1 MiB and the image from it). */
+        uint32_t used = rd32(mb + 44);
+        if (at > a && used / 24 < MAX_REGIONS) {
+            uint8_t *x = mmap1 + used;
+            put32(x, 20);
+            put64(x + 4, a);
+            put64(x + 12, at - a);
+            put32(x + 20, 1);
+            put32((uint8_t *)mb + 44, used + 24);
+        }
         put64(m + 4, at + size);
         put64(m + 12, end - (at + size));
         return at;
