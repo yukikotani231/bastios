@@ -67,3 +67,9 @@ error[E0308]: mismatched types
 == rust: a crate with a path dependency, release build
 $ bb mkdir -p /disk/r/work/app/src /disk/r/work/app/words/src && bb printf '[package]\nname = "words"\nversion = "0.2.0"\nedition = "2021"\n' > /disk/r/work/app/words/Cargo.toml && bb printf 'pub fn count(s: &str) -> usize { s.split_whitespace().count() }\n' > /disk/r/work/app/words/src/lib.rs && bb printf '[package]\nname = "app"\nversion = "0.1.0"\nedition = "2021"\n\n[dependencies]\nwords = { path = "words" }\n' > /disk/r/work/app/Cargo.toml && bb printf 'fn main() { println!("{}", words::count("a b  c\\td")); }\n' > /disk/r/work/app/src/main.rs; rc sh -c 'cd /work/app && cargo build --release --offline -q 2>&1 && ./target/release/app'
 4
+
+== rust: crates from a vendored registry (rayon, serde derive)
+$ bb mkdir -p /disk/r/work/crates/.cargo && cd /disk/r/work && bb tar -xf /disk/vendor.tar && bb cp /disk/crate/Cargo.toml /disk/crate/Cargo.lock crates/ && bb mkdir -p crates/src && bb cp /disk/crate/src/main.rs crates/src/ && bb printf '[source.crates-io]\nreplace-with = "v"\n[source.v]\ndirectory = "/work/vendor"\n' > crates/.cargo/config.toml; cd /; rc sh -c 'cd /work/crates && cargo run --offline -q 2>&1'
+200003
+{"x":3,"y":-4}
+true
