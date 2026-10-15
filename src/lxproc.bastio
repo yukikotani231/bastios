@@ -166,13 +166,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   put_space(&mut k.spaces, c, Space::Mapped(t));
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, c));
   put_fpu(&mut k.fpus, c, Fpu::State(fpu));
-  let mut f = 0;
-  while f < STRIDE
-    invariant f <= STRIDE && ptab_ok(k.procs)
-  {
-    pset(&mut k.procs, c, f, pget(k.procs, pid, f));
-    f = f + 1;
-  }
+  wcopy(&mut k.procs, c * STRIDE, pid * STRIDE, STRIDE);
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
@@ -204,6 +198,9 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   cwd_fork(&mut k.croot, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
   nsk_fork(&mut k.mns, pid, c);             // and the same others (src/lxnsk.bastio)
+  if (nsk_of(k, NSK_TIME, c) != 0) != (nsk_of(k, NSK_TIME, pid) != 0) {
+    tm_vdso(&mut k, c);                     // the page it copied says what the parent's time namespace did
+  }
   pidns_enter(&mut k, pid, c);              // with an id in the PID namespace children start in
   pset(&mut k.procs, c, F_SIGPEND, 0);
   pset(&mut k.procs, c, F_RESTART, 0);
@@ -329,6 +326,9 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   sig_reset(&mut k.sigact, pid, true);
   pset(&mut k.procs, pid, F_ALTSIZE, 0);  // and the alternate signal stack
   pr_exec(&mut k, pid);                   // the name becomes the program's
+  if nsk_of(k, NSK_TIME, pid) != 0 {
+    tm_vdso(&mut k, pid);                 // its new vDSO page starts out for the first time namespace
+  }
   ptimer_clear(&mut k, pid);              // execve deletes POSIX timers
   exec_ids(&mut k, pid, from_file, image); // set-user-ID and set-group-ID files
   match take_fpu(&mut k.fpus, pid) {

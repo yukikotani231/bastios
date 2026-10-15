@@ -330,7 +330,10 @@ fn um_proc(d: u64) -> u64
 fn um_which(d: u64) -> u64
   ensures result < UMF_N
 {
-  return d % UMF_N;
+  if d < PROC_DEV + PSYS + SY_UM {
+    return 0;
+  }
+  return (d - PROC_DEV - PSYS - SY_UM) % UMF_N;
 }
 
 /// The device of /proc/P/name (x[from..to]), or 0.
