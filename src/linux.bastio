@@ -2296,9 +2296,10 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   if d.kind == K_DEV && is_loop(d.x) {
     return loop_seek(&mut k, pid, fd, d.x, off, whence);
   }
-  // Only /proc/PID/auxv and mem seek (a debugger reads them in pieces); programs that
-  // seek in the other /proc files have always been told 0 and left at the start.
-  if d.kind == K_DEV && ((d.x >= PROC_DEV + 16 && (d.x - PROC_DEV) % 16 == 2) || is_mem_file(d.x)) {   // PF_AUXV, PF_MEM
+  // A /proc file seeks: a debugger reads auxv and mem in pieces, and top, vmstat
+  // and sar read the same file again after rewind (the next read generates
+  // the file afresh and hands out the part past the offset).
+  if d.kind == K_DEV && d.x >= PROC_DEV {
     return proc_seek(&mut k, pid, fd, off, whence);   // src/lxprocfs.bastio
   }
   if d.kind == K_DEV {

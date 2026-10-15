@@ -312,6 +312,10 @@ steps = [
     # terminal: ash gives each background job its own /dev/null otherwise,
     # and open files system-wide run out first.)
     ("i=0; while [ $i -lt 120 ]; do sleep 10 </dev/tty & i=$((i+1)); done; n=0; for d in /proc/[0-9]*; do n=$((n+1)); done; [ $n -gt 120 ] && [ -d /proc/120 ] && echo many$((1+1)); wait", b"\r\nmany2\r\n", b"\n# "),
+    # What procps, sysstat and lsof read (the compat suite runs them): the
+    # load average, /proc/vmstat, /proc/partitions, the cwd and root links
+    # and lseek on a /proc file (top and vmstat read a file again from 0).
+    ("read l x < /proc/loadavg; v=0; while read k n; do [ $k = pgfault ] && v=1; done < /proc/vmstat; c=0; while read k n; do [ $k = ctxt ] && c=1; done < /proc/stat; [ -n \"$l\" ] && [ $v = 1 ] && [ $c = 1 ] && [ $(cat /proc/partitions | wc -l) -ge 3 ] && [ \"$(readlink /proc/self/cwd)\" = \"$PWD\" ] && readlink /proc/self/root && echo mon$((1+1))", b"\r\n/\r\nmon2\r\n", b"\n# "),
     # /proc/PID/auxv: the vector exec built (AT_PHDR first, at least a dozen entries).
     # lseek on /proc/PID/auxv is tested by the gdb case of the compat suite.
     ("a=$(cat /proc/self/auxv | wc -c); [ $a -ge 192 ] && [ $a -le 288 ] && echo auxv$((1+1))", b"\r\nauxv2\r\n", b"\n# "),

@@ -11,7 +11,11 @@ ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88
                heywoodlh/vim@sha256:c8c4f0de47f20de92af6d3b0544898e857f6c2eecd7ab397a1e7daf0b5fc6292 \
                serh/nvim@sha256:e62acc0ba679451c43a0197088af546bd8ab0e23a1ce27c010748a347aa3a837 \
                odovzhan/tmux@sha256:b439b1fc9a4391884ef4c1266980639a10ac629f684f4551bfbe3a77ca005cd6 \
-               lspcontainers/lua-language-server@sha256:5edb5674fb555bec3df35e77a45cd2a98f829fd3602ea3fa68394c80f186f072
+               lspcontainers/lua-language-server@sha256:5edb5674fb555bec3df35e77a45cd2a98f829fd3602ea3fa68394c80f186f072 \
+               lwzm/htop@sha256:5ccc1d354d955872783ec1cb42d2bc5bfd0bcac737ec7a57d95f2c9250e524f9 \
+               pockost/sysstat@sha256:d5b95e9efde8b332909ef45f09f6696908dcdbe1f6badef6178a89d20f1b998d \
+               mahmoodhosseini/alpine-bash-procps-mysql-client@sha256:298ade7f93f74d6167cc3baf517ad54adf4dbb9844de6cfb1df42b019673308a \
+               agbell/pstree@sha256:b164cd39f6df9505f89b9e6cddbfa19a8871bea3a11072b0e89cfb1275d5cb31
 # One more image, for the x86-64 Alpine disk only (the devtools cases of
 # alpine.txt): cmake and ninja. The image has no arm64 build.
 ALPINE_X86_PKGS ?= dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d57b2882c0d915008f8781634dab485

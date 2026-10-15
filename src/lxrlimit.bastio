@@ -539,6 +539,7 @@ fn tm_sys_add(k: &mut Kernel, p: u64, ns: u64)
 {
   if state(k.procs, p) != FREE {
     tm_set(&mut k, p, 0, sat_add(tm_get(k, p, 0), ns));
+    k.sys = set(k.sys, SYS_SYSNS, sat_add(get(k.sys, SYS_SYSNS), ns));
   }
 }
 

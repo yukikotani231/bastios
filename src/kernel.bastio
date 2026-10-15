@@ -225,6 +225,22 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   if !make_dir(&mut k.fs, "sys") || !make_dir(&mut k.fs, "sys/fs") {
     puts(&mut con, "cannot make /sys/fs\r\n");
   }
+  // /sys/block/DISK holds the disk's attributes, which are virtual
+  // (blk_sys_at in src/lxprocfs.bastio); the directories are files so that
+  // ls and stat find them. Tools such as iostat look for them.
+  if k.fs.disk.slots != 0 && make_dir(&mut k.fs, "sys/block") {
+    let mut dn = "sda";
+    if blk_is_nvme(k.fs.disk.dev) {
+      dn = "sys/block/nvme0n1";
+    } else if blk_is_virtio(k.fs.disk.dev) {
+      dn = "sys/block/vda";
+    } else {
+      dn = "sys/block/sda";
+    }
+    if !make_dir(&mut k.fs, dn) {
+      puts(&mut con, "cannot make /sys/block\r\n");
+    }
+  }
   let mut i = 0;
   while i < NINIT
     invariant i <= NINIT && kok(k) && con_ok(con)

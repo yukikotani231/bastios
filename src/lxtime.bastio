@@ -706,6 +706,7 @@ fn lx_alarms(k: &mut Kernel)
     p = p + 1;
   }
   ptimer_tick(&mut k);                    // and the POSIX timers (src/lxptimer.bastio)
+  la_tick(&mut k);                        // and the load averages (src/lxprocfs.bastio)
 }
 
 /// The time left on process pid's real-time timer, in ns (0 when off).

@@ -72,6 +72,11 @@ struct DiskQ {
   moved: u64,           // counts operations finished, so sleepers know to look again
   dead: bool,           // a command failed or never finished: the disk is not used again
   good: u64,            // once dead: the last transaction that finished before it died
+  ios_r: u64,           // reads finished (a batch is one), for /proc/diskstats
+  blks_r: u64,          // blocks they read
+  ios_w: u64,           // writes finished
+  blks_w: u64,          // blocks they wrote
+  io_ticks: u64,        // timer ticks the device spent on commands that finished
 }
 
 spec fn dq_ok(q: &DiskQ) -> bool {
@@ -86,7 +91,8 @@ fn dq_new(nc: u64) -> DiskQ
   ensures dq_ok(result)
 {
   let mut q = DiskQ { nc: nc, cache: balloc(nc * CBLOCK), tag: alloc(nc), st: alloc(nc), hh: alloc(NH), hn: alloc(nc), hk: alloc(nc), q: alloc(NQ * QW),
-    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0 };
+    r: ring_new(NQ), running: false, batch: 1, since: 0, hand: 0, next: 1, done: 0, moved: 0, dead: false, good: 0,
+    ios_r: 0, blks_r: 0, ios_w: 0, blks_w: 0, io_ticks: 0 };
   let mut i = 0;
   while i < nc
     invariant i <= nc && dq_ok(q)
@@ -127,6 +133,36 @@ fn dq_kill(q: &mut DiskQ)
   if !q.dead {
     q.good = q.done;
     q.dead = true;
+  }
+}
+
+/// v + n, or v when that would not fit.
+fn dq_inc(v: u64, n: u64) -> u64 {
+  if v > 18446744073709551615 - n {
+    return v;
+  }
+  return v + n;
+}
+
+/// A read or write command of `kind` just finished at tick `now`: counted for
+/// /proc/diskstats. (Only the queue is counted: the file system's own
+/// synchronous reads and writes of its directory blocks are not.)
+fn dq_count(q: &mut DiskQ, kind: u64, now: u64)
+  requires dq_ok(q)
+  ensures dq_ok(q)
+  ensures q.r.h == old(q.r.h) && q.r.n == old(q.r.n) && q.running == old(q.running)
+  ensures q.next == old(q.next) && q.done == old(q.done) && q.moved == old(q.moved) && q.dead == old(q.dead)
+  ensures q.batch == old(q.batch) && q.since == old(q.since) && q.hand == old(q.hand)
+{
+  if kind == Q_READ {
+    q.ios_r = dq_inc(q.ios_r, 1);
+    q.blks_r = dq_inc(q.blks_r, q.batch);
+  } else if kind == Q_WRITE {
+    q.ios_w = dq_inc(q.ios_w, 1);
+    q.blks_w = dq_inc(q.blks_w, q.batch);
+  }
+  if now > q.since {
+    q.io_ticks = dq_inc(q.io_ticks, now - q.since);
   }
 }
 
@@ -515,6 +551,8 @@ fn dq_pump(q: &mut DiskQ, dev: &mut Blk, now: u64) -> u64
     }
     if r != BIO_OK {
       dq_kill(&mut q);
+    } else {
+      dq_count(&mut q, kind, now);
     }
     if q.batch > 1 {
       // A batched read (blk_begin_n): its blocks go to the slots of the

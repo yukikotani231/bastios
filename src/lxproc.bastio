@@ -1123,6 +1123,26 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   if !follow && pf != 0 && is_ns_file(pf) {
     m = nsf_link_meta(pf);                  // lstat: the /proc/PID/ns link itself
   }
+  let pfd = fd_path(k, n);
+  if pfd != NO_RESULT {
+    // /proc/PID/fd/N: a link to what the descriptor is open on (lstat), or
+    // that thing itself (stat, for what a path walk does not follow to a
+    // name: a pipe, a socket, the terminal).
+    let t = pfd / LXNFD;
+    let fd = pfd % LXNFD;
+    let od = fd_look(k, t, fd);
+    if od.kind == K_BAD {
+      return ENOENT;
+    }
+    if !proc_peek(k.procs, pid, t) {
+      return EACCES;
+    }
+    if follow {
+      m = fd_meta(&mut k, t, fd);
+    } else {
+      m = fd_link_meta(pfd);
+    }
+  }
   if !m.ok {
     return ENOENT;
   }
@@ -1154,6 +1174,15 @@ fn lx_fstat_at(k: &mut Kernel, pid: u64, dirfd: u64, buf: u64) -> u64
     return ENOENT;
   }
   return put_stat(&mut k, pid, buf, m);
+}
+
+/// If the first n bytes of the transfer buffer are /proc/PID/fd/N: PID * LXNFD + N,
+/// else NO_RESULT.
+fn fd_path(k: &Kernel, n: u64) -> u64
+  requires kok(k) && n <= FNAME_MAX
+  ensures result == NO_RESULT || result < NPROC * LXNFD
+{
+  return proc_fd(k.procs, k.fs.xfer, n);
 }
 
 /// The metadata of the path in the first n bytes of the transfer buffer.
@@ -1251,10 +1280,23 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let m = fd_meta(&mut k, pid, fd);
+  if !m.ok {
+    return EBADF;
+  }
+  return put_stat(&mut k, pid, buf, m);
+}
+
+/// What descriptor fd of process pid is open on, as fstat describes it (ok is
+/// false for a descriptor that is not open).
+fn fd_meta(k: &mut Kernel, pid: u64, fd: u64) -> Meta
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   let d = fd_look(k, pid, fd);
   let mut m = dev_meta(DEV_TTY);           // the console is /dev/tty
   if d.kind == K_BAD {
-    return EBADF;
+    return Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0, own: 0 };
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
     m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4, mtime: 0, own: 0 };
     // A named pipe's ends are its file, as lstat on its path sees it: the
@@ -1287,7 +1329,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
       m = Meta { ok: true, mode: S_IFREG, size: 0, ino: 100, mtime: 0, own: 0 };
     }
   }
-  return put_stat(&mut k, pid, buf, m);
+  return m;
 }
 
 /// Writes a struct stat for m to user address buf. Returns 0 or -EFAULT.

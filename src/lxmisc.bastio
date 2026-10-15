@@ -158,7 +158,7 @@ fn rlimit_of(r: u64) -> u64 {
 }
 
 /// sysinfo(info): uptime, memory in bytes (mem_unit 1) and the number of
-/// processes; no load averages or swap.
+/// processes and the load averages; no swap.
 fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -183,6 +183,9 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
     secs = secs + 1;
   }
   xfer_u64(&mut k.fs.xfer, 0, secs);
+  xfer_u64(&mut k.fs.xfer, 8, smaller(get(k.sys, SYS_LA + 1), 0xFFFFFFFF) * 32);     // loads: the averages in 16-bit fixed point
+  xfer_u64(&mut k.fs.xfer, 16, smaller(get(k.sys, SYS_LA + 2), 0xFFFFFFFF) * 32);
+  xfer_u64(&mut k.fs.xfer, 24, smaller(get(k.sys, SYS_LA + 3), 0xFFFFFFFF) * 32);
   xfer_u64(&mut k.fs.xfer, 32, pool_size(k.mem.pool) * 4096);    // totalram: the RAM the pool holds
   xfer_u64(&mut k.fs.xfer, 40, nfree * 4096);     // freeram
   bset(&mut k.fs.xfer, 80, cast[u8](procs % 256));      // procs (u16)
