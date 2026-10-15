@@ -1217,6 +1217,7 @@ t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
 t_sysv: shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL
+t_sysv: msgmni is written: that many queues, then ENOSPC
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
