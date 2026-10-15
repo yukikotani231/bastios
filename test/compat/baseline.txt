@@ -1362,6 +1362,7 @@ alpine: strace: traces a program's system calls with ptrace, following the child
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
 alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: gdb: a core file of a crashed program shows where it died, its call chain and its arguments
+alpine: nvim: Termdebug drives gdb over MI in terminal windows: a breakpoint in add, the stop, the signs on the source line and an expression
 alpine: gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
 alpine: gdb: attach to a program with three threads, and every thread is listed
 alpine: nvim: LuaJIT loads a shared object that gcc built

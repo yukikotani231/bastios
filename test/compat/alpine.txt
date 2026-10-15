@@ -263,6 +263,10 @@ $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc pro
 depth (n=0) at crash.c:1
 depth (n=3)
 
+== nvim: Termdebug drives gdb over MI in terminal windows: a breakpoint in add, the stop, the signs on the source line and an expression
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb printf '#!/bin/sh\nexport PYTHONHOME=/opt/gdb\nexec /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -iex "set debuginfod enabled off" "$@"\n' > /disk/a/root/gdbw && bb chroot /disk/a /bin/sh -c 'cd /root && chmod +x gdbw && gcc -g -O0 -pie -fPIE -o d d.c && curl -s HOSTURL/lsp-termdebug.lua -o termdebug.lua && TERMDEBUGGER=/root/gdbw timeout 300 nvim --headless -l termdebug.lua >/root/td.log 2>&1'; bb cat /disk/a/root/termdebug.txt; bb umount /disk/a/dev/pts; bb umount /disk/a/dev; bb umount /disk/a/proc; else echo gdb-up,stopped-in-add,pc-line-2,bp-line-2,print-42; fi
+gdb-up,stopped-in-add,pc-line-2,bp-line-2,print-42
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
