@@ -7,6 +7,7 @@
  * shutdown(SHUT_RD), CPU-time clocks of a thread, arch_prctl, memfd_create
  * names, madvise, timerfd flags and ETXTBSY. */
 #include <mqueue.h>
+#include <sys/mount.h>
 #include <sys/prctl.h>
 #include "compat.h"
 #include <fcntl.h>
@@ -226,6 +227,23 @@ int main(void) {
                syscall(SYS_mq_notify, q, &se) == -1 && errno == EINVAL &&
                mq_open("/ltp2q", O_RDWR | O_CREAT | O_EXCL, 0600, &at) == (mqd_t)-1 && errno == EEXIST;
            mq_close(q); ok && mq_unlink("/ltp2q") == 0 && mq_unlink("/ltp2q") == -1 && errno == ENOENT; }));
+    EXPECT("mqueue file system: queues show as files, a new file makes a queue, mq_unlink removes the file", ({
+           int ok = 0;
+           mkdir("mqfs_d", 0755);
+           if (mount("mqueue", "mqfs_d", "mqueue", 0, 0) == 0) {
+               mqd_t q = mq_open("/mqfs_a", O_RDWR | O_CREAT | O_EXCL, 0600, 0);
+               int made = q != (mqd_t)-1 && access("mqfs_d/mqfs_a", F_OK) == 0;
+               int fd = creat("mqfs_d/mqfs_b", 0600);
+               mqd_t b = fd >= 0 ? mq_open("/mqfs_b", O_RDWR, 0, 0) : (mqd_t)-1;
+               int viaFile = b != (mqd_t)-1;
+               if (b != (mqd_t)-1) mq_close(b);
+               if (fd >= 0) close(fd);
+               int gone = mq_unlink("/mqfs_a") == 0 && access("mqfs_d/mqfs_a", F_OK) == -1 && mq_unlink("/mqfs_b") == 0;
+               if (q != (mqd_t)-1) mq_close(q);
+               ok = made && viaFile && gone;
+               umount("mqfs_d");
+           }
+           rmdir("mqfs_d"); ok; }));
     EXPECT("mqueue: 32 queues at once, a 33rd is ENOSPC, each keeps its own messages", ({
            struct mq_attr at = {.mq_maxmsg = 2, .mq_msgsize = 8}; mqd_t q[33]; char nm[16], b[8]; unsigned pr;
            int n = 0, ok = 1;
