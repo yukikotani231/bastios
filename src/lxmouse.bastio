@@ -239,7 +239,7 @@ fn wheel_byte(z: u64) -> u64
 
 /// read(2) (system call n) of up to len bytes into va on descriptor fd, the
 /// mouse. Returns KEEP or SWITCH, as linux_syscall does.
-fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+fn mouse_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {

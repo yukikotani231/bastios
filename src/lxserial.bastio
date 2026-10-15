@@ -210,20 +210,23 @@ fn ser_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
   return KEEP;
 }
 
-/// Is device d the mouse or the serial port?
+/// Is device d the mouse (10) or the serial port (14)? One test, because
+/// linux_syscall is close to the solver limit.
 fn is_mice_or_ser(d: u64) -> bool {
-  return d == DEV_MICE || d == DEV_SER;
+  return (d | 4) == DEV_SER;
 }
 
-/// read(2) on the mouse or the serial port (device d).
-fn mice_or_ser_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, d: u64, va: u64, len: u64) -> u64
+/// read(2) on the mouse or the serial port, whichever descriptor fd is.
+/// linux_syscall calls this one name for both, which keeps its proof small.
+fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if d == DEV_SER {
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_DEV && d.x == DEV_SER {
     return ser_read(&mut k, pid, n, fd, va, len);
   }
-  return mice_read(&mut k, pid, n, fd, va, len);
+  return mouse_read(&mut k, pid, n, fd, va, len);
 }
 
 /// write(2) of n bytes at va to the port: the count queued, or EAGAIN if
