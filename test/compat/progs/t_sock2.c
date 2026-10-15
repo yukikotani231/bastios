@@ -5,6 +5,8 @@
 #include "compat.h"
 #include <arpa/inet.h>
 #include <fcntl.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <signal.h>
@@ -89,6 +91,50 @@ static int many_datagrams(void) {
         if (d[i] >= 0) close(d[i]);
         unlink(u[i].sun_path);
     }
+    return ok;
+}
+
+/* A pipe splices into a stream socket and a stream socket into a pipe; a
+ * datagram socket and /dev/zero take no splice (an error, not a wait). */
+static int splice_sockets(void) {
+    int p[2], q[2], sv[2], d[2], ok = 1;
+    char a[100], b[100];
+    for (int i = 0; i < 100; i++) a[i] = i;
+    ok &= pipe(p) == 0 && pipe(q) == 0 && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && socketpair(AF_UNIX, SOCK_DGRAM, 0, d) == 0;
+    ok &= write(p[1], a, 100) == 100 && splice(p[0], 0, sv[0], 0, 100, 0) == 100;
+    ok &= splice(sv[1], 0, q[1], 0, 100, 0) == 100 && read(q[0], b, 100) == 100 && memcmp(a, b, 100) == 0;
+    ok &= splice(sv[1], 0, q[1], 0, 10, SPLICE_F_NONBLOCK) == -1 && errno == EAGAIN;
+    ok &= splice(p[0], 0, d[0], 0, 1, 0) == -1 && errno == EINVAL;
+    int z = open("/dev/zero", O_WRONLY);
+    ok &= z >= 0 && splice(p[0], 0, z, 0, 1, 0) == -1 && errno == EINVAL;
+    return ok;
+}
+
+/* SIOCSIFMTU changes what SIOCGIFMTU reads back; leaving a multicast
+ * group a socket never joined is EADDRNOTAVAIL. */
+static int mtu_and_groups(void) {
+    int s = socket(AF_INET, SOCK_DGRAM, 0), ok = s >= 0;
+    struct ifreq r;
+    memset(&r, 0, sizeof r);
+    strcpy(r.ifr_name, "lo");
+    ok &= ioctl(s, SIOCGIFMTU, &r) == 0;
+    int was = r.ifr_mtu;
+    r.ifr_mtu = 1500;
+    ok &= ioctl(s, SIOCSIFMTU, &r) == 0;
+    r.ifr_mtu = 0;
+    ok &= ioctl(s, SIOCGIFMTU, &r) == 0 && r.ifr_mtu == 1500;
+    r.ifr_mtu = 10;
+    ok &= ioctl(s, SIOCSIFMTU, &r) == -1 && errno == EINVAL;
+    r.ifr_mtu = was;
+    ok &= ioctl(s, SIOCSIFMTU, &r) == 0;
+    struct ip_mreq m;
+    memset(&m, 0, sizeof m);
+    m.imr_multiaddr.s_addr = htonl(0xE0000001);
+    ok &= setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
+    ok &= setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m) == 0;
+    ok &= setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == 0;
+    m.imr_multiaddr.s_addr = htonl(0x7F000001);
+    ok &= setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m) == -1 && errno == EINVAL;
     return ok;
 }
 
@@ -244,5 +290,7 @@ int main(void) {
     EXPECT("56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails", many_pairs());
     EXPECT("at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused", many_listeners());
     EXPECT("24 bound AF_UNIX datagram sockets send around a ring and name their senders", many_datagrams());
+    EXPECT("splice between a pipe and a stream socket; none with a datagram socket or /dev/zero", splice_sockets());
+    EXPECT("SIOCSIFMTU is read back; leaving a multicast group never joined is EADDRNOTAVAIL", mtu_and_groups());
     return done();
 }

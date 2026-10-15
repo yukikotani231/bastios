@@ -371,7 +371,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     }
     return SK_WAIT;
   }
-  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, got) != got {
+  if buf != TO_XFER && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, got) != got {
     return EFAULT;
   }
   // More than one transfer buffer's worth, while more has arrived.

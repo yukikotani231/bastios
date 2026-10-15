@@ -116,7 +116,7 @@ const NS_INO: u64 = 4;                 //   its inode number (/proc/PID/ns/net)
 const NS_OWNER: u64 = 5;               //   the user namespace id that made it (0: the first)
 
 const IFN: u64 = 32;                   // interfaces, all namespaces together
-const IF_W: u64 = 10;                  // words per interface:
+const IF_W: u64 = 11;                  // words per interface:
 const IF_KIND: u64 = 0;                //   IFK_*
 const IF_NS: u64 = 1;                  //   its namespace
 const IF_FLAGS: u64 = 2;               //   IFF_UP
@@ -126,6 +126,7 @@ const IF_IP: u64 = 5;                  //   its IPv4 address (0: none; slot 1 us
 const IF_SPAN: u64 = 6;                //   2^(32 - prefix length) (0 with no address)
 const IF_MAC: u64 = 7;
 const IF_NAME: u64 = 8;                //   two words: the name's 16 bytes, low byte first
+const IF_MTU: u64 = 10;                //   the MTU SIOCSIFMTU set (0: the kind's own)
 
 const IFK_FREE: u64 = 0;
 const IFK_LO: u64 = 1;

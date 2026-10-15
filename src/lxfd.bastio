@@ -10,7 +10,8 @@
 // and a directory's next entry (for a pipe end: 1 if it is nonblocking);
 // then the F_SETOWN owner, F_SETSIG signal, the owner's setter's ids and
 // O_ASYNC (src/lxowner.bastio), then the access the open did not ask for
-// (OF_ACC: a device's description keeps no mode of its own otherwise).
+// (OF_ACC: a device's description keeps no mode of its own otherwise),
+// then the number of multicast groups a socket joined (OF_MCAST).
 // k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
 // read end and of its write end, the FIFO it belongs to + 1 (0 for an
 // anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it,
@@ -603,6 +604,7 @@ fn ofd_new(k: &mut Kernel, kind: u64, x: u64) -> u64
   of_set(&mut k.ofd, h, OF_CRED, 0);
   of_set(&mut k.ofd, h, OF_ASYNC, 0);
   of_set(&mut k.ofd, h, OF_ACC, 0);
+  of_set(&mut k.ofd, h, OF_MCAST, 0);
   return h;
 }
 
