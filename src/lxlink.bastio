@@ -105,21 +105,15 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
     return NO_RESULT;
   }
   let mut p = balloc(PATH_OUT);
-  let mut q = balloc(SPLICE);
-  let mut i = 0;
-  while i < n
-    invariant i <= n && n <= FNAME_MAX && blen(p) == PATH_OUT && kok(k)
-  {
-    bset(&mut p, i, bget(k.fs.xfer, i));
-    i = i + 1;
-  }
+  let mut q = balloc(1);                    // grown to SPLICE at the first link: most names have none
+  bytes_copy_span(&mut p, 0, k.fs.xfer, 0, n);
   let ns = ns_of(k, pid);
   let mut pl = n;
   let mut e = 0;                            // where the component being looked at starts
   let mut hops = 0;
   let mut bad = false;
   while e < pl && !bad
-    invariant e <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && blen(q) == SPLICE && kok(k)
+    invariant e <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && (blen(q) == SPLICE || blen(q) == 1) && kok(k)
   {
     let mut c = e;
     while c < pl && bget(p, c) != 47
@@ -156,6 +150,10 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
         k.perr = ENOENT;
       } else {
         hops = hops + 1;
+        if blen(q) != SPLICE {
+          bfree(q);
+          q = balloc(SPLICE);
+        }
         // The link's directory (for a relative target), the target, then
         // the rest of the path.
         let mut ql = 0;
