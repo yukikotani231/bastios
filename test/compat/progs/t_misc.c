@@ -151,6 +151,9 @@ int main(void) {
         sz > 0 && rd == 0 && syscall(SYS_syslog, 99, 0, 0) == -1 && errno == EINVAL
         && syscall(SYS_syslog, 2, 0, 8) == -1 && errno == EINVAL && syscall(SYS_syslog, 8, kb, 9) == -1 && errno == EINVAL; }));
     EXPECT("/proc/diskstats opens", open("/proc/diskstats", O_RDONLY) >= 0);
+    EXPECT("/proc/diskstats has the disk's line with its counts", ({ char t[256]; int f = open("/proc/diskstats", O_RDONLY);
+        int n = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); t[n > 0 ? n : 0] = 0;
+        n > 0 && strstr(t, " bastio0 ") && t[n - 1] == '\n'; }));
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
     EXPECT("sched_getaffinity", ({ cpu_set_t c; sched_getaffinity(0, sizeof c, &c) == 0; }));
