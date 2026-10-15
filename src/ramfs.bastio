@@ -136,7 +136,16 @@ fn kid_adj(r: &mut Buf, name: &Bytes, n: u64, up: bool)
 fn ram_has_under(r: &Buf, name: &Bytes, n: u64) -> bool
   requires rix_ok(r) && n <= blen(name)
 {
-  return get(r, KBASE + name_hash(name, 0, n) % KB) > 0;
+  // The same byte-at-a-time hash kid_adj folds in (not name_hash).
+  let mut h = 5381;
+  let mut j = 0;
+  while j < n
+    invariant j <= n && h < 4294967296
+  {
+    h = (h * 33 + cast[u64](bget(name, j))) % 4294967296;
+    j = j + 1;
+  }
+  return get(r, KBASE + h % KB) > 0;
 }
 
 /// Enters node `node` under hash h.

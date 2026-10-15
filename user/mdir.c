@@ -325,14 +325,14 @@ int main(void)
     }
     /* Tens of thousands of directories: rmdir and rename must not walk the
      * whole table for children, and still refuse a directory that has some. */
-    if (mkdir("tp", 0755) != 0 || mkdir("tp/in", 0755) != 0 || mkdir("tp/in/deep", 0755) != 0)
+    if (mkdir("tpdirectory", 0755) != 0 || mkdir("tpdirectory/inner", 0755) != 0 || mkdir("tpdirectory/inner/deepest", 0755) != 0)
         return fail("nested directories");
-    if (rmdir("tp") != -1 || errno != ENOTEMPTY || rmdir("tp/in") != -1 || errno != ENOTEMPTY)
+    if (rmdir("tpdirectory") != -1 || errno != ENOTEMPTY || rmdir("tpdirectory/inner") != -1 || errno != ENOTEMPTY)
         return fail("rmdir of a directory with names under it");
-    if (rename("tp", "tq") != 0 || rmdir("tq") != -1 || errno != ENOTEMPTY
-        || access("tq/in/deep", F_OK) != 0 || access("tp", F_OK) != -1)
+    if (rename("tpdirectory", "tqdirectory") != 0 || rmdir("tqdirectory") != -1 || errno != ENOTEMPTY
+        || access("tqdirectory/inner/deepest", F_OK) != 0 || access("tpdirectory", F_OK) != -1)
         return fail("renaming a directory with names under it");
-    if (rmdir("tq/in/deep") != 0 || rmdir("tq/in") != 0 || rmdir("tq") != 0)
+    if (rmdir("tqdirectory/inner/deepest") != 0 || rmdir("tqdirectory/inner") != 0 || rmdir("tqdirectory") != 0)
         return fail("emptying the renamed directory");
     for (made = 0; made < 20000; made++) {
         snprintf(nm, sizeof nm, "q%d", made);
