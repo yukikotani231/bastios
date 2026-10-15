@@ -756,6 +756,14 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
+t_pidfdinfo: a child a signal ended has the signal in its status
+t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
+t_pidfdinfo: a reaped child is ESRCH unless the exit status is asked for
+t_pidfdinfo: and while it is still a zombie
+t_pidfdinfo: clone with CLONE_PIDFD: ids and credentials of a running child
+t_pidfdinfo: clone3 with CLONE_PIDFD: ids and credentials of a running child
+t_pidfdinfo: the exit status is there once the child has been reaped
 t_newer: O_PATH: fchmod is EBADF
 t_newer: O_PATH: fstat works
 t_newer: O_PATH: read is EBADF
@@ -1234,6 +1242,7 @@ t_userns: and not in the first one
 t_userns: statfs of /proc/self/fd/N answers for the file N holds
 t_userns: nor in one that another user namespace made
 t_userns: a user namespace is made inside another and mapped through it
+t_userns: whoever made a user namespace joins it with setns, and not the first one
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
