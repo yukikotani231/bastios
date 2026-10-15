@@ -156,6 +156,68 @@ dev: tcc: a compile error
 dev: tcc: arguments, exit status, an executable file
 dev: tcc: hello
 dev: tcc: the library (malloc, qsort, files, strings)
+lua: lua: a C module built with gcc is loaded with require
+lua: lua: a larger workload (sieve, recursion, strings, sorting)
+lua: lua: closures, varargs, goto and error handling
+lua: lua: coroutines
+lua: lua: expression, standard input and script arguments
+lua: lua: files, directories and processes
+lua: lua: garbage collection, finalizers and weak tables
+lua: lua: integers, floats and math
+lua: lua: load, require and packages
+lua: lua: strings, patterns and formatting
+lua: lua: tables, sort and metatables
+lua: lua: unpack the root, make the device nodes
+lua: lua: utf8 and string.pack round trips
+lua: lua: version
+lua: luarocks: configuration and the empty tree
+lua: luarocks: install into a separate tree and use it
+lua: luarocks: lint and where the modules went
+lua: luarocks: make a rock that has a C module and a script
+lua: luarocks: pack, remove and install from the rock file
+lua: luarocks: the installed rock loads and its script runs
+perl: perl: a larger workload (sorting, hashing, string building, regexes)
+perl: perl: files, directories and the file system
+perl: perl: modules with C code and pure Perl
+perl: perl: numbers, lists, hashes and references
+perl: perl: processes, pipes, signals and exit status
+perl: perl: sockets on the loopback
+perl: perl: strings, regular expressions and formatting
+perl: perl: the perl5 test suite, t/base/ (9 tests)
+perl: perl: the perl5 test suite, t/class/ (12 tests)
+perl: perl: the perl5 test suite, t/cmd/ (5 tests)
+perl: perl: the perl5 test suite, t/comp/ (22 tests)
+perl: perl: the perl5 test suite, t/io/ (37 tests)
+perl: perl: the perl5 test suite, t/mro/ (72 tests)
+perl: perl: the perl5 test suite, t/op/ part 1 of 3 (60 tests)
+perl: perl: the perl5 test suite, t/op/ part 2 of 3 (61 tests)
+perl: perl: the perl5 test suite, t/op/ part 3 of 3 (61 tests)
+perl: perl: the perl5 test suite, t/opbasic/ (5 tests)
+perl: perl: the perl5 test suite, t/re/ (4 tests)
+perl: perl: threads, local time and the clock
+perl: perl: unpack the root, make the device nodes
+perl: perl: version and build
+ruby: ruby: a larger workload (sorting, hashing, strings, GC)
+ruby: ruby: build a gem, install it from the file and use it
+ruby: ruby: bundler resolves a Gemfile with a path gem and runs a command
+ruby: ruby: exceptions, control flow and metaprogramming
+ruby: ruby: files, directories and the file system
+ruby: ruby: gem lists the default and bundled gems
+ruby: ruby: minitest and test-unit run tests
+ruby: ruby: numbers, bignums, rationals and floats
+ruby: ruby: processes, pipes, signals and exit status
+ruby: ruby: rake runs a Rakefile
+ruby: ruby: sockets on the loopback
+ruby: ruby: strings, symbols, arrays, hashes and blocks
+ruby: ruby: the ruby test suite, bootstraptest/ part 1 of 2 (9 tests)
+ruby: ruby: the ruby test suite, bootstraptest/ part 2 of 2 (9 tests)
+ruby: ruby: the ruby test suite, test/ruby/ part 1 of 3 (8 tests)
+ruby: ruby: the ruby test suite, test/ruby/ part 2 of 3 (9 tests)
+ruby: ruby: the ruby test suite, test/ruby/ part 3 of 3 (8 tests)
+ruby: ruby: the standard library
+ruby: ruby: threads, fibers, queues and timing
+ruby: ruby: unpack the root, make the device nodes
+ruby: ruby: versions
 ssh: dropbear: the server starts
 ssh: dropbear: the server stops
 ssh: ssh -t: a command on a terminal (a pty in the guest)
