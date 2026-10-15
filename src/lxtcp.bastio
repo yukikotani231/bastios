@@ -453,6 +453,18 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h));
 }
 
+/// The bytes a stream socket has received and not yet handed out (FIONREAD).
+fn tcp_waiting(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= TCP_RING
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err == 0 && tk.mode == TM_CONN && tk.t < TCBS {
+    return tcp_pending(k.nic, tk.t);
+  }
+  return 0;
+}
+
 /// What a poll on a stream socket finds now: a listener is readable when a
 /// connection is waiting to be accepted, a connection when bytes or the
 /// end have arrived, and writable while its send buffer has room.

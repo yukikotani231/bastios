@@ -1503,6 +1503,22 @@ fn tcp_local_port(c: &Nic, t: u64) -> u64
   }
 }
 
+/// The bytes waiting in connection t's receive buffer (FIONREAD).
+fn tcp_pending(c: &Nic, t: u64) -> u64
+  requires nic_ok(c)
+  ensures result <= TCP_RING
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if tcb_held(n, t) && tw(n, t, W_RXLEN) <= TCP_RING {
+        return tw(n, t, W_RXLEN);
+      }
+      return 0;
+    },
+  }
+}
+
 fn tcp_peer_port(c: &Nic, t: u64) -> u64
   requires nic_ok(c)
   ensures result <= 65535

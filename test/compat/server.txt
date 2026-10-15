@@ -1,0 +1,211 @@
+# Server programs on BastiOS, for the compatibility suite (test/compat): the
+# nginx, redis and PostgreSQL of the official Docker images (their Alpine
+# variants), each entered with chroot and run the way it is run in production:
+# a web server serving files and acting as a reverse proxy, a key-value store
+# with persistence and a replica, a SQL database that is created, loaded,
+# dumped, restarted and recovered after a crash. The server disk
+# (serverdisk.py) holds each image's root as a tar file (/disk/nginx.tar,
+# redis.tar, postgres.tar) and a BusyBox at /disk/busybox; the suite boots
+# it separately. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The cases run in order and build on each other. The clients (wget, redis-cli,
+# psql, pgbench) run in the guest too, over the loopback.
+
+== nginx: unpack the root, make the device nodes
+$ bb mkdir -p /disk/ng && cd /disk/ng && bb tar -xf /disk/nginx.tar && bb mkdir -p dev proc tmp www bk && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb chroot /disk/ng /usr/sbin/nginx -v 2>&1
+nginx version: nginx/1.31.7
+
+== nginx: the configuration it came with is valid
+$ bb chroot /disk/ng /usr/sbin/nginx -t 2>&1
+nginx: the configuration file /etc/nginx/nginx.conf syntax is ok
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+
+== nginx: a site, a proxy and a backend, both configurations valid
+$ bb seq 1 300000 > /disk/ng/www/big.txt; cp /disk/ng/www/big.txt /disk/ng/bk/big.txt; echo hello static > /disk/ng/www/index.html; echo hello backend > /disk/ng/bk/index.html; printf 'worker_processes 2;\ndaemon on;\npid /run/nginx.pid;\nerror_log /tmp/err.log;\nevents { worker_connections 256; }\nhttp {\n include /etc/nginx/mime.types;\n access_log /tmp/acc.log;\n sendfile on;\n server {\n  listen 8080;\n  listen [::]:8080 ipv6only=on;\n  root /www;\n  location /api/ { proxy_pass http://127.0.0.1:9000/; }\n }\n}\n' > /disk/ng/etc/nginx/nginx.conf; printf 'worker_processes 1;\ndaemon on;\npid /run/be.pid;\nerror_log /tmp/be_err.log;\nevents { worker_connections 64; }\nhttp {\n access_log off;\n server { listen 9000; root /bk; }\n}\n' > /disk/ng/etc/nginx/be.conf; bb chroot /disk/ng /usr/sbin/nginx -t 2>&1 | bb tail -n 1; bb chroot /disk/ng /usr/sbin/nginx -t -c /etc/nginx/be.conf 2>&1 | bb tail -n 1
+nginx: configuration file /etc/nginx/nginx.conf test is successful
+nginx: configuration file /etc/nginx/be.conf test is successful
+
+== nginx: start the backend and the front, which listens on IPv4 and IPv6
+$ bb chroot /disk/ng /usr/sbin/nginx -c /etc/nginx/be.conf; bb chroot /disk/ng /usr/sbin/nginx; bb sleep 1; bb cat /disk/ng/tmp/err.log /disk/ng/tmp/be_err.log; bb ls /disk/ng/run | bb sort | bb tr '\n' ' '; echo
+be.pid lock nginx.pid 
+
+== nginx: serve a static file
+$ bb wget -q -O - http://127.0.0.1:8080/index.html
+hello static
+
+== nginx: serve it on the IPv6 loopback too
+$ bb wget -q -O - 'http://[::1]:8080/index.html' 2>&1
+hello static
+
+== nginx: a missing file is 404
+$ bb wget -q -O - http://127.0.0.1:8080/nope 2>&1
+wget: server returned error: HTTP/1.1 404 Not Found
+
+== nginx: a 300000-line file arrives whole (sendfile)
+$ bb wget -q -O - http://127.0.0.1:8080/big.txt | bb md5sum
+daef482d6c698625ab13d987d14e8781  -
+
+== nginx: reverse proxy to the backend
+$ bb wget -q -O - http://127.0.0.1:8080/api/index.html
+hello backend
+
+== nginx: a big file through the proxy arrives whole
+$ bb wget -q -O - http://127.0.0.1:8080/api/big.txt | bb md5sum
+daef482d6c698625ab13d987d14e8781  -
+
+== nginx: eight downloads at once, each whole
+$ for i in 1 2 3 4 5 6 7 8; do (bb wget -q -O - http://127.0.0.1:8080/big.txt | bb md5sum > /tmp/ng_$i.sum) & done; wait; bb cat /tmp/ng_?.sum | bb sort | bb uniq -c; rm -f /tmp/ng_?.sum
+      8 daef482d6c698625ab13d987d14e8781  -
+
+== nginx: the access log has every request
+$ bb grep -c 'GET' /disk/ng/tmp/acc.log; bb grep -c '" 404 ' /disk/ng/tmp/acc.log
+14
+1
+
+== nginx: reload on SIGHUP keeps serving
+$ echo hello again > /disk/ng/www/index.html; bb kill -HUP $(bb cat /disk/ng/run/nginx.pid); bb sleep 1; bb wget -q -O - http://127.0.0.1:8080/index.html
+hello again
+
+== nginx: stop both
+$ bb chroot /disk/ng /usr/sbin/nginx -s quit; bb chroot /disk/ng /usr/sbin/nginx -c /etc/nginx/be.conf -s quit; bb sleep 1; bb wget -q -O - http://127.0.0.1:8080/index.html 2>&1; bb wget -q -O - http://127.0.0.1:9000/index.html 2>&1
+wget: can't connect to remote host (127.0.0.1): Connection refused
+wget: can't connect to remote host (127.0.0.1): Connection refused
+
+== redis: unpack the root, make the device nodes
+$ bb mkdir -p /disk/rd && cd /disk/rd && bb tar -xf /disk/redis.tar && bb mkdir -p dev proc tmp data && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb chroot /disk/rd /usr/local/bin/redis-cli --version
+redis-cli 8.10.2
+
+== redis: start a server, which listens on IPv4 and IPv6
+$ bb chroot /disk/rd /usr/local/bin/redis-server --daemonize yes --port 6379 --dir /data --logfile /tmp/redis.log --appendonly yes --save '' --pidfile /tmp/redis.pid; bb sleep 2; bb chroot /disk/rd /usr/local/bin/redis-cli ping; bb grep -c 'Address in use' /disk/rd/tmp/redis.log
+PONG
+0
+
+== redis: strings, counters and expiry
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r set greeting hello; $r get greeting; $r incrby hits 41; $r incr hits; $r set tmp x px 200; bb sleep 1; $r exists tmp
+OK
+hello
+41
+42
+OK
+0
+
+== redis: lists, hashes, sets and sorted sets
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r rpush l a b c >/dev/null; $r lrange l 0 -1 | bb tr '\n' ' '; echo; $r hset h f1 v1 f2 v2 >/dev/null; $r hget h f2; $r sadd s 1 2 3 3 | bb tr '\n' ' '; echo; $r zadd z 3 c 1 a 2 b >/dev/null; $r zrange z 0 -1 | bb tr '\n' ' '; echo
+a b c 
+v2
+3 
+a b c 
+
+== redis: a transaction and a Lua script
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r eval 'return redis.call("incr", KEYS[1]) * 2' 1 hits; printf 'MULTI\nINCR hits\nINCR hits\nEXEC\n' | $r | bb tr '\n' ' '; echo
+86
+OK QUEUED QUEUED 44 45 
+
+== redis: publish and subscribe
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; ($r subscribe news > /tmp/sub.out &) ; bb sleep 1; $r publish news hi; bb sleep 1; bb grep -c '^hi' /tmp/sub.out; rm -f /tmp/sub.out
+1
+1
+
+== redis: a replica follows the master
+$ mkdir -p /disk/rd/data2; bb chroot /disk/rd /usr/local/bin/redis-server --daemonize yes --port 6380 --dir /data2 --logfile /tmp/redis2.log --save '' --pidfile /tmp/redis2.pid --replicaof 127.0.0.1 6379; bb sleep 8; r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r -p 6380 get greeting; $r set after sync >/dev/null; bb sleep 1; $r -p 6380 get after; $r -p 6380 info replication | bb grep -e role -e master_link_status | bb tr -d '\r'
+hello
+sync
+role:slave
+master_link_status:up
+
+== redis: a snapshot written by a forked child
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r save; $r bgsave; bb sleep 2; $r lastsave >/dev/null; $r info persistence | bb grep -e rdb_last_bgsave_status | bb tr -d '\r'; bb ls /disk/rd/data | bb sort | bb tr '\n' ' '; echo
+OK
+Background saving started
+rdb_last_bgsave_status:ok
+appendonlydir dump.rdb 
+
+== redis: twenty thousand keys in one pipeline
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; bb seq 1 20000 | bb sed 's/.*/SET k& v&/' | $r --pipe | bb tail -n 1; $r dbsize
+errors: 0, replies: 20000
+20007
+
+== redis: restart and find the data again
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r -p 6380 shutdown nosave 2>/dev/null; $r shutdown 2>/dev/null; bb sleep 2; bb chroot /disk/rd /usr/local/bin/redis-server --daemonize yes --port 6379 --dir /data --logfile /tmp/redis.log --appendonly yes --save '' --pidfile /tmp/redis.pid; bb sleep 2; $r get greeting; $r get hits; $r lrange l 0 -1 | bb tr '\n' ' '; echo; $r get k20000; $r dbsize
+hello
+45
+a b c 
+v20000
+20007
+
+== redis: redis-benchmark gets answers for every request
+$ bb chroot /disk/rd /usr/local/bin/redis-benchmark -q -n 5000 -c 10 -t set,get,incr 2>&1 | bb tr '\r' '\n' | bb grep -c 'requests per second'
+3
+
+== redis: stop
+$ r="bb chroot /disk/rd /usr/local/bin/redis-cli --raw"; $r shutdown nosave 2>/dev/null; bb sleep 1; $r ping 2>&1 | bb head -n 1
+Could not connect to Redis at 127.0.0.1:6379: Connection refused
+
+== postgres: unpack the root, make the device nodes
+$ bb mkdir -p /disk/pg && cd /disk/pg && bb tar -xf /disk/postgres.tar && bb mkdir -p dev proc tmp var/lib/postgresql/data run/postgresql && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; bb chown -R 70:70 var/lib/postgresql run/postgresql tmp; cd /; bb chroot /disk/pg /usr/local/bin/postgres --version
+postgres (PostgreSQL) 18.6
+
+== postgres: initdb makes a cluster
+$ bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/initdb -D /var/lib/postgresql/data' > /tmp/initdb.log 2>&1; echo status $?; bb grep -c '^Success' /tmp/initdb.log
+status 0
+1
+
+== postgres: the server starts and takes a connection
+$ bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/pg_ctl -D /var/lib/postgresql/data -o "-c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/postgresql" -w -l /tmp/pg.log start' | bb tail -n 1; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -c 'select 6*7'"
+server started
+42
+
+== postgres: a table of a hundred thousand rows, summed
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -c 'create table t (id int primary key, v text)' -c \"insert into t select i, md5(i::text) from generate_series(1, 100000) i\" -c 'select count(*), sum(id) from t'"
+CREATE TABLE
+INSERT 0 100000
+100000|5000050000
+
+== postgres: an index answers a lookup, a join and a group by
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -c \"select id from t where v = md5('777')\" -c 'select count(*) from t a join t b on a.id = b.id + 1' -c 'select id % 3 g, count(*) from t group by g order by g'"
+777
+99999
+0|33333
+1|33334
+2|33333
+
+== postgres: a rolled-back transaction leaves no trace
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -c 'begin' -c 'delete from t' -c 'rollback' -c 'select count(*) from t'" | bb tail -n 1
+100000
+
+== postgres: dump to a file and restore into a second database
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/createdb -h 127.0.0.1 copy && /usr/local/bin/pg_dump -h 127.0.0.1 -t t postgres | /usr/local/bin/psql -h 127.0.0.1 -q -d copy && /usr/local/bin/psql -h 127.0.0.1 -At -d copy -c 'select count(*), sum(id) from t'"
+100000|5000050000
+
+== postgres: concurrent clients updating one row keep a count
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -q -c 'create table c (n int)' -c 'insert into c values (0)'"; for i in 1 2 3 4; do bb chroot /disk/pg /bin/su postgres -c "for j in 1 2 3 4 5 6 7 8 9 10; do /usr/local/bin/psql -h 127.0.0.1 -q -c 'update c set n = n + 1'; done" & done; wait; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -c 'select n from c'"
+40
+
+== postgres: pgbench loads and runs
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/pgbench -h 127.0.0.1 -i -s 1 -q" > /tmp/pgb_i.log 2>&1; echo init $?; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/pgbench -h 127.0.0.1 -c 4 -j 2 -t 50" 2>&1 | bb grep -e 'transactions actually' -e 'failed transactions'
+init 0
+number of transactions actually processed: 200/200
+number of failed transactions: 0 (0.000%)
+
+== postgres: an immediate stop is recovered from the log
+$ bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -q -c 'create table w (n int)' -c 'insert into w select generate_series(1, 5000)'"; bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/pg_ctl -D /var/lib/postgresql/data -m immediate -w stop' | bb tail -n 1; bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/pg_ctl -D /var/lib/postgresql/data -o "-c listen_addresses=127.0.0.1 -c unix_socket_directories=/run/postgresql" -w -l /tmp/pg2.log start' | bb tail -n 1; bb grep -c 'redo starts' /disk/pg/tmp/pg2.log; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -c 'select count(*) from w' -c 'select count(*) from t' -c 'select n from c'"
+server stopped
+server started
+1
+5000
+100000
+40
+
+== postgres: a clean restart keeps the data
+$ bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/pg_ctl -D /var/lib/postgresql/data -w restart' | bb tail -n 1; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -d copy -c 'select count(*) from t'"
+server started
+100000
+
+== postgres: stop
+$ bb chroot /disk/pg /bin/su postgres -c '/usr/local/bin/pg_ctl -D /var/lib/postgresql/data -w stop' | bb tail -n 1; bb chroot /disk/pg /bin/su postgres -c "/usr/local/bin/psql -h 127.0.0.1 -At -c 'select 1'" 2>&1 | bb head -n 1
+server stopped
+psql: error: connection to server at "127.0.0.1", port 5432 failed: Connection refused
