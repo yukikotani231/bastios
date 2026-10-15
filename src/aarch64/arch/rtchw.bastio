@@ -1,26 +1,60 @@
-// The hardware clock on AArch64: none kept after boot (the PL031 is read
-// once, in src/aarch64/main.bastio), so /dev/rtc0 has no device.
+// The hardware clock on AArch64: a clock the kernel keeps itself, seeded
+// from the PL031 at boot. The PL031 is read once and given back (its page
+// lies in the device window, which the other drivers' proofs need free),
+// so /dev/rtc0 reads the seed plus the time since it was set, and
+// RTC_SET_TIME moves that, which a program sees as a clock that keeps what
+// hwclock -w wrote (until the next boot, as with QEMU's PL031).
 
-enum RtcHw { None }
+struct SoftRtc { sec: u64, at: u64 }
+
+enum RtcHw { None, Soft(SoftRtc) }
 
 spec fn rtchw_ok(h: &RtcHw) -> bool {
   true
 }
 
 fn rtchw_live(h: &RtcHw) -> bool {
-  return false;
+  match h {
+    RtcHw::Soft(c) => { return true; },
+    RtcHw::None => { return false; },
+  }
 }
 
-fn rtchw_get(h: &mut RtcHw) -> u64
+/// The time the clock says at `now` ns since boot, in seconds since
+/// 1970-01-01 00:00 UTC; 0 if there is no clock.
+fn rtchw_get(h: &mut RtcHw, now: u64) -> u64
   requires rtchw_ok(h)
   ensures rtchw_ok(h) && result < 5000000000
 {
-  return 0;
+  match h {
+    RtcHw::Soft(c) => {
+      let mut t = smaller(c.sec, 5000000000);
+      if now > c.at {
+        t = t + smaller((now - c.at) / 1000000000, 5000000000);
+      }
+      if t >= 5000000000 {
+        return 0;
+      }
+      return t;
+    },
+    RtcHw::None => { return 0; },
+  }
 }
 
-fn rtchw_set(h: &mut RtcHw, t: u64) -> bool
+/// Sets the clock to t seconds since 1970-01-01 00:00 UTC at `now` ns.
+fn rtchw_set(h: &mut RtcHw, t: u64, now: u64) -> bool
   requires rtchw_ok(h)
   ensures rtchw_ok(h)
 {
-  return false;
+  match h {
+    RtcHw::Soft(c) => {
+      if t >= 5000000000 {
+        h = RtcHw::Soft(c);
+        return false;
+      }
+      h = RtcHw::Soft(SoftRtc { sec: t, at: now });
+      return true;
+    },
+    RtcHw::None => { return false; },
+  }
 }

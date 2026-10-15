@@ -661,7 +661,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   if nic_e1000(nic) {
     puts(&mut console, "net: e1000\r\n");
   }
-  let mut k = kernel_new(m, disk, nic, Snd::None, RtcHw::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
+  let mut k = kernel_new(m, disk, nic, Snd::None, RtcHw::Soft(SoftRtc { sec: wall, at: 0 }), mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
   install_files(&mut console, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut console, "cannot start the shell\r\n");

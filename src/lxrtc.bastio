@@ -3,8 +3,9 @@
 // RTC_SET_TIME (root's, like settimeofday); the clock holds UTC, a date
 // from 2000 to 2099. Alarm and update interrupts are not supported
 // (RTC_UIE_ON and the rest answer EINVAL, as for a clock without an
-// interrupt line), and neither is read(2). Without a clock (AArch64), opening
-// the device fails with ENODEV.
+// interrupt line), and neither is read(2). Without a clock, opening the
+// device fails with ENODEV. On AArch64 the clock is the kernel's own, seeded
+// from the PL031 at boot (src/aarch64/arch/rtchw.bastio).
 
 import "lxcred.bastio";
 import "civil.bastio";
@@ -19,7 +20,7 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   ensures kok(k)
 {
   if req == RTC_RD_TIME {
-    let t = rtchw_get(&mut k.rtc);
+    let t = rtchw_get(&mut k.rtc, k.ns);
     if t < 946684800 || t >= 4102444800 {
       return EINVAL;                        // no clock, or it holds no valid time
     }
@@ -59,7 +60,7 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     if back.day != day || back.month != mon {
       return EINVAL;                        // a day the month does not have
     }
-    if !rtchw_set(&mut k.rtc, t) {
+    if !rtchw_set(&mut k.rtc, t, k.ns) {
       return EINVAL;
     }
     return 0;
