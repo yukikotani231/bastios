@@ -701,6 +701,48 @@ fn pc_close(c: &mut PCache, m: &mut Mem, h: u64)
   }
 }
 
+/// Drops slot i's page, program text or not; true if the slot is empty
+/// afterwards (always).
+fn any_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
+  requires pt_level(t) == 1 && mem_ok(m) && i < 512 && pt_leases(t) == 0
+  ensures pt_level(t) == 1 && mem_ok(m) && pt_leases(t) == 0
+{
+  pc_clear(&mut t, &mut m, i);
+  return true;
+}
+
+/// Memory is short: gives up the cache's hold on up to `want` pages,
+/// program text included (it is read again from the file when a program
+/// runs next). A page a process maps stays until the process lets go of it.
+/// Returns how many slots it emptied.
+fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m)
+  ensures result <= want
+{
+  let mut n = 0;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_lease_count(&mut t) == 0 {
+        let mut i = 0;
+        while i < PC_N && n < want
+          invariant i <= PC_N && n <= want && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
+          invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
+        {
+          if get(c.keys, 3 * i) != 0 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512) {
+            pc_unkey(&mut c.keys, &mut c.link, i);
+            n = n + 1;
+          }
+          i = i + 1;
+        }
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return n;
+}
+
 /// File h went away (its handle will name another file): drops its pages.
 fn pc_forget(c: &mut PCache, m: &mut Mem, h: u64)
   requires pc_ok(c) && mem_ok(m)
