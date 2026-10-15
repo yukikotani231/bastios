@@ -47,6 +47,9 @@ const LX_FSOPEN: u64 = 430;
 const LX_FSCONFIG: u64 = 431;
 const LX_FSMOUNT: u64 = 432;
 const LX_FSPICK: u64 = 433;
+const LX_LANDLOCK_CREATE_RULESET: u64 = 444;   // xz and others probe it and do without
+const LX_LANDLOCK_ADD_RULE: u64 = 445;
+const LX_LANDLOCK_RESTRICT_SELF: u64 = 446;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO (src/lxaio.bastio)
 const LX_IO_DESTROY: u64 = 207;
@@ -833,10 +836,12 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   // The new mount API (runc and crun use it when present) likewise falls
-  // back on ENOSYS.
+  // back on ENOSYS, and so does Landlock (xz probes it before sandboxing
+  // itself; each probe would otherwise print a line on the console).
   if n == LX_RSEQ || n == LX_IO_URING_SETUP
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
-      || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
+      || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK
+      || n == LX_LANDLOCK_CREATE_RULESET || n == LX_LANDLOCK_ADD_RULE || n == LX_LANDLOCK_RESTRICT_SELF {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
