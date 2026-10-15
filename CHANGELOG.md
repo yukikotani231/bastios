@@ -72,6 +72,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Terminal
 
+- The console and pseudo-terminals start with `IUTF8` set, and Backspace takes back a whole UTF-8 character instead of one byte: typing a Japanese word and correcting it no longer leaves half a character in the line. The echo backs over as many columns as the character filled (two for East Asian wide characters; Linux backs over one), so the cursor ends where the erased character began. `IUTF8` can be cleared with `tcsetattr`, which restores erasing a byte at a time. Table of cell widths: `src/utf8.bastio`.
 - Keys typed at the console reach a program that waits in `epoll_wait`,
   `select` or `pselect6` (libuv, and so Neovim); before, they stayed queued
   for the native shell unless the program was in `poll`, `ppoll` or `read`.
