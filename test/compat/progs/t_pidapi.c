@@ -154,7 +154,18 @@ int main(void)
         a.pidfd = (unsigned long)&fd;
         a.parent_tid = (unsigned long)&fd;
         a.exit_signal = SIGCHLD;
-        EXPECT("clone3 CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL", syscall(SYS_clone3, &a, sizeof a) == -1 && errno == EINVAL);
+        EXPECT("clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL", syscall(SYS_clone3, &a, sizeof a) == -1 && errno == EINVAL);
+        int tid = 0;
+        fd = -1;
+        a.parent_tid = (unsigned long)&tid;
+        long r = syscall(SYS_clone3, &a, sizeof a);
+        if (r == 0)
+            _exit(0);
+        EXPECT("clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at two addresses fill both", r > 0 && fd >= 0 && tid == r);
+        if (r > 0) {
+            waitid(P_PIDFD, fd, &(siginfo_t){ 0 }, WEXITED);
+            close(fd);
+        }
         struct c3 b = { 0 };
         b.exit_signal = 300;
         EXPECT("clone3 with an exit signal above 255 is EINVAL", syscall(SYS_clone3, &b, sizeof b) == -1 && errno == EINVAL);

@@ -363,7 +363,7 @@ fn put_user_u32(k: &mut Kernel, pid: u64, va: u64, v: u64) -> bool
 /// clone(flags, stack, ptid, ctid, tls) with CLONE_THREAD: a new thread
 /// of pid's group, running pid's code on `stack`. Returns its id, or
 /// -errno.
-fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64
+fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, pfdp: u64, ctid: u64, tls: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
@@ -382,9 +382,9 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if !cg_fork_ok(k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
-  if flags & CLONE_PIDFD != 0 && (fd_free(k, pid, 0) >= LXNFD || flags & CLONE_PARENT_SETTID != 0) {
-    if flags & CLONE_PARENT_SETTID != 0 {
-      return EINVAL;                        // both want the word at ptid
+  if flags & CLONE_PIDFD != 0 && (fd_free(k, pid, 0) >= LXNFD || (flags & CLONE_PARENT_SETTID != 0 && ptid == pfdp)) {
+    if flags & CLONE_PARENT_SETTID != 0 && ptid == pfdp {
+      return EINVAL;                        // both want the same word
     }
     return EMFILE;
   }
@@ -462,7 +462,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   }
   if flags & CLONE_PIDFD != 0 {
     let pfd = ev_install(&mut k, pid, OF_PIDFD, c, 2, true);     // a pidfd on the thread
-    let w = put_user_u32(&mut k, pid, ptid, pfd % 0x100000000);
+    let w = put_user_u32(&mut k, pid, pfdp, pfd % 0x100000000);
   }
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
@@ -488,7 +488,7 @@ fn clone_proc_flags(flags: u64) -> bool {
 /// then the child starts on `stack` (if not 0) with the flags' extras.
 /// With CLONE_PARENT the child is its parent's sibling. Returns the
 /// child's pid, or -errno.
-fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64
+fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, ptid: u64, pfdp: u64, ctid: u64, tls: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
@@ -506,7 +506,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     // The descriptor is the parent's, so one must be free; it cannot share
     // the word that CLONE_PARENT_SETTID writes the id to, and a detached
     // child has no one to wait for it.
-    if flags & (CLONE_PARENT_SETTID + CLONE_DETACHED) != 0 {
+    if flags & CLONE_DETACHED != 0 || (flags & CLONE_PARENT_SETTID != 0 && ptid == pfdp) {
       return EINVAL;
     }
     if fd_free(k, pid, 0) >= LXNFD {
@@ -587,7 +587,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   }
   if flags & CLONE_PIDFD != 0 {
     let pfd = ev_install(&mut k, pid, OF_PIDFD, c, 0, true);
-    let w = put_user_u32(&mut k, pid, ptid, pfd % 0x100000000);   // only the parent's copy of the word
+    let w = put_user_u32(&mut k, pid, pfdp, pfd % 0x100000000);   // only the parent's copy of the word
   }
   return c;
 }
@@ -1107,7 +1107,7 @@ fn robust_exit(k: &mut Kernel, pid: u64)
 }
 
 /// The arguments of clone3(args, size) in the form clone takes them.
-struct Clone3 { err: u64, clear: bool, flags: u64, sp: u64, ptid: u64, ctid: u64, tls: u64 }
+struct Clone3 { err: u64, clear: bool, flags: u64, sp: u64, ptid: u64, ctid: u64, tls: u64, pfd: u64 }
 
 /// Reads struct clone_args (flags, pidfd, child_tid, parent_tid,
 /// exit_signal, stack, stack_size, tls, then set_tid and later fields)
@@ -1119,12 +1119,12 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let none = Clone3 { err: EINVAL, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+  let none = Clone3 { err: EINVAL, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
   if size < 64 || size > 4096 {
     return none;
   }
   if va >= 0x8000000000000000 {
-    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
   }
   let flags = user_u64(&mut k.spaces, pid, va);
   let pidfd = user_u64(&mut k.spaces, pid, va + 8);
@@ -1135,7 +1135,7 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   let stack_size = user_u64(&mut k.spaces, pid, va + 48);
   let tls = user_u64(&mut k.spaces, pid, va + 56);
   if !flags.ok || !pidfd.ok || !child_tid.ok || !parent_tid.ok || !exit_signal.ok || !stack.ok || !stack_size.ok || !tls.ok {
-    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
   }
   let low = flags.v % 0x100000000;
   let clear = flags.v / 0x100000000;
@@ -1147,18 +1147,13 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   if (low & CLONE_SIGHAND != 0 && low & 0x100 == 0) || (low & 0x10000 != 0 && low & CLONE_SIGHAND == 0) || (low & 0x200 != 0 && low & CLONE_NEWNS != 0) {
     return none;
   }
-  let mut parent_word = parent_tid.v;
   if low & CLONE_PIDFD != 0 {
-    // CLONE_PIDFD: the descriptor's number goes to *pidfd, which clone
-    // takes as the parent_tid word (the two flags exclude each other).
+    // CLONE_PIDFD: the descriptor's number goes to *pidfd, a word of its
+    // own (clone takes it from parent_tid, and the flags exclude each other).
     let pf = user_u64(&mut k.spaces, pid, pidfd.v);
     if !pf.ok {
-      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
-    if low & CLONE_PARENT_SETTID != 0 {
-      return none;
-    }
-    parent_word = pidfd.v;
   }
   if (stack.v == 0) != (stack_size.v == 0) || stack.v >= 0x8000000000000000 || stack_size.v >= 0x8000000000000000 {
     return none;
@@ -1168,7 +1163,7 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
     // namespace (EPERM); with it the field is still unsupported (E2BIG below).
     let tsz = user_u64(&mut k.spaces, pid, va + 72);
     if tsz.ok && tsz.v != 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
-      return Clone3 { err: EPERM, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: EPERM, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
   }
   let mut j = 64;
@@ -1177,12 +1172,12 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   {
     let w = user_u64(&mut k.spaces, pid, va + j);
     if !w.ok {
-      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
     if w.v != 0 {
-      return Clone3 { err: E2BIG, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: E2BIG, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
     j = j + 8;
   }
-  return Clone3 { err: 0, clear: clear == 1, flags: low + exit_signal.v, sp: stack.v + stack_size.v, ptid: parent_word, ctid: child_tid.v, tls: tls.v };
+  return Clone3 { err: 0, clear: clear == 1, flags: low + exit_signal.v, sp: stack.v + stack_size.v, ptid: parent_tid.v, ctid: child_tid.v, tls: tls.v, pfd: pidfd.v };
 }

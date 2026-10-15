@@ -1093,6 +1093,26 @@ fn call_done(k: &mut Kernel, pid: u64)
   }
 }
 
+/// True if a child of process p has ended and not yet been waited for: a
+/// wait4 that a signal interrupts then finds it when it runs again, as on
+/// Linux, where the child is looked for before the signal is.
+fn has_zombie_child(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);
+  let mut c = 1;
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k)
+  {
+    if state(k.procs, c) == ZOMBIE && child_of_group(k.procs, c, p) {
+      return true;
+    }
+    c = c + 1;
+  }
+  return false;
+}
+
 /// Builds the signal frame for signal s on process p's stack and points p
 /// at the handler. False if the stack has no room or the action has no
 /// return address (SA_RESTORER, which every C library sets).
@@ -1129,7 +1149,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   let swapped = waiting && (call == LX_PPOLL || call == LX_PSELECT6 || call == 281 || call == 441) && wget(k.sigsave, p * SIGSAVE_ROW) & MASK_SWAPPED != 0;   // epoll_pwait, epoll_pwait2
   let suspended = waiting && call == LX_RT_SIGSUSPEND || swapped;
   let pausing = call == LX_PAUSE || suspended || never_restarts(call);
-  let reaping = (call == LX_WAIT4 || call == LX_WAITID) && s == SIGCHLD;
+  let reaping = (call == LX_WAIT4 || call == LX_WAITID) && (s == SIGCHLD || has_zombie_child(&mut k, p));
   if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {

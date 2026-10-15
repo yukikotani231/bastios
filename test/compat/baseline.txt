@@ -772,9 +772,10 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at two addresses fill both
 t_pidapi: a child killed by the signal is reported as CLD_KILLED with its signal
 t_pidapi: a second waitid(P_PIDFD) is ECHILD
-t_pidapi: clone3 CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidapi: clone3 with CLONE_PIDFD returns a pidfd
 t_pidapi: clone3 with a size below 64 is EINVAL
 t_pidapi: clone3 with an exit signal above 255 is EINVAL
