@@ -41,7 +41,7 @@ system. Without `/dev/kvm`, `bench/run.py` downloads the kernel with
 | pipebw | 64 KiB writes through a pipe to a reader |
 | tcplat, tcpbw | the same over TCP on 127.0.0.1 |
 
-`make bench-workloads` adds whole-program workloads (see Results).
+`make bench-workloads` adds whole-program workloads and `make bench-net` a TCP comparison over a network card (see Results).
 
 `bench/prof.py -- COMMAND` shows where the time goes for one command on
 BastiOS. It samples QEMU with Linux `perf` and charges each sample to a
@@ -114,6 +114,29 @@ Linux's page cache, so BastiOS goes back to the disk on every pass (see
 "The gaps, largest first"). `hello` is one gcc run (gcc, cc1, as and ld are
 loaded from the disk, 1.9 to 2.5 s over the three runs against 0.5 s on
 Linux), and `tgz` reads a large tree once: both pay for the same gap.
+
+### Over a network card
+
+`bench/netcmp.py` (`make bench-net`) runs `mtcp echo` (`user/mtcp.c`, the same
+source on both systems, built with musl) in the guest, forwards a host port
+to it through QEMU's user-mode network and drives it from the host: the
+average round trip of 200 messages of 32 bytes, and the rate of echoing 2 MiB.
+QEMU's user-mode stack is on the path of both systems and caps the rate, so
+compare the two systems, not the absolute figures. Ubuntu's kernel builds
+e1000 as a module, which the bench's initramfs does not carry, so only
+BastiOS has an e1000 row.
+
+| Card | Test | Unit | BastiOS | Linux | BastiOS / Linux |
+|---|---|---|---:|---:|---:|
+| virtio-net | round trip, 32 bytes | us | 263.6 | 316.3 | 0.83x |
+| virtio-net | echo 2 MiB | MiB/s | 13.3 | 11.9 | 1.12x |
+| e1000 | round trip, 32 bytes | us | 143.8 | n/a | |
+| e1000 | echo 2 MiB | MiB/s | 0.2 | n/a | |
+
+The e1000 driver moves bulk data at a fiftieth of virtio-net's rate (0.2
+against 13.3 MiB/s) although its round trip is shorter; the cause is not
+known yet. It is the gap that matters for real network cards and for
+clouds that offer an e1000.
 
 ## Boot time and memory
 

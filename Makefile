@@ -866,6 +866,10 @@ build/bench/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py build/be
 bench-workloads: build/bastios.elf build/bench/alpine.img
 	bench/workloads.py $(WORKLOAD_ARGS)
 
+# TCP over virtio-net and e1000 against Linux's, driven from the host (bench/netcmp.py).
+bench-net: build/bastios.elf
+	bench/netcmp.py $(NET_ARGS)
+
 # Not part of `make test`: the change in each benchmark from bench/baseline.json
 # (or COMPARE_TO=other.json) to the last `make bench` (build/bench/results.json).
 # Exits 1 if a test got more than 10% slower; see bench/compare.py.
@@ -907,6 +911,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif
