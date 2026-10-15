@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- The system runs 1023 processes and threads at once (511 before). `NPROC` is 1024; the per-process tables follow it, and `/proc/PID` names, `dec_out` and `proc_pid` take four-digit ids. `mproc` holds 700 children at once and checks ids past 511. A machine with a small kernel heap still stops sooner (about 250 at 256 MiB), because the per-process tables double at 257 rows.
 - The kernel looks at UHCI (USB 1.1) controllers and says in the boot log how many there are and how many devices are on their ports. There is no driver for them yet; this shows whether a USB keyboard on an older PC is out of reach.
 - The hardware report's `pci` lines say when a SATA controller is in RAID mode (Intel RST) or Intel VMD is on, which hide the disks from BastiOS, and what to change in the firmware.
 - On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.
@@ -437,6 +438,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Build and test
 
+- For contributors: `tools/setup-dev.sh` sets up a Debian or Ubuntu machine in one command (and a dev container runs it), CONTRIBUTING.md explains the issue labels and where to find a first issue, and a feature-request issue template and `.github/labels.yml` (synced by a workflow) were added.
 - `test/stackdepth.py` checks that the deepest chain of kernel calls in a native kernel fits the kernel stack (it fails above 64 KiB of the 92 KiB; today 41 KiB). It was written after a native kernel built with an older compiler overflowed its stack in the UDP path under a loaded test run: its functions had frames up to 19 KiB where the current compiler's are under 4.5 KiB (the boot function aside).
 
 ### Files and disks
