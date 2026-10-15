@@ -618,14 +618,14 @@ so:libgreet.so.1
 greeter-0.3-r1.apk
 
 == apk: install the built packages from the signed repository, with their scripts
-$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'apk add -q --no-progress -X /home/builder/packages/aports greeter 2>/dev/null; echo apk=$?; greeter Yuki; cat /var/lib/greeter-installed; apk verify /home/builder/packages/aports/x86_64/greeter-0.3-r1.apk; apk info -R greeter 2>/dev/null | grep so:; apk del -q greeter libgreet >/dev/null 2>&1; ls /var/lib/greeter-installed 2>&1 | cut -c1-40'
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'apk add -q --no-progress -X /home/builder/packages/aports greeter 2>/dev/null; echo apk=$?; greeter Yuki; cat /var/lib/greeter-installed; apk verify /home/builder/packages/aports/x86_64/greeter-0.3-r1.apk; apk info -R greeter 2>/dev/null | grep so:; apk del -q greeter libgreet >/dev/null 2>&1; ls /var/lib/greeter-installed 2>&1 | grep -c "No such file"'
 apk=0
 hello, Yuki!
 greeter installed
 /home/builder/packages/aports/x86_64/greeter-0.3-r1.apk: OK
 so:libc.musl-x86_64.so.1
 so:libgreet.so.1
-ls: /var/lib/greeter-installed: No such file or directory
+1
 
 == apk: a repository signed with a key that is not trusted is refused
 $ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'mkdir /root/keys && mv /etc/apk/keys/builder-* /root/keys/ && apk add -q --no-progress -X /home/builder/packages/aports greeter 2>&1 | grep -c "UNTRUSTED signature"; apk info -e greeter; echo installed=$?; mv /root/keys/* /etc/apk/keys/'
