@@ -2392,6 +2392,9 @@ def move():
     try:
         m = socket.socket(socket.AF_UNIX)
         m.connect(mon)
+        # The mouse raises IRQ 12, so it wakes a processor whose tick was
+        # stretched while the machine sat idle.
+        time.sleep(3)
         m.sendall(b"mouse_move 10 -5\n")
         time.sleep(0.3)
         m.sendall(b"mouse_button 1\n")
