@@ -94,6 +94,7 @@ struct Vfs {
   zeros: Bytes,         // ZEROS zero bytes, never written: lx_fill copies from it
   disk: DiskFs,         // the file system on the disk
   name: Bytes,          // a directory's name, while vfs_readdir lists it
+  mnt_hi: u64,          // one past the highest mount slot ever used (vfs_mount): the slots from here on are free
   mnt: Buf,             // tmpfs mounts on in-memory directories (src/lxmount.bastio)
   now: u64,             // the time, in seconds, for modification times
   lo: DiskFs,           // the file system on a loop device's image (no blocks: none mounted)
@@ -112,7 +113,7 @@ struct Vfs {
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && nopen_ok(v.nopen)
+  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
     && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
 }
 
@@ -120,7 +121,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   requires disk_ok(disk)
   ensures vfs_ok(result)
 {
-  return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), zeros: balloc(ZEROS), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), zeros: balloc(ZEROS), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), mnt_hi: 0, now: 0,
     lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(RIX + 3), rhi: 0, pool_hi: 0, nat_rows: false };
 }
 
@@ -2343,8 +2344,8 @@ fn vfs_mount_slot(v: &Vfs, i: u64) -> u64
   ensures result <= MNT_N
 {
   let mut s = 0;
-  while s < MNT_N
-    invariant s <= MNT_N
+  while s < v.mnt_hi
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N
   {
     if get(v.mnt, 2 * s) == i + 1 {
       return s;
@@ -2388,6 +2389,9 @@ fn vfs_mount(v: &mut Vfs, i: u64, ro: bool) -> bool
     return false;
   }
   v.mnt = set(v.mnt, 2 * s, i + 1);
+  if s >= v.mnt_hi {
+    v.mnt_hi = s + 1;
+  }
   vfs_set_ro(&mut v, s, ro);
   return true;
 }
@@ -2430,8 +2434,8 @@ fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
     return false;
   }
   let mut s = 0;
-  while s < MNT_N
-    invariant s <= MNT_N && vfs_ok(v) && n <= XFER
+  while s < v.mnt_hi
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XFER
   {
     let i = vfs_mount_node(v, s);
     if i < NFILES && (vfs_mount_ro(v, s) || !ro_only) {
@@ -2461,8 +2465,8 @@ fn vfs_dev_of(v: &mut Vfs, n: u64) -> u64
   let mut best = FS_RAM;
   let mut best_l = 0;
   let mut s = 0;
-  while s < MNT_N
-    invariant s <= MNT_N && vfs_ok(v) && n <= XFER
+  while s < v.mnt_hi
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XFER
   {
     let i = vfs_mount_node(v, s);
     if i < NFILES {
@@ -2588,8 +2592,8 @@ fn vfs_drop_tree(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
   }
   // Mounts on directories under it go with it.
   let mut s = 0;
-  while s < MNT_N
-    invariant s <= MNT_N && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
+  while s < v.mnt_hi
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && mem_ok(mem) && l <= NAMEBUF
   {
     let mj = vfs_mount_node(v, s);
     if mj < NFILES && ram_under(&mut v.ram, mj, v.name, l) {
