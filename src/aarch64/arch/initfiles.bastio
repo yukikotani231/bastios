@@ -5,6 +5,8 @@
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
 // /etc/shells lists the login shells (getusershell; an SSH server refuses
 // a user whose shell is not there).
+// No files are embedded at build time on this architecture (kernel.bastio asks).
+const NEXTRA: u64 = 0;
 const NINIT: u64 = 7;
 
 fn init_name(i: u64) -> Str
