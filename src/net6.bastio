@@ -487,7 +487,7 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
       v6_release(&mut n, tok);
     }
   } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI {
-    ra_in(&mut n, plen, smac);
+    ra_in(&mut n, plen, smac, slo);
   } else if (kind == ICMP6_ECHO_REPLY || (1 <= kind && kind <= 4)) && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46))
     && shi / TWO48 != 0xFF02 {
     // An echo reply, or an error report: for the raw ICMPv6 sockets (ping6).
@@ -553,12 +553,13 @@ fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64)
 /// A router advertisement (plen bytes at 54) from MAC smac: the router is
 /// where frames off the link go, and a prefix information option of
 /// length 64 with the autonomous flag gives our global address.
-fn ra_in(n: &mut Net, plen: u64, smac: u64)
+fn ra_in(n: &mut Net, plen: u64, smac: u64, slo: u64)
   requires net_ok(n) && 16 <= plen && 54 + plen <= FRAME_MAX && smac < MAC_LIMIT
   ensures net_ok(n)
 {
   if be16(n.pkt, 60) != 0 {
     n.rtr_mac = smac;                 // a router lifetime: a default router
+    n.rtr_lo = slo;
   }
   let end = 54 + plen;
   let mut o = 70;
@@ -619,6 +620,36 @@ fn nic_v6_token(c: &mut Nic, hi: u64, lo: u64) -> u64
     },
   }
   return r;
+}
+
+/// Our IPv6 state, for /proc and netlink: `what` 0 is the advertised
+/// prefix (0: none yet), 1 our interface id, 2 the default router's
+/// interface id (0: no router), 3 whether there is an IPv6 interface (the
+/// card is up).
+fn nic_v6_state(c: &Nic, what: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if what == 0 {
+        return n.pfx;
+      }
+      if what == 1 {
+        return n.iid;
+      }
+      if what == 2 {
+        if n.rtr_mac != 0 {
+          return n.rtr_lo;
+        }
+        return 0;
+      }
+      if card_live(n.dev) {
+        return 1;
+      }
+      return 0;
+    },
+  }
 }
 
 /// Half `half` (0 high, 1 low) of the IPv6 address token `ip` stands for,
