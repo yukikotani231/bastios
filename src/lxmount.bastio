@@ -322,6 +322,9 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
     if s >= MNT_N {
       return EINVAL;                        // not a mount
     }
+    if vfs_mount_ext(k.fs, s) && flags & MS_RDONLY == 0 {
+      return EROFS;                         // an ext4 image is only read
+    }
     vfs_set_ro(&mut k.fs, s, flags & MS_RDONLY != 0);
     return 0;
   }
@@ -346,7 +349,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
       vfs_umount(&mut k.fs, &mut k.mem, ms);
       return ext_errno(r);
     }
-    vfs_set_ro(&mut k.fs, ms, true);
+    vfs_set_ext(&mut k.fs, ms);
     return 0;
   }
   if t == FST_BSTDISK {

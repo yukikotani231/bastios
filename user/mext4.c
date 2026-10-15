@@ -134,6 +134,15 @@ static void tree(const char *d)
         closedir(dp);
     check(count == 0, "empty has nothing");
 
+    char mounts[4096];
+    int mfd = open("/proc/self/mounts", O_RDONLY);
+    long mn = mfd < 0 ? 0 : read(mfd, mounts, sizeof mounts - 1);
+    mounts[mn > 0 ? mn : 0] = 0;
+    if (mfd >= 0)
+        close(mfd);
+    check(strstr(mounts, " ext4 ro 0 0") != NULL, "/proc/self/mounts shows an ext4 mount");
+    check(mount(NULL, d, NULL, MS_REMOUNT, 0) < 0 && errno == EROFS, "remount read-write is refused");
+
     /* Read-only: every way of changing it fails with EROFS. */
     path(p, d, "new");
     check(open(p, O_WRONLY | O_CREAT, 0644) < 0 && errno == EROFS, "create is refused");
