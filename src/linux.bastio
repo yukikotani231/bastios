@@ -677,6 +677,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, r);
     return KEEP;
   }
+  return lx_mid_call(&mut con, &mut k, pid, n, was, a, b, c);
+}
+
+/// The calls after the sleeping ones, apart from linux_syscall so that its proof stays small.
+fn lx_mid_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
   if n == LX_WAITID {
     return lx_waitid(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
