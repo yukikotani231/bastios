@@ -4,6 +4,7 @@
 #include "compat.h"
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/wait.h>
 #include <sys/xattr.h>
@@ -162,6 +163,35 @@ static int names_are(const char *path, const char *const *want, int n) {
     return seen == n;
 }
 
+/* SEEK_DATA and SEEK_HOLE: a file with no holes is one stretch of data and
+ * a hole at its end; past the end is ENXIO. */
+static int seek_data(const char *name) {
+    int fd = filled(name, 10000);
+    if (fd < 0) return 0;
+    int ok = lseek(fd, 0, SEEK_DATA) == 0 && lseek(fd, 5000, SEEK_DATA) == 5000
+        && lseek(fd, 0, SEEK_HOLE) == 10000 && lseek(fd, 9999, SEEK_HOLE) == 10000
+        && lseek(fd, 10000, SEEK_DATA) == -1 && errno == ENXIO
+        && lseek(fd, 10000, SEEK_HOLE) == -1 && errno == ENXIO
+        && lseek(fd, 20000, SEEK_DATA) == -1 && errno == ENXIO
+        && lseek(fd, 0, SEEK_SET) == 0 && lseek(fd, 100, SEEK_DATA) == 100 && lseek(fd, 0, SEEK_CUR) == 100;
+    close(fd);
+    unlink(name);
+    return ok;
+}
+
+/* The file system ioctls a tmpfs answers: no attribute flags, no reflink. */
+static int fs_ioctls(const char *name) {
+    int fd = filled(name, 100);
+    if (fd < 0) return 0;
+    long flags = -1;
+    int ok = ioctl(fd, 0x80086601 /* FS_IOC_GETFLAGS */, &flags) == 0;
+    int clone = ioctl(fd, 0x40049409 /* FICLONE */, fd);
+    ok = ok && clone == -1 && (errno == EOPNOTSUPP || errno == EINVAL || errno == EXDEV || errno == EBADF);
+    close(fd);
+    unlink(name);
+    return ok;
+}
+
 /* One step of a check: the first that fails says where. */
 #define S(c) do { if (ok && !(c)) { printf("  step at line %d failed (errno %d %s)\n", __LINE__, errno, strerror(errno)); ok = 0; } } while (0)
 
@@ -287,5 +317,8 @@ int main(void) {
     EXPECT("setxattr, getxattr, listxattr and removexattr on a file in /tmp", xattrs("/tmp/fsx_x", "/tmp/fsx_xl", "/tmp/fsx_xm", 0));
     EXPECT("extended attributes on the disk: flags, 3000-byte values, 60 names, links, renames, directories", xattrs(on_disk("fsx_x"), on_disk("fsx_xl"), on_disk("fsx_xm"), 1));
     EXPECT("extended attributes stay on a bstdisk3 file system when it is mounted again", xattrs_remount());
+    EXPECT("SEEK_DATA and SEEK_HOLE in /tmp", seek_data("/tmp/fsx_s"));
+    EXPECT("SEEK_DATA and SEEK_HOLE on the disk", seek_data(on_disk("fsx_s")));
+    EXPECT("FS_IOC_GETFLAGS answers and FICLONE is refused", fs_ioctls("/tmp/fsx_i"));
     return done();
 }

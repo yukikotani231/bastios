@@ -1086,6 +1086,20 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
+  if d.kind == K_FILE || d.kind == K_DIR {
+    // The file system ioctls: no attribute flags are kept (lsattr sees none
+    // and chattr is refused), and there is no reflink, deduplication or
+    // extent map, as on tmpfs. (The request is an unsigned int: a libc
+    // that passes it as an int sign-extends the high bit.)
+    let fsreq = req % 0x100000000;
+    if fsreq == 0x80086601 {                 // FS_IOC_GETFLAGS
+      xfer_zero(&mut k, 8);
+      return lx_put_out(&mut k, pid, arg, 8);
+    }
+    if fsreq == 0x40086602 || fsreq == 0x40049409 || fsreq == 0x4020940D || fsreq == 0xC0189436 || fsreq == 0xC020660B {
+      return EOPNOTSUPP;                     // FS_IOC_SETFLAGS, FICLONE, FICLONERANGE, FIDEDUPERANGE, FS_IOC_FIEMAP
+    }
+  }
   if d.kind != K_CONSOLE {
     return ENOTTY;
   }
@@ -2309,7 +2323,7 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
 }
 
 /// lseek: SEEK_SET (0), SEEK_CUR (1) and SEEK_END (2), with a signed
-/// offset. Returns the new offset or -errno.
+/// offset, and SEEK_DATA (3) and SEEK_HOLE (4). Returns the new offset or -errno.
 fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -2347,6 +2361,25 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
       return EBADF;
     }
     base = size;
+  } else if whence == 3 || whence == 4 {
+    // SEEK_DATA and SEEK_HOLE: a file here is one stretch of data (reads of
+    // what was never written give zeros, but the file system does not tell
+    // them apart), with the hole that every file has at its end.
+    let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, row));
+    if size == NO_FILE {
+      return EBADF;
+    }
+    if off >= size {
+      return ENXIO;                         // (a negative offset is a huge one)
+    }
+    let mut at = off;
+    if whence == 4 {
+      at = size;
+    }
+    if !vfs_seek(&mut k.fs, row, at) {
+      return EBADF;
+    }
+    return at;
   } else if whence != 0 {
     return EINVAL;
   }
