@@ -15,6 +15,10 @@ An LTP test's exit status says how it went: 0 passed, bit 0 a failure
 warning, 32 unsupported here (TCONF). A test that does not finish within
 the timeout is interrupted and counted as a hang.
 
+Tests that race two threads for a fixed time (LTP's .runtime, up to 150 s) run
+with LTP_RUNTIME_MUL=0.1: they end in seconds, and the guest is too slow to
+finish the full run inside the timeout.
+
 As in run.py, the kernel's "[pid N: Linux system call X not implemented]"
 notes are charged to the test that was running, which ranks the missing
 system calls by how many tests each one blocks.
@@ -161,7 +165,7 @@ def run_batch(args, group, progs, work, log, idle=False):
             # and BusyBox's tools (cp for SAFE_CP), as runltp's would.
             cmd = " ".join(shlex.quote(a) for a in ["/disk/" + argv[0]] + argv[1:])
             t0 = time.time()
-            text, status = g.run(f"cd /disk; PATH=/disk:/bin TMPDIR=/tmp KCONFIG_PATH=/disk/kconfig LTP_DEV_FS_TYPE=tmpfs LTP_COLORIZE_OUTPUT=0 {cmd}; "
+            text, status = g.run(f"cd /disk; PATH=/disk:/bin TMPDIR=/tmp KCONFIG_PATH=/disk/kconfig LTP_DEV_FS_TYPE=tmpfs LTP_COLORIZE_OUTPUT=0 LTP_RUNTIME_MUL=0.1 {cmd}; "
                                  "echo @@end $?", args.timeout)
             results.append(record(tag, text, status))
             results[-1]["secs"] = round(time.time() - t0, 1)

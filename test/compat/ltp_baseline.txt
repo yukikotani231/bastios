@@ -83,6 +83,8 @@ fanotify04
 fanotify08
 fanotify09
 fanotify11
+inotify09
+inotify11
 io_cancel01
 io_destroy02
 io_getevents01
@@ -962,6 +964,7 @@ timerfd02
 timerfd_create01
 timerfd_gettime01
 timerfd_settime01
+timerfd_settime02
 times01
 times03
 tkill01
