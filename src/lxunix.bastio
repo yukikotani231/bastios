@@ -28,7 +28,7 @@
 // listener slot, those of the process that called listen: SO_PEERCRED.
 // Last, one word per listener slot: the socket file it is bound to (its
 // file handle + 1), or 0 for a name in the abstract namespace.
-// k.uxb holds each channel's ring of UX_CAP bytes, then each slot's name.
+// k.uxb holds each channel's ring of UX_CAP bytes (it grows as channels are made: ux_room), k.uxn each slot's name.
 // A datagram channel keeps each message as its length (two bytes, low
 // first), the sender's slot + 1 (0: no name), and then its bytes.
 //
@@ -64,14 +64,13 @@ const UL_DGRAM: u64 = 3;
 const UM_DGRAM: u64 = 4;
 const STAMP_SPAN: u64 = 1099511627776;  // 2^40: bind stamps are below it
 const EPROTOTYPE: u64 = 18446744073709551525;      // 2^64 - 91
-const UXL0: u64 = 512;                 // UX_N * UX_W: the first listener word
-const UXP0: u64 = 524288;               // UX_N * UX_CAP: the first name byte
-const UXF0: u64 = 768;                 // UXL0 + UX_LIS * UXL_W: the in-flight words
-const UXC0: u64 = 896;                 // UXF0 + UX_N: the channels' credentials
-const UXLC0: u64 = 1152;                // UXC0 + 2 * UX_N: the listeners' credentials
-const UXH0: u64 = 1216;                 // UXLC0 + 2 * UX_LIS: the listeners' socket files
-const UXE0: u64 = 1248;                 // UXH0 + UX_LIS: the other descriptions in flight, UX_XTRA per channel
-const UXO0: u64 = 2144;                 // UXE0 + UX_N * UX_XTRA: where in the channel the in-flight message starts
+const UXL0: u64 = 4096;                // UX_N * UX_W: the first listener word
+const UXF0: u64 = 5120;                // UXL0 + UX_LIS * UXL_W: the in-flight words
+const UXC0: u64 = 6144;                // UXF0 + UX_N: the channels' credentials
+const UXLC0: u64 = 8192;                // UXC0 + 2 * UX_N: the listeners' credentials
+const UXH0: u64 = 8448;                // UXLC0 + 2 * UX_LIS: the listeners' socket files
+const UXE0: u64 = 8576;                // UXH0 + UX_LIS: the other descriptions in flight, UX_XTRA per channel
+const UXO0: u64 = 15744;                // UXE0 + UX_N * UX_XTRA: where in the channel the in-flight message starts
 const SO_PEERCRED: u64 = 17;
 const UX_DG: u64 = 16;                 // word 3: a datagram socket
 const SUN_LEN: u64 = 110;              // sizeof(struct sockaddr_un)
@@ -362,6 +361,39 @@ fn is_unix(k: &Kernel, pid: u64, fd: u64) -> bool
   return v >= FD_OFD && v - FD_OFD < OFD_N && of_get(k.ofd, v - FD_OFD, 0) == OF_UNIX;
 }
 
+/// Makes room in k.uxb for channel c's ring, doubling it (up to UXB_MAX)
+/// if it is too short. False if the kernel's memory ran out.
+fn ux_room(k: &mut Kernel, c: u64) -> bool
+  requires kok(k) && c < UX_N
+  ensures kok(k)
+  ensures result ==> (c + 1) * UX_CAP <= blen(k.uxb)
+{
+  let need = (c + 1) * UX_CAP;
+  let l = blen(k.uxb);
+  if need <= l {
+    return true;
+  }
+  let mut nl = l;
+  while nl < need
+    invariant nl >= UXB_INIT && nl <= UXB_MAX && nl % UX_CAP == 0
+  {
+    nl = nl * 2;
+    if nl > UXB_MAX {
+      nl = UXB_MAX;
+    }
+  }
+  let mut nb = try_balloc(nl);
+  if blen(nb) != nl || nl < l {
+    bfree(nb);
+    return false;
+  }
+  bcopy(&mut nb, 0, k.uxb, 0, l);
+  let prev = k.uxb;
+  k.uxb = nb;
+  bfree(prev);
+  return true;
+}
+
 /// A free channel, open at both ends and empty; UX_N if none is free.
 fn uc_new(k: &mut Kernel) -> u64
   requires kok(k)
@@ -373,7 +405,7 @@ fn uc_new(k: &mut Kernel) -> u64
   {
     c = c + 1;
   }
-  if c >= UX_N {
+  if c >= UX_N || !ux_room(&mut k, c) {
     return UX_N;
   }
   uc_set(&mut k, c, 0, 0);
@@ -622,7 +654,7 @@ fn ul_row(k: &Kernel, l: u64, f: u64, i: u64) -> u64
   if f == 1 {
     return smaller(ul_get(k, l, 1), UX_PATH);
   }
-  return cast[u64](bget(k.uxb, UXP0 + l * UX_PATH + i));
+  return cast[u64](bget(k.uxn, l * UX_PATH + i));
 }
 
 /// The slot whose name is the first n transfer bytes, or UX_LIS.
@@ -636,7 +668,7 @@ fn ul_find(k: &Kernel, n: u64) -> u64
   {
     if ul_get(k, l, 0) != UL_FREE && ul_get(k, l, 1) == n {
       let mut i = 0;
-      while i < n && bget(k.uxb, UXP0 + l * UX_PATH + i) == bget(k.fs.xfer, i)
+      while i < n && bget(k.uxn, l * UX_PATH + i) == bget(k.fs.xfer, i)
         invariant i <= n && n <= UX_PATH && l < UX_LIS
       {
         i = i + 1;
@@ -854,7 +886,7 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   while i < n
     invariant i <= n && n <= UX_PATH && l < UX_LIS && kok(k)
   {
-    bset(&mut k.uxb, UXP0 + l * UX_PATH + i, bget(k.fs.xfer, i));
+    bset(&mut k.uxn, l * UX_PATH + i, bget(k.fs.xfer, i));
     i = i + 1;
   }
   ul_set(&mut k, l, 1, n);
@@ -1204,6 +1236,9 @@ fn ux_send_from(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bo
   if n == 0 && !u.dg {
     return 0;
   }
+  if (c + 1) * UX_CAP > blen(k.uxb) {
+    return ENOMEM;                          // never: uc_new made room for the ring
+  }
   let mut r = uc_ring(k, c);
   let count = r.n;
   let mut lead = 0;                         // the length and sender a datagram starts with
@@ -1272,6 +1307,9 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
     }
   } else if u.mode != UM_CONN {
     return ENOTCONN;
+  }
+  if (c + 1) * UX_CAP > blen(k.uxb) {
+    return 0;                               // never: uc_new made room for the ring
   }
   let mut r = uc_ring(k, c);
   let count = r.n;
@@ -1383,7 +1421,7 @@ fn sun_name_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, l: u64, none: u64)
   if l < UX_LIS && n >= 1 && n <= UX_PATH {
     let mut at = 2;                         // where the name's bytes go
     let mut m = n;
-    if bget(k.uxb, UXP0 + l * UX_PATH) != 0 {
+    if bget(k.uxn, l * UX_PATH) != 0 {
       bset(&mut k.fs.xfer, 2, 47);          // "/"
       at = 3;
       m = smaller(n, SUN_LEN - 4);          // and a NUL after
@@ -1392,7 +1430,7 @@ fn sun_name_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, l: u64, none: u64)
     while i < m
       invariant i <= m && m <= UX_PATH && at <= 3 && l < UX_LIS && kok(k)
     {
-      bset(&mut k.fs.xfer, at + i, bget(k.uxb, UXP0 + l * UX_PATH + i));
+      bset(&mut k.fs.xfer, at + i, bget(k.uxn, l * UX_PATH + i));
       i = i + 1;
     }
     len = at + m;

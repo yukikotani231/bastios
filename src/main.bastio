@@ -1549,6 +1549,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.sigsave);
   free(sys.k.ux);
   bfree(sys.k.uxb);
+  bfree(sys.k.uxn);
   free(sys.k.mns);
   free(sys.k.scf);
   bfree(sys.k.mstr);

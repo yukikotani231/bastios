@@ -839,17 +839,19 @@ fn is_exe_file(f: u64) -> bool
 
 // AF_UNIX sockets (src/lxunix.bastio): UX_N one-way channels and UX_LIS
 // names to connect to.
-const UX_N: u64 = 128;
-const UX_S: u64 = 64;                 // the radix of a datagram socket's slots: a slot + 1 is at most UX_LIS, below it
+const UX_N: u64 = 1024;
+const UX_S: u64 = 256;                // the radix of a datagram socket's slots: a slot + 1 is at most UX_LIS, below it
 const UX_W: u64 = 4;                  // head, count, read end open, write end open
 const UX_CAP: u64 = 4096;             // bytes a channel holds
-const UX_LIS: u64 = 32;
+const UX_LIS: u64 = 128;
 const UX_BACKLOG: u64 = 4;            // connections waiting for accept
 const UXL_W: u64 = 8;                 // 4 + UX_BACKLOG
 const UX_PATH: u64 = 108;             // the longest name
 const UX_XTRA: u64 = 7;               // descriptions a message passes besides the first
-const UX_LEN: u64 = 2272;             // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files, then UX_XTRA words per channel, then one offset per channel
-const UXB_LEN: u64 = 527744;          // UX_N * UX_CAP + UX_LIS * UX_PATH
+const UX_LEN: u64 = 16768;            // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files, then UX_XTRA words per channel, then one offset per channel
+const UXB_INIT: u64 = 131072;         // 32 channels' rings: k.uxb starts this long and doubles, up to UXB_MAX
+const UXB_MAX: u64 = 4194304;         // UX_N * UX_CAP
+const UXN_LEN: u64 = 13824;           // UX_LIS * UX_PATH: the names
 
 const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptions
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
@@ -998,7 +1000,8 @@ struct Kernel {
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
   evt: Buf,             // timerfds and epoll instances (src/lxevent.bastio)
   ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
-  uxb: Bytes,           // their bytes
+  uxb: Bytes,           // their bytes, as far as channels have needed them (a multiple of UX_CAP)
+  uxn: Bytes,           // the listeners' names
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
   holes: Buf,           // address space munmap gave back, HOLE_N ranges per process (src/lxmem.bastio)
   lazy: Buf,            // code pages read from a file when first touched, LZ_W words per process (src/lazy.bastio)
@@ -1108,7 +1111,7 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) >= UXB_INIT && blen(k.uxb) <= UXB_MAX && blen(k.uxb) % UX_CAP == 0 && blen(k.uxn) == UXN_LEN && len(k.maps) == MAPS_LEN && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
