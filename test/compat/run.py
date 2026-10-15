@@ -819,7 +819,7 @@ def main():
         # of about a gigabyte onto the disk: a copy.
         disk = os.path.join(args.out, "rust-run.img")
         shutil.copyfile(args.rust_disk, disk)
-        lanes.append((disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
+        lanes.append((disk, [("rust", "Rust toolchain", applets_lane(rust, 1800))], "2G"))
     lanes = [l for l in lanes if l[1]]
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
