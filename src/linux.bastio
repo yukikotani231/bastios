@@ -586,10 +586,20 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_CLONE && a & CLONE_VM != 0 && a & CLONE_VFORK != 0 && a & CLONE_THREAD == 0 {
+    if a / 0x1000 % 2 == 1 && fd_free(k, pid, 0) >= LXNFD {
+      ret(&mut k.procs, pid, EMFILE);
+      return KEEP;
+    }
     let r = lx_vfork_vm(&mut k, mmu, pid, b);
     if r >= NPROC {
       ret(&mut k.procs, pid, r);            // -errno: no child
       return KEEP;
+    }
+    if a / 0x1000 % 2 == 1 {                // CLONE_PIDFD
+      // Go's os/exec asks for a pidfd this way. The space is the child's
+      // while the parent waits, so the descriptor's number goes in through it.
+      let pfd = ev_install(&mut k, pid, OF_PIDFD, r, 0, true);
+      let w = put_user_u32(&mut k, r, pfdp, pfd % 0x100000000);
     }
     if clear {
       sig_reset(&mut k.sigact, r, true);

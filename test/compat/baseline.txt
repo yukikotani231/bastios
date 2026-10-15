@@ -772,6 +772,8 @@ t_net: getaddrinfo localhost
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd
+t_pidapi: waitid(P_PIDFD) on it reports the child's status
 t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL
 t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at two addresses fill both
 t_pidapi: a child killed by the signal is reported as CLD_KILLED with its signal

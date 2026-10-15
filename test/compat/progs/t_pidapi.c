@@ -52,6 +52,12 @@ static pid_t child_c3(int *pidfd, unsigned long long flags, int go, int code)
     return p;
 }
 
+static int vfork_child(void *arg)
+{
+    (void)arg;
+    _exit(7);
+}
+
 int main(void)
 {
     setup();
@@ -170,6 +176,21 @@ int main(void)
         b.exit_signal = 300;
         EXPECT("clone3 with an exit signal above 255 is EINVAL", syscall(SYS_clone3, &b, sizeof b) == -1 && errno == EINVAL);
         EXPECT("clone3 with a size below 64 is EINVAL", syscall(SYS_clone3, &b, 63) == -1 && errno == EINVAL);
+    }
+
+    /* Go's os/exec: clone(CLONE_VM | CLONE_VFORK | CLONE_PIDFD). */
+    {
+        static char stk[16384] __attribute__((aligned(16)));
+        int fd = -1;
+        long r = clone(vfork_child, stk + sizeof stk, CLONE_VM | CLONE_VFORK | CLONE_PIDFD | SIGCHLD, 0, &fd);
+        EXPECT("clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd", r > 0 && fd >= 0);
+        siginfo_t si = { 0 };
+        if (fd >= 0 && waitid(P_PIDFD, fd, &si, WEXITED) == 0)
+            EXPECT("waitid(P_PIDFD) on it reports the child's status", si.si_pid == r && si.si_status == 7);
+        else
+            EXPECT("waitid(P_PIDFD) on it reports the child's status", 0);
+        if (fd >= 0)
+            close(fd);
     }
 
     /* A thread's pidfd (6.9). */
