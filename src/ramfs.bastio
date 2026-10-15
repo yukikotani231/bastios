@@ -16,7 +16,7 @@
 import "pages.bastio";
 import "core/bytes.bastio";
 
-const NFILES: u64 = 8192;           // more than every descriptor of a process, or a build tree
+const NFILES: u64 = 32768;          // more than every descriptor of a process, or a build tree
 const FNAME_MAX: u64 = 255;
 const FILE_PAGES: u64 = 262144;
 const FILE_MAX: u64 = 1073741824;     // FILE_PAGES * 4096 (1 GiB)
@@ -40,9 +40,14 @@ spec fn file_ok(f: &RamFile) -> bool {
   blen(f.name) <= FNAME_MAX && f.size <= FILE_MAX && vlen(f.pages) <= FILE_PAGES
 }
 
-/// The table always has NFILES slots, and every file in it is well formed.
+/// The table holds up to NFILES slots and grows as nodes are made; a slot
+/// past its end is free. Every file in it is well formed.
 spec fn nodes_ok(v: &Vec[Node]) -> bool {
-  vlen(v) == NFILES && forall i: u64 :: i < NFILES ==> (vget(v, i) is Node::File ==> file_ok(vget(v, i).File))
+  vlen(v) <= NFILES && forall i: u64 :: i < vlen(v) ==> (vget(v, i) is Node::File ==> file_ok(vget(v, i).File))
+}
+
+spec fn slot_free(v: &Vec[Node], i: u64) -> bool {
+  i >= vlen(v) || vget(v, i) is Node::Free
 }
 
 // The name index: an open-addressing hash table over the names of the
@@ -52,11 +57,15 @@ spec fn nodes_ok(v: &Vec[Node]) -> bool {
 // only functions that change a node's name; ram_find still compares the
 // name of whatever the index offers, so a stale entry costs a wrong
 // answer only if one of those four forgets to update it.
-const RIX: u64 = 16384;                // twice NFILES: never more than half full
+const RIX: u64 = 65536;                // twice NFILES: never more than half full
+// Word RIX holds the number of TOMBs; word RIX + 1 a hint for ram_create:
+// every node below it is in use (ram_remove lowers it, ram_create raises it).
+// Word RIX + 2 counts the nodes that are hard links, so the walks that look
+// for them (ram_link_to, ram_links) can be skipped while there are none.
 const TOMB: u64 = 18446744073709551615;
 
 spec fn rix_ok(r: &Buf) -> bool {
-  len(r) == RIX + 1
+  len(r) == RIX + 3
 }
 
 /// The hash of name[from .. from + n].
@@ -180,33 +189,33 @@ fn rix_tidy(v: &mut Vec[Node], r: &mut Buf)
 fn ram_new() -> Vec[Node]
   ensures nodes_ok(result)
 {
-  let mut v = vec_new[Node]();
-  let mut i = 0;
-  while i < NFILES
-    invariant i <= NFILES && vlen(v) == i
-    invariant forall j: u64 :: j < i ==> vget(v, j) is Node::Free
-  {
-    vec_push(&mut v, Node::Free);
-    i = i + 1;
-  }
-  return v;
+  return vec_new[Node]();
 }
 
 /// Takes node `i` out, leaving its slot free.
 fn take_node(v: &mut Vec[Node], i: u64) -> Node
   requires nodes_ok(v) && i < NFILES
-  ensures nodes_ok(v) && vget(v, i) is Node::Free
+  ensures nodes_ok(v) && slot_free(v, i)
   ensures result is Node::File ==> file_ok(result.File)
 {
+  if i >= vec_len(v) {
+    return Node::Free;
+  }
   return vec_swap(&mut v, i, Node::Free);
 }
 
 /// Puts a node into a free slot.
 fn put_node(v: &mut Vec[Node], i: u64, x: Node)
-  requires nodes_ok(v) && i < NFILES && vget(v, i) is Node::Free
+  requires nodes_ok(v) && i < NFILES && slot_free(v, i)
   requires x is Node::File ==> file_ok(x.File)
   ensures nodes_ok(v)
 {
+  while vec_len(v) <= i
+    invariant nodes_ok(v) && i < NFILES && slot_free(v, i)
+  {
+    vec_push(&mut v, Node::Free);
+  }
+  assert vget(v, i) is Node::Free;
   match vec_swap(&mut v, i, x) {
     Node::Free => {},
     Node::File(_f) => { unreachable; },     // the slot was free
@@ -652,7 +661,7 @@ fn ram_find(v: &mut Vec[Node], r: &Buf, hi: u64, name: &Bytes, n: u64) -> u64
     }
     if e != TOMB && e - 1 < hi {
       let i = e - 1;
-      if vec_with(v, i, node_named, name, n) {
+      if i < vec_len(v) && vec_with(v, i, node_named, name, n) {
         return i;
       }
     }
@@ -676,12 +685,20 @@ fn ram_create(v: &mut Vec[Node], r: &mut Buf, name: &Bytes, n: u64, dir: bool, n
   if dir {
     mode = 493;                         // 0755
   }
-  let mut i = 0;
+  let mut i = get(r, RIX + 1);
+  if i > NFILES {
+    i = 0;
+  }
   while i < NFILES
     invariant i <= NFILES && nodes_ok(v) && rix_ok(r)
   {
     match take_node(&mut v, i) {
       Node::Free => {
+        // The table grows by doubling; if the kernel's heap has no room
+        // for that, the table counts as full instead of halting the kernel.
+        if i >= vec_len(v) && !vec_try_reserve(&mut v, i + 1 - vec_len(v)) {
+          return NFILES;
+        }
         let mut nm = balloc(n);
         let mut j = 0;
         while j < n
@@ -692,6 +709,7 @@ fn ram_create(v: &mut Vec[Node], r: &mut Buf, name: &Bytes, n: u64, dir: bool, n
         }
         put_node(&mut v, i, Node::File(RamFile { name: nm, dir: dir, size: 0, pages: vec_new[Slot](), mode: mode, mtime: now, link: NFILES, own: 0 }));
         rix_put(&mut r, name_hash(name, 0, n), i);
+        r = set(r, RIX + 1, i + 1);
         return i;
       },
       Node::File(f) => { put_node(&mut v, i, Node::File(f)); },
@@ -706,6 +724,9 @@ fn ram_size(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return NO_FILE;
+  }
   return vec_with(v, i, node_size);
 }
 
@@ -714,6 +735,9 @@ fn ram_is_dir(v: &mut Vec[Node], i: u64) -> bool
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return false;
+  }
   return vec_with(v, i, node_is_dir);
 }
 
@@ -723,6 +747,9 @@ fn ram_under(v: &mut Vec[Node], i: u64, name: &Bytes, n: u64) -> bool
   requires nodes_ok(v) && i < NFILES && n <= blen(name)
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return false;
+  }
   return vec_with(v, i, node_under, name, n);
 }
 
@@ -733,6 +760,9 @@ fn ram_name(v: &mut Vec[Node], i: u64, buf: &mut Bytes) -> u64
   ensures nodes_ok(v) && blen(buf) == old(blen(buf))
   ensures result <= blen(buf) || result == NO_FILE
 {
+  if i >= vec_len(v) {
+    return NO_FILE;
+  }
   return vec_with(v, i, node_name_into, &mut buf);
 }
 
@@ -741,6 +771,9 @@ fn ram_len(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return NO_FILE;
+  }
   return vec_with(v, i, node_len);
 }
 
@@ -799,6 +832,9 @@ fn ram_meta(v: &mut Vec[Node], i: u64) -> FMeta
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v)
 {
+  if i >= vec_len(v) {
+    return FMeta { ok: false, mode: 0, mtime: 0, own: 0 };
+  }
   return vec_with(v, i, node_meta);
 }
 
@@ -881,7 +917,13 @@ fn ram_remove(v: &mut Vec[Node], r: &mut Buf, mem: &mut Mem, i: u64)
       if ol > 0 {
         rix_del(&mut r, name_hash(f.name, 0, ol), i);
       }
+      if f.link < NFILES && get(r, RIX + 2) > 0 {
+        r = set(r, RIX + 2, get(r, RIX + 2) - 1);
+      }
       file_free(f, &mut mem);
+      if i < get(r, RIX + 1) {
+        r = set(r, RIX + 1, i);
+      }
     },
   }
   rix_tidy(&mut v, &mut r);
@@ -913,6 +955,9 @@ fn ram_link_of(v: &mut Vec[Node], i: u64) -> u64
   requires nodes_ok(v) && i < NFILES
   ensures nodes_ok(v) && result <= NFILES
 {
+  if i >= vec_len(v) {
+    return NFILES;
+  }
   return vec_with(v, i, node_link_of);
 }
 
@@ -932,6 +977,9 @@ fn ram_link(v: &mut Vec[Node], r: &mut Buf, name: &Bytes, n: u64, t: u64, now: u
       let mut g = f;
       g.link = t;
       put_node(&mut v, i, Node::File(g));
+      if get(r, RIX + 2) < NFILES {
+        r = set(r, RIX + 2, get(r, RIX + 2) + 1);
+      }
     },
   }
   return i;
@@ -970,4 +1018,11 @@ fn ram_links(v: &mut Vec[Node], t: u64) -> u64
     i = i + 1;
   }
   return c;
+}
+
+/// Does any node name another as a hard link?
+fn ram_has_links(r: &Buf) -> bool
+  requires rix_ok(r)
+{
+  return get(r, RIX + 2) > 0;
 }

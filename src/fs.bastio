@@ -72,7 +72,7 @@ const VFS_MISS: u64 = 18446744073709551614;     // the disk has not caught up: s
 const LO0: u64 = NFILES + DSLOTS;     // the loop mount's entry e is LO0 + e
 const HFILES: u64 = NFILES + 2 * DSLOTS;   // every file handle is below this
 const NOPEN: u64 = HFILES;           // the files nopen counts (slot NOPEN, past them, is where any other (fs, node) would go: never stored)
-const NOPEN_START: u64 = 8192;       // what nopen starts with (NFILES: the in-memory nodes); it doubles as disk entries are opened
+const NOPEN_START: u64 = NFILES;      // what nopen starts with (NFILES: the in-memory nodes); it doubles as disk entries are opened
 
 spec fn nopen_ok(n: &Buf) -> bool {
   len(n) >= NFILES && len(n) <= NOPEN
@@ -107,7 +107,6 @@ struct Vfs {
   nopen: Buf,           // per file (nslot): how many rows and holds are open on it; node_open reads this instead of scanning ftab
   pool_hi: u64,         // every open row in the pool is below this (file_writing scans no further); only grows
   nat_rows: bool,       // a row past the pool (a native process's) was ever opened: false lets file_writing skip them
-  rlinked: bool,        // a hard link to an in-memory file was ever made: false lets vfs_nlink skip counting them
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
@@ -120,7 +119,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(RIX + 1), rhi: 0, pool_hi: 0, nat_rows: false, rlinked: false };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0))), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(RIX + 3), rhi: 0, pool_hi: 0, nat_rows: false };
 }
 
 /// ram_create of the name in the transfer buffer, noting the node in `rhi`
@@ -434,7 +433,7 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64
     return fd;
   }
   let mut i = ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, n);
-  if i < NFILES && v.rlinked {
+  if i < NFILES && ram_has_links(v.rix) {
     let t = ram_link_of(&mut v.ram, i);
     if t < NFILES {
       i = t;
@@ -986,8 +985,8 @@ fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
     return false;
   }
   let mut l = NFILES;
-  if v.rlinked {
-    l = ram_link_to(&mut v.ram, i);    // a walk of the whole table: only once a link was made
+  if ram_has_links(v.rix) {
+    l = ram_link_to(&mut v.ram, i);    // a walk of the whole table: only while a link exists
   }
   if l < NFILES {
     // The file keeps its node (descriptors and other links name it) and
@@ -1068,7 +1067,7 @@ fn vfs_target(v: &mut Vfs, f: u64) -> u64
   ensures f >= HFILES ==> result == f
 {
   if f < NFILES {
-    if !v.rlinked {
+    if !ram_has_links(v.rix) {
       return f;                             // no link node exists: skip taking the node out to look
     }
     let t = ram_link_of(&mut v.ram, f);
@@ -1098,7 +1097,7 @@ fn vfs_nlink(v: &mut Vfs, f: u64) -> u64
 {
   let t = vfs_target(&mut v, f);
   if t < NFILES {
-    if !v.rlinked {
+    if !ram_has_links(v.rix) {
       return 1;                             // no link node exists, so the count would be 0 (and costs a pass over every node)
     }
     return 1 + ram_links(&mut v.ram, t);
@@ -2237,7 +2236,6 @@ fn vfs_link(v: &mut Vfs, n: u64, m: u64) -> u64
   if f >= NFILES || vfs_ram_link(&mut v, m, f) >= NFILES {
     return LINK_FULL;
   }
-  v.rlinked = true;
   return LINKED;
 }
 
