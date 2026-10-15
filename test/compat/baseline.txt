@@ -325,6 +325,10 @@ t_fdshare: close_range with CLOSE_RANGE_UNSHARE closes only the caller's copy
 t_fdshare: execve gives the program a table of its own
 t_fdshare: kcmp(KCMP_FILES) tells sharing processes from the rest
 t_fdshare: unshare(CLONE_FILES) is EMFILE past nr_open
+t_fdshare: a working directory the child sets is the parent's
+t_fdshare: a umask the child sets is the parent's
+t_fdshare: after unshare(CLONE_FS) the child's chdir stays with it
+t_fdshare: kcmp(KCMP_FS) says processes that share a working directory do
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read

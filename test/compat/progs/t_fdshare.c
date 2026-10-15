@@ -1,4 +1,4 @@
-/* Processes that share a descriptor table (clone with CLONE_FILES): what one
+/* Processes that share a descriptor table (clone with CLONE_FILES) or a working directory and umask (CLONE_FS): what one
  * opens or closes the other sees, until one of them unshares it (unshare,
  * close_range with CLOSE_RANGE_UNSHARE, execve), kcmp says which processes
  * share, and unshare(CLONE_FILES) fails past /proc/sys/fs/nr_open. */
@@ -6,11 +6,13 @@
 #include <fcntl.h>
 #include <sched.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 
 #define STACK 65536
 #define KCMP_FILES 2
+#define KCMP_FS 3
 #ifndef CLOSE_RANGE_UNSHARE
 #define CLOSE_RANGE_UNSHARE (1U << 1)
 #endif
@@ -22,6 +24,7 @@ struct arg {
     int mode;
     int fd;          /* a descriptor the parent opened */
     int up, go;      /* the child tells the parent on up, and waits on go */
+    int flags;       /* clone flags, besides SIGCHLD */
     pid_t parent;
 };
 
@@ -54,6 +57,16 @@ static int child(void *p)
         execv("/proc/self/exe", av);
         return 22;
     }
+    case 7:   /* the working directory is the parent's too */
+        return chdir("/etc") ? 30 : 0;
+    case 8:
+        umask(077);
+        return 0;
+    case 9:   /* unshare(CLONE_FS): the child's chdir stays with it */
+        if (unshare(CLONE_FS)) return 31;
+        return chdir("/etc") ? 32 : 0;
+    case 10:  /* kcmp(KCMP_FS) */
+        return syscall(SYS_kcmp, a->parent, getpid(), KCMP_FS, 0, 0) == 0 ? 0 : 33;
     case 6:   /* a copy would hold a descriptor past nr_open */
         return unshare(CLONE_FILES) == 0 || errno != EMFILE ? 23 : 0;
     }
@@ -65,7 +78,7 @@ static int run(struct arg *a)
 {
     int st;
     char *stack = malloc(STACK);
-    pid_t c = stack ? clone(child, stack + STACK, CLONE_FILES | SIGCHLD, a) : -1;
+    pid_t c = stack ? clone(child, stack + STACK, a->flags | SIGCHLD, a) : -1;
     if (c < 0 || waitpid(c, &st, 0) != c) return -1;
     free(stack);
     return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
@@ -78,7 +91,7 @@ int main(int argc, char **argv)
     setup();
     int up[2], go[2];
     if (pipe(up) || pipe(go)) return 1;
-    struct arg a = { 0, -1, up[1], go[0], getpid() };
+    struct arg a = { 0, -1, up[1], go[0], CLONE_FILES, getpid() };
 
     /* What the child opens, the parent has: its descriptor is the lowest free one. */
     int first = open("/etc/passwd", O_RDONLY);
@@ -134,6 +147,22 @@ int main(int argc, char **argv)
         }
         close(65);
         if (ok) pass(); else fail("nr_open");
+    }
+    {
+        char cwd[64], here[64];
+        a.flags = CLONE_FS;
+        getcwd(here, sizeof here);
+        a.mode = 7;
+        EXPECT("a working directory the child sets is the parent's", run(&a) == 0 && getcwd(cwd, sizeof cwd) && strstr(cwd, "etc"));
+        chdir(here);
+        mode_t old = umask(022);
+        a.mode = 8;
+        EXPECT("a umask the child sets is the parent's", run(&a) == 0 && umask(old) == 077);
+        a.mode = 9;
+        EXPECT("after unshare(CLONE_FS) the child's chdir stays with it", run(&a) == 0 && getcwd(cwd, sizeof cwd) && !strcmp(cwd, here));
+        a.mode = 10;
+        EXPECT("kcmp(KCMP_FS) says processes that share a working directory do", run(&a) == 0 && syscall(SYS_kcmp, getpid(), 1, KCMP_FS, 0, 0) != 0);
+        chdir(here);
     }
     return done();
 }

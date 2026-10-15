@@ -196,6 +196,141 @@ fn fd_leave(k: &mut Kernel, p: u64)
   pset(&mut k.procs, p, F_FDHOLD, 0);
 }
 
+// ---------------------------------------------------------------- shared working directory
+//
+// The same ring for clone with CLONE_FS between processes (not threads,
+// which share theirs through group_move): the working directory, root and
+// umask are in the row of the member whose call is being handled.
+
+/// Swaps the working directory, root and umask of a and b.
+fn fs_swap(k: &mut Kernel, a: u64, b: u64)
+  requires kok(k) && a < NPROC && b < NPROC
+  ensures kok(k)
+{
+  if a == b || (a + 1) * CWD_STRIDE > len(k.cwd) || (b + 1) * CWD_STRIDE > len(k.cwd)
+     || (a + 1) * CWD_STRIDE > len(k.croot) || (b + 1) * CWD_STRIDE > len(k.croot) {
+    return;
+  }
+  let mut i = 0;
+  while i < CWD_STRIDE
+    invariant i <= CWD_STRIDE && kok(k) && (a + 1) * CWD_STRIDE <= len(k.cwd) && (b + 1) * CWD_STRIDE <= len(k.cwd) && (a + 1) * CWD_STRIDE <= len(k.croot) && (b + 1) * CWD_STRIDE <= len(k.croot)
+  {
+    let x = wget(k.cwd, a * CWD_STRIDE + i);
+    wset(&mut k.cwd, a * CWD_STRIDE + i, wget(k.cwd, b * CWD_STRIDE + i));
+    wset(&mut k.cwd, b * CWD_STRIDE + i, x);
+    let y = wget(k.croot, a * CWD_STRIDE + i);
+    wset(&mut k.croot, a * CWD_STRIDE + i, wget(k.croot, b * CWD_STRIDE + i));
+    wset(&mut k.croot, b * CWD_STRIDE + i, y);
+    i = i + 1;
+  }
+  let u = pget(k.procs, a, F_UMASK);
+  pset(&mut k.procs, a, F_UMASK, pget(k.procs, b, F_UMASK));
+  pset(&mut k.procs, b, F_UMASK, u);
+}
+
+/// The member after p in its working-directory ring, or 0 if p has its own.
+fn fs_next(procs: &Buf, p: u64) -> u64
+  requires ptab_ok(procs) && p < NPROC
+  ensures result < NPROC
+{
+  let n = pget(procs, p, F_FSNEXT);
+  if n >= NPROC {
+    return 0;
+  }
+  return n;
+}
+
+/// The row that holds p's working directory, root and umask.
+fn fs_home(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < NPROC
+{
+  if fs_next(k.procs, p) == 0 || pget(k.procs, p, F_FSHOLD) == 1 {
+    return p;
+  }
+  let mut q = fs_next(k.procs, p);
+  let mut n = 0;
+  while q != 0 && q != p && n < NPROC
+    invariant n <= NPROC && q < NPROC
+  {
+    if pget(k.procs, q, F_FSHOLD) == 1 {
+      return q;
+    }
+    q = fs_next(k.procs, q);
+    n = n + 1;
+  }
+  return p;
+}
+
+/// Brings the shared working directory to p's row.
+fn fs_take(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let h = fs_home(k, p);
+  if h != p {
+    fs_swap(&mut k, h, p);
+    pset(&mut k.procs, h, F_FSHOLD, 0);
+    pset(&mut k.procs, p, F_FSHOLD, 1);
+  }
+}
+
+/// Process c shares p's working directory, root and umask.
+fn fs_join(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  if p == c {
+    return;
+  }
+  fs_take(&mut k, p);
+  let n = fs_next(k.procs, p);
+  pset(&mut k.procs, c, F_FSHOLD, 0);
+  if n == 0 {
+    pset(&mut k.procs, p, F_FSHOLD, 1);
+    pset(&mut k.procs, p, F_FSNEXT, c);
+    pset(&mut k.procs, c, F_FSNEXT, p);
+  } else {
+    pset(&mut k.procs, c, F_FSNEXT, n);
+    pset(&mut k.procs, p, F_FSNEXT, c);
+  }
+}
+
+/// Process p stops sharing: they stay with the rest of its ring.
+fn fs_leave(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = fs_next(k.procs, p);
+  if n == 0 {
+    return;
+  }
+  if pget(k.procs, p, F_FSHOLD) == 1 {
+    fs_swap(&mut k, p, n);
+    pset(&mut k.procs, n, F_FSHOLD, 1);
+  }
+  // The member before p now skips it.
+  let mut q = n;
+  let mut i = 0;
+  while q != 0 && fs_next(k.procs, q) != p && i < NPROC
+    invariant i <= NPROC && q < NPROC && kok(k)
+  {
+    q = fs_next(k.procs, q);
+    i = i + 1;
+  }
+  if q != 0 && fs_next(k.procs, q) == p {
+    if q == n {
+      // Only n is left: its table is its own again.
+      pset(&mut k.procs, n, F_FSNEXT, 0);
+      pset(&mut k.procs, n, F_FSHOLD, 0);
+    } else {
+      pset(&mut k.procs, q, F_FSNEXT, n);
+    }
+  }
+  pset(&mut k.procs, p, F_FSNEXT, 0);
+  pset(&mut k.procs, p, F_FSHOLD, 0);
+}
+
 fn of_get(t: &Buf, h: u64, f: u64) -> u64
   requires len(t) == OFD_LEN && h < OFD_N && f < OFD_STRIDE
 {
@@ -601,6 +736,23 @@ fn lx_fd_fork(k: &mut Kernel, parent: u64, child: u64)
   }
 }
 
+/// Process p gets a working directory, root and umask of its own, copies of
+/// the ones it shared.
+fn fs_unshare(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = fs_next(k.procs, p);
+  if n == 0 {
+    return;
+  }
+  fs_take(&mut k, p);
+  fs_leave(&mut k, p);
+  cwd_fork(&mut k.cwd, n, p);
+  cwd_fork(&mut k.croot, n, p);
+  pset(&mut k.procs, p, F_UMASK, pget(k.procs, n, F_UMASK));
+}
+
 /// Process p gets descriptors of its own, a copy of the ones it shared.
 fn fd_unshare(k: &mut Kernel, p: u64)
   requires kok(k) && p < NPROC
@@ -646,6 +798,26 @@ fn fd_ring_id(k: &Kernel, p: u64) -> u64
       best = q;
     }
     q = fd_next(k.procs, q);
+    n = n + 1;
+  }
+  return best;
+}
+
+/// The lowest id in the ring p belongs to: the same for every member.
+fn fs_ring_id(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < NPROC
+{
+  let mut best = p;
+  let mut q = fs_next(k.procs, p);
+  let mut n = 0;
+  while q != 0 && q != p && n < NPROC
+    invariant n <= NPROC && q < NPROC && best < NPROC
+  {
+    if q < best {
+      best = q;
+    }
+    q = fs_next(k.procs, q);
     n = n + 1;
   }
   return best;
@@ -717,6 +889,9 @@ fn lx_fd_close_all(k: &mut Kernel, pid: u64, only_cloexec: bool)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if !only_cloexec {
+    fs_leave(&mut k, pid);                  // the process ends: it stops sharing its working directory
+  }
   if fd_next(k.procs, pid) != 0 {
     if !only_cloexec {
       fd_leave(&mut k, pid);                // the others still use them

@@ -35,6 +35,7 @@ const LX_PIDFD_GETFD: u64 = 438;
 const PVM_WAIT: u64 = 4611686018427387904;           // process_vm's answer: not yet (no byte count is this large)
 const KCMP_FILE: u64 = 0;
 const KCMP_FILES: u64 = 2;
+const KCMP_FS: u64 = 3;
 const KCMP_EPOLL_TFD: u64 = 7;
 
 fn is_pidfd_call(n: u64) -> bool {
@@ -238,6 +239,10 @@ fn lx_kcmp(k: &mut Kernel, pid: u64, p1: u64, p2: u64, kind: u64, i1: u64, i2: u
   if t == KCMP_FILES {
     x = fd_ring_id(k, p1);                  // processes that share a table share a ring
     y = fd_ring_id(k, p2);
+  }
+  if t == KCMP_FS {
+    x = fs_ring_id(k, p1);
+    y = fs_ring_id(k, p2);
   }
   if t == KCMP_FILE {
     let r1 = fd_home(k, p1);

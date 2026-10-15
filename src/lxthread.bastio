@@ -238,6 +238,7 @@ fn group_take(k: &mut Kernel, mmu: &Mmu, p: u64)
   ensures kok(k)
 {
   fd_take(&mut k, p);                       // threads, and processes cloned with CLONE_FILES
+  fs_take(&mut k, p);                       // and with CLONE_FS
   if pget(k.procs, p, F_TGID) == 0 || has_space(&mut k.spaces, p) {
     return;
   }
@@ -369,6 +370,9 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 || flags & CLONE_VFORK != 0 {
     return EINVAL;
   }
+  if fs_next(k.procs, pid) != 0 {
+    return EAGAIN;                          // its working directory is shared with another process: threads would move it with their group
+  }
   if !cow_break_all(&mut k, pid) {
     return ENOMEM;                          // its copy-on-write pages need copies first (src/lxcow.bastio)
   }
@@ -457,13 +461,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
 /// the exit signal, CLONE_PARENT, CLONE_PIDFD, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
-/// CLONE_FILES, which shares the descriptor table (fd_join).
+/// CLONE_FILES, which shares the descriptor table (fd_join), and CLONE_FS,
+/// which shares the working directory, root and umask (fs_join).
 /// CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWCGROUP and CLONE_NEWNET give the
 /// child a mount, UTS, IPC, cgroup or network namespace of its own. Sharing the cwd, signal handlers or
 /// memory with a separate process, and the other namespaces, are not
 /// supported.
 fn clone_proc_flags(flags: u64) -> bool {
-  let known = 0xff + CLONE_PARENT + CLONE_FILES + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID + CLONE_PIDFD
+  let known = 0xff + CLONE_PARENT + CLONE_FS + CLONE_FILES + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID + CLONE_PIDFD
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
     + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP + CLONE_NEWNET;
   return flags & known == flags;
@@ -478,6 +483,9 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   ensures kok(k)
 {
   let mut par = pid;
+  if flags & CLONE_FS != 0 && (pget(k.procs, pid, F_TGID) != 0 || flags & CLONE_NEWNS != 0) {
+    return EINVAL;                          // a thread group keeps its working directory in its own way (group_move)
+  }
   if flags & CLONE_PARENT != 0 {
     par = pget(k.procs, tgid(k.procs, pid), F_PARENT);
     if par == 0 || par >= NPROC {
@@ -524,6 +532,9 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   }
   if flags % 256 != SIGCHLD {
     pset(&mut k.procs, c, F_XSIG, flags % 256 + 1);   // the exit signal the parent gets
+  }
+  if flags & CLONE_FS != 0 {
+    fs_join(&mut k, pid, c);                // the copy fork made is not used
   }
   if flags & CLONE_FILES != 0 {
     lx_fd_close_all(&mut k, c, false);      // the copy fork made: the child has the parent's table instead
@@ -607,6 +618,9 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   // CLONE_FS, so unsharing those has nothing left to do.
   if flags & !(ns + CLONE_FS + CLONE_FILES) != 0 && pget(k.procs, pid, F_TGID) != 0 {
     return EINVAL;                          // threads that share them: not supported
+  }
+  if flags & CLONE_FS != 0 || ns & CLONE_NEWNS != 0 {
+    fs_unshare(&mut k, pid);                // a new mount namespace takes a working directory of its own too
   }
   if flags & CLONE_FILES != 0 && fd_next(k.procs, pid) != 0 && fd_top(k, pid) > nr_open(k) {
     return EMFILE;                          // the copy would hold a descriptor past /proc/sys/fs/nr_open

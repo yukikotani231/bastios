@@ -1039,6 +1039,7 @@ unlinkat01
 unshare01
 unshare02
 unshare03
+unshare04
 ustat01
 ustat02
 utime01
