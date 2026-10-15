@@ -817,7 +817,7 @@ fn is_px_timens(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || f == PROC_DEV + PSYS + SY_PID_MAX || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_IPC + 5 || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2042,7 +2042,12 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       return put_s(&mut o, 0, "0\n");
     }
     if what == SY_PID_MAX {
-      let a = put_n(&mut o, 0, NPROC);    // every pid is below it
+      let mut pm = NPROC;                 // every pid is below it
+      let w = get(k.sys, SYS_PIDMX);
+      if w != 0 {
+        pm = w - 1;                       // as written: kept and handed back, pids are still handed out below NPROC
+      }
+      let a = put_n(&mut o, 0, pm);
       return put_c(&mut o, a, 10);
     }
     if what == SY_PRINTK {
@@ -2386,11 +2391,19 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_s(&mut o, a, "\nPPid:\t");
     a = put_n(&mut o, a, vpid_of(k, pid, parent));
-    if nsk_of(k, NSK_PID, p) != 0 && nsk_of(k, NSK_PID, pid) == 0 {
-      a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in its own namespace
-      a = put_n(&mut o, a, p);
-      a = put_c(&mut o, a, 9);
-      a = put_n(&mut o, a, get(k.mns, nsk_at(NSK_VPID, p)));
+    let dp = pn_depth(k, nsk_of(k, NSK_PID, p));
+    let dobs = pn_depth(k, nsk_of(k, NSK_PID, pid));
+    if dp > dobs {
+      a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in each namespace inside, down to its own
+      a = put_n(&mut o, a, vpid_of(k, pid, p));
+      let mut j = smaller(dp - dobs, 3);
+      while j > 0 && j <= 3
+        invariant j <= 3 && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
+      {
+        j = j - 1;
+        a = put_c(&mut o, a, 9);
+        a = put_n(&mut o, a, get(k.mns, nsk_at(vp_kind(j), p)));
+      }
     }
     a = put_s(&mut o, a, "\nUid:");
     a = put_ids(&mut o, a, k, pid, p, 0, F_UID, F_SUID);
@@ -2769,6 +2782,34 @@ fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
   return p * LXNFD + fd;
 }
 
+/// Where the name x[..n] (no leading "/") goes on once process p's root is
+/// taken off its front: 0 if the name is not inside the root.
+fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
+  requires kok(k) && p < NPROC && n <= blen(x)
+  ensures result <= n
+{
+  let rl = root_len(k, p);
+  if rl == 0 || n < rl {
+    return 0;
+  }
+  let mut i = 0;
+  while i < rl
+    invariant i <= rl && rl <= n && n <= blen(x) && rl <= FNAME_MAX && kok(k) && p < NPROC
+  {
+    if cast[u64](bget(x, i)) != wget(k.croot, p * CWD_STRIDE + 1 + i) % 256 {
+      return 0;
+    }
+    i = i + 1;
+  }
+  if n == rl {
+    return rl;
+  }
+  if bget(x, rl) != 47 {
+    return 0;
+  }
+  return rl + 1;
+}
+
 /// The target of /proc/P/fd/FD into o: "/dev/tty" for the console, the
 /// path of a file, a "pipe:[N]" or "socket:[N]" or "anon_inode:[...]"
 /// name for the rest. Returns its length, or NO_RESULT if fd is closed.
@@ -2804,12 +2845,13 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       let n = vfs_dirent(&mut k.fs, f);
       if n != NO_FILE && n <= XFER {
         let mut a = put_c(&mut o, 0, 47);
-        let mut j = 0;
         // A file below a mount the process's namespace made (a tmpfs, say)
-        // reads under the mount's name, not the file layer's.
+        // reads under the mount's name, not the file layer's; and below the
+        // process's root (chroot, pivot_root) from there.
         let mut lg = balloc(FNAME_MAX);
         let ln = ns_back(k, ns_of(k, p), smaller(n, FNAME_MAX), &mut lg);
         if ln != NO_RESULT && ln < PROC_OUT {
+          let mut j = root_skip(k, p, lg, ln);
           while j < ln
             invariant j <= ln && ln < PROC_OUT && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
           {
@@ -2820,6 +2862,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
           return a;
         }
         bfree(lg);
+        let mut j = root_skip(k, p, k.fs.xfer, n);
         while j < n
           invariant j <= n && n <= XFER && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
         {
@@ -2849,7 +2892,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       // the process's root now (the root directory itself as "/"), when it
       // is inside it.
       let rl = root_len(k, p);
-      if rl > 0 && d.kind == K_DIR {
+      if rl > 0 {
         let mut s0 = 0;
         if n > 0 && base_byte(k, p, h, 0) == 47 {
           s0 = 1;
@@ -2923,6 +2966,27 @@ fn magic_link(k: &mut Kernel, pid: u64, n: u64) -> u64
   return r;
 }
 
+/// Does file f lie inside process p's root?
+fn file_in_root(k: &mut Kernel, p: u64, f: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = vfs_dirent(&mut k.fs, f);
+  if n == NO_FILE || n > FNAME_MAX {
+    return false;
+  }
+  let mut lg = balloc(FNAME_MAX);
+  let ln = ns_back(k, ns_of(k, p), n, &mut lg);
+  let mut inside = false;
+  if ln != NO_RESULT {
+    inside = root_skip(k, p, lg, ln) > 0;
+  } else {
+    inside = root_skip(k, p, k.fs.xfer, n) > 0;
+  }
+  bfree(lg);
+  return inside;
+}
+
 /// magic_link for the rewritten name x[..n].
 fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && n <= FNAME_MAX
@@ -2936,11 +3000,16 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   let t = pfd / LXNFD;
   let fd = pfd % LXNFD;
   let d = fd_look(k, t, fd);
+  let mut fr = NO_FILE;
+  if d.kind == K_FILE {
+    fr = vfs_row_file(k.fs, d.x);
+  }
+  let inroot = fr != NO_FILE && file_in_root(&mut k, pid, fr);
   // Only a directory (or the pts directory) is followed to a path, and a
-  // file only for a process that has not changed its root: a file may lie
-  // outside the root (a chroot, a container), where its name resolves to
-  // nothing; open and exec reopen a file through the link.
-  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && root_len(k, pid) == 0 && !ofd_lacks(k, fd_ofd(k, t, fd), ACC_LINK)) {
+  // file only if it lies inside the process's root (a chroot, a container),
+  // as outside it its name resolves to nothing; open and exec reopen a file
+  // through the link.
+  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && (root_len(k, pid) == 0 || inroot) && !ofd_lacks(k, fd_ofd(k, t, fd), ACC_LINK)) {
     return NO_RESULT;
   }
   if d.kind == K_FILE {
@@ -2977,6 +3046,26 @@ fn proc_peek(procs: &Buf, pid: u64, p: u64) -> bool
   requires ptab_ok(procs) && pid < NPROC && p < NPROC
 {
   return pid == p || cred_root(procs, pid) || same_ids(procs, pid, p);
+}
+
+/// Whether /proc file f is one of another process's whose content tells
+/// pid more than it may know: the memory map (/proc/PID/maps) and the
+/// auxiliary vector (/proc/PID/auxv) give away where its stack, libraries
+/// and code lie, /proc/PID/mem is its memory, and /proc/PID/io counts what
+/// it reads and writes. Linux hides them from anyone who could not ptrace
+/// the process (EACCES at open); so does this, by proc_peek.
+fn proc_secret(procs: &Buf, pid: u64, f: u64) -> bool
+  requires ptab_ok(procs) && pid < NPROC
+{
+  if f < PROC_DEV + 16 || f >= PROC_DEV + PSYS {
+    return false;
+  }
+  let p = (f - PROC_DEV) / 16;
+  let w = (f - PROC_DEV) % 16;
+  if p >= NPROC || (w != PF_MAPS && w != PF_AUXV && w != PF_MEM && w != PF_IO) {
+    return false;
+  }
+  return !proc_peek(procs, pid, p);
 }
 
 /// Whether the path at user address path ends in the component "self"
@@ -3354,6 +3443,20 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   let sbase = PROC_DEV + PSYS + SY_SC;
   if f >= sbase && f < sbase + SCT_NUM {
     k.sys = set(k.sys, SYS_SCT + (f - sbase), v + 1);
+    return n;
+  }
+  if f == PROC_DEV + PSYS + SY_IPC + 5 {
+    if v > 32768 {
+      return EINVAL;                        // IPCMNI
+    }
+    k.sys = set(k.sys, SYS_MSGMNI, v + 1);
+    return n;
+  }
+  if f == PROC_DEV + PSYS + SY_PID_MAX {
+    if v < 301 || v > 4194304 {
+      return EINVAL;                        // Linux's bounds: PIDS_MIN and PID_MAX_LIMIT
+    }
+    k.sys = set(k.sys, SYS_PIDMX, v + 1);
     return n;
   }
   if f >= PROC_DEV + PSYS + SY_INO && f < PROC_DEV + PSYS + SY_INO + 3 {

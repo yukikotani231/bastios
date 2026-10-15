@@ -373,7 +373,7 @@ run-uefi: build/bastios.iso $(DISK)
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
-test: build/bastios.elf
+test: $(if $(filter d,$(LANES)),build/bastioc1,build/bastios.elf)
 	BASTIOC=$(BASTIOC) BASTIOC0=$(BASTIOC0) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
@@ -786,6 +786,12 @@ build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/co
 build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
+# The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
+# gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
+# digest, its layers kept in ALPINE_CACHE like the others'. x86-64 only.
+build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
 # Source tarballs of the projects srcbuild.txt builds inside Alpine, checked
 # against pinned SHA-256 sums (test/compat/srcpkg.sh); run.py serves them.
 build/compat/srcpkg.stamp: test/compat/srcpkg.sh test/compat/busybox.config | build/compat
@@ -793,12 +799,12 @@ build/compat/srcpkg.stamp: test/compat/srcpkg.sh test/compat/busybox.config | bu
 	cp test/compat/busybox.config build/compat/srcpkg/busybox.config
 	touch $@
 
-compat: build/bastios.elf build/compat/srcpkg.stamp build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --src-dir build/compat/srcpkg --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --out build/compat $(COMPAT_PROGS)
+compat: build/bastios.elf build/compat/srcpkg.stamp build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --src-dir build/compat/srcpkg --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/srcpkg.stamp build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --src-dir build/compat/srcpkg --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/srcpkg.stamp build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/rust.img
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --src-dir build/compat/srcpkg --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
