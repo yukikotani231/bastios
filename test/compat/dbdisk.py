@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Writes the database disk for the compat suite (test/compat/db.txt): the
-PostgreSQL server of the official postgres:alpine image as a tar file
-(/disk/postgres.tar) and the Redis server of redis:alpine (/disk/redis.tar),
-next to Alpine's BusyBox (the redis image's own) at /disk/busybox. The checks unpack a tar file, make the
-device nodes, chroot into the root and run the servers.
+servers of the official postgres:alpine, redis:alpine and valkey:alpine
+images, each as a tar file (/disk/postgres.tar, /disk/redis.tar,
+/disk/valkey.tar), next to Alpine's BusyBox (the redis image's own) at
+/disk/busybox. The checks unpack a tar file, make the device nodes, chroot
+into the root and run the server.
 
-    dbdisk.py OUT.img POSTGRES_IMAGE REDIS_IMAGE --cache DIR
+    dbdisk.py OUT.img POSTGRES_IMAGE REDIS_IMAGE VALKEY_IMAGE --cache DIR
 
-The images are Docker Hub images, NAME@sha256:DIGEST (the Makefile pins them).
+The images are Docker Hub images, NAME@sha256:DIGEST (images.mk pins them).
 Their layers are fetched and cached as alpinedisk.py does it. What a server
 never reads at run time is left out to keep the disk small: headers, manuals,
 and LLVM with the JIT module that loads it (the checks run with jit=off).
@@ -39,18 +40,20 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
-    out, pg, redis = args
+    out, pg, redis, valkey = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "db")
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
     p, r = os.path.join(work, "postgres.tar"), os.path.join(work, "redis.tar")
     pack(pg, cache, p)
     pack(redis, cache, r)
+    v = os.path.join(work, "valkey.tar")
+    pack(valkey, cache, v)
     busybox = os.path.join(work, "busybox")
     with tarfile.open(r) as tf, open(busybox, "wb") as f:
         f.write(tf.extractfile("bin/busybox").read())
     env = dict(os.environ, MKDISK_FREE_MB="512")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
-                               f"busybox={busybox}", p, r], env)
+                               f"busybox={busybox}", p, r, v], env)
 
 main()

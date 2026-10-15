@@ -1313,6 +1313,25 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+db: db: postgres dump and restore into another database
+db: db: postgres extension, an index and vacuum
+db: db: postgres initdb, a cluster with a write-ahead log
+db: db: postgres over TCP, with several clients at once
+db: db: postgres recovers a committed row after the server is killed
+db: db: postgres rolls back and keeps its constraints
+db: db: postgres server starts and accepts connections
+db: db: postgres shuts down cleanly and starts again with its data
+db: db: postgres tables, an index and a join
+db: db: postgres version
+db: db: redis load from several clients
+db: db: redis restarts with its data from the append-only file
+db: db: redis saves in the background (fork) and syncs its append-only file
+db: db: redis server starts and answers
+db: db: redis strings, lists, hashes, sorted sets and expiry
+db: db: redis version
+db: db: unpack the roots and make the device nodes
+db: db: valkey server starts, stores and saves
+db: db: valkey version
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key

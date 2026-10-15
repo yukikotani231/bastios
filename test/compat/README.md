@@ -60,6 +60,16 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   `TCC_REV`; the patch modifies tcc, so it is under tcc's license,
   LGPL-2.1-or-later, not this repository's). The compiler's own sources are on the disk under `/disk/s`,
   but proving them needs more memory than a process gets.
+- `db.txt`: database servers, from a disk of their own (`dbdisk.py`): the
+  PostgreSQL 17, Redis 7 and Valkey 8 servers of the official Alpine-based
+  images (`POSTGRES_IMAGE`, `REDIS_IMAGE`, `VALKEY_IMAGE` in `images.mk`,
+  pinned by digest), each unpacked from a tar file in the guest and entered
+  with `chroot`. The cases run PostgreSQL as its own user: `initdb`, a server
+  with a write-ahead log and `fsync`, SQL over a Unix socket and TCP, several
+  clients (`pgbench`), an extension, `pg_dump` and a restore, and recovery of
+  a committed row after `kill -9` of the postmaster. Redis and Valkey set and
+  read values, save in a forked child, keep an append-only file and load it
+  again. LLVM and the JIT are left out of the disk (the cases run `jit=off`).
 - `alpine.txt`: Alpine Linux 3.24, from a fourth disk (`alpinedisk.py`).
   The first case unpacks its minirootfs and enters it with `chroot`. Then
   `apk` installs packages from a repository on the same disk, and they run:
