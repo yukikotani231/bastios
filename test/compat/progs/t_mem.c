@@ -320,5 +320,16 @@ int main(void) {
            if (sf >= 0) close(sf);
            unlink("mem_shared");
            ok; }));
+    EXPECT("mprotect makes 300 MiB of a PROT_NONE reservation writable and executable (a JIT's code range), more than the machine has: only touched pages count", ({
+           size_t sz = 300u << 20;
+           char *r = mmap(0, 512u << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+           int ok = r != MAP_FAILED && mprotect(r, sz, PROT_READ | PROT_WRITE | PROT_EXEC) == 0;
+           if (ok) {
+               r[0] = 1; r[sz / 2] = 2; r[sz - 1] = 3;
+               ok = r[0] == 1 && r[sz / 2] == 2 && r[sz - 1] == 3 && r[4096] == 0;
+               ok = ok && mprotect(r + 4096, 8192, PROT_NONE) == 0 && mprotect(r + 4096, 8192, PROT_READ | PROT_WRITE) == 0 && r[4096] == 0;
+               ok = ok && munmap(r, 512u << 20) == 0;
+           }
+           ok; }));
     return done();
 }

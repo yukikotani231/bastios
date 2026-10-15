@@ -50,6 +50,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `spin`, `true`) running at EL0. `test/aarch64_test.sh` is part of `make test`.
   The Linux layer, the file system and the network are still x86-64 only.
 - Programs get AT_HWCAP and AT_HWCAP2 in their auxiliary vector (`HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID` on AArch64, 0 on x86-64). A musl built with optimised string routines reads them before it has a thread pointer and crashed without them. `/proc/PID/auxv` reads the longer vector, and core files carry an AArch64 `NT_PRSTATUS`, so gdb 16 debugs programs on AArch64 (breakpoints in a PIE program, attach, threads, a core file).
+- `mprotect` that makes never-touched pages of a PROT_NONE reservation writable records them to be mapped when touched (as a writable anonymous `mmap` does) instead of mapping them all at once, so V8's 4 GiB-wide code range no longer fails with ENOMEM on a small machine: Alpine's Node 24 runs its JIT.
 
 ### Network
 
