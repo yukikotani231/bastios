@@ -52,6 +52,9 @@ PROMPT = b"\n# "
 BB = "/disk/busybox"
 
 NOTE = re.compile(r"\[pid \d+: Linux system call (\d+) not implemented\]")
+# What the kernel says on the console when a program faults and is killed: it
+# is not the output of the command a case runs.
+KILLNOTE = re.compile(r"\[pid \d+ \(.*\): .*killed\]$|\[fault diag: ")
 
 
 def syscall_names():
@@ -573,6 +576,10 @@ def run_applet(env, name, cmd, expected, timeout, bb):
             line = NOTE.sub("", line)
             if not line:
                 continue
+        if KILLNOTE.match(line):
+            if body and body[-1] == "":
+                body.pop()                  # the blank line that comes before the note
+            continue
         body.append(line)
     if status is None:
         return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
