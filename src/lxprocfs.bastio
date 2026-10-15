@@ -2541,6 +2541,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
 fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures (result <= n && result <= XFER) || result >= 0x8000000000000000
 {
   let h = fd_ofd(k, pid, fd);
   if h >= OFD_N || is_exe_file(f) {
@@ -2586,6 +2587,7 @@ fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
 fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if is_mem_file(f) {
     return mem_io(&mut k, pid, fd, f, va, n, false);

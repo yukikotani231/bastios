@@ -742,6 +742,7 @@ fn ino_closed(k: &mut Kernel, x: u64, dir: bool)
 fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && i < INO_N
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let b = ino_base(i);
   let q = smaller(iget(k, b + 2), INO_Q);
@@ -1662,6 +1663,7 @@ fn fan_prep(k: &mut Kernel, pid: u64, fd: u64, n: u64)
 fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && i < INO_N
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let b = ino_base(i);
   let q = smaller(iget(k, b + 2), FAN_Q);
@@ -1677,7 +1679,7 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   let mut off = 0;
   let mut err = 0;
   while taken < q && off + FAN_META <= n && err == 0 && off < XFER
-    invariant taken <= q && q <= FAN_Q && off <= XFER + FAN_META && i < INO_N && kok(k)
+    invariant taken <= q && q <= FAN_Q && off <= XFER + FAN_META && i < INO_N && kok(k) && off <= n && (err == 0 || err >= 0x8000000000000000)
   {
     let e = fe_at(i, (first + taken) % FAN_Q);
     let mask = iget(k, e);
@@ -1723,6 +1725,7 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
 fn ino_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && i < INO_N
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if iget(k, ino_base(i)) == 2 {
     return fan_read(&mut k, pid, i, va, n);
