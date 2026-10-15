@@ -62,8 +62,8 @@
 //   data    the data of the disk's commands: up to a 4 KiB block
 //   ctx3    0: slot 5's device context; 2048: its control ring;
 //           3072: the mouse's interrupt transfer ring
-//   ctx4    0: slot 6's device context; 2048: its control ring
-//   ser     0: the serial port's bulk OUT ring; 1024: its IN ring;
+//   sp.ctx  0: slot 6's device context; 2048: its control ring
+//   sp.pg   0: the serial port's bulk OUT ring; 1024: its IN ring;
 //           2048: the bytes being sent; 2560: the packet received
 //
 // and the scratchpad pages the controller asks for (`sps`: Intel's want 34
@@ -179,6 +179,8 @@ const SCSI_SYNC: u64 = 0x35;
 /// time is kept queued on its bulk IN endpoint, and one write at a time on
 /// its OUT endpoint.
 struct SerPort {
+  ctx: Dma,           // slot 6's device context and control ring
+  pg: Dma,            // the bulk rings and buffers
   kind: u64,          // SER_NONE, SER_FTDI or SER_ACM
   slot: u8,
   in_dci: u64,
@@ -197,7 +199,7 @@ struct SerPort {
 struct Xhci {
   regs: Mmio,
   dcbaa: Dma, cmd: Dma, evt: Dma, ctx: Dma, ctx2: Dma, inp: Dma, ep0: Dma, intr: Dma,
-  bulk: Dma, data: Dma, ctx3: Dma, ctx4: Dma, ser: Dma,
+  bulk: Dma, data: Dma, ctx3: Dma,
   sps: Vec[Dma],      // the scratchpad pages
   op: u64,            // where the operational registers start
   rt: u64,            // the runtime registers
@@ -454,7 +456,7 @@ fn ep0_put(x: &mut Xhci, slot: u64, p: u64, s: u32, c: u32)
   ensures xhci_ok(x)
 {
   if slot == 6 {
-    x.sp.e0 = trb_put(&mut x.ctx4, 2048, x.sp.e0, p, s, c);
+    x.sp.e0 = trb_put(&mut x.sp.ctx, 2048, x.sp.e0, p, s, c);
   } else if slot == 5 {
     x.e0e = trb_put(&mut x.ctx3, 2048, x.e0e, p, s, c);
   } else if slot == 4 {
@@ -585,14 +587,14 @@ fn dev_attach(x: &mut Xhci, p: u64, route: u64, tt: u64, speed: u64, depth: u64)
     return false;
   }
   // The device context: half a page of ctx or ctx2. The control ring: a
-  // quarter of ep0. Slots 5 and 6 have both in ctx3 and ctx4.
+  // quarter of ep0. Slots 5 and 6 have both in ctx3 and sp.ctx.
   let half = ((s - 1) % 2) * 2048;
   let mut ca = dma_phys(x.ctx) + half;
   let quarter = ((s - 1) % 4) * 1024;
   let mut ea = dma_phys(x.ep0) + quarter;
   if s == 6 {
-    zero_page(&mut x.ctx4, 0, 3072);
-    ca = dma_phys(x.ctx4);
+    zero_page(&mut x.sp.ctx, 0, 3072);
+    ca = dma_phys(x.sp.ctx);
     ea = ca + 2048;
   } else if s == 5 {
     zero_page(&mut x.ctx3, 0, 3072);
@@ -1129,10 +1131,10 @@ fn ser_setup(x: &mut Xhci, s: u64, p: u64, route: u64, tt: u64, speed: u64, conf
     top = din;
   }
   zero_page(&mut x.inp, 0, RAW_AT);
-  zero_page(&mut x.ser, 0, 4096);
+  zero_page(&mut x.sp.pg, 0, 4096);
   x.sp.out_at = 1;
   x.sp.in_at = 1;
-  let ba = dma_phys(x.ser);
+  let ba = dma_phys(x.sp.pg);
   let ia = ba + SER_IN_RING;
   ictx(&mut x, 0, 1, cast[u32](1 | (1 << dout) | (1 << din)));
   ictx(&mut x, 1, 0, cast[u32](route | (speed << 20) | (top << 27)));
@@ -1174,8 +1176,8 @@ fn ser_in_queue(x: &mut Xhci)
   requires xhci_ok(x)
   ensures xhci_ok(x)
 {
-  let b = dma_phys(x.ser);
-  x.sp.in_at = trb_put(&mut x.ser, SER_IN_RING, x.sp.in_at, b + SER_RX_BUF, cast[u32](x.sp.mps), cast[u32](TRB_NORMAL * 1024 + 32 + 4));  // IOC, ISP
+  let b = dma_phys(x.sp.pg);
+  x.sp.in_at = trb_put(&mut x.sp.pg, SER_IN_RING, x.sp.in_at, b + SER_RX_BUF, cast[u32](x.sp.mps), cast[u32](TRB_NORMAL * 1024 + 32 + 4));  // IOC, ISP
   xw(&mut x, x.db + cast[u64](x.sp.slot) * 4, cast[u32](x.sp.in_dci));
 }
 
@@ -1199,7 +1201,7 @@ fn ser_rx(x: &mut Xhci, cc: u64, left: u64)
   while i < got && x.sp.qn < SQ_N && i < SER_RX_MAX
     invariant xhci_ok(x) && i <= SER_RX_MAX
   {
-    bset(&mut x.sp.q, x.sp.qn, dma_read8(&mut x.ser, SER_RX_BUF + i));
+    bset(&mut x.sp.q, x.sp.qn, dma_read8(&mut x.sp.pg, SER_RX_BUF + i));
     x.sp.qn = x.sp.qn + 1;
     i = i + 1;
   }
@@ -1232,11 +1234,11 @@ fn xhci_ser_send(x: &mut Xhci, src: &Bytes, n: u64) -> u64
   while i < m
     invariant xhci_ok(x) && i <= m && m <= SER_TX_MAX && m <= blen(src)
   {
-    dma_write8(&mut x.ser, SER_TX_BUF + i, bget(src, i));
+    dma_write8(&mut x.sp.pg, SER_TX_BUF + i, bget(src, i));
     i = i + 1;
   }
-  let b = dma_phys(x.ser);
-  x.sp.out_at = trb_put(&mut x.ser, 0, x.sp.out_at, b + SER_TX_BUF, cast[u32](m), cast[u32](TRB_NORMAL * 1024 + 32));   // IOC
+  let b = dma_phys(x.sp.pg);
+  x.sp.out_at = trb_put(&mut x.sp.pg, 0, x.sp.out_at, b + SER_TX_BUF, cast[u32](m), cast[u32](TRB_NORMAL * 1024 + 32));   // IOC
   xw(&mut x, x.db + cast[u64](x.sp.slot) * 4, cast[u32](x.sp.out_dci));
   x.sp.tx_busy = true;
   return m;
@@ -1827,13 +1829,13 @@ fn xhci_new(regs: Mmio, m: &mut Mem, f0: Frame, f1: Frame, f2: Frame, f3: Frame,
 {
   let mut x = Xhci { regs: regs, dcbaa: dma_lend(f0), cmd: dma_lend(f1), evt: dma_lend(f2), ctx: dma_lend(f3),
     inp: dma_lend(f4), ep0: dma_lend(f5), intr: dma_lend(f6),
-    bulk: dma_lend(f7), data: dma_lend(f8), ctx2: dma_lend(f9), ctx3: dma_lend(f10), ctx4: dma_lend(f11), ser: dma_lend(f12), sps: vec_new[Dma](), op: 0, rt: 0, db: 0,
+    bulk: dma_lend(f7), data: dma_lend(f8), ctx2: dma_lend(f9), ctx3: dma_lend(f10), sps: vec_new[Dma](), op: 0, rt: 0, db: 0,
     csz: 32, ports: 0, cmd_at: 1, evt_at: 1, e0a: 1, e0b: 1, e0c: 1, e0d: 1, e0e: 1, int_at: 1, ev_p: 0, ev_s: 0, ev_c: 0, slot: 0,
     dci: 0, port: 0, keys: balloc(6), q: balloc(16), qn: 0, shift: false, ctrl: false, live: false,
     mslot: 0, mdci: 0, m_at: 1, mq: balloc(MQ_N * 4), mqn: 0, mbtn: 0, mlive: false,
     msd: MSD_NONE, ds: 0, dout: 0, din: 0, iface: 0, out_at: 1, in_at: 1, tag: 0, plo: 0, sectors: 0,
     busy: false, stage: 0, done: false, dcc: 0, bop: 0, irq: false,
-    sp: SerPort { kind: SER_NONE, slot: 0, in_dci: 0, out_dci: 0, in_at: 1, out_at: 1, e0: 1, mps: 0, q: balloc(SQ_N), qn: 0,
+    sp: SerPort { ctx: dma_lend(f11), pg: dma_lend(f12), kind: SER_NONE, slot: 0, in_dci: 0, out_dci: 0, in_at: 1, out_at: 1, e0: 1, mps: 0, q: balloc(SQ_N), qn: 0,
       wait: false, tx_busy: false, dead: false } };
   let cap = cast[u64](xr(&mut x, 0) & 255);
   let hcs1 = cast[u64](xr(&mut x, 4));
@@ -1934,8 +1936,8 @@ fn xhci_free(x: Xhci, m: &mut Mem) -> Mmio
   give_page(&mut m, dma_take(d.bulk));
   give_page(&mut m, dma_take(d.data));
   give_page(&mut m, dma_take(d.ctx3));
-  give_page(&mut m, dma_take(d.ctx4));
-  give_page(&mut m, dma_take(d.ser));
+  give_page(&mut m, dma_take(d.sp.ctx));
+  give_page(&mut m, dma_take(d.sp.pg));
   bfree(d.sp.q);
   bfree(d.keys);
   bfree(d.q);
