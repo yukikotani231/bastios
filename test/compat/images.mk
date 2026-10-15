@@ -12,10 +12,14 @@ ALPINE_PKGS ?= alpine/git@sha256:a4bb51f1a3553df194ce679fc1db721d8bfba2046fa1a88
                serh/nvim@sha256:e62acc0ba679451c43a0197088af546bd8ab0e23a1ce27c010748a347aa3a837 \
                odovzhan/tmux@sha256:b439b1fc9a4391884ef4c1266980639a10ac629f684f4551bfbe3a77ca005cd6 \
                lspcontainers/lua-language-server@sha256:5edb5674fb555bec3df35e77a45cd2a98f829fd3602ea3fa68394c80f186f072
-# One more image, for the x86-64 Alpine disk only (the devtools cases of
-# alpine.txt): cmake and ninja. The image has no arm64 build.
-ALPINE_X86_PKGS ?= dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d57b2882c0d915008f8781634dab485
+# More images, for the x86-64 Alpine disk only: cmake and ninja (the devtools
+# cases of alpine.txt), and OpenRC and chrony (the openrc cases). The first has
+# no arm64 build.
+ALPINE_X86_PKGS ?= dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d57b2882c0d915008f8781634dab485 \
+                   jrei/openrc-alpine@sha256:34e83bb9eb9a235f1230ce2fe534b9d5172d8b5d8921af36239e73810472c6f6 \
+                   simonrupf/chronyd@sha256:65b8c04632d5420044ab2295bb1b4f414ecf3b354a3e4bd19c4aedfd0866c7a5
 ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
+ALPINE_X86_DISK_PKGS ?= openrc,chrony,tzdata,ifupdown-ng
 DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402

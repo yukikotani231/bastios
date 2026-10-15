@@ -18,6 +18,7 @@ for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do
 done
 # The root was made by a container image: its rc.conf names a container.
 $B sed -i 's/^rc_sys=.*/#rc_sys=""/' $R/etc/rc.conf
+$B sed -i 's/^#rc_nocolor=.*/rc_nocolor=YES/' $R/etc/rc.conf
 echo bastio-box > $R/etc/hostname
 printf 'auto lo\niface lo inet loopback\n' > $R/etc/network/interfaces
 printf 'server 10.0.2.2 port '"$NTPPORT"' iburst\nmakestep 1 3\nrtcsync\n' > $R/etc/chrony/chrony.conf
