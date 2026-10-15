@@ -8,9 +8,12 @@ KERNEL=${KERNEL:-build/bastios.elf}
 # Seconds each boot's steps may take in all. The longest boot's steps take
 # about 35 s alone; with make test's other lanes running beside it (test/all.sh)
 # they took over 60 s, and its last steps failed for want of time, on main too.
-# The native job (NATIVE=1) on a loaded runner took over 110 s, so the limit
-# is only there to end a hang, not to tell slow from broken.
-TIMEOUT=${TIMEOUT:-240}
+# The native job (NATIVE=1) on a loaded runner took over 110 s, and with the
+# steps added since it ran past 240 s: the step being run then, and every one
+# after it, failed with no output (main's native job, on whichever of the
+# thread steps was running). So the limit is only there to end a hang, not to
+# tell slow from broken.
+TIMEOUT=${TIMEOUT:-600}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
@@ -532,7 +535,7 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
     # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
     # of the 1 GiB window and grows the stack past 6 MiB).
     ("ulimit -s", b"\r\n8192\r\n", b"\n# "),

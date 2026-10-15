@@ -209,6 +209,22 @@ t_dev: unbound reads nothing
 t_dev: unbound: LOOP_GET_STATUS64 is ENXIO
 t_dev: write at the end is ENOSPC
 t_dev: write through the device
+t_devcg: a backward jump is EINVAL
+t_devcg: a cgroup directory opens
+t_devcg: a child cgroup is filtered by its parent's program
+t_devcg: a device program loads
+t_devcg: a link attaches the program
+t_devcg: a process outside the cgroup is not filtered
+t_devcg: a program that does not end in exit is EINVAL
+t_devcg: after the detach everything opens
+t_devcg: attach with ALLOW_MULTI
+t_devcg: attaching to a descriptor that is no cgroup is EBADF or EINVAL
+t_devcg: closing the link detaches the program
+t_devcg: detach
+t_devcg: nothing filters before the attach
+t_devcg: the cgroup goes away with its program attached or not
+t_devcg: the link filters
+t_devcg: the process in the cgroup sees only 1:3
 t_devnode: a host device bound over a tmpfs file
 t_devnode: chmod by path works
 t_devnode: chmod of the bound node by path works

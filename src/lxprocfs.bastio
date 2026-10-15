@@ -990,6 +990,12 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i == 14 + UMF_N + PXF_N {
       return Ent { len: name_out(&mut k.fs.xfer, "fdinfo"), dir: true, end: false };
     }
+    if i == 15 + UMF_N + PXF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "auxv"), dir: false, end: false };
+    }
+    if i == 16 + UMF_N + PXF_N {
+      return Ent { len: name_out(&mut k.fs.xfer, "mem"), dir: false, end: false };
+    }
     return end;
   }
   if i == 0 {

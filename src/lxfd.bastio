@@ -408,6 +408,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     ino_free(&mut k, x);
   } else if kind == OF_SECCOMP && x < SC_N {
     sc_listener_closed(&mut k, x);          // src/lxseccomp.bastio
+  } else if kind == OF_BPF && x < DVP_N {
+    bpf_release(&mut k, x, w);              // src/lxbpf.bastio
   } else if kind == OF_PIPE_R && x < NPIPES {
     let left = pi_get(k.pipes, x, 2);
     if left > 0 {
@@ -914,6 +916,9 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     return fd_install(&mut k, pid, hp);
   }
   let dev = dev_at(k.fs.xfer, n);
+  if dev != DEV_NONE && dev != DEV_DIR && !dv_open_ok(k, pid, dev, flags) {
+    return EPERM;                           // the device filter of a cgroup (src/lxbpf.bastio)
+  }
   if dev == DEV_TTY {
     if xfer_is(k.fs.xfer, 0, n, "dev/console") && !console_may(k.procs, pid, flags) {
       return EACCES;                        // the console is root's (rw--w----), as stat says
@@ -1038,6 +1043,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
     if nd == DEV_NONE {
       return ENXIO;
+    }
+    if !dv_open_ok(k, pid, nd, flags) {
+      return EPERM;                         // the device filter of a cgroup (src/lxbpf.bastio)
     }
     let hn = ofd_new(&mut k, OF_DEV, nd);
     if hn >= OFD_N {
