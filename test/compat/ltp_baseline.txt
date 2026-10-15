@@ -77,6 +77,12 @@ confstr01
 connect01
 connect02
 connect03
+fanotify01
+fanotify02
+fanotify04
+fanotify08
+fanotify09
+fanotify11
 io_cancel01
 io_destroy02
 io_getevents01

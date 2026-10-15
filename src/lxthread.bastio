@@ -484,9 +484,6 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     return EPERM;                           // a new user namespace makes the caller privileged in it (src/lxuser.bastio)
   }
   if flags & CLONE_NEWUSER != 0 {
-    if nsk_of(k, NSK_USER, pid) != 0 {
-      return ENOSPC;                        // two levels so far
-    }
     if !userns_room(&mut k) {
       return ENOMEM;
     }
@@ -575,9 +572,6 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     }
     if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP) != ns {
       return EINVAL;                        // not the time namespace
-    }
-    if ns & CLONE_NEWUSER != 0 && nsk_of(k, NSK_USER, pid) != 0 {
-      return ENOSPC;                        // two levels so far (src/lxuser.bastio)
     }
     if ns & CLONE_NEWUSER != 0 && !userns_room(&mut k) {
       return ENOMEM;
