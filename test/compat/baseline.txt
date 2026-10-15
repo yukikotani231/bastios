@@ -635,7 +635,8 @@ t_mem: FUTEX_WAKE on an unmapped word is EFAULT
 t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED file mapped by two processes
 t_mem: MAP_SHARED file mapping across fork
-t_mem: a writable MAP_SHARED mapping is written back after twenty read-only ones
+t_mem: a writable MAP_SHARED mapping is written back after seventy read-only ones
+t_mem: forty writable MAP_SHARED mappings are each written back
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
@@ -1204,7 +1205,9 @@ t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
+t_sysv: shmat and shmdt in a loop reuse the address space
 t_sysv: shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL
+t_sysv: msgmni is written: that many queues, then ENOSPC
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
@@ -1313,6 +1316,16 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+rust: rust: unpack the root, make the device nodes
+rust: rust: version
+rust: rust: compile and run a program
+rust: rust: collections, strings, closures and traits
+rust: rust: threads, channels and a mutex
+rust: rust: exit status and a panic
+rust: rust: files and directories
+rust: rust: cargo builds and runs a project
+rust: rust: cargo test
+rust: rust: a compile error is reported
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
