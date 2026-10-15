@@ -433,6 +433,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   cwd_fork(&mut k.croot, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the group's namespaces (src/lxns.bastio, src/lxnsk.bastio)
   nsk_fork(&mut k.mns, pid, c);
+  nsk_set(&mut k, NSK_TIME, c, nsk_of(k, NSK_TIME, pid));   // a thread shares its creator's time namespace, whatever its children get
   pidns_thread(&mut k, pid, c);
   pset(&mut k.procs, c, F_FUTEX, 0);
   pset(&mut k.procs, c, F_CTID, 0);
@@ -586,8 +587,8 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if ns & CLONE_NEWUSER == 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP) != ns {
-      return EINVAL;                        // not the time namespace
+    if ns & CLONE_NEWTIME != 0 && !tm_room(&mut k) {
+      return ENOMEM;
     }
     if ns & CLONE_NEWUSER != 0 && !userns_room(&mut k) {
       return ENOMEM;
