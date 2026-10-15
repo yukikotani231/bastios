@@ -450,7 +450,7 @@ CRUN_VER      ?= 1.19.1
 CRUN_SHA256   ?= eaa2408dee92432d142d58317127b5974d39a8ad48689ba8b2eff8f74614f4b8
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
-COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
+COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/speedtest1 build/compat/micropython build/compat/kilo \
                  build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll \
                  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/rg
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
@@ -578,6 +578,12 @@ build/compat/sqlite3: | build/compat/src
 	cd build/compat/src/sqlite && ./configure --disable-tcl >/dev/null && $(MAKE) -s sqlite3.c shell.c >/dev/null
 	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
 	  build/compat/src/sqlite/shell.c build/compat/src/sqlite/sqlite3.c -lm
+
+# SQLite's benchmark, which checks its own results (--verify), from the
+# sources build/compat/sqlite3 fetched.
+build/compat/speedtest1: build/compat/sqlite3
+	$(MUSLCC) $(APP_CFLAGS) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_ENABLE_RTREE -Ibuild/compat/src/sqlite -o $@ \
+	  build/compat/src/sqlite/test/speedtest1.c build/compat/src/sqlite/sqlite3.c -lm
 
 # MicroPython's unix port, without the modules that need libraries musl
 # does not bring (ffi, btree, ssl).
