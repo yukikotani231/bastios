@@ -14,6 +14,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Documentation
+
+- A documentation website for BastiOS at <https://yukikotani231.github.io/bastios/>, built from `docs/` with mdBook (`site/build.sh`) and published by GitHub Actions on every push to `main`.
+
 ### Boot
 
 - On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.
