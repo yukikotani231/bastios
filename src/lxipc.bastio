@@ -1705,17 +1705,25 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
     return EINVAL;
   }
   let mut at = 0;
+  let mut from_hole = false;
   if want == 0 {
-    let brk = pget(k.procs, pid, F_BRK);
-    let low = pget(k.procs, pid, F_MMAP);
-    if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
-      return ENOMEM;
+    // Address space a munmap or an earlier shmdt left first, as mmap does;
+    // else below the lowest mapping. Without the hole, a process that
+    // attaches and detaches in a loop used up its window.
+    at = hole_take(&mut k, pid, pages);
+    from_hole = at < STACK_FIRST;
+    if !from_hole {
+      let brk = pget(k.procs, pid, F_BRK);
+      let low = pget(k.procs, pid, F_MMAP);
+      if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
+        return ENOMEM;
+      }
+      at = (low - pages * 4096) / 4096;
+      if at * 4096 < brk {
+        return ENOMEM;
+      }
+      pset(&mut k.procs, pid, F_MMAP, at * 4096);
     }
-    at = (low - pages * 4096) / 4096;
-    if at * 4096 < brk {
-      return ENOMEM;
-    }
-    pset(&mut k.procs, pid, F_MMAP, at * 4096);
   } else {
     if want < USER_BASE || (want - USER_BASE) / 4096 > STACK_FIRST || pages > STACK_FIRST - (want - USER_BASE) / 4096 {
       return EINVAL;
@@ -1736,6 +1744,9 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
   }
   if !ok {
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + pages, 0);
+    if from_hole {
+      hole_add(&mut k, pid, at, at + pages);
+    }
     return ENOMEM;
   }
   k.ipc = set(k.ipc, sa_at(g, rec), slot + 1);
@@ -1780,7 +1791,11 @@ fn lx_shmdt(k: &mut Kernel, pid: u64, addr: u64) -> u64
   {
     let first = get(k.ipc, sa_at(g, a) + 1);
     if get(k.ipc, sa_at(g, a)) != 0 && first <= WPAGES && addr == USER_BASE + first * 4096 {
+      let pages = get(k.ipc, sa_at(g, a) + 2);
       shm_detach(&mut k, g, a, true);
+      if pages <= WPAGES - first && first >= pget(k.procs, pid, F_MMAP) / 4096 {
+        hole_add(&mut k, pid, first, first + pages);   // address space shmat and mmap can use again
+      }
       return 0;
     }
     a = a + 1;

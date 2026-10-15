@@ -205,6 +205,23 @@ static int shm_basics(void) {
     return ok;
 }
 
+/* A process that attaches and detaches in a loop gets the same address space
+ * back each time: 20000 attachments of 256 KiB are 5 GiB, more than a window. */
+static int shm_loop(void) {
+    int id = shmget(IPC_PRIVATE, 256 * 1024, IPC_CREAT | 0600);
+    if (id < 0) return 0;
+    int ok = 1;
+    char *first = 0;
+    for (int i = 0; ok && i < 20000; i++) {
+        char *p = shmat(id, 0, 0);
+        if (p == (void *)-1) { ok = 0; break; }
+        if (i == 0) first = p;
+        ok = p == first && shmdt(p) == 0;
+    }
+    shmctl(id, IPC_RMID, 0);
+    return ok;
+}
+
 static int shm_errors(void) {
     int ok = shmget(IPC_PRIVATE, 0, 0600) == -1 && errno == EINVAL;
     int id = shmget(0x5159, 4096, IPC_CREAT | 0600);
@@ -398,6 +415,7 @@ int main(void) {
     EXPECT("SEM_UNDO is undone at exit", sem_undo());
     EXPECT("shmat, a second view, fork, IPC_RMID", shm_basics());
     EXPECT("shmget and shmat errors", shm_errors());
+    EXPECT("shmat and shmdt in a loop reuse the address space", shm_loop());
     EXPECT("/proc/sysvipc and /proc/sys/kernel limits", proc_files());
     EXPECT("shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL", shmmax_written());
     EXPECT("msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message", next_ids_and_copy());

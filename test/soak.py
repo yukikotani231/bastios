@@ -19,11 +19,18 @@ count after every round. The run fails when
   * the descriptor or process count of a round differs from the first one's;
   * the pages free at power off differ from the pages free at boot.
 
+--alpine IMG runs a different workload instead: Alpine's gcc and make build a
+C project over and over inside a chroot on the disk image IMG (see
+test/compat/alpinedisk.py; make one with `--disk gcc,make,musl-dev,binutils`),
+with tar, gzip, a file system walk, and a download of a 16 MiB file from a web
+server on this machine, between the builds. A round is one build and its
+companions; the same checks apply.
+
 --secs runs rounds until that much time has passed (default 120); --rounds
 runs exactly that many. Every round's line is kept in OUT/soak.log (--keep
 names the directory, default a temporary one that is removed).
 """
-import argparse, os, re, select, subprocess, sys, tempfile, time
+import argparse, base64, hashlib, http.server, os, re, select, shutil, subprocess, sys, tempfile, threading, time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
@@ -43,6 +50,8 @@ def main():
     ap.add_argument("--warmup", type=int, default=3, help="rounds before the leak baseline is taken")
     ap.add_argument("--leak-kb", type=int, default=512)
     ap.add_argument("--stall", type=int, default=300, help="seconds without a finished round that count as a hang")
+    ap.add_argument("--env", action="append", default=[], help="NAME=VALUE for msoak (e.g. SOAK_IPC=m)")
+    ap.add_argument("--alpine", help="run the Alpine build workload on this disk image instead of msoak")
     ap.add_argument("--only", help="comma-separated steps of msoak to run (default: all)")
     ap.add_argument("--keep", help="directory for the log and disk image")
     a = ap.parse_args()
@@ -51,10 +60,31 @@ def main():
     work = a.keep or tmp.name
     os.makedirs(work, exist_ok=True)
     disk = os.path.join(work, "soak-disk.img")
-    subprocess.check_call([os.path.join(HERE, "compat/mkdisk.py"), disk, "msoak=" + a.prog], stdout=subprocess.DEVNULL)
-    scratch = os.path.join(work, "soak-scratch.img")
-    with open(scratch, "wb") as f:
-        f.truncate(33 << 20)
+    if a.alpine:
+        shutil.copyfile(a.alpine, disk)
+        if a.mem < 1024:
+            a.mem = 1024
+    else:
+        subprocess.check_call([os.path.join(HERE, "compat/mkdisk.py"), disk, "msoak=" + a.prog], stdout=subprocess.DEVNULL)
+
+    blob = os.urandom(16 << 20)
+    blob_md5 = hashlib.md5(blob).hexdigest()
+    port = 0
+    if a.alpine:
+        class H(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(blob)))
+                self.end_headers()
+                try:
+                    self.wfile.write(blob)
+                except OSError:
+                    pass
+            def log_message(self, *x):
+                pass
+        srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+        port = srv.server_address[1]
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
 
     q = subprocess.Popen(
         ["qemu-system-x86_64", "-kernel", a.kernel, "-m", f"{a.mem}M", "-smp", str(a.smp),
@@ -125,7 +155,31 @@ def main():
     # beyond what the deadline allows and interrupted with Ctrl-C
     big = a.rounds or 1000000
     mark = len(out)
-    send(((f"SOAK_ONLY={a.only} " if a.only else "") + (f"SOAK_NORMDIR=1 " if os.environ.get("SOAK_NORMDIR") else "") + f"/disk/msoak {big} {a.seed} {a.mempct}\r").encode())
+    if a.alpine:
+        bb = "/disk/busybox"
+        send(f"mkdir -p /disk/a && cd /disk/a && {bb} tar -xf /disk/root.tar && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | {bb} tr : ' '); {bb} mknod dev/$1 c $2 $3; done; echo /repo > etc/apk/repositories; cd /; echo setup-tar-done\r".encode())
+        if not read_until(b"setup-tar-done", mark, 300):
+            fails.append("unpacking the Alpine root")
+            finish()
+        mark = len(out)
+        send(f"{bb} chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress gcc musl-dev make binutils; echo apk-status=$?\r".encode())
+        if not read_until(b"apk-status=0", mark, 600):
+            fails.append("apk add gcc")
+            finish()
+        script = open(os.path.join(HERE, "soak/alpine_round.sh"), "rb").read()
+        enc = base64.b64encode(script).decode()
+        mark = len(out)
+        send(b": > /tmp/asoak.b64\r")
+        for i in range(0, len(enc), 800):
+            send(f"printf '%s' '{enc[i:i + 800]}' >> /tmp/asoak.b64\r".encode())
+        send(f"{bb} base64 -d /tmp/asoak.b64 > /tmp/asoak.sh; echo script-md5=$({bb} md5sum < /tmp/asoak.sh)\r".encode())
+        if not read_until(f"script-md5={hashlib.md5(script).hexdigest()}".encode(), mark, 120):
+            fails.append("sending the workload script")
+            finish()
+        mark = len(out)
+        send(f"{bb} sh /tmp/asoak.sh {big} 10.0.2.2:{port} {blob_md5}\r".encode())
+    else:
+        send(((f"SOAK_ONLY={a.only} " if a.only else "") + "".join(e + " " for e in a.env) + f"/disk/msoak {big} {a.seed} {a.mempct}\r").encode())
     t0 = time.time()
     deadline = t0 + a.secs
     last_progress = t0

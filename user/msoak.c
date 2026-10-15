@@ -628,7 +628,7 @@ static void do_container(void)
         }
         /* The tmpfs is marked for everyone until the namespace is collected
          * (src/lxns.bastio), so the directory may stay busy for a while. */
-        if (getenv("SOAK_NORMDIR") == 0) rmdir(mnt);
+        rmdir(mnt);
         ops++;
     }
 }
@@ -695,27 +695,34 @@ static void do_cgroup(void)
 
 static void do_ipc(void)
 {
+    const char *only = getenv("SOAK_IPC");
     for (int i = 0; i < 10; i++) {
-        int shm = shmget(IPC_PRIVATE, 64 * 1024, IPC_CREAT | 0600);
-        if (shm < 0) {
-            note_once("sysv shm", errno);
-            return;
+        if (!only || strchr(only, 's')) {
+            int shm = shmget(IPC_PRIVATE, 64 * 1024, IPC_CREAT | 0600);
+            if (shm < 0) {
+                note_once("sysv shm", errno);
+                return;
+            }
+            char *p = shmat(shm, 0, 0);
+            CHECK(p != (char *)-1, "ipc: shmat");
+            memset(p, i, 64 * 1024);
+            CHECK(shmdt(p) == 0, "ipc: shmdt");
+            CHECK(shmctl(shm, IPC_RMID, 0) == 0, "ipc: shmctl");
         }
-        char *p = shmat(shm, 0, 0);
-        CHECK(p != (char *)-1, "ipc: shmat");
-        memset(p, i, 64 * 1024);
-        CHECK(shmdt(p) == 0, "ipc: shmdt");
-        CHECK(shmctl(shm, IPC_RMID, 0) == 0, "ipc: shmctl");
-        int q = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
-        if (q >= 0) {
-            struct { long t; char d[16]; } m = {1, "hello"}, r;
-            CHECK(msgsnd(q, &m, sizeof m.d, 0) == 0, "ipc: msgsnd");
-            CHECK(msgrcv(q, &r, sizeof r.d, 0, 0) == sizeof r.d, "ipc: msgrcv");
-            msgctl(q, IPC_RMID, 0);
+        if (!only || strchr(only, 'm')) {
+            int q = msgget(IPC_PRIVATE, IPC_CREAT | 0600);
+            if (q >= 0) {
+                struct { long t; char d[16]; } m = {1, "hello"}, r;
+                CHECK(msgsnd(q, &m, sizeof m.d, 0) == 0, "ipc: msgsnd");
+                CHECK(msgrcv(q, &r, sizeof r.d, 0, 0) == sizeof r.d, "ipc: msgrcv");
+                msgctl(q, IPC_RMID, 0);
+            }
         }
-        int sem = semget(IPC_PRIVATE, 2, IPC_CREAT | 0600);
-        if (sem >= 0)
-            semctl(sem, 0, IPC_RMID);
+        if (!only || strchr(only, 'e')) {
+            int sem = semget(IPC_PRIVATE, 2, IPC_CREAT | 0600);
+            if (sem >= 0)
+                semctl(sem, 0, IPC_RMID);
+        }
         ops++;
     }
 }
