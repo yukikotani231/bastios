@@ -515,10 +515,10 @@ fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
       oper = 0;                       // unknown, as Linux says of lo when it is up
     }
     nla_put32(&mut n, IFLA_TXQLEN, 1000);
-    nla_put32(&mut n, IFLA_MTU, 65536);
+    nla_put32(&mut n, IFLA_MTU, if_mtu(n, i));
   } else {
     nla_put32(&mut n, IFLA_TXQLEN, 1000);
-    nla_put32(&mut n, IFLA_MTU, 1500);
+    nla_put32(&mut n, IFLA_MTU, if_mtu(n, i));
     if if_lxflags(n, i) / IFF_LOWER_UP % 2 == 1 {
       oper = 6;                       // IF_OPER_UP
     }
@@ -1619,6 +1619,20 @@ fn nic_route(c: &Nic, ns: u64, r: u64, f: u64) -> u64
   }
 }
 
+/// Interface i's MTU: the one SIOCSIFMTU gave it, else its kind's.
+fn if_mtu(n: &Net, i: u64) -> u64
+  requires net_ok(n) && i < IFN
+{
+  let m = iw(n, i, IF_MTU);
+  if m != 0 {
+    return m;
+  }
+  if iw(n, i, IF_KIND) == IFK_LO {
+    return 65536;
+  }
+  return 1500;
+}
+
 /// Slot i's MTU.
 fn nic_if_mtu(c: &Nic, i: u64) -> u64
   requires nic_ok(c) && i < IFN
@@ -1626,10 +1640,29 @@ fn nic_if_mtu(c: &Nic, i: u64) -> u64
   match c {
     Nic::None => { return 65536; },
     Nic::Up(n) => {
-      if iw(n, i, IF_KIND) == IFK_LO {
-        return 65536;
+      return if_mtu(n, i);
+    },
+  }
+}
+
+/// SIOCSIFMTU: gives interface i the MTU m (68 to 65536): 0, or a
+/// positive errno.
+/// Packets still use the kind's own size: the MTU is what programs read
+/// back.
+fn nic_if_set_mtu(c: &mut Nic, i: u64, m: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return NE_INVAL; },
+    Nic::Up(mut n) => {
+      if m < 68 || m > 65536 || i >= IFN || iw(n, i, IF_KIND) == IFK_FREE {
+        c = Nic::Up(n);
+        return NE_INVAL;
       }
-      return 1500;
+      iset(&mut n, i, IF_MTU, m);
+      c = Nic::Up(n);
+      return 0;
     },
   }
 }

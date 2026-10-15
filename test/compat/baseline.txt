@@ -1175,6 +1175,8 @@ t_sock2: write after SHUT_WR is EPIPE
 t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
+t_sock2: splice between a pipe and a stream socket; none with a datagram socket or /dev/zero
+t_sock2: SIOCSIFMTU is read back; leaving a multicast group never joined is EADDRNOTAVAIL
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME

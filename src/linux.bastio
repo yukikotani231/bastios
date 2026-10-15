@@ -929,6 +929,7 @@ const SIOCGIFNAME: u64 = 0x8910;
 const SIOCSIFNAME: u64 = 0x8923;
 const SIOCGIFINDEX: u64 = 0x8933;
 const SIOCGIFMTU: u64 = 0x8921;
+const SIOCSIFMTU: u64 = 0x8922;
 const SIOCGIFTXQLEN: u64 = 0x8942;
 const IFREQ_SIZE: u64 = 40;
 const TIOCGPGRP: u64 = 0x540F;
@@ -1083,7 +1084,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
-    || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
+    || req == SIOCGIFMTU || req == SIOCSIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
   }
   if d.kind != K_CONSOLE {
@@ -1187,7 +1188,7 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
 /// never kept), and the interfaces of the caller's network namespace
 /// (src/netns.bastio): SIOCGIFCONF lists those with an address,
 /// SIOCGIFFLAGS, SIOCGIFINDEX, SIOCGIFADDR and SIOCGIFNAME read one, and
-/// SIOCSIFFLAGS (up or down) and SIOCSIFNAME change one.
+/// SIOCSIFFLAGS (up or down), SIOCSIFNAME and SIOCSIFMTU change one.
 fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -1216,9 +1217,16 @@ fn sock_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if i >= IFN {
     return 18446744073709551597;            // ENODEV (src/lxmore.bastio comes later)
   }
-  if req == SIOCSIFFLAGS || req == SIOCSIFNAME {
+  if req == SIOCSIFFLAGS || req == SIOCSIFNAME || req == SIOCSIFMTU {
     if !net_admin(k, pid) {
       return EPERM;
+    }
+    if req == SIOCSIFMTU {
+      let e = nic_if_set_mtu(&mut k.nic, i, get_u64(k.fs.xfer, 16) % 4294967296);
+      if e != 0 {
+        return 18446744073709551615 - (e - 1);   // -e
+      }
+      return 0;
     }
     if req == SIOCSIFNAME {
       let e = nic_if_rename(&mut k.nic, ns, i, name_w(k.fs.xfer, 16, 16, 0), name_w(k.fs.xfer, 16, 16, 1));

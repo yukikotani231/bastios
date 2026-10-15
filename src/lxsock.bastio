@@ -717,6 +717,63 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   if !inet || name % 0x100000000 >= 0x80000000 {
     return ENOPROTOOPT;
   }
+  if lv == 0 {
+    return mcast_opt(&mut k, pid, fd, name % 0x100000000, va, ln);
+  }
+  return 0;
+}
+
+const IP_ADD_MEMBERSHIP: u64 = 35;
+const IP_DROP_MEMBERSHIP: u64 = 36;
+const MCAST_JOIN_GROUP: u64 = 42;
+const MCAST_LEAVE_GROUP: u64 = 45;
+
+/// The IP options that join and leave a multicast group. Nothing is
+/// received from a group (there is no multicast routing here), but a
+/// socket counts the groups it joined, so that leaving one it never
+/// joined (a connection accepted from a listener that joined it: Linux
+/// does not copy the membership) is EADDRNOTAVAIL, as it is on Linux.
+/// Other IP options are accepted and ignored.
+fn mcast_opt(k: &mut Kernel, pid: u64, fd: u64, name: u64, va: u64, ln: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let join = name == IP_ADD_MEMBERSHIP || name == MCAST_JOIN_GROUP;
+  let leave = name == IP_DROP_MEMBERSHIP || name == MCAST_LEAVE_GROUP;
+  if !join && !leave {
+    return 0;
+  }
+  // struct ip_mreq starts with the group; group_req has an interface
+  // number, then a sockaddr_in (the address 4 bytes in) at offset 8.
+  let mut at = 0;
+  let mut need = 8;
+  if name == MCAST_JOIN_GROUP || name == MCAST_LEAVE_GROUP {
+    at = 12;
+    need = 16;
+  }
+  if ln < need {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, need) != need {
+    return EFAULT;
+  }
+  let first = bget(k.fs.xfer, at);
+  if first < 224 || first > 239 {
+    return EINVAL;                          // not a multicast address
+  }
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return 0;
+  }
+  let c = of_get(k.ofd, h, OF_MCAST);
+  if join {
+    of_set(&mut k.ofd, h, OF_MCAST, sat_add(c, 1));
+    return 0;
+  }
+  if c == 0 {
+    return EADDRNOTAVAIL;
+  }
+  of_set(&mut k.ofd, h, OF_MCAST, c - 1);
   return 0;
 }
 
@@ -784,6 +841,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   lx_fill(&mut k, 0, 4);
   bset(&mut k.fs.xfer, 0, cast[u8](v % 256));
   bset(&mut k.fs.xfer, 1, cast[u8](v / 256 % 256));
+  bset(&mut k.fs.xfer, 2, cast[u8](v / 65536 % 256));
   if room >= 0x80000000 {
     return EINVAL;                          // a negative length
   }

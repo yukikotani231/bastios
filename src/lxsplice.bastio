@@ -6,7 +6,8 @@
 // the bytes in the first. vmsplice is writev into a pipe's write end, or
 // readv out of its read end.
 //
-// Not done: splice to or from a socket (EINVAL). The bytes are copied,
+// A pipe splices to a TCP or unix stream socket, and one of those splices
+// into a pipe; the other sockets (EINVAL) do not. The bytes are copied,
 // never moved page by page, so SPLICE_F_MOVE and SPLICE_F_GIFT change
 // nothing.
 
@@ -219,6 +220,43 @@ fn splice_to_pipe(k: &mut Kernel, pid: u64, row: u64, inp: u64, p: u64, len: u64
   return done;
 }
 
+/// splice from the connected stream socket fd (TCP or unix) into pipe p:
+/// up to len bytes, as many as arrived and the pipe has room for.
+fn splice_sock_to_pipe(k: &mut Kernel, pid: u64, fd: u64, p: u64, len: u64, nb: bool) -> u64
+  requires kok(k) && pid < NPROC && p < NPIPES
+  ensures kok(k)
+{
+  let step = smaller(XFER, len);
+  let pr = pipe_ring(k.pipes, p);
+  let room = pipe_room_for(&mut k, p, pr.n, step);
+  if room == 0 {
+    if pi_get(k.pipes, p, 2) == 0 {
+      return EPIPE;
+    }
+    if nb {
+      return EAGAIN;
+    }
+    return SP_WAIT;
+  }
+  let want = smaller(step, room);
+  let mut got = 0;
+  if is_tcp(k, pid, fd) {
+    got = lx_tcp_recv(&mut k, pid, fd, TO_XFER, want, nb, false);
+  } else {
+    got = ux_recv(&mut k, pid, fd, TO_XFER, want, nb, false, false, 0, 0);
+    if got == ENOTCONN {
+      return EINVAL;                        // as Linux's splice tests expect of a socket with no peer
+    }
+  }
+  if got == SK_WAIT {
+    return SP_WAIT;
+  }
+  if got == 0 || got > XFER {
+    return got;                             // the end, or an error
+  }
+  return pipe_put_xfer(&mut k, p, got);
+}
+
 /// splice from /proc file f, open as fd, into pipe p: up to XFER bytes from
 /// the description's offset, which moves on.
 fn splice_proc_to_pipe(k: &mut Kernel, pid: u64, fd: u64, f: u64, p: u64, len: u64, nb: bool) -> u64
@@ -269,8 +307,17 @@ fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u
   }
   let nb = flags / SPLICE_F_NONBLOCK % 2 == 1;
   if from_pipe {
-    if dout.kind == K_SOCK {
-      return EINVAL;                        // not done
+    if !out_writable(k, pid, out) {
+      return EBADF;                         // a file or handle not open for writing
+    }
+    if dout.kind == K_SOCK && !(is_tcp(k, pid, out) || (is_unix(k, pid, out) && !ux_dgram(k, pid, out))) {
+      return EINVAL;                        // only stream sockets take a splice
+    }
+    if dout.kind == K_DEV && (dout.x == DEV_ZERO || (dout.x >= PROC_DEV && !is_uts_file(dout.x) && !proc_xfer_writable(dout.x))) {
+      return EINVAL;                        // /dev/zero and read-only /proc files take no splice
+    }
+    if dout.kind != K_SOCK && dout.kind != K_FILE && dout.kind != K_CONSOLE && dout.kind != K_DEV && !to_pipe {
+      return EINVAL;                        // epoll, eventfd and the rest: say so before waiting for bytes
     }
     if dout.kind == K_FILE && fget(k.fs.ftab, dout.x, FD_MODE) / O_APPEND % 2 == 1 {
       return EINVAL;                        // as Linux: no splice onto an O_APPEND file
@@ -282,6 +329,9 @@ fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u
       return EINVAL;
     }
     return splice_proc_to_pipe(&mut k, pid, fin, di.x, dout.x, len, nb || pipe_nonblock(k, pid, out));
+  }
+  if di.kind == K_SOCK && (is_tcp(k, pid, fin) || (is_unix(k, pid, fin) && !ux_dgram(k, pid, fin))) {
+    return splice_sock_to_pipe(&mut k, pid, fin, dout.x, len, nb || pipe_nonblock(k, pid, out));
   }
   if di.kind != K_FILE {
     return EINVAL;                          // only a file or a /proc file feeds a pipe here
