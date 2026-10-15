@@ -390,7 +390,7 @@ steps = [
     # sees itself and only its own children there, and a /proc mounted in
     # it lists them by those ids; user/mns.c (above) checks the rest.
     ("unshare -p -f --mount-proc sh -c 'echo $$; kill -0 1 && echo seen; cat /proc/1/stat; ls -d /proc/9'",
-     b"\r\n1\r\nseen\r\n1 (ash) S 0 1 1 ", b"\n# "),
+     [b"\r\n1\r\nseen\r\n1 (ash) ", b" 0 1 1 0 -1 "], b"\n# "),     # not the state letter: the shell may not have gone to sleep for cat yet
     # setns into a network namespace: nsenter -n joins the one a process
     # unshared into, so its /proc/self/ns/net link names that namespace
     # (and the caller's own stays the first one's).
