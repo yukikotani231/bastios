@@ -113,8 +113,8 @@ const P2: u64 = 42;
 const P3: u64 = 80;                            // P1 + 2 * P_LEN; INO_GLEN is P3 + P_LEN
 const P_LEN: u64 = 38;
 const G_A0: u64 = 118;                         // the call's first argument (the result may overwrite its register)
-const G_PID: u64 = 119;                        // the process whose call is running: fanotify events are charged to it
-const G_FANM: u64 = 120;                       // fanotify marks in all
+const G_PID: u64 = 119;
+const G_FANM: u64 = 120;
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -739,14 +739,11 @@ fn ino_closed(k: &mut Kernel, x: u64, dir: bool)
 
 /// read on instance i: as many whole events as fit in n bytes, -EINVAL if
 /// not even the first does, -EAGAIN if none is queued.
-fn ino_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && i < INO_N
   ensures kok(k)
 {
   let b = ino_base(i);
-  if iget(k, b) == 2 {
-    return fan_read(&mut k, pid, i, va, n);
-  }
   let q = smaller(iget(k, b + 2), INO_Q);
   let first = iget(k, b + 3) % INO_Q;
   if q == 0 {
@@ -813,8 +810,7 @@ fn ino_pow(j: u64) -> u64
   return 0x100000000000000;
 }
 
-/// What poll sees on instance x:
-/// POLLIN while an event is queued.
+/// What poll sees on instance x: POLLIN while an event is queued.
 fn ino_bits(k: &Kernel, x: u64) -> u64
   requires kok(k)
 {
@@ -846,6 +842,9 @@ fn ino_before(k: &mut Kernel, pid: u64)
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
   if n >= 0x10000 {
     return;
+  }
+  if n == 0 {
+    fan_prep(&mut k, pid, a, c);         // read
   }
   iput(&mut k, INO_G + G_CALL, n + 1);
   iput(&mut k, INO_G + G_A0, a);
@@ -1464,7 +1463,7 @@ fn fan_prefix(k: &Kernel, at: u64, n: u64) -> bool
 /// Queues an event of mask for process tg (thread tid) on handle f in
 /// instance i, or merges it into one already queued for them.
 fn fan_queue(k: &mut Kernel, i: u64, mask: u64, tg: u64, tid: u64, f: u64)
-  requires kok(k) && i < INO_N
+  requires kok(k) && i < INO_N && f < 0xFFFFFFFFFFFF
   ensures kok(k)
 {
   let b = ino_base(i);
@@ -1491,11 +1490,13 @@ fn fan_queue(k: &mut Kernel, i: u64, mask: u64, tg: u64, tid: u64, f: u64)
     iput(&mut k, e + 1, 0);
     iput(&mut k, e + 2, 0);
     iput(&mut k, e + 3, 0);
+    iput(&mut k, e + 4, 0);
   } else {
     iput(&mut k, e, mask);
     iput(&mut k, e + 1, tg);
     iput(&mut k, e + 2, f + 1);
     iput(&mut k, e + 3, tid);
+    iput(&mut k, e + 4, 0);
   }
   iput(&mut k, b + 2, q + 1);
 }
@@ -1509,7 +1510,7 @@ fn fan_event(k: &mut Kernel, f: u64, mask: u64)
   requires kok(k)
   ensures kok(k)
 {
-  if iget(k, INO_G + G_FANM) == 0 {
+  if iget(k, INO_G + G_FANM) == 0 || f >= 0xFFFFFFFFFFFF {
     return;
   }
   let evm = mask & FAN_EVENTS;
@@ -1625,6 +1626,41 @@ fn fan_open(k: &mut Kernel, pid: u64, h: u64, evf: u64) -> u64
   return fd;
 }
 
+/// Before a read(fd, buf, n) of process pid: if fd is a fanotify instance,
+/// opens the files of the first n / FAN_META events queued, so that the
+/// read itself only copies. (Opening files in the read itself does not
+/// verify: it grows linux_syscall past the solver's limit.)
+fn fan_prep(k: &mut Kernel, pid: u64, fd: u64, n: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let i = fan_of(k, pid, fd);
+  if i >= INO_N {
+    return;
+  }
+  let b = ino_base(i);
+  let q = smaller(smaller(iget(k, b + 2), FAN_Q), n / FAN_META);
+  let first = iget(k, b + 3) % FAN_Q;
+  let evf = iget(k, b + 4);
+  let mut j = 0;
+  while j < q
+    invariant j <= q && q <= FAN_Q && i < INO_N && kok(k) && pid < NPROC
+  {
+    let e = fe_at(i, (first + j) % FAN_Q);
+    let h = iget(k, e + 2);
+    if h != 0 && iget(k, e + 4) == 0 {
+      let r = fan_open(&mut k, pid, h - 1, evf);
+      if r == EMFILE || r == ENFILE {
+        return;
+      }
+      if r < LXNFD {
+        iput(&mut k, e + 4, r + 1);
+      }
+    }
+    j = j + 1;
+  }
+}
+
 /// read on instance i: as many whole events as fit in n bytes, -EINVAL if
 /// not even one does, -EAGAIN if none is queued.
 fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
@@ -1641,24 +1677,19 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   }
   let first = iget(k, b + 3) % FAN_Q;
   let flags = iget(k, b + 1);
-  let evf = iget(k, b + 4);
   let mut taken = 0;
   let mut off = 0;
   let mut err = 0;
   while taken < q && off + FAN_META <= n && err == 0 && off < XFER
-    invariant taken <= q && q <= FAN_Q && i < INO_N && kok(k)
+    invariant taken <= q && q <= FAN_Q && off <= XFER + FAN_META && i < INO_N && kok(k)
   {
     let e = fe_at(i, (first + taken) % FAN_Q);
     let mask = iget(k, e);
     let h = iget(k, e + 2);
     let mut fd = 0xFFFFFFFF;                // no descriptor
-    if h != 0 {
-      let r = fan_open(&mut k, pid, h - 1, evf);
-      if r == EMFILE || r == ENFILE {
-        err = r;
-      } else if r < LXNFD {
-        fd = r;
-      }
+    let pre = iget(k, e + 4);
+    if h != 0 && pre != 0 {
+      fd = smaller(pre - 1, LXNFD - 1);   // opened before the call (fan_prep)
     }
     if err == 0 {
       let mut row = iget(k, e + 1);
@@ -1676,7 +1707,7 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
       xfer_u64(&mut k.fs.xfer, 8, mask);
       store_le32(&mut k.fs.xfer, 16, cast[u32](fd));
       store_le32(&mut k.fs.xfer, 20, cast[u32](rp % 0x100000000));
-      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + off, k.fs.xfer, FAN_META) != FAN_META {
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, smaller(va, 0xFFFFFFFFFFFF) + off, k.fs.xfer, FAN_META) != FAN_META {
         err = EFAULT;
       } else {
         off = off + FAN_META;
@@ -1690,4 +1721,15 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
     return err;
   }
   return off;
+}
+
+/// read on instance i of either kind.
+fn ino_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && i < INO_N
+  ensures kok(k)
+{
+  if iget(k, ino_base(i)) == 2 {
+    return fan_read(&mut k, pid, i, va, n);
+  }
+  return ino_read_in(&mut k, pid, i, va, n);
 }
