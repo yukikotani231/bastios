@@ -305,7 +305,7 @@ steps = [
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
     # 100 connections to ourselves at once is 200 in the kernel's table (it
     # held 32), and 30 UDP sockets at once (8 before).
-    ("mtcp many 100", b"mtcp: 100 connections and 30 udp sockets", b"\n# "),
+    ("mtcp many 100", b"mtcp: 100 connections and 30 udp sockets, 16 queued", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -416,7 +416,7 @@ steps = [
     # but has no more rights: root's files show as 65534 and stay unreadable,
     # and a file she makes is hers outside. Without a map she is 65534.
     ("su alice -c 'unshare -U -r sh -c \"id -u; id -g; ls -ln /etc/shadow; cat /etc/shadow; echo s=\\$?; touch /home/alice/f; ls -ln /home/alice/f; cat /proc/self/uid_map /proc/self/setgroups\"; ls -ln /home/alice/f; unshare -U id -u; unshare -U -r -u sh -c \"hostname box; hostname\"; unshare -U -r unshare -U true; echo n=$?'",
-     [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=1"], b"\n# "),
+     [b"\r\n0\r\n0\r\n", b"65534    65534", b"Permission denied", b"s=1", b"0        0", b"         0       1000          1\r\ndeny", b"1000     1000", b"\r\n65534\r\nbox\r\n", b"n=0"], b"\n# "),
     # The root of a user namespace mounts in a mount namespace of its own,
     # and only there: a tmpfs it mounts is gone with the namespace, and a
     # user without a mount namespace of its own (or without any) mounts nothing.

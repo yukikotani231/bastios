@@ -323,6 +323,29 @@ int main(void)
         if (unlink(nm) != 0)
             return fail("emptying the in-memory table");
     }
+    /* Tens of thousands of directories: rmdir and rename must not walk the
+     * whole table for children, and still refuse a directory that has some. */
+    if (mkdir("tpdirectory", 0755) != 0 || mkdir("tpdirectory/inner", 0755) != 0 || mkdir("tpdirectory/inner/deepest", 0755) != 0)
+        return fail("nested directories");
+    if (rmdir("tpdirectory") != -1 || errno != ENOTEMPTY || rmdir("tpdirectory/inner") != -1 || errno != ENOTEMPTY)
+        return fail("rmdir of a directory with names under it");
+    if (rename("tpdirectory", "tqdirectory") != 0 || rmdir("tqdirectory") != -1 || errno != ENOTEMPTY
+        || access("tqdirectory/inner/deepest", F_OK) != 0 || access("tpdirectory", F_OK) != -1)
+        return fail("renaming a directory with names under it");
+    if (rmdir("tqdirectory/inner/deepest") != 0 || rmdir("tqdirectory/inner") != 0 || rmdir("tqdirectory") != 0)
+        return fail("emptying the renamed directory");
+    for (made = 0; made < 20000; made++) {
+        snprintf(nm, sizeof nm, "q%d", made);
+        if (mkdir(nm, 0755) != 0)
+            return fail("making 20000 directories");
+    }
+    if (rename("q7", "r7") != 0 || rename("r7", "q7") != 0)
+        return fail("renaming a directory among thousands");
+    while (made > 0) {
+        snprintf(nm, sizeof nm, "q%d", --made);
+        if (rmdir(nm) != 0)
+            return fail("removing 20000 directories");
+    }
     /* tmpfs: mounted on an empty directory, listed in /proc/self/mounts,
      * busy while a file in it is open, emptied by umount2; read-only
      * with MS_RDONLY until a remount. */

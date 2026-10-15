@@ -212,8 +212,8 @@ static int userns(void)
             _exit(48);                      /* owned by its process: 5002 outside, 12 inside */
         if (proc_put("/proc/self/setgroups", "deny\n") < 0 || proc_put("/proc/self/setgroups", "allow\n") != -1)
             _exit(49);
-        if (unshare(CLONE_NEWUSER) != -1 || errno != ENOSPC)
-            _exit(50);                      /* two levels */
+        if (unshare(CLONE_NEWUSER) != 0)
+            _exit(50);                      /* one inside this one */
         _exit(0);
     }
     int st;

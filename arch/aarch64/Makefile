@@ -240,10 +240,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # (dynamic) BusyBox starts only inside the unpacked root.
 $(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
     $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys \
-    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so $(B)/compat/strace | $(B)/compat
+    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun | $(B)/compat
 	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
-	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so $(B)/compat/strace"
+	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun"
 
 # The tree-sitter C parser for Neovim, as the x86-64 suite builds it (the
 # top-level Makefile): the generated parser.c of the pinned npm package in a
@@ -279,6 +279,15 @@ RUNC_ARM64_SHA256 ?= 12c612e2ebe6ca198de676ce75ed557e79fe6109032209bb8e25166c967
 $(B)/compat/runc: | $(B)/compat
 	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.arm64
 	echo "$(RUNC_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	chmod +x $@.part && mv $@.part $@
+
+# crun, the other OCI runtime: the static arm64 binary of the upstream release
+# (the x86-64 suite's CRUN_VER), checked against a pinned SHA-256.
+CRUN_VER          ?= 1.19.1
+CRUN_ARM64_SHA256 ?= 4f28e8912fa52d1325cb42bfdc41d8f387d44e415955a82c203251e9dc1def5c
+$(B)/compat/crun: | $(B)/compat
+	curl -fsSL -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-arm64
+	echo "$(CRUN_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
 # Dropbear, the SSH server of the "nvim over ssh" case, built from the same

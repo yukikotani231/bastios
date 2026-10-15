@@ -288,6 +288,30 @@ t_dns: name server binds UDP port 53
 t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
+t_fanotify: a child's event comes to its directory
+t_fanotify: a class other than notification is refused
+t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
+t_fanotify: a mark on a missing file is ENOENT
+t_fanotify: a mark with no operation is EINVAL
+t_fanotify: a modification ends the ignore mask
+t_fanotify: a mount mark covers files under the directory
+t_fanotify: a subdirectory's event needs FAN_ONDIR
+t_fanotify: a write is modify and close-write
+t_fanotify: add FAN_ONDIR
+t_fanotify: an empty queue is EAGAIN
+t_fanotify: an ignored event is left out
+t_fanotify: and reports them
+t_fanotify: fanotify_init makes a descriptor
+t_fanotify: fdinfo lists the inode marks
+t_fanotify: flush the marks
+t_fanotify: ignore access
+t_fanotify: mark a file for access, modify, open and close
+t_fanotify: now it comes, without the flag in its mask
+t_fanotify: open, access and close of a file are one event
+t_fanotify: reading the event's descriptor makes no event
+t_fanotify: remove the mark
+t_fanotify: the event says who did it
+t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
@@ -1197,6 +1221,7 @@ t_userns: the root of a user namespace brings loopback up in a network namespace
 t_userns: and not in the first one
 t_userns: statfs of /proc/self/fd/N answers for the file N holds
 t_userns: nor in one that another user namespace made
+t_userns: a user namespace is made inside another and mapped through it
 tty: kilo: edit and save a file
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
