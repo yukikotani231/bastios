@@ -100,6 +100,20 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts threads and writes machine code at run time, so this lane boots the
   guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
   them on a copy.
+- `python.txt`: Python development, from a seventh disk (`pythondisk.py`): the
+  root of the official `python:3.14-alpine` image (`PYTHON_IMAGE`: CPython,
+  pip and the headers in `/usr/local`), entered with `chroot`, with gcc
+  installed by apk from the Alpine repository over HTTP. The cases make a
+  venv, `pip install` packages from the host's web server (pinned by SHA-256
+  in `pythondeps.txt`, served at `HOSTURL/wheels/`; pip finds them through
+  `/etc/pip.conf`), build a C extension from source (MarkupSafe), run the
+  whole test suite of a real project (Jinja2's 784 tests), load binary musl
+  wheels (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson,
+  cffi) and run `pyprogs/stdlib.py`, which exercises the standard library on
+  top of the system calls: fork, threads, signals, sockets, mmap, pty,
+  sqlite3, ctypes, multiprocessing (fork, spawn and forkserver), asyncio and
+  TLS. `pyprogs/` is served at `HOSTURL/pyprogs/`, and the same script runs on
+  Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB.
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel

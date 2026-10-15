@@ -76,6 +76,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_TTY {
     return 0x500;
   }
+  if d == DEV_PTMX {
+    return 0x502;                           // 5:2
+  }
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return 0x700 + d - DEV_LOOP;            // block major 7
   }
@@ -104,6 +107,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   }
   if rdev == 0x500 || rdev == 0x501 {
     return DEV_TTY;
+  }
+  if rdev == 0x502 {
+    return DEV_PTMX;                        // a /dev/ptmx made by mknod, in a chroot
   }
   if rdev >= 0x700 && rdev < 0x700 + LOOP_N {
     return DEV_LOOP + rdev - 0x700;

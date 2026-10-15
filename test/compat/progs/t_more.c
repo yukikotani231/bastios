@@ -105,6 +105,19 @@ int main(int argc, char **argv) {
            waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 7; }));
     EXPECT("vfork + _exit", (c = vfork()) >= 0 && (c == 0 ? (_exit(7), 0) : waitpid(c, &st, 0) == c && WEXITSTATUS(st) == 7));
     EXPECT("getrusage children", ({ struct rusage r; getrusage(RUSAGE_CHILDREN, &r) == 0; }));
+    /* numpy and psutil: ru_maxrss, the memory policy calls, the memory and context-switch lines of /proc/PID/status, and SIOCETHTOOL. */
+    EXPECT("getrusage self reports a maximum resident size", ({ struct rusage r; getrusage(RUSAGE_SELF, &r) == 0 && r.ru_maxrss > 0; }));
+    EXPECT("mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT", ({ char *pg = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); int mode = -1;
+           pg != MAP_FAILED && syscall(SYS_mbind, (long)pg, 4096L, 0L, 0L, 0L, 0L) == 0 && syscall(SYS_set_mempolicy, 0L, 0L, 0L) == 0
+           && syscall(SYS_get_mempolicy, (long)&mode, 0L, 0L, 0L, 0L) == 0 && mode == 0; }));
+    EXPECT("/proc/PID/status has VmRSS and the context switch counts", ({ char b[4096]; int f = open("/proc/self/status", O_RDONLY);
+           int n = f < 0 ? -1 : read(f, b, sizeof b - 1); if (n > 0) b[n] = 0; if (f >= 0) close(f);
+           n > 0 && strstr(b, "\nVmRSS:\t") && strstr(b, "\nvoluntary_ctxt_switches:\t") && strstr(b, "\nnonvoluntary_ctxt_switches:\t"); }));
+    EXPECT("/proc/meminfo has Active, Inactive and Shmem", ({ char b[4096]; int f = open("/proc/meminfo", O_RDONLY);
+           int n = f < 0 ? -1 : read(f, b, sizeof b - 1); if (n > 0) b[n] = 0; if (f >= 0) close(f);
+           n > 0 && strstr(b, "\nActive:") && strstr(b, "\nInactive:") && strstr(b, "\nShmem:"); }));
+    EXPECT("SIOCETHTOOL on a socket is EOPNOTSUPP", ({ int s = socket(AF_INET, SOCK_DGRAM, 0); unsigned ec[16] = { 1 }; /* ETHTOOL_GSET */ char ifr[40] = "lo"; void *d = ec;
+           memcpy(ifr + 16, &d, sizeof d); s >= 0 && ioctl(s, 0x8946, ifr) == -1 && errno == EOPNOTSUPP && close(s) == 0; }));
     /* What CPython's socket, os and shutil modules lean on. */
     EXPECT("ioctl FIONBIO makes a read EAGAIN", ({ int one = 1; char ch; pipe(p) == 0 && ioctl(p[0], FIONBIO, &one) == 0 &&
            (fcntl(p[0], F_GETFL) & O_NONBLOCK) && read(p[0], &ch, 1) == -1 && errno == EAGAIN; }));

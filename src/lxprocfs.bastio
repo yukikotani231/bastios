@@ -2112,7 +2112,10 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, avail);
     a = put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: ");
     a = put_n(&mut o, a, smaller(pc_count(k.fs.pc), PC_N) * 4);
-    return put_s(&mut o, a, " kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
+    // The memory in use counts as active; psutil and free(1) read these.
+    a = put_s(&mut o, a, " kB\nSwapCached: 0 kB\nActive: ");
+    a = put_n(&mut o, a, total - smaller(avail, total));
+    return put_s(&mut o, a, " kB\nInactive: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\nDirty: 0 kB\nWriteback: 0 kB\nShmem: 0 kB\nSReclaimable: 0 kB\n");
   }
   if what == PF_CPUINFO && p == 0 {
     let mut a = 0;
@@ -2406,8 +2409,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_c(&mut o, a, 32);
       i = i + 1;
     }
-    a = put_s(&mut o, a, "\nVmLck:\t");
+    // Every page the process has counts as resident (as in statm).
+    let kb = smaller(anon_count(&mut k, p, 0, WPAGES), WPAGES) * 4;
+    a = put_s(&mut o, a, "\nVmPeak:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nVmSize:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nVmLck:\t");
     a = put_n(&mut o, a, rl_locked(k, p) / 1024);
+    a = put_s(&mut o, a, " kB\nVmHWM:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nVmRSS:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nRssAnon:\t");
+    a = put_n(&mut o, a, kb);
     a = put_s(&mut o, a, " kB\nThreads:\t");
     a = put_n(&mut o, a, group_size(k, p));
     a = put_s(&mut o, a, "\nNoNewPrivs:\t");
@@ -2420,6 +2435,8 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, sc_mode(k, p));
     a = put_s(&mut o, a, "\nSeccomp_filters:\t");
     a = put_n(&mut o, a, sc_depth(k, p));
+    // Nothing counts context switches.
+    a = put_s(&mut o, a, "\nvoluntary_ctxt_switches:\t0\nnonvoluntary_ctxt_switches:\t0");
     return put_c(&mut o, a, 10);
   }
   if what == PF_COMM {
