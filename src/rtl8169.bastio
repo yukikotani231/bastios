@@ -1,0 +1,622 @@
+// A Realtek RTL8111/8168 gigabit card (PCI 10ec:8168 and 10ec:8161), the
+// network chip on most desktop and laptop boards of the last fifteen years.
+// QEMU emulates no such card (it has the RTL8139, a different design), so
+// this driver is written from Realtek's register layout as Linux's r8169
+// uses it and has never run against hardware or a model: treat it as
+// untested.
+//
+// What it drives: the PCIe 8168 generations from the 8168b to the 8168h
+// (8111B to 8111H, 8411), identified by the chip version in TxConfig. It
+// does the common start-up only: reset, MAC address, one receive and one
+// normal-priority transmit ring of eight descriptors, accept unicast,
+// broadcast and all multicast, a restart of the PHY's autonegotiation. The
+// per-chip tuning of Linux's rtl_hw_start_8168* (EPHY fix-ups, ASPM and L1
+// timers, FIFO thresholds, PHY firmware) is left as the firmware set it, and
+// the 8168g and later get only the reset and RX-gate handling they cannot
+// work without. The DASH variants (8168ep, 8168fp/8117) are not driven: they
+// need their management controller stopped first.
+// Polled like the other cards, with an optional receive interrupt on the PCI
+// line (see rtl_irq).
+//
+// The register block is BAR 2 (BAR 0 is the same registers in I/O space),
+// claimed as an `Mmio`; every page the card can touch is a `Dma` lent at
+// start and taken back after a reset at power off. Memory, six pages like
+// the e1000's: one for the two descriptor rings (eight receive descriptors
+// at 0, eight transmit descriptors at 2048), four of receive buffers (eight
+// of 2 KiB) and one for the frame being sent. A descriptor is 16 bytes: the
+// options word (bit 31 the card owns it, bit 30 last in the ring, bit 29
+// first and bit 28 last segment of a frame, the length in the low bits),
+// the VLAN word and the 64-bit buffer address.
+
+import "virtio_net.bastio";
+
+const RTL_VENDOR: u64 = 0x10EC;
+const RTL_NONE: u64 = 0;              // rtl_kind: a chip this driver does not drive
+const RTL_OLD: u64 = 1;               // 8168b to 8168f, 8411: MAC address in the registers or the ERI
+const RTL_G: u64 = 2;                 // 8168g, 8168gu, 8411b, 8168h: the RX gate and the MAC OCP
+const RTL_LEN: u64 = 4096;
+const RTL_TOP: u64 = 0xFEC00000;      // its BAR must lie below the I/O APIC, HPET and local APIC
+const RTL_PAGES: u64 = 6;
+const RTL_DESCS: u64 = 8;
+const RTL_TXR: u64 = 2048;            // where the transmit ring starts in the ring page
+const RTL_MINTX: u64 = 60;            // the card does not pad short frames
+
+// Registers (offsets in the BAR).
+const RTR_MAC0: u64 = 0x00;             // the MAC address: 4 bytes, then 2
+const RTR_MAR0: u64 = 0x08;             // multicast hash filter, 2 words
+const RTR_TXDESC: u64 = 0x20;           // transmit ring address, low then high
+const RTR_CMD: u64 = 0x37;
+const RTR_TXPOLL: u64 = 0x38;
+const RTR_IMR: u64 = 0x3C;
+const RTR_ISR: u64 = 0x3E;
+const RTR_TXCFG: u64 = 0x40;
+const RTR_RXCFG: u64 = 0x44;
+const RTR_CFG9346: u64 = 0x50;          // 0xC0 unlocks the configuration registers
+const RTR_PHYAR: u64 = 0x60;            // PHY register access
+const RTR_ERIDR: u64 = 0x70;            // extended register access: data
+const RTR_ERIAR: u64 = 0x74;            //   and address/command
+const RTR_OCP: u64 = 0xB0;              // MAC OCP access (8168g and later)
+const RTR_MCU: u64 = 0xD3;
+const RTR_RXMAX: u64 = 0xDA;
+const RTR_CPLUS: u64 = 0xE0;
+const RTR_INTMIT: u64 = 0xE2;
+const RTR_RXDESC: u64 = 0xE4;
+const RTR_MAXTX: u64 = 0xEC;
+const RTR_MISC: u64 = 0xF0;
+
+// Bits.
+const RT_CMD_RESET: u64 = 0x10;
+const RT_CMD_ON: u64 = 0x0C;             // receiver and transmitter
+const RT_TXPOLL_NPQ: u64 = 0x40;         // normal-priority queue has work
+const RT_ISR_RX: u64 = 0x53;             // the interrupts asked for: RxOK, RxErr, RxOverflow, RxFIFOOver
+const RT_TXCFG_BASE: u64 = 0x03000700;   // unlimited DMA bursts, the shortest inter-frame gap
+const RT_TXCFG_AUTO_FIFO: u64 = 0x80;    // 8168evl and later
+const RT_RXCFG_ACCEPT: u64 = 0x0E;       // broadcast, multicast, our address
+const RT_CPLUS_OFFLOAD: u64 = 0x60;      // receive checksum and VLAN stripping: off
+const RT_MISC_RXDV_GATE: u64 = 0x80000;  // 8168g: the receive gate
+const RT_MCU_NOW_IS_OOB: u64 = 0x80;
+const RT_MCU_LINK_LIST: u64 = 0x02;
+const RT_OCP_E8DE: u64 = 0xE8DE;
+const RT_OCP_WRITE: u64 = 0x80000000;
+const RT_ERI_READ_MASK: u64 = 0xF000;    // all four bytes
+const RT_PHY_BMCR: u64 = 0;
+const RT_PHY_PAGE: u64 = 0x1F;
+const RT_BMCR_AUTONEG: u64 = 0x1200;     // autonegotiation on and restarted, power-down off
+const RTD_OWN: u64 = 0x80000000;
+const RTD_EOR: u64 = 0x40000000;
+const RTD_FS: u64 = 0x20000000;
+const RTD_LS: u64 = 0x10000000;
+const RTD_RES: u64 = 0x200000;          // receive: an error summary
+const RT_DELAY_READS: u64 = 2000;        // register reads that take at least a millisecond
+
+struct Rtl {
+  regs: Mmio,
+  ring: Dma,          // both descriptor rings
+  rb0: Dma,           // receive buffers 0-1
+  rb1: Dma,           // 2-3
+  rb2: Dma,           // 4-5
+  rb3: Dma,           // 6-7
+  tb: Dma,            // the frame being sent
+  rx_next: u64,       // the next receive descriptor the card fills
+  tx_next: u64,       // the next transmit descriptor
+  kind: u64,          // RTL_OLD or RTL_G (RTL_NONE: not started)
+  eri_mac: bool,      // the MAC address is read through the ERI, not the registers
+  mac: u64,
+  live: bool,
+  irq: bool,          // received frames can raise its PCI interrupt line (see rtl_irq)
+}
+
+spec fn rtl_ok(r: &Rtl) -> bool {
+  mmio_len(r.regs) == RTL_LEN && mmio_base(r.regs) % 4096 == 0
+  && r.rx_next < RTL_DESCS && r.tx_next < RTL_DESCS && r.mac < 281474976710656 && r.kind <= RTL_G
+}
+
+/// Whether PCI id `vendor:device` is a card of this driver's family. (Which
+/// chip it holds is known only from its registers: see rtl_kind.)
+fn rtl_model(vendor: u64, device: u64) -> bool {
+  return vendor == RTL_VENDOR && (device == 0x8168 || device == 0x8161);
+}
+
+/// The first such card on the PCI bus, or PCI_NONE.
+fn rtl_find(p: &mut Pci) -> u64
+  requires pci_ok(p)
+  ensures pci_ok(p) && result <= PCI_NONE
+{
+  let mut d = 0;
+  while d < PCI_NONE
+    invariant d <= PCI_NONE && pci_ok(p)
+  {
+    let id = pci_read(&mut p, d, PCI_ID);
+    if rtl_model(id % 65536, id / 65536 % 65536) {
+      return d;
+    }
+    d = pci_next(&mut p, d);
+  }
+  return PCI_NONE;
+}
+
+/// What the chip is, from TxConfig bits 20-30 and 24-27 masked as r8169's
+/// table does (`xid`: 0xFCF of TxConfig >> 20).
+fn rtl_kind(xid: u64) -> u64
+  requires xid <= 4095
+  ensures result <= RTL_G
+{
+  let m8 = xid & 0x7C8;
+  let m7 = xid & 0x7CF;
+  if m7 == 0x4C0 || m7 == 0x509 || m7 == 0x5C8 || m7 == 0x541 || m7 == 0x6C0 {
+    return RTL_G;                     // 8168g, gu, 8411b, 8168h, 8168M
+  }
+  if m8 == 0x380 || m8 == 0x3C0 || m8 == 0x3C8 || m8 == 0x280 || m8 == 0x2C0 || m8 == 0x2C8
+    || m7 == 0x281 || m7 == 0x28A || m7 == 0x28B || m7 == 0x480 || m7 == 0x481 || m8 == 0x488 {
+    return RTL_OLD;                   // 8168b, c, cp, d, dp, e, evl, f, 8411
+  }
+  return RTL_NONE;                    // 8101, 8169, 8125, the DASH chips, unknown
+}
+
+/// Registers: byte, word and double word access, which the card allows.
+fn rtl_r8(r: &mut Rtl, o: u64) -> u64
+  requires rtl_ok(r) && o < RTL_LEN
+  ensures rtl_ok(r) && result <= 255
+{
+  return cast[u64](mmio_read8(&mut r.regs, o));
+}
+
+fn rtl_r16(r: &mut Rtl, o: u64) -> u64
+  requires rtl_ok(r) && o % 2 == 0 && o + 2 <= RTL_LEN
+  ensures rtl_ok(r) && result <= 65535
+{
+  return cast[u64](mmio_read16(&mut r.regs, o));
+}
+
+fn rtl_r32(r: &mut Rtl, o: u64) -> u64
+  requires rtl_ok(r) && o % 4 == 0 && o + 4 <= RTL_LEN
+  ensures rtl_ok(r) && result <= 4294967295
+{
+  return cast[u64](mmio_read32(&mut r.regs, o));
+}
+
+fn rtl_w8(r: &mut Rtl, o: u64, v: u64)
+  requires rtl_ok(r) && o < RTL_LEN && v <= 255
+  ensures rtl_ok(r)
+{
+  mmio_write8(&mut r.regs, o, cast[u8](v));
+}
+
+fn rtl_w16(r: &mut Rtl, o: u64, v: u64)
+  requires rtl_ok(r) && o % 2 == 0 && o + 2 <= RTL_LEN && v <= 65535
+  ensures rtl_ok(r)
+{
+  mmio_write16(&mut r.regs, o, cast[u16](v));
+}
+
+fn rtl_w32(r: &mut Rtl, o: u64, v: u64)
+  requires rtl_ok(r) && o % 4 == 0 && o + 4 <= RTL_LEN && v <= 4294967295
+  ensures rtl_ok(r)
+{
+  mmio_write32(&mut r.regs, o, cast[u32](v));
+}
+
+/// Waits at least `ms` milliseconds: a register read crosses the PCI bus and
+/// takes at least half a microsecond, so RT_DELAY_READS of them last a
+/// millisecond or more. (No clock is running yet when the card starts.)
+fn rtl_delay(r: &mut Rtl, ms: u64)
+  requires rtl_ok(r) && ms <= 100
+  ensures rtl_ok(r)
+{
+  let mut n = 0;
+  while n < ms * RT_DELAY_READS
+    invariant rtl_ok(r) && ms <= 100
+  {
+    rtl_r8(&mut r, RTR_CMD);
+    n = n + 1;
+  }
+}
+
+/// Waits until `(byte at o) & mask == want`, for at most a few
+/// milliseconds; false if it never did.
+fn rtl_wait8(r: &mut Rtl, o: u64, mask: u64, want: u64) -> bool
+  requires rtl_ok(r) && o < RTL_LEN && mask <= 255
+  ensures rtl_ok(r)
+{
+  let mut spins = 0;
+  while spins < 20 * RT_DELAY_READS
+    invariant rtl_ok(r)
+  {
+    if rtl_r8(&mut r, o) & mask == want {
+      return true;
+    }
+    spins = spins + 1;
+  }
+  return false;
+}
+
+/// A MAC OCP register (8168g and later), read.
+fn rtl_ocp_read(r: &mut Rtl, reg: u64) -> u64
+  requires rtl_ok(r) && reg < 65536 && reg % 2 == 0
+  ensures rtl_ok(r) && result <= 65535
+{
+  rtl_w32(&mut r, RTR_OCP, reg * 32768);
+  return rtl_r32(&mut r, RTR_OCP) % 65536;
+}
+
+fn rtl_ocp_write(r: &mut Rtl, reg: u64, v: u64)
+  requires rtl_ok(r) && reg < 65536 && reg % 2 == 0 && v <= 65535
+  ensures rtl_ok(r)
+{
+  rtl_w32(&mut r, RTR_OCP, RT_OCP_WRITE + reg * 32768 + v);
+}
+
+/// An extended register, read (all four bytes); the card answers with the
+/// flag set once the value is in the data register. 0 if it never did.
+fn rtl_eri_read(r: &mut Rtl, a: u64) -> u64
+  requires rtl_ok(r) && a < 4096 && a % 4 == 0
+  ensures rtl_ok(r) && result <= 4294967295
+{
+  rtl_w32(&mut r, RTR_ERIAR, RT_ERI_READ_MASK + a);
+  let mut spins = 0;
+  while spins < 20 * RT_DELAY_READS
+    invariant rtl_ok(r)
+  {
+    if rtl_r32(&mut r, RTR_ERIAR) >= RTD_OWN {
+      return rtl_r32(&mut r, RTR_ERIDR);
+    }
+    spins = spins + 1;
+  }
+  return 0;
+}
+
+/// A PHY register, written, and the call waits for the card to finish.
+fn rtl_phy_write(r: &mut Rtl, reg: u64, v: u64)
+  requires rtl_ok(r) && reg < 32 && v <= 65535
+  ensures rtl_ok(r)
+{
+  rtl_w32(&mut r, RTR_PHYAR, RTD_OWN + reg * 65536 + v);
+  let mut spins = 0;
+  while spins < 20 * RT_DELAY_READS
+    invariant rtl_ok(r)
+  {
+    if rtl_r32(&mut r, RTR_PHYAR) < RTD_OWN {
+      return;
+    }
+    spins = spins + 1;
+  }
+}
+
+/// The address of receive buffer b (0-7).
+fn rtl_rxbuf_addr(r: &Rtl, b: u64) -> u64
+  requires b < RTL_DESCS
+{
+  let mut a = dma_addr(r.rb3);
+  if b < 2 {
+    a = dma_addr(r.rb0);
+  } else if b < 4 {
+    a = dma_addr(r.rb1);
+  } else if b < 6 {
+    a = dma_addr(r.rb2);
+  }
+  if a > ADDR_LIMIT {
+    return 0;                         // never: the pool is below 256 MiB
+  }
+  return a + b % 2 * RX_BUF;
+}
+
+/// Copies the first n bytes of receive buffer `b` into pkt.
+fn rtl_rxbuf_copy(r: &mut Rtl, b: u64, pkt: &mut Bytes, n: u64)
+  requires rtl_ok(r) && b < RTL_DESCS && n <= RX_BUF && n <= blen(pkt)
+  ensures rtl_ok(r) && blen(pkt) == old(blen(pkt)) && r.live == old(r.live) && r.irq == old(r.irq)
+  ensures r.rx_next == old(r.rx_next) && r.tx_next == old(r.tx_next)
+{
+  let at = b % 2 * RX_BUF;
+  if b < 2 {
+    dma_to_bytes(&mut pkt, 0, &mut r.rb0, at, n);
+  } else if b < 4 {
+    dma_to_bytes(&mut pkt, 0, &mut r.rb1, at, n);
+  } else if b < 6 {
+    dma_to_bytes(&mut pkt, 0, &mut r.rb2, at, n);
+  } else {
+    dma_to_bytes(&mut pkt, 0, &mut r.rb3, at, n);
+  }
+}
+
+/// Hands receive descriptor `b` to the card: its length is the buffer's and
+/// the last one in the ring ends it.
+fn rtl_rx_give(r: &mut Rtl, b: u64)
+  requires rtl_ok(r) && b < RTL_DESCS
+  ensures rtl_ok(r) && r.live == old(r.live) && r.irq == old(r.irq)
+  ensures r.rx_next == old(r.rx_next) && r.tx_next == old(r.tx_next)
+{
+  let mut o = RTD_OWN + RX_BUF;
+  if b == RTL_DESCS - 1 {
+    o = o + RTD_EOR;
+  }
+  dma_write32(&mut r.ring, b * 16 + 4, 0);
+  dma_write64(&mut r.ring, b * 16 + 8, rtl_rxbuf_addr(r, b));
+  dma_write32(&mut r.ring, b * 16, cast[u32](o));
+}
+
+/// The 8168g and later cannot be reset while their receive gate is open
+/// and the management controller owns the link list: close the gate, wait
+/// for the FIFOs to drain, stop the receiver and transmitter, leave
+/// out-of-band mode and let the link list settle (rtl_hw_init_8168g).
+fn rtl_init_g(r: &mut Rtl)
+  requires rtl_ok(r)
+  ensures rtl_ok(r)
+{
+  let m = rtl_r32(&mut r, RTR_MISC);
+  if m / RT_MISC_RXDV_GATE % 2 == 0 {
+    rtl_w32(&mut r, RTR_MISC, m + RT_MISC_RXDV_GATE);
+  }
+  rtl_delay(&mut r, 2);
+  let mut spins = 0;
+  while spins < 20 * RT_DELAY_READS && rtl_r32(&mut r, RTR_TXCFG) / 2048 % 2 == 0
+    invariant rtl_ok(r)
+  {
+    spins = spins + 1;
+  }
+  rtl_wait8(&mut r, RTR_MCU, 0x30, 0x30);
+  let c = rtl_r8(&mut r, RTR_CMD);
+  rtl_w8(&mut r, RTR_CMD, c - c % 16 + c % 4);   // receiver and transmitter off
+  rtl_delay(&mut r, 1);
+  let mcu = rtl_r8(&mut r, RTR_MCU);
+  if mcu / RT_MCU_NOW_IS_OOB % 2 == 1 {
+    rtl_w8(&mut r, RTR_MCU, mcu - RT_MCU_NOW_IS_OOB);
+  }
+  let o = rtl_ocp_read(&mut r, RT_OCP_E8DE);
+  if o / 16384 % 2 == 1 {
+    rtl_ocp_write(&mut r, RT_OCP_E8DE, o - 16384);
+  }
+  rtl_wait8(&mut r, RTR_MCU, RT_MCU_LINK_LIST, RT_MCU_LINK_LIST);
+  let o2 = rtl_ocp_read(&mut r, RT_OCP_E8DE);
+  if o2 / 32768 % 2 == 0 {
+    rtl_ocp_write(&mut r, RT_OCP_E8DE, o2 + 32768);
+  }
+  rtl_wait8(&mut r, RTR_MCU, RT_MCU_LINK_LIST, RT_MCU_LINK_LIST);
+}
+
+/// Resets the chip (command register, bit 4 clears when done).
+fn rtl_reset(r: &mut Rtl) -> bool
+  requires rtl_ok(r)
+  ensures rtl_ok(r)
+{
+  rtl_w8(&mut r, RTR_CMD, RT_CMD_RESET);
+  return rtl_wait8(&mut r, RTR_CMD, RT_CMD_RESET, 0);
+}
+
+/// Takes the card's registers and six pages, resets it, sets up both rings
+/// and reads its MAC address. A card that cannot be started is left with
+/// `live` false: it sends nothing and receives nothing.
+fn rtl_new(regs: Mmio, r0: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, t: Frame) -> Rtl
+  requires mmio_len(regs) == RTL_LEN && mmio_base(regs) % 4096 == 0
+  ensures rtl_ok(result)
+{
+  let mut r = Rtl { regs: regs, ring: dma_lend(r0), rb0: dma_lend(b0), rb1: dma_lend(b1), rb2: dma_lend(b2),
+    rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, kind: RTL_NONE, eri_mac: false, mac: 0, live: false, irq: false };
+  let ra = dma_addr(r.ring);
+  if ra > ADDR_LIMIT - 4096 {
+    return r;
+  }
+  let txcfg = rtl_r32(&mut r, RTR_TXCFG);
+  if txcfg == 4294967295 {
+    return r;                         // the card does not answer
+  }
+  let xid = txcfg / 1048576 % 4096 & 0xFCF;
+  let kind = rtl_kind(xid);
+  if kind == RTL_NONE {
+    return r;
+  }
+  let m8 = xid & 0x7C8;
+  let m7 = xid & 0x7CF;
+  // The MAC address is in the extended registers from the 8168f on (the
+  // 8168evl keeps it in the plain ones).
+  let eri_mac = kind == RTL_G || m7 == 0x480 || m7 == 0x481 || m8 == 0x488;
+  let evl_up = eri_mac || m8 == 0x2C8;
+  // Chips that gather received frames' multicast filter on their own use
+  // RX_MULTI_EN (r8169's rtl_init_rxcfg).
+  let multi = m8 == 0x3C0 || m8 == 0x3C8 || m8 == 0x2C8 || m8 == 0x480 || m8 == 0x488;
+  rtl_w8(&mut r, RTR_CFG9346, 0xC0);
+  if kind == RTL_G {
+    rtl_init_g(&mut r);
+  }
+  if !rtl_reset(&mut r) {
+    return r;
+  }
+  r.kind = kind;
+  r.eri_mac = eri_mac;
+  // The MAC address, least significant byte first.
+  let mut lo = rtl_r32(&mut r, RTR_MAC0);
+  let mut hi = rtl_r16(&mut r, RTR_MAC0 + 4);
+  if eri_mac {
+    let elo = rtl_eri_read(&mut r, 0xE0);
+    let ehi = rtl_eri_read(&mut r, 0xE4) % 65536;
+    if elo != 0 || ehi != 0 {
+      lo = elo;
+      hi = ehi;
+    }
+  }
+  if (lo == 0 && hi == 0) || lo == 4294967295 {
+    return r;                         // no usable address
+  }
+  let m0 = lo % 256;
+  let m1 = lo / 256 % 256;
+  let m2 = lo / 65536 % 256;
+  let m3 = lo / 16777216 % 256;
+  let m4 = hi % 256;
+  let m5 = hi / 256 % 256;
+  r.mac = ((((m0 * 256 + m1) * 256 + m2) * 256 + m3) * 256 + m4) * 256 + m5;
+  // Rings: all receive descriptors offered, the transmit ones empty (the
+  // last of each ends its ring).
+  let mut d = 0;
+  while d < RTL_DESCS
+    invariant d <= RTL_DESCS && rtl_ok(r)
+  {
+    rtl_rx_give(&mut r, d);
+    dma_write32(&mut r.ring, RTL_TXR + d * 16, 0);
+    dma_write32(&mut r.ring, RTL_TXR + d * 16 + 4, 0);
+    dma_write64(&mut r.ring, RTL_TXR + d * 16 + 8, 0);
+    d = d + 1;
+  }
+  dma_write32(&mut r.ring, RTL_TXR + (RTL_DESCS - 1) * 16, cast[u32](RTD_EOR));
+  rtl_w32(&mut r, RTR_TXDESC + 4, 0);
+  rtl_w32(&mut r, RTR_TXDESC, ra + RTL_TXR);
+  rtl_w32(&mut r, RTR_RXDESC + 4, 0);
+  rtl_w32(&mut r, RTR_RXDESC, ra);
+  if evl_up {
+    rtl_w8(&mut r, RTR_MAXTX, 0x27);
+  } else {
+    rtl_w8(&mut r, RTR_MAXTX, 0x3F);
+  }
+  rtl_w16(&mut r, RTR_RXMAX, 16384);
+  let cp = rtl_r16(&mut r, RTR_CPLUS);
+  rtl_w16(&mut r, RTR_CPLUS, cp - (cp & RT_CPLUS_OFFLOAD));
+  rtl_w16(&mut r, RTR_INTMIT, 0);
+  rtl_w16(&mut r, RTR_IMR, 0);
+  // The PHY, on its first register page, told to negotiate.
+  rtl_phy_write(&mut r, RT_PHY_PAGE, 0);
+  rtl_phy_write(&mut r, RT_PHY_BMCR, RT_BMCR_AUTONEG);
+  rtl_w8(&mut r, RTR_CFG9346, 0);
+  if kind == RTL_G {
+    // The gate rtl_init_g closed opens again; the two extended registers
+    // r8169 clears for the 8168g and 8168h.
+    let m = rtl_r32(&mut r, RTR_MISC);
+    if m / RT_MISC_RXDV_GATE % 2 == 1 {
+      rtl_w32(&mut r, RTR_MISC, m - RT_MISC_RXDV_GATE);
+    }
+  }
+  rtl_w8(&mut r, RTR_CMD, RT_CMD_ON);
+  let mut tx = RT_TXCFG_BASE;
+  if evl_up {
+    tx = tx + RT_TXCFG_AUTO_FIFO;
+  }
+  rtl_w32(&mut r, RTR_TXCFG, tx);
+  let mut rx = 0x8700;                // 128-byte DMA bursts
+  if multi {
+    rx = rx + 0x4000;
+  }
+  if kind == RTL_G {
+    rx = rx + 0x4000 + 0x800;         // multi and early receive off
+  }
+  rtl_w32(&mut r, RTR_MAR0, 4294967295);
+  rtl_w32(&mut r, RTR_MAR0 + 4, 4294967295);
+  rtl_w32(&mut r, RTR_RXCFG, rx + RT_RXCFG_ACCEPT);
+  r.live = true;
+  return r;
+}
+
+/// Resets the card, so it stops using the pages, and takes them back (at
+/// power off). The registers go back to the caller.
+fn rtl_free(r: Rtl, m: &mut Mem) -> Mmio
+  requires rtl_ok(r) && mem_ok(m)
+  ensures mem_ok(m)
+{
+  let mut d = r;
+  rtl_w16(&mut d, RTR_IMR, 0);
+  rtl_w8(&mut d, RTR_CMD, 0);
+  rtl_reset(&mut d);
+  give_page(&mut m, dma_take(d.ring));
+  give_page(&mut m, dma_take(d.rb0));
+  give_page(&mut m, dma_take(d.rb1));
+  give_page(&mut m, dma_take(d.rb2));
+  give_page(&mut m, dma_take(d.rb3));
+  give_page(&mut m, dma_take(d.tb));
+  return d.regs;
+}
+
+/// The caller has unmasked the card's interrupt line at the 8259: from now
+/// on `rtl_irq` may let the card raise it.
+fn rtl_irq_on(r: &mut Rtl)
+  requires rtl_ok(r)
+  ensures rtl_ok(r) && r.live == old(r.live)
+{
+  r.irq = r.live;
+}
+
+/// Whether a received frame raises the card's interrupt line, if it can.
+fn rtl_irq(r: &mut Rtl, on: bool)
+  requires rtl_ok(r)
+  ensures rtl_ok(r) && r.live == old(r.live) && r.irq == old(r.irq)
+{
+  if r.irq && on {
+    rtl_w16(&mut r, RTR_IMR, RT_ISR_RX);
+  } else if r.irq {
+    rtl_w16(&mut r, RTR_IMR, 0);
+  }
+}
+
+/// The interrupt status is cleared by writing its bits back, which lowers
+/// the card's (level-triggered) line before the stack looks for frames.
+fn rtl_ack(r: &mut Rtl)
+  requires rtl_ok(r)
+  ensures rtl_ok(r) && r.live == old(r.live) && r.irq == old(r.irq)
+{
+  if r.irq {
+    let s = rtl_r16(&mut r, RTR_ISR);
+    rtl_w16(&mut r, RTR_ISR, s);
+  }
+}
+
+/// Copies the next received frame into `pkt` and returns its length, or 0
+/// if none has arrived. The buffer goes straight back to the card.
+fn rtl_recv(r: &mut Rtl, pkt: &mut Bytes) -> u64
+  requires rtl_ok(r) && blen(pkt) >= RX_BUF
+  ensures rtl_ok(r) && blen(pkt) == old(blen(pkt)) && result <= RX_BUF - NET_HDR
+{
+  if !r.live {
+    return 0;
+  }
+  let b = r.rx_next;
+  let o = cast[u64](dma_read32(&mut r.ring, b * 16));
+  if o / RTD_OWN % 2 == 1 {
+    return 0;                         // the card still owns it
+  }
+  // The length counts the 4-byte CRC. A frame that needed several buffers,
+  // or the card marked bad, is dropped (each of its pieces comes through
+  // here and goes back).
+  let got = o % 16384;
+  let mut n = 0;
+  if o / RTD_FS % 2 == 1 && o / RTD_LS % 2 == 1 && o / RTD_RES % 2 == 0 && got >= 4 && got - 4 <= RX_BUF - NET_HDR {
+    n = got - 4;
+  }
+  rtl_rxbuf_copy(&mut r, b, &mut pkt, n);
+  rtl_rx_give(&mut r, b);
+  r.rx_next = (b + 1) % RTL_DESCS;
+  return n;
+}
+
+/// Sends the first `n` bytes of `pkt` as one frame (padded to 60 bytes) and
+/// waits until the card has taken it.
+fn rtl_send(r: &mut Rtl, pkt: &Bytes, n: u64) -> bool
+  requires rtl_ok(r) && n <= FRAME_MAX && n <= blen(pkt)
+  ensures rtl_ok(r)
+{
+  if !r.live {
+    return false;
+  }
+  bytes_to_dma(&mut r.tb, 0, pkt, 0, n);
+  let mut len = n;
+  while len < RTL_MINTX
+    invariant (len <= RTL_MINTX || len == n) && n <= len && rtl_ok(r)
+  {
+    dma_write8(&mut r.tb, len, 0);
+    len = len + 1;
+  }
+  let d = RTL_TXR + r.tx_next * 16;
+  dma_write32(&mut r.ring, d + 4, 0);
+  dma_write64(&mut r.ring, d + 8, dma_addr(r.tb));
+  let mut o = RTD_OWN + RTD_FS + RTD_LS + len;
+  if r.tx_next == RTL_DESCS - 1 {
+    o = o + RTD_EOR;
+  }
+  dma_write32(&mut r.ring, d, cast[u32](o));
+  r.tx_next = (r.tx_next + 1) % RTL_DESCS;
+  rtl_w8(&mut r, RTR_TXPOLL, RT_TXPOLL_NPQ);
+  let mut spins = 0;
+  while spins < VIO_SPINS
+    invariant rtl_ok(r) && d + 16 <= 4096 && d % 16 == 0
+  {
+    if cast[u64](dma_read32(&mut r.ring, d)) / RTD_OWN % 2 == 0 {
+      return true;
+    }
+    spins = spins + 1;
+  }
+  return false;
+}

@@ -1948,6 +1948,13 @@ fn nic_e1000(c: &Nic) -> bool {
   }
 }
 
+fn nic_rtl(c: &Nic) -> bool {
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return card_is_rtl(n.dev); },
+  }
+}
+
 fn nic_irq(c: &Nic) -> bool {
   match c {
     Nic::None => { return false; },
