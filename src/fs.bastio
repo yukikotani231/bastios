@@ -113,8 +113,8 @@ struct Vfs {
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && v.nat_hi <= FD_ROWS && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
-    && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
+  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
+    && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc) && v.nat_hi <= FD_ROWS
 }
 
 fn vfs_new(disk: DiskFs) -> Vfs
