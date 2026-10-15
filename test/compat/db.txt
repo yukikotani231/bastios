@@ -15,9 +15,10 @@
 # of the same root.
 
 == db: unpack the roots and make the device nodes
-$ for n in p:postgres r:redis v:valkey; do d=${n%%:*}; bb mkdir -p /disk/$d && cd /disk/$d && bb tar -xf /disk/${n#*:}.tar && for x in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0; do set -- $(echo $x | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; done; cd /; bb mount -t proc proc /disk/p/proc; pgsu() { bb chroot /disk/p /bin/su postgres -s /bin/sh -c "$1"; }; rcli() { bb chroot /disk/r /usr/local/bin/redis-cli "$@"; }; vcli() { bb chroot /disk/v /usr/local/bin/valkey-cli "$@"; }; bb ls /disk/p/dev | bb cat
+$ for n in p:postgres r:redis v:valkey; do d=${n%%:*}; bb mkdir -p /disk/$d && cd /disk/$d && bb tar -xf /disk/${n#*:}.tar && for x in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0; do set -- $(echo $x | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; done; bb mkdir -p /disk/p/dev/shm; bb chmod 1777 /disk/p/dev/shm; cd /; bb mount -t proc proc /disk/p/proc; pgsu() { bb chroot /disk/p /bin/su postgres -s /bin/sh -c "$1"; }; rcli() { bb chroot /disk/r /usr/local/bin/redis-cli "$@"; }; vcli() { bb chroot /disk/v /usr/local/bin/valkey-cli "$@"; }; bb ls /disk/p/dev | bb cat
 null
 random
+shm
 tty
 urandom
 zero
@@ -72,6 +73,21 @@ CREATE INDEX
 26
 VACUUM
 CHECKPOINT
+
+== db: postgres parallel query, workers share a segment (POSIX shared memory)
+$ pgsu '/usr/local/bin/psql -h /tmp -d postgres -At -c "create table big as select g a, md5(g::text) b from generate_series(1,200000) g" -c "set parallel_setup_cost=0" -c "set parallel_tuple_cost=0" -c "set min_parallel_table_scan_size=0" -c "set max_parallel_workers_per_gather=2" -c "explain (costs off) select count(*) from big where b like \$\$%ab%\$\$" -c "select count(*) from big where b like \$\$%ab%\$\$"'
+SELECT 200000
+SET
+SET
+SET
+SET
+Finalize Aggregate
+  ->  Gather
+        Workers Planned: 2
+        ->  Partial Aggregate
+              ->  Parallel Seq Scan on big
+                    Filter: (b ~~ '%ab%'::text)
+22827
 
 == db: postgres dump and restore into another database
 $ pgsu '/usr/local/bin/createdb -h /tmp r2 && /usr/local/bin/pg_dump -h /tmp postgres > /tmp/d.sql; /usr/local/bin/psql -q -h /tmp r2 -f /tmp/d.sql > /dev/null 2>&1; /usr/local/bin/psql -h /tmp r2 -Atc "select count(*) from t" -c "select count(*) from pgbench_accounts"'

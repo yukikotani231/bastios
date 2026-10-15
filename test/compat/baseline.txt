@@ -1314,10 +1314,12 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+db: db: gosu (Go) gives up root: every thread changes its ids
 db: db: postgres dump and restore into another database
 db: db: postgres extension, an index and vacuum
 db: db: postgres initdb, a cluster with a write-ahead log
 db: db: postgres over TCP, with several clients at once
+db: db: postgres parallel query, workers share a segment (POSIX shared memory)
 db: db: postgres recovers a committed row after the server is killed
 db: db: postgres rolls back and keeps its constraints
 db: db: postgres server starts and accepts connections
@@ -1333,7 +1335,6 @@ db: db: redis version
 db: db: unpack the roots and make the device nodes
 db: db: valkey server starts, stores and saves
 db: db: valkey version
-db: db: gosu (Go) gives up root: every thread changes its ids
 java: java: unpack the root, make the device nodes
 java: java: version
 java: java: compile and run a program
