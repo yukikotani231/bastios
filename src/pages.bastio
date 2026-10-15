@@ -245,11 +245,68 @@ fn mark_cow(m: &mut Mem, s: &Shared)
   }
 }
 
+// A private page the process may both write and run code from (a built-in
+// program's image, a read-write-execute mapping) is marked XPAGE instead of
+// 0, and COW_PAGE_X instead of COW_PAGE when fork shares it: the page table
+// entry cannot be asked whether the page may run (src/lxmem.bastio, l2_protect),
+// and fork and the copy a write makes must keep it so. Every other page the
+// process may write cannot run code.
+const XPAGE: u64 = 4;
+const COW_PAGE_X: u64 = 5;
+
+/// Is a bitmap value one of a copy-on-write page?
+fn bm_cow(v: u64) -> bool
+{
+  return v == COW_PAGE || v == COW_PAGE_X;
+}
+
 /// Is shared page `s` copy-on-write?
 fn is_cow_page(m: &Mem, s: &Shared) -> bool
   requires mem_ok(m)
 {
-  return shared_id(s) < len(m.bm) && get(m.bm, shared_id(s)) == COW_PAGE;
+  return shared_id(s) < len(m.bm) && bm_cow(get(m.bm, shared_id(s)));
+}
+
+/// Is shared page `s` a copy-on-write page that was executable?
+fn is_cow_x(m: &Mem, s: &Shared) -> bool
+  requires mem_ok(m)
+{
+  return shared_id(s) < len(m.bm) && get(m.bm, shared_id(s)) == COW_PAGE_X;
+}
+
+/// Marks the page of `s`, which a private mapping held and could run code
+/// from, COW_PAGE_X.
+fn mark_cow_x(m: &mut Mem, s: &Shared)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  let i = shared_id(s);
+  if i < len(m.bm) && get(m.bm, i) != 1 {
+    m.bm = set(m.bm, i, COW_PAGE_X);
+  }
+}
+
+/// Says whether private page `f` (in use, not shared) may be written and run
+/// as well: XPAGE, or an ordinary in-use page again.
+fn mark_x(m: &mut Mem, f: &Frame, on: bool)
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  let i = frame_id(f);
+  if i < len(m.bm) && (get(m.bm, i) == 0 || get(m.bm, i) == XPAGE) {
+    if on {
+      m.bm = set(m.bm, i, XPAGE);
+    } else {
+      m.bm = set(m.bm, i, 0);
+    }
+  }
+}
+
+/// Is private page `f` one that may be written and run?
+fn is_x_frame(m: &Mem, f: &Frame) -> bool
+  requires mem_ok(m)
+{
+  return frame_id(f) < len(m.bm) && get(m.bm, frame_id(f)) == XPAGE;
 }
 
 /// The free pages plus the cached ones (`mem`).

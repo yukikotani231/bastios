@@ -22,7 +22,7 @@ import "pages.bastio";
 import "arch/userbase.bastio";
 // What win_op (src/lxmem.bastio) does to a range of window pages.
 const WOP_UNMAP: u64 = 0;
-const WOP_PROTECT: u64 = 1;             // arg: 2 read-write, 1 read-only, 0 PROT_NONE
+const WOP_PROTECT: u64 = 1;             // arg: 2 read-write, 1 read-only, 0 PROT_NONE; +4 to allow running code
 const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WOP_COUNT: u64 = 3;               // only count the mapped pages
 const WOP_ZERO: u64 = 4;                // fill the private pages with zeros (madvise)
@@ -559,11 +559,12 @@ fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
   let mut p = 0;
   let mut ok = true;
   while ok && p < npages
-    invariant p <= npages && npages <= STACK_FIRST && mem_ok(m) && pt_level(l3) == 3
+    invariant p <= npages && npages <= STACK_FIRST && mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
   {
     ok = w_map(&mut m, &mut l3, p, false);
     if ok {
       w_fill(&mut l3, p, img, p * 4096);
+      w_exec(&mut m, &mut l3, p);          // a flat image is code and data in one
       p = p + 1;
     }
   }
@@ -741,16 +742,35 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
         // A MAP_SHARED page stays one page: the child maps it too (and a
         // copy-on-write page stays read-only in both).
         let w = pt_writable(src, p);
-        pt_put_shared(&mut l1, p, pt_dup_shared(src, p), w);
+        let d = pt_dup_shared(src, p);
+        if is_cow_x(m, d) {
+          pt_put_shared(&mut l1, p, d, false);
+        } else if is_cow_page(m, d) {
+          // Data that fork shared stays no-execute (see l2_protect).
+          pt_put_shared(&mut l1, p, d, true);
+          pt_set_access(&mut l1, p, 1);
+        } else {
+          pt_put_shared(&mut l1, p, d, w);
+        }
         if !pt_accessible(src, p) {
           pt_set_access(&mut l1, p, 0);      // PROT_NONE in both
         }
       } else if cow && pt_writable(src, p) {
         // Copy-on-write: the page becomes shared, read-only on both sides.
-        let s = shared_new(pt_take_frame(&mut src, p));
-        mark_cow(&mut m, s);
-        pt_put_shared(&mut l1, p, shared_dup(s), false);
-        pt_put_shared(&mut src, p, s, false);
+        let fr = pt_take_frame(&mut src, p);
+        let x = is_x_frame(m, fr);
+        let s = shared_new(fr);
+        if x {
+          mark_cow_x(&mut m, s);
+          pt_put_shared(&mut l1, p, shared_dup(s), false);
+          pt_put_shared(&mut src, p, s, false);
+        } else {
+          mark_cow(&mut m, s);
+          pt_put_shared(&mut l1, p, shared_dup(s), true);
+          pt_set_access(&mut l1, p, 1);     // read-only, still no-execute
+          pt_put_shared(&mut src, p, s, true);
+          pt_set_access(&mut src, p, 1);
+        }
       } else {
         let b = find_free(&mut m);
         if b >= NPAGES {
