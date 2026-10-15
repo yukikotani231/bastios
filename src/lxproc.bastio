@@ -916,7 +916,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
           lx_fill(&mut k, 0, 4);
           let code = pget(k.procs, c, F_CODE);
           if code >= SIG_DEATH {
-            bset(&mut k.fs.xfer, 0, cast[u8](code % 128));   // ended by a signal
+            bset(&mut k.fs.xfer, 0, cast[u8](code % 128 + code / 128 % 2 * 128));   // ended by a signal (+ 128: left a core file)
           } else {
             bset(&mut k.fs.xfer, 1, cast[u8](code % 256));
           }
@@ -1027,7 +1027,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
           bset(&mut k.fs.xfer, 0, 17);              // si_signo: SIGCHLD
           xfer_u64(&mut k.fs.xfer, 16, vpid_of(k, pid, c));   // si_pid (and a zero si_uid)
           if code >= SIG_DEATH {
-            bset(&mut k.fs.xfer, 8, 2);             // si_code: CLD_KILLED
+            bset(&mut k.fs.xfer, 8, cast[u8](2 + code / 128 % 2));   // si_code: CLD_KILLED, or CLD_DUMPED (3)
             bset(&mut k.fs.xfer, 24, cast[u8](code % 128));
           } else {
             bset(&mut k.fs.xfer, 8, 1);             // CLD_EXITED
