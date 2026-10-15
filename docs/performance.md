@@ -151,7 +151,10 @@ Linux guest):
 | `microvm` | 0.29 s | after it |
 | `pc` | 0.2 to 0.4 s | includes QEMU's start-up |
 
-The smallest RAM that boots is 36 MiB (1863 free 4 KiB pages at the prompt).
+The smallest RAM that boots is 30 MiB (3539 free 4 KiB pages at the prompt;
+it was 36 MiB with 1863 before the RAM below the image joined the page pool).
+At 64 MiB the prompt has 11676 free pages (7822 before), at 128 MiB 27233
+(23620), at 256 MiB 57889 (54276).
 `-m 16M` prints nothing because the image is linked at 16 MiB. Details and
 the failure modes of the other sizes are in [cloud.md](cloud.md).
 
@@ -328,3 +331,24 @@ machine, because they come from algorithms, not from emulation.
    a fork is now a fault and a copy, even after the child is gone, since
    a page whose other reference was dropped is still copied (no way yet
    to take back a sole reference to a shared page as a private one).
+
+## The page cache scales with memory
+
+The page cache (`src/pcache.bastio`) used to have a fixed 16384 slots (64 MiB).
+Its slot count is now chosen at boot: half the page pool, between 512 and
+131072 slots (512 MiB), fewer if the kernel heap is short. Under memory
+pressure `pc_shrink` still gives pages back before a process is killed.
+
+`bench/workloads.py`, QEMU TCG, `-m 512M`, median of 3 runs, same disk:
+
+| Phase | fixed cache (s) | scaled cache (s) |
+|---|---:|---:|
+| hello (gcc -O2, one file) | 2.86 | 0.95 |
+| tgz | 4.17 | 4.61 |
+| scan | 12.38 | 12.67 |
+
+`hello` reads the same compiler files on every run, so they now stay cached.
+`tgz` and `scan` read each file once and are not helped; their cost is
+elsewhere (directory walks, see the `getdents` work, and the gzip run under
+emulation). The memory test boots with 48M because the larger pool leaves
+too much free at 64M for its out-of-memory cases.

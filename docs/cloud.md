@@ -118,10 +118,12 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
 - **Boot time and memory under KVM** have not been measured: the machine
   these numbers were taken on has no `/dev/kvm`. Under TCG (QEMU 8, one CPU,
   `-kernel`) the 2.9 MB image reaches the `bastios>` prompt in 0.2 to 0.4 s
-  including QEMU's start-up. The smallest memory that boots is 36 MiB
-  (`-m 36M`: 1863 pages of 4 KiB free at the prompt); `-m 33M` and `-m 34M`
-  print `bastio: out of memory` (the kernel's own heap does not fit), and
-  `-m 24M` and below fail the same way. **`-m 16M` prints nothing** because
+  including QEMU's start-up. The smallest memory that boots is 30 MiB
+  (`-m 30M`: 3539 pages of 4 KiB free at the prompt); `-m 28M` and below
+  print the banner and stop before the prompt (the kernel's own heap does
+  not fit). Before the RAM between 1 MiB and the image joined the page pool
+  (`boot/linker.ld` names the image's start, `_image_start`), the least was
+  36 MiB. **`-m 16M` prints nothing** because
   the image is linked at 16 MiB (`boot/linker.ld`), which is the end of 16 MiB
   of RAM: the loader has nowhere to put it and QEMU does not complain.
 - **Power off without ACPI.** QEMU's `microvm` (and Firecracker) publish no

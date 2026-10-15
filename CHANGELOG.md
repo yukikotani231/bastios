@@ -43,6 +43,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine (what Firecracker's `SendCtrlAltDel` sends), so a guest without ACPI has a way to end. The console prints `ctrl-alt-del: restarting` and the machine goes through the same path as `reboot`.
 - The local APIC timer is calibrated against PIT channel 0 when the speaker channel (2) is missing, as in QEMU's `microvm`, before falling back to two seconds of the RTC. A `microvm` boots in 0.3 s instead of 2.1 s under TCG. Trusted: about 30 more lines of C in `boot/smp.c`.
 
+### Memory
+
+- Running out of memory no longer ends the faulting process with SIGSEGV. A page fault that finds no free page first gives the page cache back (a cached page nobody maps is freed) and runs the fault again; if that frees nothing the out-of-memory killer (`src/oom.bastio`) sends SIGKILL to the process with the highest `oom_score`, Linux's rule: the share of all pages it holds in thousandths, moved by its `oom_score_adj` (-1000 never kills it, 1000 makes it the first choice; process 1 is never chosen). The console says `Out of memory: Killed process N (name) oom_score S, K kB resident`, the faulting process waits while the victim dies, and /proc/vmstat counts `oom_kill`. `/proc/PID/oom_score` reports the score (it was always 0), `/proc/sys/vm/drop_caches` (1 or 3) drops the page cache, and `MemAvailable` counts the cached pages. Tested at 64 MiB of RAM by `test/memory_test.sh` (user/mhog.c) on one and four processors: reclaim before any kill, the biggest process chosen over the one that asked last, `oom_score_adj` moving the choice. Not done: a shortage of the kernel's own heap still halts, a system call that finds no page still fails with ENOMEM, and a stack that cannot grow still gets its SIGSEGV.
+
 ### AArch64
 
 - BastiOS builds for AArch64 and boots to the shell on QEMU's `virt` machine
