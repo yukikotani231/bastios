@@ -157,6 +157,76 @@ static int fdlink_after_pivot(void) {
     return 1;
 }
 
+/* Root of a user namespace goes back into a mount, UTS or network namespace
+ * that it made (runc's way into a container), and not into the first one. */
+static int setns_own_kinds(void) {
+    int m = open("/proc/self/ns/mnt", O_RDONLY);
+    int first = open("/proc/1/ns/mnt", O_RDONLY);
+    if (unshare(CLONE_NEWUTS | CLONE_NEWNET) != 0) return 0;
+    int u = open("/proc/self/ns/uts", O_RDONLY);
+    int n = open("/proc/self/ns/net", O_RDONLY);
+    if (m < 0 || first < 0 || u < 0 || n < 0) return 0;
+    if (setns(first, CLONE_NEWNS) != -1 || errno != EPERM) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        if (unshare(CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET) != 0) _exit(1);
+        if (setns(m, CLONE_NEWNS) != 0 || setns(u, CLONE_NEWUTS) != 0 || setns(n, CLONE_NEWNET) != 0) _exit(2);
+        _exit(0);
+    }
+    int st;
+    return waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+/* A user without CAP_SYS_ADMIN is refused setns, even into the namespaces it
+ * is already in (LTP setns01 relies on it). */
+static int setns_unprivileged(void) {
+    if (!as_nobody()) return 0;
+    const char *names[] = {"mnt", "uts", "net"};
+    int types[] = {CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWNET};
+    for (int i = 0; i < 3; i++) {
+        char path[32];
+        snprintf(path, sizeof path, "/proc/self/ns/%s", names[i]);
+        int f = open(path, O_RDONLY);
+        if (f < 0 || setns(f, types[i]) != -1 || errno != EPERM) return 0;
+        close(f);
+    }
+    return 1;
+}
+
+/* The root of a user namespace joins the mount namespace of a process in a
+ * user namespace it made (runc's remapping thread joins the container's). */
+static int setns_child_mntns(void) {
+    int up[2], down[2];
+    if (pipe(up) || pipe(down)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        if (unshare(CLONE_NEWUSER) != 0) _exit(10);
+        if (write(up[1], "x", 1) != 1 || read(down[0], &b, 1) != 1) _exit(11);
+        if (setresuid(0, 0, 0) != 0 || unshare(CLONE_NEWNS) != 0) _exit(12);
+        if (write(up[1], "y", 1) != 1 || read(down[0], &b, 1) != 1) _exit(13);
+        _exit(0);
+    }
+    char b, path[64];
+    if (read(up[0], &b, 1) != 1) return 0;
+    snprintf(path, sizeof path, "/proc/%d/setgroups", c);
+    int ok = write_str(path, "deny", 4) == 4;
+    snprintf(path, sizeof path, "/proc/%d/uid_map", c);
+    ok = ok && write_str(path, "0 0 1\n", 6) == 6;
+    snprintf(path, sizeof path, "/proc/%d/gid_map", c);
+    ok = ok && write_str(path, "0 0 1\n", 6) == 6;
+    ok = ok && write(down[1], "y", 1) == 1 && read(up[0], &b, 1) == 1;
+    snprintf(path, sizeof path, "/proc/%d/ns/mnt", c);
+    int f = open(path, O_RDONLY);
+    ok = ok && f >= 0 && setns(f, CLONE_NEWNS) == 0;
+    int err = errno;
+    write(down[1], "z", 1);
+    int st;
+    waitpid(c, &st, 0);
+    errno = err;
+    return ok;
+}
+
 /* The user who made a user namespace joins it again with setns (rootless
  * podman's way back into the namespace its pause process holds), and is
  * root there, but cannot go to the first one. */
@@ -341,6 +411,9 @@ int main(void) {
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
     EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
     EXPECT("whoever made a user namespace joins it with setns, and not the first one", in_child(join_userns));
+    EXPECT("an unprivileged user cannot setns, not even into the namespaces it is in", in_child(setns_unprivileged));
+    EXPECT("root of a user namespace joins the mount, UTS and network namespaces it made, not the first mount one", in_userns(setns_own_kinds, 1));
+    EXPECT("and the mount namespace of a process in a user namespace it made", in_userns(setns_child_mntns, 0));
     EXPECT("a directory descriptor reads back from the new root after pivot_root", in_userns(fdlink_after_pivot, 1));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
