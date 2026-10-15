@@ -4,11 +4,11 @@ A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/basti
 
 > **Status: experimental.** Everything here has been tried in QEMU only; no real PC has booted it yet. The system call ABI and the disk format can still change.
 >
-> **Works today, in QEMU:** a Unix shell (BusyBox), users and passwords with `login` and `su`, files kept on a disk, DHCP, DNS, TCP/IP over IPv4 and IPv6, an SSH server (Dropbear), a web server, Alpine Linux's binaries and its package manager `apk` in a `chroot`, and programs such as Lua, Python, sqlite, git and a C compiler.
+> **Works today, in QEMU:** a Unix shell (BusyBox), users and passwords with `login` and `su`, files kept on a disk, DHCP, DNS, TCP/IP over IPv4 and IPv6, an SSH server (Dropbear), a web server, Alpine Linux's binaries and its package manager `apk` in a `chroot`, and programs such as Lua, Python, sqlite, git, Node.js, Go and a C compiler. Development tools run too: Neovim, gcc, make, cmake, `gdb`, `strace` and `tmux`, and so do the container runtimes `runc` and `crun`. It also builds for AArch64 and boots on QEMU's `virt` machine. [Development on BastiOS](docs/development.md) says what is tested and how.
 >
-> **Not yet:** a real PC, a login prompt at boot, users and SSH keys that survive a reboot, more than 31 processes or 1023 files on the disk, a graphical desktop.
+> **Not yet:** a real PC (images and drivers for real hardware exist but none has been tried: see [Real hardware](docs/real-hardware.md)), a login prompt by default (it is a boot option), users and SSH keys that survive a reboot, a graphical desktop.
 >
-> [Using BastiOS](docs/using.md) walks through all of it, from `make run` to logging in over SSH.
+> [Using BastiOS](docs/using.md) walks through all of it, from `make run` to logging in over SSH. The full list of documents is in [docs/README.md](docs/README.md).
 
 <!-- guide-test: session -->
 ```text
@@ -143,7 +143,10 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |
 | `files/` | Files installed in memory at boot (built into the kernel image) |
 | `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
-| `docs/` | [Getting started](docs/getting-started.md), [using BastiOS](docs/using.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
+| `arch/aarch64/`, `src/aarch64/`, `boot/aarch64/` | The AArch64 port ([docs/aarch64.md](docs/aarch64.md)) |
+| `bench/` | The benchmarks against Linux ([docs/performance.md](docs/performance.md)) |
+| `tools/` | Helpers: `mkusb.py` (USB images), `ocipull.sh` (pull a container image), `qemu-ena` (a model of the AWS adapter for QEMU), `proof_coverage.py` (which kernel functions carry specifications) |
+| `docs/` | Everything else; the index is [docs/README.md](docs/README.md) |
 
 ## Contributing
 

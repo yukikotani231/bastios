@@ -39,14 +39,15 @@ fn lz_at(p: u64, f: u64) -> u64
 
 /// Process pid's program was just installed from `src`, with file hold
 /// `hold` (HOLD_N: none): records the code pages it left out, or lets go
-/// of the hold if there are none.
-fn lazy_set(k: &mut Kernel, pid: u64, src: Src, hold: u64)
-  requires kok(k) && pid < NPROC
+/// of the hold if there are none. `rn` is what exec drew for the layout:
+/// the pages are the ones of the program as placed (elf_parse_rnd).
+fn lazy_set(k: &mut Kernel, pid: u64, src: Src, hold: u64, rn: Rnd)
+  requires kok(k) && pid < NPROC && rnd_ok(rn)
   ensures kok(k)
 {
   let mut lz = lz_none();
   if hold < HOLD_N && src.file {
-    let e = elf_parse(&mut k.fs, src);
+    let e = elf_parse_rnd(&mut k.fs, src, rn);
     if e.ok {
       lz = lazy_plan(&mut k.fs, src, e);
     }
