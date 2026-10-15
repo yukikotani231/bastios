@@ -108,7 +108,7 @@ struct Rtl {
 
 spec fn rtl_ok(r: &Rtl) -> bool {
   mmio_len(r.regs) == RTL_LEN && mmio_base(r.regs) % 4096 == 0
-  && r.rx_next < RTL_DESCS && r.tx_next < RTL_DESCS && r.mac < 281474976710656 && r.kind <= RTL_G
+  && r.rx_next < RTL_DESCS && r.tx_next < RTL_DESCS
 }
 
 /// Whether PCI id `vendor:device` is a card of this driver's family. (Which
