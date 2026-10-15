@@ -652,6 +652,14 @@ fn post_proc(k: &mut Kernel, p: u64, s: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
+  post_proc_w(&mut k, p, s, 0);
+}
+
+/// post_proc with the sender word of the siginfo (see info_from).
+fn post_proc_w(k: &mut Kernel, p: u64, s: u64, word: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
   let mut at = p;
   if has_sig(pget(k.procs, p, F_SIGMASK), s) {
     let g = tgid(k.procs, p);
@@ -676,7 +684,7 @@ fn post_proc(k: &mut Kernel, p: u64, s: u64)
       at = l;
     }
   }
-  post_sig(&mut k, at, s);
+  post_w(&mut k, at, s, word);
 }
 
 /// On a timer tick, with k.ns just read: sends SIGALRM to each process
@@ -909,6 +917,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           return KEEP;
         }
       }
+      rtq_refill(&mut k, pid, s);
       ret(&mut k.procs, pid, s);
       return KEEP;
     }
