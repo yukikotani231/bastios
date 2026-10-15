@@ -1,0 +1,47 @@
+# Podman on BastiOS, for the compatibility suite (test/compat): the static
+# podman image (podman, crun, conmon, netavark, newuidmap) entered with
+# chroot, as root and as the image's unprivileged user. The Podman disk
+# (podmandisk.py) holds the image's root as a tar file (/disk/root.tar) and
+# a BusyBox at /disk/busybox. The storage driver is vfs (BastiOS has no
+# FUSE and no kernel overlay file system for a user namespace). The format
+# is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root.
+
+== podman: unpack the image root and set it up
+$ bb mkdir -p /disk/p && cd /disk/p && bb tar -xf /disk/root.tar && bb mkdir -p dev proc sys tmp var/tmp run home/podman root dev/shm dev/pts && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/p/proc; bb mount -t sysfs sysfs /disk/p/sys; bb mkdir -p /disk/p/sys/fs/cgroup; bb mount -t cgroup2 cgroup2 /disk/p/sys/fs/cgroup; bb mount -t tmpfs tmpfs /disk/p/dev/shm; bb mount -t devpts devpts /disk/p/dev/pts; bb chmod 1777 /disk/p/tmp /disk/p/var/tmp /disk/p/dev/shm; bb mount --make-rshared /; bb ls /disk/p/dev | bb cat
+console
+null
+pts
+random
+shm
+tty
+urandom
+zero
+
+== podman: version
+$ pc() { bb chroot /disk/p /usr/local/bin/podman --storage-driver=vfs "$@"; }; pc --version | bb sed 's/ version .*//'
+podman
+
+== podman: import a root and run a container as root
+$ bb tar -cf /tmp/ctr.tar -C /disk/p bin lib && pc import /tmp/ctr.tar ctr >/dev/null 2>&1; pc run --rm --network=none ctr echo hello 2>&1 | bb grep -v '^\[pid'
+hello
+
+== podman: a container has its own hostname
+$ pc run --rm --network=none --hostname boxed ctr hostname 2>&1 | bb grep -v '^\[pid'
+boxed
+
+== podman: rootless, the unprivileged user maps to root in its user namespace
+$ bb chmod 4755 /disk/p/usr/bin/newuidmap /disk/p/usr/bin/newgidmap; bb chown -R 1000:1000 /disk/p/home/podman; bb mkdir -p /disk/p/run/user/1000; bb chown 1000:1000 /disk/p/run/user/1000; bb chroot /disk/p /bin/su podman -s /bin/sh -c 'unshare -U -r id -u; /usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r info --format "{{.Host.Security.Rootless}}"'
+0
+true
+
+== podman: rootless, import an image (chroot, mkdir and lchown as the namespace's root)
+$ bb chroot /disk/p /bin/su podman -s /bin/sh -c '/usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r import /tmp/ctr.tar rctr >/dev/null 2>&1; echo rc=$?; /usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r images --format "{{.Repository}}"'
+rc=0
+localhost/rctr

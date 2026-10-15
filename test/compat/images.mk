@@ -19,6 +19,7 @@ ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file
 DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
+PODMAN_IMAGE ?= mgoltzsche/podman@sha256:86e6ecde27e86140a20fa16dcc03cc1e67150536bd8335f6effbba067e352b48
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # The tree-sitter C parser for Neovim (npm package, pinned by version and SHA-256).
 TREESITTER_C_VER    := 0.24.1
