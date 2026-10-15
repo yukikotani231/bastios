@@ -201,6 +201,10 @@ ok
 $ bb mkdir -p ca_d/e/f && bb rm -r ca_d && echo ok
 ok
 
+== rm -r: a directory whose first name has hard links (the file takes a link's name; the listing must not skip it)
+$ bb mkdir ca_h && echo x > ca_h/base && for i in $(bb seq 1 200); do bb ln ca_h/base ca_h/l$i; done; bb rm -r ca_h; test -e ca_h || echo gone
+gone
+
 == find
 $ bb mkdir ca_d; bb touch ca_d/x; bb find ca_d -name x; bb rm -r ca_d
 ca_d/x

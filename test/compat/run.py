@@ -677,6 +677,7 @@ def main():
     ap.add_argument("--bastio-disk", help="the Bastio disk (bastioc1, z3, tcc) for bastio.txt")
     ap.add_argument("--alpine-disk", help="the Alpine disk (root file system, apk repository) for alpine.txt")
     ap.add_argument("--alpine-repo", help="the same repository's directory, served at ALPINEURL")
+    ap.add_argument("--src-dir", help="a directory of source tarballs (srcpkg.sh), served at HOSTURL/src for the build-from-source cases of alpine.txt")
     ap.add_argument("--registry-image", help="the layer list (JSON) of an image in the cache, which the web server serves as a registry for ocipull.sh")
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
@@ -703,12 +704,15 @@ def main():
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
+    srcbuild = load_applets(os.path.join(HERE, "srcbuild.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     web = WebServer()
     if args.registry_image:
         web.add_registry(args.registry_image)
+    if args.src_dir and os.path.isdir(args.src_dir):
+        os.symlink(os.path.abspath(args.src_dir), os.path.join(web.dir, "src"))
     env = Host(os.path.abspath(args.host), web) if args.host else None
     bb = os.path.join(os.path.abspath(args.host), "busybox") if args.host else BB
     t0 = time.time()
@@ -795,6 +799,13 @@ def main():
         lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
                              ("alpine-tty", "programs on the terminal in Alpine",
                               lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])]))
+    if args.alpine_disk and args.src_dir and ARCH == "x86_64":
+        # Real projects built from their source tarballs inside Alpine (gcc and
+        # make from apk), each case a long build: a lane of its own, with its
+        # own copy of the disk, running beside the others.
+        disk = os.path.join(args.out, "srcbuild-run.img")
+        shutil.copyfile(args.alpine_disk, disk)
+        lanes.append((disk, [("srcbuild", "building real projects from source in Alpine", applets_lane(srcbuild, 3600))], "1G"))
     if args.debian_disk:
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
@@ -828,7 +839,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "srcbuild", "debian", "node", "go"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
