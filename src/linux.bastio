@@ -703,16 +703,6 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if is_ipc_call(n) {
     return lx_ipc_call(&mut k, pid, n, was, a, b, c);
   }
-  if is_sys_call(n) {
-    return lx_sys_call(&mut k, pid, n, a, b);
-  }
-  if is_prio_call(n) {
-    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));
-    return KEEP;
-  }
-  if is_cred_call(n) {
-    return lx_cred_call(&mut k, pid, n, a, b, c);
-  }
   return lx_last_call(&mut con, &mut k, pid, n, a, b, c);
 }
 
@@ -759,6 +749,16 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  if is_sys_call(n) {
+    return lx_sys_call(&mut k, pid, n, a, b);
+  }
+  if is_prio_call(n) {
+    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));
+    return KEEP;
+  }
+  if is_cred_call(n) {
+    return lx_cred_call(&mut k, pid, n, a, b, c);
+  }
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
     return KEEP;
