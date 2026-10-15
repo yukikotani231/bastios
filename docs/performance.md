@@ -151,7 +151,10 @@ Linux guest):
 | `microvm` | 0.29 s | after it |
 | `pc` | 0.2 to 0.4 s | includes QEMU's start-up |
 
-The smallest RAM that boots is 36 MiB (1863 free 4 KiB pages at the prompt).
+The smallest RAM that boots is 30 MiB (3539 free 4 KiB pages at the prompt;
+it was 36 MiB with 1863 before the RAM below the image joined the page pool).
+At 64 MiB the prompt has 11676 free pages (7822 before), at 128 MiB 27233
+(23620), at 256 MiB 57889 (54276).
 `-m 16M` prints nothing because the image is linked at 16 MiB. Details and
 the failure modes of the other sizes are in [cloud.md](cloud.md).
 

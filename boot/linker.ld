@@ -2,6 +2,7 @@ ENTRY(_start)
 SECTIONS
 {
     . = 16M;               /* above the holes UEFI firmware leaves low in RAM */
+    _image_start = .;      /* RAM between 1 MiB and here joins the page pool (bst_pool_init) */
     .note.pvh : { KEEP(*(.note.pvh)) }
     .text : {
         KEEP(*(.multiboot))
