@@ -1207,6 +1207,7 @@ t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
+t_sysv: shmat and shmdt in a loop reuse the address space
 t_sysv: shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL
 t_sysv: msgmni is written: that many queues, then ENOSPC
 t_thread: /proc/self/stat and status count the threads
@@ -1317,6 +1318,15 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+java: java: unpack the root, make the device nodes
+java: java: version
+java: java: compile and run a program
+java: java: records, streams and collections
+java: java: threads and an executor
+java: java: exit status and an uncaught exception
+java: java: files and directories
+java: java: a jar with a main class
+java: java: a compile error is reported
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
