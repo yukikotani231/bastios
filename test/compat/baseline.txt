@@ -1333,6 +1333,7 @@ db: db: redis version
 db: db: unpack the roots and make the device nodes
 db: db: valkey server starts, stores and saves
 db: db: valkey version
+db: db: gosu (Go) gives up root: every thread changes its ids
 java: java: unpack the root, make the device nodes
 java: java: version
 java: java: compile and run a program

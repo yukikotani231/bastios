@@ -26,6 +26,11 @@ zero
 $ bb chroot /disk/p /usr/local/bin/postgres --version
 postgres (PostgreSQL) 17.11
 
+== db: gosu (Go) gives up root: every thread changes its ids
+$ bb chroot /disk/p /usr/local/bin/gosu postgres /bin/sh -c 'id -u; id -g'
+70
+70
+
 == db: postgres initdb, a cluster with a write-ahead log
 $ pgsu 'mkdir -p /tmp/pg && /usr/local/bin/initdb -D /tmp/pg/data --no-sync > /tmp/initdb.log 2>&1; echo initdb $?; ls /tmp/pg/data/pg_wal | head -1'
 initdb 0
