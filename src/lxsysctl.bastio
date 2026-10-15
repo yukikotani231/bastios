@@ -625,7 +625,7 @@ fn sysd_child_dir(j: u64, i: u64) -> bool {
 // kills for memory here, so the scores stay 0; the numbers are what Linux
 // reports for a process nobody has tuned.
 
-const PXF_N: u64 = 10;
+const PXF_N: u64 = 11;
 
 fn px_name(w: u64) -> Str {
   if w == 0 {
@@ -657,6 +657,9 @@ fn px_name(w: u64) -> Str {
   }
   if w == 9 {
     return "oom_adj";
+  }
+  if w == 10 {
+    return "timens_offsets";
   }
   return "oom_score";
 }
@@ -691,6 +694,9 @@ fn px_text(w: u64) -> Str {
   }
   if w == 9 {
     return "0\n";
+  }
+  if w == 10 {
+    return "monotonic           0         0\nboottime            0         0\n";
   }
   return "0\n";
 }

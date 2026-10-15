@@ -264,7 +264,7 @@ fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
     return w / NS_PER_TICK * NS_PER_TICK;
   }
   if clk == CLOCK_MONOTONIC_COARSE {
-    let m = smaller(k.ns, FOREVER - 1);
+    let m = tm_clock(k, pid, clk, smaller(k.ns, FOREVER - 1));
     return m / NS_PER_TICK * NS_PER_TICK;
   }
   if clk == CLOCK_REALTIME {
@@ -272,7 +272,7 @@ fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
   }
   // MONOTONIC, MONOTONIC_RAW, MONOTONIC_COARSE and BOOTTIME count from boot.
   if clk <= CLOCK_BOOTTIME {
-    return smaller(k.ns, FOREVER - 1);
+    return tm_clock(k, pid, clk, smaller(k.ns, FOREVER - 1));     // shifted in a time namespace (src/lxnsk.bastio)
   }
   return FOREVER;
 }
