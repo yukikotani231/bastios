@@ -195,6 +195,51 @@ static int fs_ioctls(const char *name) {
 /* One step of a check: the first that fails says where. */
 #define S(c) do { if (ok && !(c)) { printf("  step at line %d failed (errno %d %s)\n", __LINE__, errno, strerror(errno)); ok = 0; } } while (0)
 
+/* A file in RAM keeps no memory for a page nothing was written to or that was punched out:
+   SEEK_DATA and SEEK_HOLE tell it, and st_blocks counts what is kept. */
+static long blocks_of(int fd) {
+    struct stat st;
+    fsync(fd);
+    return fstat(fd, &st) == 0 ? (long)st.st_blocks * 512 : -1;
+}
+
+static int sparse(const char *name) {
+    int ok = 1;
+    int fd = open(name, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) return 0;
+    char b = 'x';
+    /* data in pages 0 and 2, a hole in page 1, a hole again from page 3 to the end of 5 pages */
+    S(pwrite(fd, &b, 1, 10) == 1 && pwrite(fd, &b, 1, 8192 + 5) == 1 && ftruncate(fd, 5 * 4096) == 0);
+    S(lseek(fd, 0, SEEK_DATA) == 0);
+    S(lseek(fd, 0, SEEK_HOLE) == 4096);
+    S(lseek(fd, 4096, SEEK_DATA) == 8192);
+    S(lseek(fd, 4096, SEEK_HOLE) == 4096);
+    S(lseek(fd, 8192, SEEK_HOLE) == 3 * 4096);
+    S(lseek(fd, 3 * 4096 + 7, SEEK_DATA) == -1 && errno == ENXIO);
+    S(lseek(fd, 3 * 4096 + 7, SEEK_HOLE) == 3 * 4096 + 7);
+    S(lseek(fd, 5 * 4096, SEEK_HOLE) == -1 && errno == ENXIO);
+    long two = blocks_of(fd);
+    S(two == 2 * 4096);
+    /* a hole reads as zeros, and writing into it takes a page */
+    S(range_is(fd, 4096, 8192, 0));
+    S(pwrite(fd, &b, 1, 4096 + 1) == 1 && blocks_of(fd) == 3 * 4096);
+    /* punching whole pages gives them back; punching part of one only zeroes it */
+    S(fallocate(fd, 3 /* PUNCH_HOLE | KEEP_SIZE */, 4096, 4096) == 0 && blocks_of(fd) == 2 * 4096);
+    S(lseek(fd, 4096, SEEK_HOLE) == 4096 && lseek(fd, 0, SEEK_DATA) == 0);
+    S(fallocate(fd, 3, 100, 200) == 0 && blocks_of(fd) == 2 * 4096);
+    S(range_is(fd, 100, 300, 0) && range_is(fd, 10, 11, 'x'));
+    S(fallocate(fd, 3, 0, 5 * 4096) == 0 && blocks_of(fd) == 0);
+    S(lseek(fd, 0, SEEK_DATA) == -1 && errno == ENXIO);
+    S(lseek(fd, 0, SEEK_HOLE) == 0);
+    S(lseek(fd, 0, SEEK_END) == 5 * 4096);
+    /* zeroing a hole takes pages; truncating gives them back */
+    S(fallocate(fd, 0x10 /* ZERO_RANGE */, 0, 2 * 4096) == 0 && blocks_of(fd) == 2 * 4096);
+    S(ftruncate(fd, 4096) == 0 && blocks_of(fd) == 4096);
+    close(fd);
+    unlink(name);
+    return ok;
+}
+
 static int xattrs(const char *name, const char *lnk, const char *moved, int rich) {
     char v[4096], w[4096], nm[32];
     int ok = 1;
@@ -319,6 +364,7 @@ int main(void) {
     EXPECT("extended attributes stay on a bstdisk3 file system when it is mounted again", xattrs_remount());
     EXPECT("SEEK_DATA and SEEK_HOLE in /tmp", seek_data("/tmp/fsx_s"));
     EXPECT("SEEK_DATA and SEEK_HOLE on the disk", seek_data(on_disk("fsx_s")));
+    EXPECT("holes in a file in /tmp: SEEK_DATA, SEEK_HOLE, st_blocks, punching and zeroing", sparse("/tmp/fsx_h"));
     EXPECT("FS_IOC_GETFLAGS answers and FICLONE is refused", fs_ioctls("/tmp/fsx_i"));
     return done();
 }

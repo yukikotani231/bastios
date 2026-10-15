@@ -937,6 +937,73 @@ fn truncate_row(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
   return ok;
 }
 
+/// Takes the bytes [from, to) out of the RAM file open in `row` for
+/// writing (fallocate PUNCH_HOLE): whole pages go back to the allocator and
+/// read as zeros after. False, changing nothing, for any other file, which
+/// the caller zero-writes instead.
+fn vfs_punch(v: &mut Vfs, mem: &mut Mem, row: u64, from: u64, to: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if fget(v.ftab, row, FD_MODE) / O_WRITE % 2 == 0 {
+    return false;
+  }
+  let i = fget(v.ftab, row, FD_NODE);
+  if fget(v.ftab, row, FD_FS) != FS_RAM || i >= NFILES || i == v.lo_file {
+    return false;
+  }
+  let mut done = false;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      if !g.dir {
+        file_punch(&mut g, &mut mem, from, to);
+        g.mtime = v.now;
+        done = true;
+      }
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  return done;
+}
+
+/// SEEK_DATA (data) or SEEK_HOLE from off in file f0 (a vfs_lookup
+/// handle): NO_FILE for ENXIO, or NO_FILE - 1 if the file is not one that
+/// keeps track of holes (a file on a disk is one stretch of data).
+fn vfs_next(v: &mut Vfs, f0: u64, off: u64, data: bool) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let f = vfs_target(&mut v, f0);
+  if f < NFILES {
+    return ram_next(&mut v.ram, f, off, data);
+  }
+  return NO_FILE - 1;
+}
+
+/// The 512-byte blocks file f0 (a vfs_lookup handle) takes up: for a file
+/// in RAM the pages that hold memory (holes cost nothing), else its size
+/// rounded up.
+fn vfs_blocks(v: &mut Vfs, f0: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let f = vfs_target(&mut v, f0);
+  if f < NFILES {
+    return ram_pages(&mut v.ram, f) * 8;
+  }
+  let s = vfs_size(&mut v, f);
+  if s == NO_FILE {
+    return 0;
+  }
+  let mut n = s / 512;
+  if s % 512 != 0 {
+    n = n + 1;
+  }
+  return n;
+}
+
 /// Sets a row's offset to off + k, saturating.
 fn vfs_advance(v: &mut Vfs, row: u64, off: u64, k: u64)
   requires vfs_ok(v) && row < FD_ROWS

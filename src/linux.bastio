@@ -2362,9 +2362,10 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
     }
     base = size;
   } else if whence == 3 || whence == 4 {
-    // SEEK_DATA and SEEK_HOLE: a file here is one stretch of data (reads of
-    // what was never written give zeros, but the file system does not tell
-    // them apart), with the hole that every file has at its end.
+    // SEEK_DATA and SEEK_HOLE: a file in RAM has holes where a page has no
+    // memory; any other file is one stretch of data (reads of what was never
+    // written give zeros, but the file system does not tell them apart),
+    // with the hole that every file has at its end.
     let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, row));
     if size == NO_FILE {
       return EBADF;
@@ -2375,6 +2376,13 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
     let mut at = off;
     if whence == 4 {
       at = size;
+    }
+    let n = vfs_next(&mut k.fs, vfs_row_file(k.fs, row), off, whence == 3);
+    if n == NO_FILE {
+      return ENXIO;
+    }
+    if n != NO_FILE - 1 {
+      at = n;
     }
     if !vfs_seek(&mut k.fs, row, at) {
       return EBADF;
