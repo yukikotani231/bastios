@@ -1480,6 +1480,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     if login == 0 {
       puts(&mut con, "cannot start login\r\n");
     }
+  } else if installing {
+    // The installer image (docs/install.md): BusyBox's ash as a login
+    // shell, which reads /etc/profile, and that runs the installer.
+    if spawn_as(&mut k, ASH_PROG, 0, "-sh") == 0 {
+      puts(&mut con, "cannot start the installer\r\n");
+    }
   } else if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
   }

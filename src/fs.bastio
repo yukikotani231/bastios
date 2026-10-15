@@ -204,6 +204,16 @@ fn lo_swap(v: &mut Vfs, pages: Vec[Slot], size: u64) -> Vec[Slot]
   return s.pages;
 }
 
+/// Mounts the disk afresh as the BastiOS partition of its GPT (what boot
+/// does without the option `install`): the installer, which has just made
+/// the partition, then fills it through the file system.
+fn vfs_mount_target(v: &mut Vfs)
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  v.disk = disk_mount(disk_unmount(v.disk), DM_GPT);
+}
+
 /// Is the name in the first n bytes of the transfer buffer on the disk
 /// ("disk/" and at least one more byte)?
 fn on_disk(v: &Vfs, n: u64) -> bool
