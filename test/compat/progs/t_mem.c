@@ -67,6 +67,21 @@ int main(void) {
            c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0; }) && ({ char c = 0; pread(fd, &c, 1, 2) == 1 && c == 'X'; }));
     EXPECT("MAP_SHARED file mapping across fork", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED &&
            ({ pid_t c = fork(); c == 0 ? (q[3] = 'F', _exit(0), 0) : c > 0 && waitpid(c, &st, 0) == c && q[3] == 'F'; }));
+    EXPECT("a writable MAP_SHARED mapping is written back after twenty read-only ones", ({
+               int ok = 1;
+               for (int i = 0; i < 20; i++) {
+                   int r = open("cm_f", O_RDONLY);
+                   ok &= r >= 0 && mmap(0, 4096, PROT_READ, MAP_SHARED, r, 0) != MAP_FAILED;
+                   if (r >= 0) close(r);
+               }
+               int g = open("cm_g", O_RDWR | O_CREAT | O_TRUNC, 0644);
+               char *m = g >= 0 && ftruncate(g, 4096) == 0 ? mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, g, 0) : MAP_FAILED;
+               ok &= m != MAP_FAILED;
+               if (m != MAP_FAILED) { m[5] = 'W'; ok &= munmap(m, 4096) == 0; }
+               char c = 0;
+               ok &= g >= 0 && pread(g, &c, 1, 5) == 1 && c == 'W';
+               if (g >= 0) { close(g); unlink("cm_g"); }
+               ok; }));
     {
         /* Two processes that map the file on their own share its pages,
            and read(2) and write(2) agree with the mapping. */

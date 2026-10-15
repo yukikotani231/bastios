@@ -1435,10 +1435,12 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
   sk_enter(&mut n, s);
   // A datagram to this machine waits for room in the loopback queue, as TCP
   // does, instead of being dropped: the queue may still hold the frames of
-  // connections that were just closed.
+  // connections that were just closed. Each poll takes in what was queued
+  // before it, but the answers it causes queue again (FINs, ACKs, resends
+  // that a slow host lets pile up), so it may take several polls to drain.
   let mut spin = 0;
-  while spin < 16 && lo_full(n, ip)
-    invariant spin <= 16 && net_ok(n)
+  while spin < 256 && lo_full(n, ip)
+    invariant spin <= 256 && net_ok(n)
   {
     net_poll(&mut n);
     spin = spin + 1;

@@ -25,7 +25,7 @@
  * code that looks the symbol up. */
 #include <stdint.h>
 
-struct vdata { uint64_t mult, base, at, epoch; };
+struct vdata { uint64_t mult, base, at, epoch, tmns; };
 extern const volatile struct vdata vdso_data __attribute__((visibility("hidden")));
 
 struct timespec { long tv_sec; long tv_nsec; };
@@ -70,7 +70,9 @@ int __kernel_clock_gettime(int clk, struct timespec *ts)
     /* MONOTONIC(_RAW) 1, 4; BOOTTIME 7. MONOTONIC_COARSE (6) is the system
      * call's, which counts in ticks: reading it here by the counter would
      * run ahead of a later system call's answer (LTP's clock_gettime04). */
-    if (mult == 0 || mult >= MULT_MAX || (clk != 1 && clk != 4 && clk != 7))
+    /* tmns: the process is in a time namespace, which shifts the monotonic
+     * clocks by an offset only the kernel knows (src/lxnsk.bastio). */
+    if (mult == 0 || mult >= MULT_MAX || vdso_data.tmns != 0 || (clk != 1 && clk != 4 && clk != 7))
         return (int)sys_clock_gettime(clk, ts);
     uint64_t now, t = at;
     __asm__ volatile("isb; mrs %0, cntvct_el0" : "=r"(now));

@@ -106,7 +106,7 @@ const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kep
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
-const NF_N: u64 = 8;
+const NF_N: u64 = 10;
 const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroups at P * 3 + 0, 1, 2 (src/lxuser.bastio)
 const UMF_N: u64 = 3;
 const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot * CGF_N + f (src/lxcgroup.bastio)
@@ -805,8 +805,14 @@ fn is_px_adj(f: u64) -> bool {
   return f >= pbase && f < pbase + NPROC * PXF_N && (f - pbase) % PXF_N == 1;
 }
 
+/// Is f some process's timens_offsets?
+fn is_px_timens(f: u64) -> bool {
+  let pbase = PROC_DEV + PSYS + SY_PX;
+  return f >= pbase && f < pbase + NPROC * PXF_N && (f - pbase) % PXF_N == 10;
+}
+
 fn proc_writable(f: u64) -> bool {
-  return is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2010,6 +2016,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         let b = put_n(&mut o, a, 1002 - s);
         return put_c(&mut o, b, 10);
       }
+      if w == 10 {
+        return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
+      }
       return put_s(&mut o, 0, px_text(w));
     }
     if what >= SY_SC && what < SY_SC + SCT_NUM {
@@ -2306,9 +2315,10 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if what == PF_UPTIME {
-    let mut a = put_n(&mut o, 0, k.ns / NS_PER_S);
+    let up = tm_clock(k, pid, CLOCK_BOOTTIME, smaller(k.ns, FOREVER - 1));   // the reader's time namespace's boot time
+    let mut a = put_n(&mut o, 0, up / NS_PER_S);
     a = put_c(&mut o, a, 46);
-    a = put_2(&mut o, a, k.ns / 10000000 % 100);
+    a = put_2(&mut o, a, up / 10000000 % 100);
     return put_s(&mut o, a, " 0.00\n");
   }
   if p == 0 || state(k.procs, p) == FREE {
@@ -3275,6 +3285,9 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
     i = i + 1;
   }
   let pbase = PROC_DEV + PSYS + SY_PX;
+  if f >= pbase && is_px_timens(f) {
+    return tm_write(&mut k, smaller((f - pbase) / PXF_N, NPROC - 1), n);   // src/lxnsk.bastio
+  }
   if f >= pbase && f < pbase + NPROC * PXF_N && (f - pbase) % PXF_N == 1 {
     // oom_score_adj: -1000 to 1000, kept as 1001 + it
     let mut neg = false;
