@@ -1592,13 +1592,26 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
   {
-    let got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+    let mut got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+    if got == VFS_MISS && done > 0 {
+      // A read of a regular file is whole unless it reaches the end: wait
+      // for the disk here (the call has begun, so it cannot be started over)
+      // instead of returning what came so far.
+      let mut tries = 0;
+      while got == VFS_MISS && tries < 64
+        invariant tries <= 64 && kok(k) && row < FD_ROWS && done < want && want <= READ_MAX && (got <= XFER || got == NO_FD || got == VFS_MISS)
+      {
+        disk_wait(&mut k.fs.disk);
+        got = vfs_read(&mut k.fs, &mut k.mem, row, smaller(want - done, XFER));
+        tries = tries + 1;
+      }
+    }
     if got == NO_FD {
       return EBADF;
     }
     if got == VFS_MISS {
       if done > 0 {
-        return done;                        // what came so far; the rest waits
+        return done;                        // the disk is not catching up: what came so far
       }
       return DISK_RETRY;                    // sleep until the disk catches up
     }
@@ -1722,7 +1735,19 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
         return total;
       }
     }
-    let w = vfs_write(&mut k.fs, &mut k.mem, d.x, piece);
+    let mut w = vfs_write(&mut k.fs, &mut k.mem, d.x, piece);
+    if w == VFS_MISS && total > 0 {
+      // Wait for the disk here rather than return a short count: a write of
+      // a regular file takes all of its bytes (pwrite has no restart).
+      let mut tries = 0;
+      while w == VFS_MISS && tries < 64
+        invariant tries <= 64 && kok(k) && d.x < FD_ROWS && piece <= XFER && (w <= piece || w == NO_FD || w == VFS_MISS)
+      {
+        disk_wait(&mut k.fs.disk);
+        w = vfs_write(&mut k.fs, &mut k.mem, d.x, piece);
+        tries = tries + 1;
+      }
+    }
     if w == NO_FD {
       return EBADF;
     }

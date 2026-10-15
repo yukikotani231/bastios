@@ -1934,6 +1934,53 @@ fn vfs_set_owner(v: &mut Vfs, f0: u64, uid: u64, gid: u64) -> bool
   return false;
 }
 
+/// Does file f0 keep its extended attributes in a block on a disk (a file
+/// or directory of the disk or of the loop mount) rather than in memory?
+fn vfs_xa_disk(v: &mut Vfs, f0: u64) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let f = vfs_target(&mut v, f0);
+  return f >= NFILES && f < HFILES;
+}
+
+/// Reads the attribute block of the disk file f0 into out (BLOCK bytes:
+/// zeros when it has none). False if f0 is not a file or directory on a
+/// disk, or the read fails.
+fn vfs_xa_read(v: &mut Vfs, f0: u64, out: &mut Bytes) -> bool
+  requires vfs_ok(v) && blen(out) == BLOCK
+  ensures vfs_ok(v) && blen(out) == BLOCK
+{
+  let f = vfs_target(&mut v, f0);
+  if f >= NFILES && f < NFILES + DSLOTS {
+    return disk_xa_read(&mut v.disk, f - NFILES, &mut out);
+  }
+  if f >= LO0 && f < HFILES {
+    return disk_xa_read(&mut v.lo, f - LO0, &mut out);
+  }
+  zero(&mut out, 0, BLOCK);
+  return false;
+}
+
+/// Makes src the attribute block of the disk file f0 (none: it keeps no
+/// attributes). False, with nothing changed, if f0 is not a file or
+/// directory on a disk, the loop mount is read-only, or the disk is full.
+fn vfs_xa_write(v: &mut Vfs, f0: u64, src: &Bytes, none: bool) -> bool
+  requires vfs_ok(v) && blen(src) == BLOCK
+  ensures vfs_ok(v)
+{
+  let f = vfs_target(&mut v, f0);
+  if f >= NFILES && f < NFILES + DSLOTS {
+    return disk_xa_write(&mut v.disk, f - NFILES, src, none);
+  }
+  if f >= LO0 && f < HFILES && !v.lo_ro {
+    let ok = disk_xa_write(&mut v.lo, f - LO0, src, none);
+    lo_settle(&mut v);
+    return ok;
+  }
+  return false;
+}
+
 /// Sets handle f's permission bits (when `mode` is below 4096) and its
 /// modification time (when `mtime` is not NO_FILE). False if f names
 /// nothing that keeps them, or the disk fails.

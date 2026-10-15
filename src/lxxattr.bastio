@@ -1,11 +1,16 @@
-// Extended attributes, kept in memory. No file system here stores them, so
-// they live in a small table keyed by the file layer handle of the file
-// (the handle names the file, not the path: a hard link or a rename does
-// not lose them). XA_N attributes in all, each a name of at most
-// XA_NAME - 1 bytes and a value of at most XA_VAL bytes; the table is
-// emptied by a reboot like the files are not, so it is a stand-in, not
-// persistence. A handle's attributes go with its last name (xa_gone, called
-// from ino_gone in src/lxinotify.bastio).
+// Extended attributes. A file or directory on a disk (the disk file system
+// or a loop mount) keeps its attributes in one block of its own, named by
+// its directory entry (E_XATTR in src/diskfs.bastio), so they survive a
+// reboot and go with the file when it is renamed or linked, and a power cut
+// leaves the old set or the new one. The block holds records of a name
+// (below XA_NAME bytes) and a value (as long as the block has room for, as
+// on ext4), each padded to 8 bytes (xb_* below). Any other file (in
+// memory) has its attributes in a small table keyed by the file layer
+// handle of the file (the handle names the file, not the path: a hard link
+// or a rename does not lose them): XA_N attributes in all, each a name of
+// at most XA_NAME - 1 bytes and a value of at most XA_VAL bytes. A handle's
+// table attributes go with its last name (xa_gone, called from ino_gone in
+// src/lxinotify.bastio).
 //
 // setxattr, getxattr, listxattr and removexattr and their l- and f- forms.
 // Names must begin with user., trusted., security. or system. (anything
@@ -170,6 +175,265 @@ fn xa_space(nm: &Bytes, nl: u64) -> u64
   return 0;
 }
 
+// ---------------------------------------------------------------- on a disk
+
+/// The size in bytes of the record for a name of nl bytes and a value of
+/// vl bytes: two length words, then each padded to a multiple of 8.
+fn xb_rec(nl: u64, vl: u64) -> u64
+  requires nl > 0 && nl < XA_NAME && vl <= BLOCK
+  ensures result == 16 + (nl + 7) / 8 * 8 + (vl + 7) / 8 * 8 && result >= 24 && result >= 16 + nl + vl && result <= 16 + XA_NAME + BLOCK + 8
+{
+  return 16 + (nl + 7) / 8 * 8 + (vl + 7) / 8 * 8;
+}
+
+/// Where the records of blob end: the offset of the first free byte, or
+/// BLOCK for a block that is full or whose records do not add up.
+fn xb_end(blob: &Bytes) -> u64
+  requires blen(blob) == BLOCK
+  ensures result <= BLOCK
+{
+  let mut o = 0;
+  while o + 16 <= BLOCK
+    invariant o <= BLOCK && blen(blob) == BLOCK
+  {
+    let nl = get_u64(blob, o);
+    if nl == 0 {
+      return o;
+    }
+    let vl = get_u64(blob, o + 8);
+    if nl >= XA_NAME || vl > BLOCK {
+      return BLOCK;
+    }
+    let r = xb_rec(nl, vl);
+    if o + r > BLOCK {
+      return BLOCK;
+    }
+    o = o + r;
+  }
+  return BLOCK;
+}
+
+/// The offset of the record named nm (nl bytes) in blob, or BLOCK.
+fn xb_find(blob: &Bytes, nm: &Bytes, nl: u64) -> u64
+  requires blen(blob) == BLOCK && nl < XA_NAME && nl <= blen(nm)
+  ensures result <= BLOCK && (result == BLOCK || result + 16 + nl <= BLOCK)
+{
+  let mut o = 0;
+  while o + 16 <= BLOCK
+    invariant o <= BLOCK && blen(blob) == BLOCK && nl < XA_NAME && nl <= blen(nm)
+  {
+    let rl = get_u64(blob, o);
+    if rl == 0 {
+      return BLOCK;
+    }
+    let vl = get_u64(blob, o + 8);
+    if rl >= XA_NAME || vl > BLOCK {
+      return BLOCK;
+    }
+    let r = xb_rec(rl, vl);
+    if o + r > BLOCK {
+      return BLOCK;
+    }
+    if rl == nl {
+      let mut same = true;
+      let mut i = 0;
+      while i < nl
+        invariant i <= nl && nl < XA_NAME && nl <= blen(nm) && o + r <= BLOCK && o + 16 + nl <= BLOCK && blen(blob) == BLOCK
+      {
+        if bget(blob, o + 16 + i) != bget(nm, i) {
+          same = false;
+        }
+        i = i + 1;
+      }
+      if same {
+        return o;
+      }
+    }
+    o = o + r;
+  }
+  return BLOCK;
+}
+
+/// Takes the record at offset o (as xb_find gave it) out of blob.
+fn xb_cut(blob: &mut Bytes, o: u64)
+  requires blen(blob) == BLOCK && o < BLOCK
+  ensures blen(blob) == BLOCK
+{
+  let end = xb_end(blob);
+  if o + 16 > BLOCK || end > BLOCK {
+    return;
+  }
+  let nl = get_u64(blob, o);
+  let vl = get_u64(blob, o + 8);
+  if nl == 0 || nl >= XA_NAME || vl > BLOCK {
+    return;
+  }
+  let r = xb_rec(nl, vl);
+  if o + r > end {
+    return;
+  }
+  bmove(&mut blob, o, o + r, end - o - r);
+  zero(&mut blob, end - r, end);
+}
+
+/// Appends a record for nm (nl bytes) and the vl bytes at the start of val
+/// to blob. False, with blob unchanged, if it does not fit.
+fn xb_add(blob: &mut Bytes, nm: &Bytes, nl: u64, val: &Bytes, vl: u64) -> bool
+  requires blen(blob) == BLOCK && nl < XA_NAME && nl > 0 && nl <= blen(nm) && vl <= blen(val) && vl <= BLOCK
+  ensures blen(blob) == BLOCK
+{
+  let end = xb_end(blob);
+  let r = xb_rec(nl, vl);
+  if end >= BLOCK || end + r > BLOCK {
+    return false;
+  }
+  put_u64(&mut blob, end, nl);
+  put_u64(&mut blob, end + 8, vl);
+  bcopy(&mut blob, end + 16, nm, 0, nl);
+  bcopy(&mut blob, end + 16 + (nl + 7) / 8 * 8, val, 0, vl);
+  return true;
+}
+
+/// setxattr on a disk file: the checks that go before are xa_set's.
+fn xb_set(k: &mut Kernel, h: u64, nm: &Bytes, nl: u64, vl: u64, flags: u64) -> u64
+  requires kok(k) && nl < XA_NAME && nl > 0 && nl <= blen(nm) && vl <= XFER
+  ensures kok(k)
+{
+  let mut blob = balloc(BLOCK);
+  if !vfs_xa_read(&mut k.fs, h, &mut blob) {
+    bfree(blob);
+    return EOPNOTSUPP_X;
+  }
+  let o = xb_find(blob, nm, nl);
+  let mut r = 0;
+  if o < BLOCK && flags == 1 {
+    r = EEXIST;
+  } else if o >= BLOCK && flags == 2 {
+    r = ENODATA_X;
+  } else {
+    if o < BLOCK {
+      xb_cut(&mut blob, o);
+    }
+    if !xb_add(&mut blob, nm, nl, k.fs.xfer, vl) {
+      r = ENOSPC;                        // one block holds all of a file's attributes
+    } else if !vfs_xa_write(&mut k.fs, h, blob, false) {
+      r = ENOSPC;
+    }
+  }
+  bfree(blob);
+  return r;
+}
+
+/// getxattr on a disk file.
+fn xb_get(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC && nl < XA_NAME && nl > 0 && nl <= blen(nm)
+  ensures kok(k)
+{
+  let mut blob = balloc(BLOCK);
+  if !vfs_xa_read(&mut k.fs, h, &mut blob) {
+    bfree(blob);
+    return ENODATA_X;
+  }
+  let o = xb_find(blob, nm, nl);
+  if o >= BLOCK {
+    bfree(blob);
+    return ENODATA_X;
+  }
+  let vl = get_u64(blob, o + 8);
+  if size == 0 {
+    bfree(blob);
+    return vl;
+  }
+  if size < vl {
+    bfree(blob);
+    return ERANGE;
+  }
+  let at = o + 16 + (nl + 7) / 8 * 8;
+  let mut r = vl;
+  if vl > 0 {
+    if vl > XFER || at + vl > BLOCK {
+      r = ENODATA_X;
+    } else {
+      bcopy(&mut k.fs.xfer, 0, blob, at, vl);
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, vl) != vl {
+        r = EFAULT;
+      }
+    }
+  }
+  bfree(blob);
+  return r;
+}
+
+/// listxattr on a disk file.
+fn xb_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut blob = balloc(BLOCK);
+  if !vfs_xa_read(&mut k.fs, h, &mut blob) {
+    bfree(blob);
+    return 0;
+  }
+  let mut total = 0;
+  let mut o = 0;
+  let mut go = true;
+  while go && o + 16 <= BLOCK
+    invariant o <= BLOCK && total <= o && blen(blob) == BLOCK && kok(k)
+  {
+    let nl = get_u64(blob, o);
+    let vl = get_u64(blob, o + 8);
+    if nl == 0 || nl >= XA_NAME || vl > BLOCK {
+      go = false;
+    } else {
+      let r = xb_rec(nl, vl);
+      if o + r > BLOCK || total + nl + 1 > o + r {
+        go = false;
+      } else {
+        bcopy(&mut k.fs.xfer, total, blob, o + 16, nl);
+        bset(&mut k.fs.xfer, total + nl, 0);
+        total = total + nl + 1;
+        o = o + r;
+      }
+    }
+  }
+  bfree(blob);
+  if size == 0 {
+    return total;
+  }
+  if size < total {
+    return ERANGE;
+  }
+  if total > 0 && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, total) != total {
+    return EFAULT;
+  }
+  return total;
+}
+
+/// removexattr on a disk file.
+fn xb_remove(k: &mut Kernel, h: u64, nm: &Bytes, nl: u64) -> u64
+  requires kok(k) && nl < XA_NAME && nl > 0 && nl <= blen(nm)
+  ensures kok(k)
+{
+  let mut blob = balloc(BLOCK);
+  if !vfs_xa_read(&mut k.fs, h, &mut blob) {
+    bfree(blob);
+    return ENODATA_X;
+  }
+  let o = xb_find(blob, nm, nl);
+  if o >= BLOCK {
+    bfree(blob);
+    return ENODATA_X;
+  }
+  xb_cut(&mut blob, o);
+  let none = xb_end(blob) == 0;
+  let mut r = 0;
+  if !vfs_xa_write(&mut k.fs, h, blob, none) {
+    r = ENOSPC;
+  }
+  bfree(blob);
+  return r;
+}
+
 /// The handle form `form` (0 path, 1 path without following links, 2 fd)
 /// names: a file layer handle, HFILES, or NO_RESULT (k.perr says why).
 fn xa_target(k: &mut Kernel, pid: u64, form: u64, a: u64) -> u64
@@ -185,7 +449,7 @@ fn xa_target(k: &mut Kernel, pid: u64, form: u64, a: u64) -> u64
 /// setxattr: handle h (from xa_target), name nm of nl bytes, vl value bytes
 /// at user address va, flags (XATTR_CREATE 1, XATTR_REPLACE 2).
 fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u64, flags: u64) -> u64
-  requires kok(k) && pid < NPROC && nl < XA_NAME && nl <= blen(nm)
+  requires kok(k) && pid < NPROC && nl > 0 && nl < XA_NAME && nl <= blen(nm)
   ensures kok(k)
 {
   if flags > 3 || flags == 3 {
@@ -201,8 +465,12 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
   if vl > 65536 {
     return E2BIG;                         // XATTR_SIZE_MAX
   }
-  if vl > XA_VAL {
+  let disk = vfs_xa_disk(&mut k.fs, h);
+  if !disk && vl > XA_VAL {
     return ENOSPC;                        // more than the table holds
+  }
+  if vl > XFER {
+    return ENOSPC;                        // more than a block holds
   }
   let uid = fs_id(k.procs, pid, false);
   if sp == 2 && uid != 0 {
@@ -215,6 +483,15 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
   let t = m.mode % 65536 / 4096 * 4096;
   if sp == 1 && (t == T_LINK || t == T_FIFO || t == T_CHR || t == T_BLK || t == T_SOCK) {
     return EPERM;                         // user. attributes are for files and directories only
+  }
+  if disk {
+    if flags > 2 {
+      return EINVAL;
+    }
+    if vl > 0 && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, vl) != vl {
+      return EFAULT;
+    }
+    return xb_set(&mut k, h, nm, nl, vl, flags);
   }
   let mut e = xa_find(k, h, nm, nl);
   if e < XA_N && flags == 1 {
@@ -268,7 +545,7 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
 /// getxattr: the value of nm on h into user address va (size bytes), or
 /// its length if size is 0.
 fn xa_get(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, size: u64) -> u64
-  requires kok(k) && pid < NPROC && nl < XA_NAME && nl <= blen(nm)
+  requires kok(k) && pid < NPROC && nl > 0 && nl < XA_NAME && nl <= blen(nm)
   ensures kok(k)
 {
   if xa_space(nm, nl) == 0 {
@@ -276,6 +553,9 @@ fn xa_get(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, size: 
   }
   if h >= HFILES {
     return ENODATA_X;
+  }
+  if vfs_xa_disk(&mut k.fs, h) {
+    return xb_get(&mut k, pid, h, nm, nl, va, size);
   }
   let e = xa_find(k, h, nm, nl);
   if e >= XA_N {
@@ -313,6 +593,9 @@ fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
   if h >= HFILES {
     return 0;
   }
+  if vfs_xa_disk(&mut k.fs, h) {
+    return xb_list(&mut k, pid, h, va, size);
+  }
   let mut total = 0;
   let mut e = 0;
   while e < XA_N
@@ -348,7 +631,7 @@ fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
 
 /// removexattr.
 fn xa_remove(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64) -> u64
-  requires kok(k) && pid < NPROC && nl < XA_NAME && nl <= blen(nm)
+  requires kok(k) && pid < NPROC && nl > 0 && nl < XA_NAME && nl <= blen(nm)
   ensures kok(k)
 {
   let sp = xa_space(nm, nl);
@@ -364,6 +647,9 @@ fn xa_remove(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64) -> u64
   let m = vfs_meta(&mut k.fs, h);
   if !owns(k.procs, pid, m.own) {
     return EPERM;
+  }
+  if vfs_xa_disk(&mut k.fs, h) {
+    return xb_remove(&mut k, h, nm, nl);
   }
   let e = xa_find(k, h, nm, nl);
   if e >= XA_N {
