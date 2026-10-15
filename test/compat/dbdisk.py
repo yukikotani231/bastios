@@ -43,6 +43,7 @@ def main():
     out, pg, redis, valkey = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "db")
     cache = cache or work
+    os.makedirs(work, exist_ok=True)
     os.makedirs(cache, exist_ok=True)
     p, r = os.path.join(work, "postgres.tar"), os.path.join(work, "redis.tar")
     pack(pg, cache, p)
