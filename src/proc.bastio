@@ -101,6 +101,8 @@ const F_START: u64 = 65;             // when it started: centiseconds since boot
 const F_FAULT_RIP: u64 = 67;         // the last page fault found its page mapped already: rip + 1 and address (src/main.bastio)
 const F_FAULT_VA: u64 = 68;
 const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^40 (/proc/PID/cmdline)
+const F_WDONE: u64 = 71;             // Linux write(2) restarted for the disk: 2 * the bytes already written + 1 if the last pass stopped for the disk (src/linux.bastio)
+const F_XSIG: u64 = 70;              // Linux: the signal its parent gets when it ends, plus 1 (clone's exit_signal); 0 is SIGCHLD
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
 const MAY_X: u64 = 1;
@@ -459,8 +461,10 @@ const FD_CLOEXEC: u64 = 8192;
 const OFD_N: u64 = 4096;
 // Loop devices (src/lxloop.bastio): LOOP_N devices of LOOP_W words.
 const LOOP_N: u64 = 32;
-const LOOP_W: u64 = 13;
-const LOOP_LEN: u64 = 416;             // LOOP_N * LOOP_W
+const LOOP_W: u64 = 14;
+const LOOP_LEN: u64 = 448;             // LOOP_N * LOOP_W
+const DEV_RANDOM: u64 = 3;             // /dev/random and /dev/urandom (src/lxdev.bastio)
+const RNDGETENTCNT: u64 = 0x80045200;  // ioctl on /dev/random: the entropy count, an int
 const DEV_LOOPCTL: u64 = 6;            // OF_DEV device /dev/loop-control
 const DEV_LOOP: u64 = 64;              // OF_DEV device /dev/loopN is DEV_LOOP + N
 const S_IFBLK: u64 = 0x61B0;           // a block device, rw-rw----

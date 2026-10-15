@@ -154,5 +154,17 @@ int main(void) {
         if (x >= 0) close(x);
         unlink("cx_f");
     }
+    EXPECT("a write of many unaligned blocks is not short", ({
+           static char big[70000], back[70000];
+           int r = 0, g = open("cf_big", O_RDWR | O_CREAT | O_TRUNC, 0644);
+           for (int j = 0; j < (int)sizeof big; j++) big[j] = (char)(j * 7 + 3);
+           for (int k = 0; g >= 0 && k < 6; k++) {
+               off_t at = 7900 + k * 70001;
+               ssize_t w = lseek(g, at, SEEK_SET) == at ? write(g, big, sizeof big) : -1;
+               r += (w == (ssize_t)sizeof big && lseek(g, at, SEEK_SET) == at && read(g, back, sizeof back) == (ssize_t)sizeof back && memcmp(big, back, sizeof big) == 0);
+           }
+           if (g >= 0) close(g);
+           unlink("cf_big");
+           r == 6; }));
     return done();
 }

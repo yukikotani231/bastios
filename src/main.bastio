@@ -1,3 +1,4 @@
+// stage1-only: vec_with (ramfs.bastio reads table nodes in place)
 // BastiOS kernel: boots, starts the shell as the first user process, and
 // schedules processes round robin, preempting them on the timer.
 //
