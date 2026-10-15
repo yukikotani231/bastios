@@ -303,6 +303,9 @@ steps = [
     # src/tcpbuf.bastio), so the later page counts may be lower than the
     # first by that much.
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
+    # 100 connections to ourselves at once is 200 in the kernel's table (it
+    # held 32), and 30 UDP sockets at once (8 before).
+    ("mtcp many 100", b"mtcp: 100 connections and 30 udp sockets", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -390,7 +393,7 @@ steps = [
     # sees itself and only its own children there, and a /proc mounted in
     # it lists them by those ids; user/mns.c (above) checks the rest.
     ("unshare -p -f --mount-proc sh -c 'echo $$; kill -0 1 && echo seen; cat /proc/1/stat; ls -d /proc/9'",
-     b"\r\n1\r\nseen\r\n1 (ash) S 0 1 1 ", b"\n# "),
+     [b"\r\n1\r\nseen\r\n1 (ash) ", b" 0 1 1 0 -1 "], b"\n# "),     # not the state letter: the shell may not have gone to sleep for cat yet
     # setns into a network namespace: nsenter -n joins the one a process
     # unshared into, so its /proc/self/ns/net link names that namespace
     # (and the caller's own stays the first one's).

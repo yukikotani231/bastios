@@ -54,3 +54,23 @@ fn step_flags(fl: u64, on: bool) -> u64 {
   }
   return base;
 }
+
+// PTRACE_GET_SYSCALL_INFO: the architecture (AUDIT_ARCH_*) and the words of
+// struct user_regs_struct (user_pt_regs) that hold the arguments of a system
+// call (n < 6), its result, the instruction pointer and the stack pointer.
+const PT_AUDIT_ARCH: u64 = 0xC000003E;
+const UR_RET: u64 = 10;
+const UR_IP: u64 = 16;
+const UR_SP: u64 = 19;
+
+fn ur_arg(n: u64) -> u64
+  requires n < 6
+  ensures result < USER_REGS
+{
+  if n == 0 { return 14; }                  // rdi
+  if n == 1 { return 13; }                  // rsi
+  if n == 2 { return 12; }                  // rdx
+  if n == 3 { return 7; }                   // r10
+  if n == 4 { return 9; }                   // r8
+  return 8;                                 // r9
+}

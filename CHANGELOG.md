@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- The network stack holds 240 TCP connections (32 before: two for each connection between programs on this machine, plus listeners and connections in TIME_WAIT), 32 UDP sockets (8) and 256 masqueraded flows (64) for network namespaces.
 - The in-memory file system holds 32768 files and directories (8192 before); the console shell's `ls` looks at the first 32768 disk entries after them. The node table now grows as nodes are made instead of being filled at boot, so a small machine pays only for the nodes it uses; the name index (1 MiB) and the open-description table are still allocated at boot. `ram_create` starts its search at a hint, so making many names is not quadratic.
 - Files on a disk can be up to 512 GiB (1 GiB before): a file past 1 GiB hangs from a super map of root maps, one per GiB (disk format `BSTDISK5`, written when the first such file is made; older kernels do not mount it). `user/mbig` writes pieces at offsets up to 40 GiB on a sparse 40 GiB disk, across GiB boundaries, cuts and regrows the file, and checks that every block comes back; `test/fsck.py` and `test/crashsim.py` read the new layout.
 - A file in memory (tmpfs, and the image behind a loop device) can reach 1 GiB (64 MiB before), and a loop device 1 GiB (64 MiB before). Pages are still taken only where a file is written, so a sparse file costs a table of 16 bytes a page. `shell_test.sh` grows a file to 300 MiB and appends to it.
