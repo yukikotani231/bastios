@@ -20,8 +20,8 @@ make
 linux-headers
 
 == srcbuild: fetch the source tarballs
-$ cd /disk/a/root && for f in zlib-1.3.1.tar.gz lua-5.4.7.tar.gz sqlite-amalgamation.tar.gz git-2.53.0.tar.xz curl-8.18.0.tar.gz busybox-1.37.0.tar.bz2 busybox.config; do bb wget -q HOSTURL/src/$f || echo failed $f; done; bb ls | bb wc -l
-7
+$ cd /disk/a/root && for f in zlib-1.3.1.tar.gz lua-5.4.7.tar.gz sqlite-amalgamation.tar.gz git-2.53.0.tar.xz curl-8.18.0.tar.gz busybox-1.37.0.tar.bz2 busybox.config xz-5.8.1.tar.xz; do bb wget -q HOSTURL/src/$f || echo failed $f; done; bb ls | bb wc -l
+8
 
 == zlib 1.3.1: configure, make, and its own test programs
 $ bb chroot /disk/a /bin/sh -c 'cd /root && tar xzf zlib-1.3.1.tar.gz && cd zlib-1.3.1 && ./configure --prefix=/usr/local >/root/zlib.log 2>&1 && make -j2 >>/root/zlib.log 2>&1 && make check 2>&1 | grep "test OK" && make install >>/root/zlib.log 2>&1; cd /root && rm -rf zlib-1.3.1'
@@ -55,3 +55,11 @@ $ bb chroot /disk/a /bin/sh -c 'cd /root && mkdir bbr && tar xjf busybox-1.37.0.
 built 42
 failed: 0
 passed: 150 or more
+
+== xz 5.8.1 (autotools): configure, make and make check (19 tests: round trips, corrupt input, the scripts)
+$ bb chroot /disk/a /bin/sh -c 'cd /root && tar xJf xz-5.8.1.tar.xz && cd xz-5.8.1 && ./configure --disable-nls --disable-doc >/root/xz-cfg.log 2>&1 && make -j2 CFLAGS=-O0 >/root/xz.log 2>&1 && make check -j2 >/root/xz-check.log 2>&1; grep -E "^# (TOTAL|PASS|FAIL|ERROR)" /root/xz-check.log; echo hello xz | src/xz/xz -9 | src/xz/xz -d; cd /root && rm -rf xz-5.8.1'
+# TOTAL: 19
+# PASS:  19
+# FAIL:  0
+# ERROR: 0
+hello xz
