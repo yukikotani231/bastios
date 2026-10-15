@@ -29,7 +29,7 @@ import "pcache.bastio";
 
 const NFD: u64 = 64;                  // rows a process's native calls and the kernel's own opens use
 const FD_POOL: u64 = 4096;            // rows first in the table, for the files Linux descriptors name: any process may take any (OFD_N)
-const FD_ROWS: u64 = 36864;           // FD_POOL + NPROC * NFD
+const FD_ROWS: u64 = 69632;           // FD_POOL + NPROC * NFD
 const FD_STRIDE: u64 = 4;
 const HOLD_N: u64 = 512;              // holds (vfs_hold), in their own table
 const HOLD_LEN: u64 = 2048;           // HOLD_N * FD_STRIDE
@@ -39,7 +39,7 @@ const XFER: u64 = 4096;               // the most bytes one call moves
 
 /// The first row of process pid's native block.
 fn nbase(pid: u64) -> u64
-  requires pid < 512                  // NPROC (src/proc.bastio)
+  requires pid < 1024                 // NPROC (src/proc.bastio)
   ensures result + NFD <= FD_ROWS && result == FD_POOL + pid * NFD
 {
   return FD_POOL + pid * NFD;

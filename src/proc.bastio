@@ -19,7 +19,7 @@ import "snd.bastio";
 // literals FD_ROWS (src/fs.bastio), IPC_LEN, SYS_LEN and the SYS_* offsets,
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
-const NPROC: u64 = 512;
+const NPROC: u64 = 1024;
 const STRIDE: u64 = 72 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
