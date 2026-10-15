@@ -219,17 +219,26 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
       bset(&mut fp, c, bget(k.fs.xfer, c));
       c = c + 1;
     }
+    // The start in the file layer: lp and sp are the namespace's names,
+    // which a mount moves (a container's /sys/fs/cgroup is not under its
+    // root's name there), fp is the file layer's already.
+    let mut st = balloc(CWD_STRIDE);
+    let mut stl = ns_tr(&mut k, ns_of(k, pid), sp, sl);
+    if stl == NO_RESULT || stl > FNAME_MAX {
+      stl = 0;
+    }
     c = 0;
-    while c < sl
-      invariant c <= sl && sl <= FNAME_MAX && blen(sp) == CWD_STRIDE && kok(k)
+    while c < stl
+      invariant c <= stl && stl <= FNAME_MAX && blen(st) == CWD_STRIDE && kok(k)
     {
-      bset(&mut k.fs.xfer, c, bget(sp, c));
+      bset(&mut st, c, bget(k.fs.xfer, c));
       c = c + 1;
     }
-    let id = xdev_at(&mut k, sl);
-    if !xdev_same(&mut k, lp, ln, sp, sl, id) || !xdev_same(&mut k, fp, fl, sp, sl, id) {
+    let id = xdev_at(&mut k, stl);
+    if !xdev_same(&mut k, pid, lp, ln, sp, sl, id, true) || !xdev_same(&mut k, pid, fp, fl, st, stl, id, false) {
       e = EXDEV;
     }
+    bfree(st);
     bfree(fp);
   }
   bfree(lp);
@@ -364,8 +373,9 @@ fn xdev_at(k: &mut Kernel, n: u64) -> u64
 
 /// Is every directory the name p[..pl] passes through, and the name itself,
 /// on file system id, leaving out those it shares with the start s[..sl]?
-fn xdev_same(k: &mut Kernel, p: &Bytes, pl: u64, s: &Bytes, sl: u64, id: u64) -> bool
-  requires kok(k) && pl <= FNAME_MAX && pl <= blen(p) && sl <= blen(s)
+/// A name of the namespace (logical) goes through its mounts first.
+fn xdev_same(k: &mut Kernel, pid: u64, p: &Bytes, pl: u64, s: &Bytes, sl: u64, id: u64, logical: bool) -> bool
+  requires kok(k) && pid < NPROC && pl <= FNAME_MAX && pl <= blen(p) && sl <= blen(s)
   ensures kok(k)
 {
   // How far p and s agree.
@@ -377,20 +387,27 @@ fn xdev_same(k: &mut Kernel, p: &Bytes, pl: u64, s: &Bytes, sl: u64, id: u64) ->
   }
   let mut i = 1;
   while i <= pl
-    invariant 1 <= i && pl <= FNAME_MAX && pl <= blen(p) && sl <= blen(s) && cp <= pl && cp <= sl && kok(k)
+    invariant 1 <= i && pl <= FNAME_MAX && pl <= blen(p) && sl <= blen(s) && cp <= pl && cp <= sl && kok(k) && pid < NPROC
   {
     if i == pl || bget(p, i) == 47 {
       let shared = i <= cp && (i == sl || (i < sl && bget(s, i) == 47));
       if !shared {
-        let mut c = 0;
-        while c < i
-          invariant c <= i && i <= pl && pl <= FNAME_MAX && pl <= blen(p) && kok(k)
-        {
-          bset(&mut k.fs.xfer, c, bget(p, c));
-          c = c + 1;
-        }
-        if xdev_at(&mut k, i) != id {
-          return false;
+        if logical {
+          let t = ns_tr(&mut k, ns_of(k, pid), p, i);
+          if t == NO_RESULT || t > FNAME_MAX || xdev_at(&mut k, t) != id {
+            return false;
+          }
+        } else {
+          let mut c = 0;
+          while c < i
+            invariant c <= i && i <= pl && pl <= FNAME_MAX && pl <= blen(p) && kok(k)
+          {
+            bset(&mut k.fs.xfer, c, bget(p, c));
+            c = c + 1;
+          }
+          if xdev_at(&mut k, i) != id {
+            return false;
+          }
         }
       }
     }
