@@ -264,6 +264,8 @@ def package(files, p, kept=({}, {})):
         path = f"{d}/{name}" if d else name
         if pruned(path):
             continue
+        if path not in files and path.startswith("etc/"):
+            continue                # a configuration file the image replaced or removed
         if path not in files:
             sys.exit(f"alpinedisk: {p['P']}: {path} is not in the image")
         src, body = files[path]
@@ -281,6 +283,8 @@ def package(files, p, kept=({}, {})):
             ti.size = len(body)
             ti.pax_headers = {"APK-TOOLS.checksum.SHA1": hashlib.sha1(body).hexdigest()}
             data.append((ti, body))
+    # A hard link names a file that comes before it in the archive.
+    data.sort(key=lambda e: e[0].type == tarfile.LNKTYPE)
     dgz = gz(tar(data))
     info = "".join(f"{n} = {p[k]}\n" for k, n in PKGINFO if k in p)
     for k, n in LISTS:

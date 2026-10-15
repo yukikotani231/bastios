@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# The syslog service of Alpine's busybox-openrc package (copied, as the
+# images the suite is made from do not hold that package).
+description="Basic system logging daemon"
+command=/sbin/syslogd
+command_args="${SYSLOGD_OPTS}"
+pidfile=/var/run/syslogd.pid
+
+depend() {
+	provide logger
+	need hostname
+	use clock
+}
