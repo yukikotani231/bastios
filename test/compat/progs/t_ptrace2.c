@@ -122,6 +122,7 @@ static void body_fork(void)
 }
 static void body_exit5(void) { _exit(5); }
 static void body_usr1(void) { raise(SIGUSR1); _exit(handled == SIGUSR2 ? 20 : handled == SIGUSR1 ? 21 : 22); }
+static void body_term(void) { signal(SIGTERM, SIG_DFL); raise(SIGTERM); _exit(0); }
 static void body_getpid(void) { syscall(SYS_getppid); syscall(SYS_getppid); }
 static void body_vfork(void)
 {
@@ -185,6 +186,14 @@ int main(void)
            int ev = event_of(c); unsigned long msg = 0; ptrace(PTRACE_GETEVENTMSG, c, 0, &msg);
            ok = ok && ev == PTRACE_EVENT_EXIT && (msg >> 8) == 5;
            ptrace(PTRACE_CONT, c, 0, 0); int cx = wst(c); ok = ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 5; ok; }));
+    EXPECT("PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop", ({
+           c = traced_child(body_term); int ok = stopped_with(c, SIGSTOP);
+           ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACEEXIT);
+           ptrace(PTRACE_CONT, c, 0, 0);
+           ok = ok && stopped_with(c, SIGTERM); ptrace(PTRACE_CONT, c, 0, (void *)(long)SIGTERM);
+           int ev = event_of(c); unsigned long msg = 0; ptrace(PTRACE_GETEVENTMSG, c, 0, &msg);
+           ok = ok && ev == PTRACE_EVENT_EXIT && msg == SIGTERM;
+           ptrace(PTRACE_CONT, c, 0, 0); int cx = wst(c); ok = ok && WIFSIGNALED(cx) && WTERMSIG(cx) == SIGTERM; ok; }));
     EXPECT("PTRACE_SETOPTIONS with an unknown option is EINVAL", ({
            c = traced_child(body_exit5); int ok = stopped_with(c, SIGSTOP);
            int r = ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)0x40000000); int e = errno;

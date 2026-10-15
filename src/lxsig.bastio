@@ -1158,7 +1158,7 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
       pset(&mut k.procs, p, F_SIGPEND, pend & !sbit(s));
       let w = tr_get(k, p);
       if w % 65536 != 0 && s != SIGKILL {
-        if tr_skip(w) == 0 {
+        if tr_skip(w) == 0 && (s == 5 || tr2_get(k, p) / TS_XEV % 2 == 0) {
           let t = tr2_get(k, p);
           if pget(k.procs, p, F_RESTART) != 0 && t % 2 == 1 && t / TS_NOENT % 2 == 0 && t / TS_ENTRY % 2 == 0 && t / TS_EXIT % 2 == 0 && t / TS_CUT % 2 == 0 {
             // A call that waits is cut short by this signal: as on Linux, the
@@ -1185,6 +1185,9 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
         return false;                       // not run until SIGCONT
       }
       if s == SIGKILL || (h == SIG_DFL && !dfl_ignores(s)) {
+        if pt_death_event(&mut k, p, s) {
+          return false;                     // the exit event first
+        }
         let dumped = core_dump(&mut k, p, s);
         terminate(&mut k, mmu, p, death_code(s, dumped));
         return false;

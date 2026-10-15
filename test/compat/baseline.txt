@@ -1055,6 +1055,7 @@ t_ptrace2: PTRACE_LISTEN keeps a group-stopped tracee stopped; SIGCONT then wake
 t_ptrace2: PTRACE_O_EXITKILL kills the tracee when the tracer dies
 t_ptrace2: PTRACE_O_TRACECLONE reports a new thread, which is traced
 t_ptrace2: PTRACE_O_TRACEEXIT stops the tracee at exit with the status as the event message
+t_ptrace2: PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop
 t_ptrace2: PTRACE_O_TRACEFORK: the event message is the new child's pid
 t_ptrace2: PTRACE_O_TRACESYSGOOD marks a system call stop with SIGTRAP | 0x80
 t_ptrace2: PTRACE_O_TRACEVFORK and PTRACE_O_TRACEVFORKDONE report the vfork and its end

@@ -368,6 +368,25 @@ fn pt_exit_event(k: &mut Kernel, p: u64, code: u64) -> bool
   return true;
 }
 
+/// Process p is about to die of the fatal signal s (not SIGKILL, which no
+/// stop can outlast). With PTRACE_O_TRACEEXIT its tracer gets the exit
+/// event first, with the signal as the message; the signal stays pending and
+/// is taken again, as already approved, when the tracer resumes p.
+fn pt_death_event(k: &mut Kernel, p: u64, s: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let w = tr_get(k, p);
+  let t = tr2_get(k, p);
+  if w % 65536 == 0 || tr_opt(w) / 64 % 2 == 0 || t / TS_XEV % 2 == 1 || s == SIGKILL {
+    return false;
+  }
+  pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+  tr2_put(&mut k, p, t % TS_EV + EV_EXIT * TS_EV + s * TS_MSG + TS_XEV);
+  tr_stop(&mut k, p, 5);
+  return true;
+}
+
 /// Process p has made a child with vfork (a copy here: the parent does not
 /// wait). If its tracer asked for PTRACE_O_TRACEVFORKDONE, the stop for the
 /// vfork event is followed by one for the child's end of the borrowing, as
