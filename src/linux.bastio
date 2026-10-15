@@ -1097,6 +1097,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && is_ns_file(d.x) && req % 0x100000000 >= NS_GET_USERNS && req % 0x100000000 <= NS_GET_OWNER_UID {
     return ns_ioctl(&mut k, pid, fd, d.x, req % 0x100000000, arg);   // src/lxnsk.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_RTC {
+    return rtc_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxrtc.bastio
+  }
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }

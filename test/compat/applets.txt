@@ -286,3 +286,28 @@ $ bb sh -c 'x=4; echo $((x * x))'
 == sh pipeline and subshell
 $ bb sh -c '(echo a; echo b) | bb wc -l'
 2
+
+== date -s sets the wall clock
+$ bb date -u -s '2031-02-03 04:05:06' >ca_ds; bb date -u +%Y-%m-%dT%H; rm ca_ds
+2031-02-03T04
+
+== hwclock -w writes the hardware clock and -s sets the system clock from it
+$ bb date -u -s '2031-02-03 04:05:06' >ca_hw; bb hwclock -u -w; bb date -u -s '2001-01-01 00:00:00' >ca_hw; bb hwclock -u -s; bb date -u +%Y-%m-%d; rm ca_hw
+2031-02-03
+
+== hwclock -r reads the hardware clock
+$ bb date -u -s '2031-02-03 04:05:06' >ca_hr; bb hwclock -u -w; bb hwclock -u -r | bb cut -c1-16; rm ca_hr
+Mon Feb  3 04:05
+
+== TZ as a POSIX string
+$ TZ=JST-9 bb date -d @0 '+%Y-%m-%d %H:%M %Z'
+1970-01-01 09:00 JST
+
+== TZ with daylight saving rules
+$ TZ=EST5EDT,M3.2.0,M11.1.0 bb date -d @1720000000 '+%H:%M %Z'; TZ=EST5EDT,M3.2.0,M11.1.0 bb date -d @1700000000 '+%H:%M %Z'
+05:46 EDT
+17:13 EST
+
+== ntpd -q sets the clock from an NTP server
+$ bb date -u -s '2000-01-01 00:00:00' >ca_ntp; bb ntpd -q -n -p HOSTNTP >/dev/null 2>&1; bb date -u +%Y-%m-%d; rm ca_ntp
+2031-02-03

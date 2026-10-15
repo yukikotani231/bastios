@@ -1,6 +1,8 @@
 // The CMOS real-time clock (the MC146818 behind ports 0x70 and 0x71), read
-// once at boot to give CLOCK_REALTIME its starting point. After that the
-// clock (src/tsc.bastio) keeps time; the RTC is not read again, and it is never written.
+// at boot to give CLOCK_REALTIME its starting point. After that the
+// clock (src/tsc.bastio) keeps time; /dev/rtc0 (src/lxrtc.bastio) reads and writes it on request.
+
+import "civil.bastio";
 
 const RTC: u64 = 0x70;
 
@@ -29,26 +31,6 @@ fn rtc_num(v: u64, bcd: bool) -> u64
     return v / 16 * 10 + v % 16;
   }
   return v;
-}
-
-/// Days from 1970-01-01 to year-month-day (the proleptic Gregorian
-/// calendar; years 2000 to 2099, what the clock can hold).
-fn days_from_civil(year: u64, month: u64, day: u64) -> u64
-  requires 2000 <= year && year <= 2099 && 1 <= month && month <= 12 && 1 <= day && day <= 31
-  ensures result <= 47500
-{
-  let mut y = year;
-  let mut mp = month + 9;              // March is month 0 of the year
-  if month > 2 {
-    mp = month - 3;
-  } else {
-    y = year - 1;
-  }
-  let era = y / 400;
-  let yoe = y - era * 400;
-  let doy = (153 * mp + 2) / 5 + day - 1;
-  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-  return era * 146097 + doe - 719468;
 }
 
 /// The time now, in seconds since 1970-01-01 00:00 UTC, as the clock says
@@ -85,4 +67,57 @@ fn rtc_seconds(r: &mut Rtc) -> u64
     return 0;
   }
   return days_from_civil(year, month, day) * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+/// Writes register `reg`.
+fn rtc_put(r: &mut Rtc, reg: u64, v: u64)
+  requires rtc_ok(r) && reg < 0x80 && v < 256
+  ensures rtc_ok(r)
+{
+  pio_out8(&mut r.io, 0, cast[u8](reg));
+  pio_out8(&mut r.io, 1, cast[u8](v));
+}
+
+/// A number below 100 in the clock's format: BCD or binary.
+fn rtc_enc(v: u64, bcd: bool) -> u64
+  requires v < 100
+  ensures result < 256
+{
+  if bcd {
+    return v / 10 * 16 + v % 10;
+  }
+  return v;
+}
+
+/// Sets the clock to t seconds since 1970-01-01 00:00 UTC (the years 2000
+/// to 2099). Updates are halted (status B bit 7) while the registers are
+/// written, so the clock does not carry between them.
+fn rtc_set_seconds(r: &mut Rtc, t: u64)
+  requires rtc_ok(r) && 946684800 <= t && t < 4102444800
+  ensures rtc_ok(r)
+{
+  let c = civil_from_seconds(t);
+  let b = rtc_reg(&mut r, 0x0B);
+  let bcd = b / 4 % 2 == 0;
+  let mut hour = c.hour;
+  let mut pm = 0;
+  if b / 2 % 2 == 0 {
+    // 12-hour mode: 12 stands for 0, and bit 7 of the hour is PM.
+    if hour >= 12 {
+      pm = 128;
+    }
+    hour = hour % 12;
+    if hour == 0 {
+      hour = 12;
+    }
+  }
+  rtc_put(&mut r, 0x0B, b % 128 + 128);     // SET: halt the update cycle
+  rtc_put(&mut r, 0x00, rtc_enc(c.sec, bcd));
+  rtc_put(&mut r, 0x02, rtc_enc(c.min, bcd));
+  rtc_put(&mut r, 0x04, rtc_enc(hour, bcd) % 128 + pm);
+  rtc_put(&mut r, 0x06, c.wday + 1);        // 1 = Sunday
+  rtc_put(&mut r, 0x07, rtc_enc(c.day, bcd));
+  rtc_put(&mut r, 0x08, rtc_enc(c.month, bcd));
+  rtc_put(&mut r, 0x09, rtc_enc(c.year - 2000, bcd));
+  rtc_put(&mut r, 0x0B, b % 128);           // and let it run again
 }

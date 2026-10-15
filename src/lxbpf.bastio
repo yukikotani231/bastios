@@ -417,6 +417,9 @@ fn dv_num(d: u64) -> DvNum
   if d == DEV_DSP {
     return DvNum { ty: DVT_CHAR, major: 14, minor: 3 };
   }
+  if d == DEV_RTC {
+    return DvNum { ty: DVT_CHAR, major: 10, minor: 135 };
+  }
   if d == DEV_MICE {
     return DvNum { ty: DVT_CHAR, major: 13, minor: 63 };
   }

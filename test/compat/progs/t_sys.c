@@ -9,6 +9,7 @@
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
+#include <sys/sysmacros.h>
 #include <sys/time.h>
 #include <sys/timex.h>
 #include <sys/utsname.h>
@@ -111,6 +112,163 @@ static int adjust(void) {
     ok = ok && adjtimex(&v) == -1 && errno == EINVAL;
     v.modes = 0x8000;                       /* ADJ_ADJTIME without ADJ_OFFSET */
     ok = ok && adjtimex(&v) == -1 && errno == EINVAL;
+    return ok;
+}
+
+/* The hardware clock, /dev/rtc0: hwclock's RTC_RD_TIME and RTC_SET_TIME. */
+struct rtc_tm { int sec, min, hour, mday, mon, year, wday, yday, isdst; };
+#define RTC_RD_TIME_ 0x80247009u
+#define RTC_SET_TIME_ 0x4024700Au
+
+static int hw_clock(void) {
+    int fd = open("/dev/rtc0", O_RDWR);
+    if (fd < 0) return 0;
+    struct rtc_tm was, t = {0};
+    int ok = ioctl(fd, RTC_RD_TIME_, &was) == 0 && was.year >= 120;
+    t.sec = 6; t.min = 5; t.hour = 4; t.mday = 3; t.mon = 1; t.year = 131;   /* 2031-02-03 04:05:06, a Monday */
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &t) == 0;
+    struct rtc_tm r = {0};
+    ok = ok && ioctl(fd, RTC_RD_TIME_, &r) == 0;
+    ok = ok && r.year == 131 && r.mon == 1 && r.mday == 3 && r.hour == 4 && r.min == 5 && r.sec >= 6 && r.sec < 12;
+    ok = ok && r.wday == 1 && r.yday == 33;
+    struct rtc_tm bad = t;
+    bad.mon = 1; bad.mday = 30;                          /* 30 February */
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &bad) == -1 && errno == EINVAL;
+    bad = t; bad.mon = 12;
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &bad) == -1 && errno == EINVAL;
+    bad = t; bad.year = 99;                              /* 1999: the clock holds 2000 to 2099 */
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &bad) == -1 && errno == EINVAL;
+    bad = t; bad.hour = 24;
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &bad) == -1 && errno == EINVAL;
+    t = (struct rtc_tm){ 10, 0, 0, 31, 11, 199, 0, 0, 0 };   /* 2099-12-31 00:00:10 */
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &t) == 0 && ioctl(fd, RTC_RD_TIME_, &r) == 0 && r.year == 199 && r.mon == 11 && r.mday == 31;
+    t = (struct rtc_tm){ 0, 0, 12, 29, 1, 124, 0, 0, 0 };         /* 2024-02-29 12:00:00 (a leap day), a Thursday */
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &t) == 0 && ioctl(fd, RTC_RD_TIME_, &r) == 0
+        && r.year == 124 && r.mon == 1 && r.mday == 29 && r.hour == 12 && r.wday == 4 && r.yday == 59;
+    ok = ok && ioctl(fd, RTC_SET_TIME_, &was) == 0;      /* put it back (a second or so late) */
+    close(fd);
+    int fd2 = open("/dev/rtc", O_RDONLY);                /* the same clock by its other name */
+    ok = ok && fd2 >= 0 && ioctl(fd2, RTC_RD_TIME_, &r) == 0 && r.year >= 120;
+    if (fd2 >= 0) close(fd2);
+    struct stat st;
+    ok = ok && stat("/dev/rtc0", &st) == 0 && S_ISCHR(st.st_mode) && major(st.st_rdev) == 10 && minor(st.st_rdev) == 135;
+    pid_t p = fork();
+    if (p == 0) {
+        if (setuid(65534) != 0) _exit(1);
+        int f = open("/dev/rtc0", O_RDONLY);
+        _exit(f == -1 && errno == EACCES ? 0 : 2);       /* crw-------: root's */
+    }
+    int w = 0;
+    waitpid(p, &w, 0);
+    return ok && WIFEXITED(w) && WEXITSTATUS(w) == 0;
+}
+
+/* How far CLOCK_REALTIME has gone ahead of CLOCK_MONOTONIC since the call
+ * that was made with a = the two readings, in usec. */
+static long drift_since(const struct timespec *real0, const struct timespec *mono0) {
+    struct timespec r, m;
+    clock_gettime(CLOCK_REALTIME, &r);
+    clock_gettime(CLOCK_MONOTONIC, &m);
+    long dr = (r.tv_sec - real0->tv_sec) * 1000000L + (r.tv_nsec - real0->tv_nsec) / 1000;
+    long dm = (m.tv_sec - mono0->tv_sec) * 1000000L + (m.tv_nsec - mono0->tv_nsec) / 1000;
+    return dr - dm;
+}
+
+/* Setting the clock leaves it unsynchronised with the largest error
+ * (chronyd probes ADJ_SETOFFSET this way). */
+static int clock_cleared(void) {
+    struct timex t = {0};
+    t.modes = ADJ_MAXERROR | ADJ_STATUS;
+    t.maxerror = 0;
+    t.status = STA_PLL;                                  /* synchronised */
+    int ok = adjtimex(&t) >= 0 && t.maxerror == 0 && !(t.status & STA_UNSYNC);
+    struct timex z = {0};
+    z.modes = ADJ_SETOFFSET | ADJ_NANO;
+    ok = ok && adjtimex(&z) >= 0 && z.maxerror >= 100000 && (z.status & STA_UNSYNC);
+    t = (struct timex){0};
+    t.modes = ADJ_MAXERROR | ADJ_STATUS;
+    t.maxerror = 0;
+    t.status = STA_PLL;
+    adjtimex(&t);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    ok = ok && clock_settime(CLOCK_REALTIME, &ts) == 0;
+    struct timex v = {0};
+    ok = ok && adjtimex(&v) >= 0 && v.maxerror >= 100000 && (v.status & STA_UNSYNC);
+    return ok;
+}
+
+/* What slewing() found wrong, for the failure line. */
+static char slew_why[160];
+#define STEP(cond, ...) do { if (ok && !(cond)) { ok = 0; snprintf(slew_why, sizeof slew_why, __VA_ARGS__); } } while (0)
+
+/* adjtimex moves the clock: frequency, a PLL offset and adjtime. */
+static int slewing(void) {
+    struct timespec r0, m0;
+    struct timex t = {0};
+    int ok = 1;
+    long d;
+    /* +500 ppm for two seconds: the wall clock gains 1 ms on the monotonic one. */
+    t.modes = ADJ_FREQUENCY;
+    t.freq = 500L * 65536;
+    STEP(adjtimex(&t) >= 0, "set +500 ppm: errno %d", errno);
+    clock_gettime(CLOCK_REALTIME, &r0);
+    clock_gettime(CLOCK_MONOTONIC, &m0);
+    sleep(2);
+    d = drift_since(&r0, &m0);
+    STEP(d > 700 && d < 1300, "+500 ppm for 2 s drifted %ld us", d);
+    t.modes = ADJ_FREQUENCY;
+    t.freq = -500L * 65536;                              /* and the same slow */
+    STEP(adjtimex(&t) >= 0, "set -500 ppm: errno %d", errno);
+    clock_gettime(CLOCK_REALTIME, &r0);
+    clock_gettime(CLOCK_MONOTONIC, &m0);
+    sleep(2);
+    d = drift_since(&r0, &m0);
+    STEP(d < -700 && d > -1300, "-500 ppm for 2 s drifted %ld us", d);
+    t.modes = ADJ_FREQUENCY;
+    t.freq = 0;
+    STEP(adjtimex(&t) >= 0, "set 0 ppm: errno %d", errno);
+    clock_gettime(CLOCK_REALTIME, &r0);
+    clock_gettime(CLOCK_MONOTONIC, &m0);
+    sleep(1);
+    d = drift_since(&r0, &m0);
+    STEP(d > -350 && d < 350, "0 ppm drifted %ld us", d);   /* back to the rate it had */
+
+    /* A PLL offset of 20 ms, time constant 0 (1/16 of it a second): 2 s move it about 2.4 ms. */
+    t = (struct timex){0};
+    t.modes = ADJ_OFFSET | ADJ_STATUS | ADJ_TIMECONST | ADJ_MICRO;   /* in usec (an earlier check set nanoseconds) */
+    t.status = STA_PLL;
+    t.constant = 0;
+    t.offset = 20000;
+    STEP(adjtimex(&t) >= 0, "set a PLL offset: errno %d", errno);
+    clock_gettime(CLOCK_REALTIME, &r0);
+    clock_gettime(CLOCK_MONOTONIC, &m0);
+    sleep(2);
+    d = drift_since(&r0, &m0);
+    STEP(d > 1500 && d < 4000, "a 20 ms PLL offset moved the clock %ld us in 2 s", d);
+    struct timex v = {0};
+    STEP(adjtimex(&v) >= 0 && v.offset > 15000 && v.offset < 18500, "the PLL offset left reads %ld", (long)v.offset);
+    t = (struct timex){0};
+    t.modes = ADJ_OFFSET | ADJ_STATUS;                   /* cancel it */
+    t.status = STA_PLL;
+    t.offset = 0;
+    STEP(adjtimex(&t) >= 0, "cancel the offset: errno %d", errno);
+    t = (struct timex){0};
+    t.modes = ADJ_STATUS;                                /* and leave the clock unsynchronised */
+    t.status = STA_UNSYNC;
+    adjtimex(&t);
+
+    /* adjtime(): -10 ms at 500 ppm; 2 s of it is 1 ms (back). */
+    struct timeval delta = { 0, -10000 }, old;
+    clock_gettime(CLOCK_REALTIME, &r0);
+    clock_gettime(CLOCK_MONOTONIC, &m0);
+    STEP(adjtime(&delta, &old) == 0, "adjtime: errno %d", errno);
+    sleep(2);
+    d = drift_since(&r0, &m0);
+    STEP(d < -700 && d > -1300, "adjtime of -10 ms moved the clock %ld us in 2 s", d);
+    struct timeval left, none = { 0, 0 };
+    long rest = adjtime(&none, &left) == 0 ? left.tv_sec * 1000000L + left.tv_usec : 0;
+    STEP(rest < -7000 && rest > -9300, "adjtime left %ld us", rest);   /* what was left, and cancelled */
     return ok;
 }
 
@@ -599,6 +757,11 @@ int main(void) {
     EXPECT("clock_settime moves CLOCK_REALTIME", set_clock());
     EXPECT("settimeofday", timeofday());
     EXPECT("adjtimex reads and sets", adjust());
+    EXPECT("/dev/rtc0 reads and sets the hardware clock", hw_clock());
+    EXPECT("setting the clock leaves the NTP error at its maximum and the status unsynchronised", clock_cleared());
+    if (begin("adjtimex slews the wall clock: frequency, PLL offset, adjtime")) {
+        if (slewing()) pass(); else fail("%s", slew_why);
+    }
     EXPECT("not root: EPERM", not_root());
     EXPECT("a cgroup namespace roots the tree", cgroup_ns());
     EXPECT("memory.max kills the biggest process of a group that passes it", cgroup_mem());

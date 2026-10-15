@@ -1,0 +1,4 @@
+// The hardware clock is architecture specific: src/<arch>/arch/rtchw.bastio,
+// found through the --lib directory the build passes for that architecture.
+
+import "arch/rtchw.bastio";

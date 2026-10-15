@@ -292,10 +292,11 @@ steps = [
     # out at the top of the stack (it used to stop at 32 and 16).
     ("(set --; i=0; while [ $i -lt 400 ]; do set -- \"$@\" arg$i; export V$i=x$i; i=$((i+1)); done; ash -c 'echo argc=$# last=${400} env=$V399' x \"$@\")", b"argc=400 last=arg399 env=x399", b"\n# "),
     # Time: clocks, nanosleep, poll that waits, select, alarms and pause, and
-    # eventfd, timerfd and epoll (user/mtime.c); the sleep applet; ash's
+    # eventfd, timerfd and epoll, the hardware clock and adjtimex's frequency
+    # (user/mtime.c); the sleep applet; ash's
     # read -t, a poll on the console that times out, then one that wakes
     # when a line is typed.
-    ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok"], b"\n# "),
+    ("mtime", [b"mtime: rang 3, selected, slept ", b"woke in time, events ok, clocks ok"], b"\n# "),
     # A TCP transfer to this machine's own address, many times longer than a
     # card's frame: loopback segments are longer than 1500 bytes
     # (src/net.bastio, NET_BUF), and every byte is checked on arrival. The

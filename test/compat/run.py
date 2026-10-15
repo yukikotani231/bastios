@@ -16,7 +16,8 @@ applets), starts the kernel's built-in ash, and runs:
   * each case in tty.txt: a program driven by keystrokes on the console
     (an editor, a REPL), then a shell command whose output must match.
 
-Commands may name HOSTURL (or HOSTADDR, its address and port, or HOSTPORT,
+Commands may name HOSTNTP, an NTP server run here (it says it is 2031-02-03
+04:05:06 UTC at the start), and HOSTURL (or HOSTADDR, its address and port, or HOSTPORT,
 the port alone): a web server this script runs on the host machine
 (WebServer), which the guest reaches through QEMU's user network
 (http://10.0.2.2:PORT). HOSTSURL is the same files over HTTPS, with a
@@ -122,6 +123,49 @@ def load_tty(path):
     return [(c["name"], c["prog"], c["keys"], c["check"], c["exp"]) for c in cases]
 
 
+class NtpServer:
+    """An NTP server on the host, for HOSTNTP: a stratum 2 clock that says it
+    is NTP_START (2031-02-03 04:05:06 UTC) when it starts and runs at the
+    host's rate from there, so a client that sets its clock from it reads a
+    fixed date (the cases that use it finish within the day)."""
+    START = 1927857906
+    ERA = 2208988800                       # seconds from 1900 to 1970
+
+    def __init__(self):
+        self.t0 = time.time()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.settimeout(0.5)
+        self.port = self.sock.getsockname()[1]
+        self.stop = False
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def now(self):
+        return self.START + (time.time() - self.t0)
+
+    def stamp(self, t):
+        t += self.ERA
+        sec = int(t)
+        return struct.pack(">II", sec, int((t - sec) * (1 << 32)) & 0xFFFFFFFF)
+
+    def serve(self):
+        while not self.stop:
+            try:
+                req, peer = self.sock.recvfrom(512)
+            except socket.timeout:
+                continue
+            except OSError:
+                return
+            if len(req) < 48:
+                continue
+            rx = self.stamp(self.now())
+            version = (req[0] >> 3) & 7 or 4
+            head = bytes([(0 << 6) | (version << 3) | 4, 2, req[2] or 6, 0xEC])   # LI 0, mode 4 (server), stratum 2, precision 2^-20
+            reply = (head + struct.pack(">II", 0, 0x00000800) + b"LOCL" + self.stamp(self.now() - 5)
+                     + req[40:48] + rx + self.stamp(self.now()))
+            self.sock.sendto(reply, peer)
+
+
 class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
@@ -158,6 +202,7 @@ class WebServer:
         for name in ("server.lua", "client.lua", "real-client.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
+        self.ntp = NtpServer()
         handler = functools.partial(Quiet, directory=self.dir)
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
@@ -284,6 +329,7 @@ class Guest:
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
+        self.hostntp = f"10.0.2.2:{web.ntp.port}" if web else ""
         self.hostsurl = f"https://10.0.2.2:{web.sport}" if web and web.sport else ""
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
@@ -427,6 +473,7 @@ class Host:
         self.hosturl = f"http://127.0.0.1:{web.port}" if web else ""
         self.hostaddr = f"127.0.0.1 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
+        self.hostntp = f"127.0.0.1:{web.ntp.port}" if web else ""
         self.hostsurl = f"https://127.0.0.1:{web.sport}" if web and web.sport else ""
 
     def boot(self):
@@ -556,7 +603,7 @@ def run_applet(env, name, cmd, expected, timeout, bb):
     expected = [arch_words(l) for l in expected]
     cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
     cmd = (cmd.replace("HOSTSURL", env.hostsurl).replace("HOSTURL", env.hosturl)
-           .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport)
+           .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport).replace("HOSTNTP", env.hostntp)
            .replace("SSHPORT", getattr(env, "sshport", "")))
     if cmd.startswith("@host "):
         return run_on_host(name, cmd[6:], expected, timeout)

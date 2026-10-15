@@ -1,0 +1,89 @@
+// The calendar: days since 1970-01-01 and dates, for the years 2000 to 2099
+// (what the hardware clocks hold). Shared by every architecture: the CMOS
+// clock (src/rtc.bastio) and /dev/rtc0 (src/lxrtc.bastio).
+
+/// Days from 1970-01-01 to year-month-day (the proleptic Gregorian
+/// calendar; years 2000 to 2099, what the clock can hold).
+fn days_from_civil(year: u64, month: u64, day: u64) -> u64
+  requires 2000 <= year && year <= 2099 && 1 <= month && month <= 12 && 1 <= day && day <= 31
+  ensures result <= 47500
+{
+  let mut y = year;
+  let mut mp = month + 9;              // March is month 0 of the year
+  if month > 2 {
+    mp = month - 3;
+  } else {
+    y = year - 1;
+  }
+  let era = y / 400;
+  let yoe = y - era * 400;
+  let doy = (153 * mp + 2) / 5 + day - 1;
+  let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+/// A date and time of day (UTC), as the clock's registers and
+/// struct rtc_time hold them.
+struct Civil { year: u64, month: u64, day: u64, hour: u64, min: u64, sec: u64, wday: u64, yday: u64 }
+
+/// The date `days` days after 1970-01-01 (the proleptic Gregorian
+/// calendar; the years 2000 to 2099 the clock can hold), by whole years
+/// and months. wday counts from Sunday = 0, yday from 1 January = 0.
+fn civil_from_days(days: u64) -> Civil
+  requires 10957 <= days && days <= 47500
+  ensures 2000 <= result.year && result.year <= 2099 && 1 <= result.month && result.month <= 12
+  ensures 1 <= result.day && result.day <= 31 && result.wday < 7 && result.yday < 366
+{
+  let mut y = 2000;
+  let mut left = days - 10957;             // days since 2000-01-01
+  let mut len = 366;
+  while left >= len && y < 2099
+    invariant 2000 <= y && y <= 2099 && len >= 365 && len <= 366
+  {
+    left = left - len;
+    y = y + 1;
+    len = 365;
+    if y % 4 == 0 && (y % 100 != 0 || y % 400 == 0) {
+      len = 366;
+    }
+  }
+  if left >= len {
+    left = len - 1;                        // unreachable below the year 2100; keeps the result in range
+  }
+  let yday = left;
+  let leap = len == 366;
+  let mut m = 1;
+  let mut dim = 31;
+  while m < 12 && left >= dim
+    invariant 1 <= m && m <= 12 && 28 <= dim && dim <= 31
+  {
+    left = left - dim;
+    m = m + 1;
+    if m == 2 {
+      dim = 28;
+      if leap {
+        dim = 29;
+      }
+    } else if m == 4 || m == 6 || m == 9 || m == 11 {
+      dim = 30;
+    } else {
+      dim = 31;
+    }
+  }
+  if left >= 31 {
+    left = 30;
+  }
+  return Civil { year: y, month: m, day: left + 1, hour: 0, min: 0, sec: 0, wday: (days + 4) % 7, yday: yday % 366 };
+}
+
+/// t seconds since 1970-01-01 00:00 UTC as a date and time of day.
+fn civil_from_seconds(t: u64) -> Civil
+  requires 946684800 <= t && t < 4102444800
+  ensures 2000 <= result.year && result.year <= 2099 && 1 <= result.month && result.month <= 12
+  ensures 1 <= result.day && result.day <= 31 && result.hour < 24 && result.min < 60 && result.sec < 60
+  ensures result.wday < 7 && result.yday < 366
+{
+  let c = civil_from_days(t / 86400);
+  let s = t % 86400;
+  return Civil { year: c.year, month: c.month, day: c.day, hour: s / 3600, min: s / 60 % 60, sec: s % 60, wday: c.wday, yday: c.yday };
+}

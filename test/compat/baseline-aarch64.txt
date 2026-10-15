@@ -71,6 +71,8 @@ apps: sqlite3: 20000 rows, an index and a query
 apps: sqlite3: WAL
 apps: sqlite3: a database file
 apps: sqlite3: in memory
+busybox: TZ as a POSIX string
+busybox: TZ with daylight saving rules
 busybox: awk
 busybox: base64
 busybox: basename/dirname
@@ -81,6 +83,7 @@ busybox: cp
 busybox: cut
 busybox: date
 busybox: date -d
+busybox: date -s sets the wall clock
 busybox: dd
 busybox: dd large blocks
 busybox: df
@@ -96,6 +99,8 @@ busybox: gzip round trip
 busybox: head/tail
 busybox: hexdump
 busybox: hostname
+busybox: hwclock -r reads the hardware clock
+busybox: hwclock -w writes the hardware clock and -s sets the system clock from it
 busybox: id -u
 busybox: kill -0
 busybox: ln -s
@@ -107,6 +112,7 @@ busybox: mktemp
 busybox: mv
 busybox: nice
 busybox: nproc
+busybox: ntpd -q sets the clock from an NTP server
 busybox: od
 busybox: printenv
 busybox: printf
@@ -1106,8 +1112,10 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sys: /dev/rtc0 reads and sets the hardware clock
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
+t_sys: adjtimex slews the wall clock: frequency, PLL offset, adjtime
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max kills the biggest process of a group that passes it
 t_sys: not root: EPERM
