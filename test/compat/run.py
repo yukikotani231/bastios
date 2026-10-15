@@ -687,6 +687,7 @@ def main():
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
                     help="the guest's processor; aarch64 runs the groups named by --groups, against baseline-aarch64.txt")
     ap.add_argument("--groups", help="comma-separated groups of the first disk to run (programs and busybox, by default all)")
+    ap.add_argument("--only", help="comma-separated groups of the other disks to run (alpine, srcbuild, ...), to try one without the rest")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
@@ -823,6 +824,9 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append((disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
+    if args.only:
+        keep = args.only.split(",")
+        lanes = [(l[0], [g for g in l[1] if g[0] in keep]) + l[2:] for l in lanes]
     lanes = [l for l in lanes if l[1]]
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
