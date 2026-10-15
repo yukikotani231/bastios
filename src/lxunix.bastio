@@ -65,7 +65,7 @@ const UM_DGRAM: u64 = 4;
 const STAMP_SPAN: u64 = 1099511627776;  // 2^40: bind stamps are below it
 const EPROTOTYPE: u64 = 18446744073709551525;      // 2^64 - 91
 const UXL0: u64 = 512;                 // UX_N * UX_W: the first listener word
-const UXP0: u64 = 524288;               // UX_N * UX_CAP: the first name byte
+const UXP0: u64 = 8388608;              // UX_N * UX_CAP: the first name byte
 const UXF0: u64 = 768;                 // UXL0 + UX_LIS * UXL_W: the in-flight words
 const UXC0: u64 = 896;                 // UXF0 + UX_N: the channels' credentials
 const UXLC0: u64 = 1152;                // UXC0 + 2 * UX_N: the listeners' credentials
@@ -1222,9 +1222,9 @@ fn ux_send_from(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bo
   let mut got = 0;
   if n > 0 {
     if xf {
-      got = smaller(n, UX_CAP - count - lead);
+      got = smaller(smaller(n, UX_CAP - count - lead), XFER);
     } else {
-      got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(n, UX_CAP - count - lead));
+      got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, smaller(smaller(n, UX_CAP - count - lead), XFER));
       if got == NO_RESULT || got == 0 {
         return EFAULT;
       }

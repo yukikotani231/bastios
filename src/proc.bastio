@@ -844,14 +844,14 @@ fn is_exe_file(f: u64) -> bool
 const UX_N: u64 = 128;
 const UX_S: u64 = 64;                 // the radix of a datagram socket's slots: a slot + 1 is at most UX_LIS, below it
 const UX_W: u64 = 4;                  // head, count, read end open, write end open
-const UX_CAP: u64 = 4096;             // bytes a channel holds
+const UX_CAP: u64 = 65536;            // bytes a channel holds
 const UX_LIS: u64 = 32;
 const UX_BACKLOG: u64 = 4;            // connections waiting for accept
 const UXL_W: u64 = 8;                 // 4 + UX_BACKLOG
 const UX_PATH: u64 = 108;             // the longest name
 const UX_XTRA: u64 = 7;               // descriptions a message passes besides the first
 const UX_LEN: u64 = 2272;             // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files, then UX_XTRA words per channel, then one offset per channel
-const UXB_LEN: u64 = 527744;          // UX_N * UX_CAP + UX_LIS * UX_PATH
+const UXB_LEN: u64 = 8392064;         // UX_N * UX_CAP + UX_LIS * UX_PATH
 
 const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptions
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux

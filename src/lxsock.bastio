@@ -832,7 +832,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     }
   }
   if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {
-    v = 4096;                               // a unix channel; a TCP buffer is as big
+    v = 65536;                              // a unix channel (UX_CAP), as big as a pipe
   }
   if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, &mut k.fs.xfer, 4) != 4 {
     return EFAULT;
@@ -841,6 +841,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   lx_fill(&mut k, 0, 4);
   bset(&mut k.fs.xfer, 0, cast[u8](v % 256));
   bset(&mut k.fs.xfer, 1, cast[u8](v / 256 % 256));
+  bset(&mut k.fs.xfer, 2, cast[u8](v / 65536 % 256));
   if room >= 0x80000000 {
     return EINVAL;                          // a negative length
   }
