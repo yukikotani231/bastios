@@ -1320,7 +1320,8 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   let alen = name_arg(&mut args, name);
   let total = start_env(&mut args, alen);
   let src = Src { file: false, prog: prog, f: 0, size: slen(prog_image(prog)) };
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, Src { file: false, prog: NPROGS, f: 0, size: 0 }, args, alen, total, false);
+  let rn = layout_rnd(&mut k.rng, k.sys, k.procs, pid);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, rn, k.tsc, k.epoch, pid, src, Src { file: false, prog: NPROGS, f: 0, size: 0 }, args, alen, total, false);
   bfree(args);
   let ok = sp is Space::Mapped;
   put_space(&mut k.spaces, pid, sp);
@@ -1520,8 +1521,8 @@ fn start_env(args: &mut Bytes, from: u64) -> u64
 /// process `pid` up to start it: program, registers, program break.
 /// Returns `Space::Empty`, changing nothing, if the image is malformed or
 /// memory runs out. The caller installs the space.
-fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: u64, t: Tsc, epoch: u64, pid: u64, src: Src, isrc0: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
-  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs) && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args)
+fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rnd, t: Tsc, epoch: u64, pid: u64, src: Src, isrc0: Src, args: &Bytes, alen: u64, total: u64, lazy: bool) -> Space
+  requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs) && pid < NPROC && alen <= total && total <= ARGS_MAX && total <= blen(args) && rnd_ok(rn)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v) && ptab_ok(procs)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
@@ -1529,13 +1530,18 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   // must be ELF. Check the headers before taking anything.
   let img = prog_image(src.prog);
   let elf = src.file || is_elf(img);
-  let e = elf_parse(&mut v, src);
+  // A PIE lands at PIE_AT plus its random distance; a program too big for
+  // that place goes where it would have without randomization.
+  let e = elf_parse_rnd(&mut v, src, rn);
   let mut size = 0;
   let mut entry = e.entry;
-  let mut rsp = USER_BASE + elf_sp(args, alen, total);
+  let mut rsp = USER_BASE + elf_sp(args, alen, total, rn.shift);
   let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   let mut ie = bad_elf();
   let mut mmap_top = VDSO_PAGE * 4096;     // the vDSO's page is above it
+  if e.ok && rn.mmap_pg * 4096 + (e.end + 4095) / 4096 * 4096 < mmap_top {
+    mmap_top = mmap_top - rn.mmap_pg * 4096;
+  }
   let mut lz = lz_none();
   if elf {
     if !e.ok {
@@ -1559,7 +1565,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
       if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
         return Space::Empty;
       }
-      let place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
+      let mut place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
+      if place >= low + rn.mmap_pg * 4096 {
+        place = place - rn.mmap_pg * 4096;      // moved down, if there is room above the program
+      }
       ie = elf_parse_at(&mut v, isrc, place);
       if !ie.ok {
         return Space::Empty;
@@ -1582,7 +1591,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
       return Space::Empty;
     }
   }
-  let sp = build_space(&mut m, &mut txt, &mut v, src, img, elf, e, isrc, ie, lz, size, args, alen, total, seed, t, epoch);
+  let sp = build_space(&mut m, &mut txt, &mut v, src, img, elf, e, isrc, ie, lz, size, args, alen, total, rn, t, epoch);
   if sp is Space::Empty {
     return sp;
   }
@@ -1602,7 +1611,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
   }
   pset(&mut procs, pid, F_ARGS, 0);
   if elf && total <= ARGS_MAX {
-    pset(&mut procs, pid, F_ARGS, str_at(total) + alen * 1099511627776);
+    pset(&mut procs, pid, F_ARGS, str_at(total, rn.shift) + alen * 1099511627776);
   }
   pset(&mut procs, pid, reg_word(R_PC), entry);
   pset(&mut procs, pid, reg_word(R_SP), rsp);
@@ -1615,8 +1624,9 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, seed: 
     pset(&mut procs, pid, F_ABI, 1);
     // The heap starts on the page after the image; mmap takes pages
     // downward from the stack. Both stay in the window below the stack.
-    pset(&mut procs, pid, F_BRK, (e.end + 4095) / 4096 * 4096);
-    pset(&mut procs, pid, F_BRK0, (e.end + 4095) / 4096 * 4096);
+    let heap = (e.end + 4095) / 4096 * 4096 + rn.brk_pg * 4096;
+    pset(&mut procs, pid, F_BRK, heap);
+    pset(&mut procs, pid, F_BRK0, heap);
     pset(&mut procs, pid, F_MMAP, mmap_top);
   }
   return sp;
@@ -1671,14 +1681,14 @@ fn interp_src(v: &mut Vfs, src: Src, e: Elf) -> Src
 
 /// The address space for a checked image: ELF, or a BastiOS image needing
 /// `size` bytes of memory.
-fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, lz: Lz, size: u64, args: &Bytes, alen: u64, total: u64, seed: u64, t: Tsc, epoch: u64) -> Space
+fn build_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, img: Str, elf: bool, e: Elf, isrc: Src, ie: Elf, lz: Lz, size: u64, args: &Bytes, alen: u64, total: u64, rn: Rnd, t: Tsc, epoch: u64) -> Space
   requires mem_ok(m) && store_ok(txt) && vfs_ok(v) && (elf ==> (e.ok && elf_fits(src.size, e) && elf_fits(isrc.size, ie))) && (!elf ==> size <= IMAGE_MAX)
-  requires alen <= total && total <= ARGS_MAX && total <= blen(args)
+  requires alen <= total && total <= ARGS_MAX && total <= blen(args) && rnd_ok(rn)
   ensures mem_ok(m) && store_ok(txt) && vfs_ok(v)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
   if elf {
-    return elf_space(&mut m, &mut txt, &mut v, src, e, isrc, ie, lz, args, alen, total, seed, t, epoch);
+    return elf_space(&mut m, &mut txt, &mut v, src, e, isrc, ie, lz, args, alen, total, rn, t, epoch);
   }
   return new_space(&mut m, img, size);
 }
