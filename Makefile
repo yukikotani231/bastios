@@ -384,7 +384,7 @@ run-uefi: build/bastios.iso $(DISK)
 	  -cdrom build/bastios.iso $(ISO_DISPLAY) $(QEMU_DEVS) -serial mon:stdio $(CLEAN_EXIT)
 
 # The tests are listed in test/all.sh, which runs JOBS of them at a time.
-test: build/bastios.elf
+test: $(if $(filter d,$(LANES)),build/bastioc1,build/bastios.elf)
 	BASTIOC=$(BASTIOC) BASTIOC0=$(BASTIOC0) BASTIOLIB=$(BASTIOLIB) MUSLCC=$(MUSLCC) test/all.sh
 
 # The system call fuzzer at length: SEEDS runs of CALLS calls from seed
