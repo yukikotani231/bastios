@@ -22,8 +22,10 @@
 // have, and for gid_map only after setgroups was set to "deny". Privilege
 // in a namespace (ns_cap) is a process whose effective user is mapped to 0
 // there: it may make namespaces (the user namespace itself needs nothing),
-// change ids and groups to mapped ones, and set the names of a UTS
-// namespace it made. Mounting, device access and the rest stay root's.
+// change ids and groups to mapped ones, set the names of a UTS namespace
+// and change the mounts of a mount namespace, if its user namespace (or one
+// it descends from) made them: each remembers the user namespace it was
+// made in. Device access and the rest stay root's.
 //
 // setns into a user namespace (a /proc/PID/ns/user descriptor or a pidfd)
 // is for root, and for a process that holds CAP_SYS_ADMIN over it (ns_cap_over):
