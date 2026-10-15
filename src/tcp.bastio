@@ -3,11 +3,15 @@
 // and a 4 KiB send buffer. Data that arrives early is held at its place in
 // the receive buffer (one stretch per connection) until the gap before it
 // is filled. Lost segments are resent go-back-N on a timeout that doubles
-// with each resend. Segments keep to the peer's MSS. A peer that shrinks
-// its window to 0 is probed with one byte for as long as it answers.
-// There is no congestion control, no window scaling and no selective
-// acknowledgement. test/tcp_test.sh drives these paths through a lossy
-// peer.
+// with each resend, from a retransmission timeout estimated from the round
+// trips measured (RFC 6298). Segments keep to the peer's MSS. A peer that
+// shrinks its window to 0 is probed with one byte for as long as it answers.
+// The sender is limited by a congestion window (slow start and congestion
+// avoidance, RFC 5681, with an initial window of ten segments), leaves
+// slow start on three duplicate ACKs or enough SACKed data and repairs the
+// holes the peer reports without waiting for the timer (RFC 6675, NewReno
+// style when the peer takes no SACK blocks). test/tcp_test.sh and
+// test/tcpperf.sh drive these paths through a lossy peer.
 //
 // As in the rest of the stack, every byte and table index is proved in
 // bounds for any segment that can arrive: lengths and offsets read off the
@@ -24,7 +28,13 @@ const TCP_MSS: u64 = 1460;            // the largest segment we send to or ask o
 const TCP_MSS_LO: u64 = 14946;        // ... and to an address of this one: a frame of NET_BUF bytes
 const TCP_WS: u64 = 4;                // our window scale (RFC 7323): TCP_RING fits in 16 bits after it
 const TCP_BURST: u64 = 16;            // segments one tcp_output sends at most
-const TCP_RTO: u64 = 100;             // ticks before the first resend (1 s); doubles on each
+const TCP_RTO: u64 = 100;             // ticks before the first resend (1 s) until a round trip is measured; doubles on each
+const TCP_RTO_MIN: u64 = 20;          // ... and no shorter than this once one is (200 ms, as Linux)
+const TCP_RTO_MAX: u64 = 6000;        // ... or longer (60 s)
+const TCP_IW: u64 = 10;               // the initial congestion window, in segments (RFC 6928)
+const TCP_CWND_MAX: u64 = 1073741824;
+const TCP_DUPTHRESH: u64 = 3;         // duplicate ACKs that show a segment lost
+const SB_N: u64 = 4;                  // stretches past a gap the sender keeps track of
 const TCP_TRIES: u64 = 8;             // unanswered resends before the connection is reset
 const TCP_LINGER: u64 = 200;          // ticks in TIME_WAIT
 const SEQ_MOD: u64 = 4294967296;
@@ -80,6 +90,25 @@ const W_RXHEAD: u64 = 24;             // where the next byte to read is in the r
 const W_WS: u64 = 25;                 // the peer's window scale + 1, once both sides scale; 0: neither does
 const W_SACK: u64 = 26;               // 1 if the peer takes SACK blocks (it sent SACK-permitted)
 const W_NS: u64 = 27;                 // its network namespace (src/netns.bastio)
+const W_CWND: u64 = 28;               // congestion window, in bytes
+const W_SSTH: u64 = 29;               // slow start threshold
+const W_DUPS: u64 = 30;               // duplicate ACKs since W_UNA last moved
+const W_REC: u64 = 31;                // W_MAX when recovery (or a timeout) began
+const W_INREC: u64 = 32;              // 1 while repairing a loss the peer reported (fast recovery)
+const W_NOFR: u64 = 33;               // 1 from a timeout until W_REC is acknowledged: no new fast retransmit
+const W_RTTSEQ: u64 = 34;             // the segment being timed ends here
+const W_RTTAT: u64 = 35;              // ... and went at this tick + 1; 0: none timed
+const W_SRTT: u64 = 36;               // smoothed round trip, ticks * 8
+const W_RVAR: u64 = 37;               // its variation, ticks * 4
+const W_RTO: u64 = 38;                // the resend timeout in ticks; 0: not measured yet
+const W_RTTOK: u64 = 39;              // 1 once a round trip is measured
+const W_SBN: u64 = 40;                // stretches the peer reported holding past a gap (SACK) ...
+const W_HISACK: u64 = 41;             // ... how far past W_UNA the furthest reaches
+const W_SB0: u64 = 42;                // ... and the stretches, as (start, end) bytes past W_UNA: 42..49
+const W_RTXNXT: u64 = 50;             // recovery: where past W_UNA to look for the next hole
+const W_RTXOUT: u64 = 51;             // recovery: bytes sent again and not yet acknowledged
+const W_DACK: u64 = 52;               // a delayed ACK is due at this tick; 0: none owed
+const W_DSEG: u64 = 53;               // segments taken in since our last ACK
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
 // Connection t's rings (src/tcpbuf.bastio).
@@ -119,10 +148,14 @@ fn seq_add(a: u64, b: u64) -> u64
   return (a + b) % SEQ_MOD;
 }
 
+spec fn sdiff(b: u64, a: u64) -> u64 {
+  (b % SEQ_MOD + SEQ_MOD - a % SEQ_MOD) % SEQ_MOD
+}
+
 /// How far b is ahead of a on sequence numbers (mod 2^32); both are reduced
 /// first, so any words will do.
 fn seq_diff(b: u64, a: u64) -> u64
-  ensures result < SEQ_MOD
+  ensures result < SEQ_MOD && result == sdiff(b, a)
 {
   return (b % SEQ_MOD + SEQ_MOD - a % SEQ_MOD) % SEQ_MOD;
 }
@@ -258,28 +291,499 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
   send_via(&mut n, next_hop(n, rip), 34 + tlen);
 }
 
-/// Arms the resend timer if it is off: TCP_RTO, doubled for each resend
-/// so far, up to 64 times longer.
+// ---------------------------------------------------------------- congestion control
+
+/// The largest segment connection t sends: what the peer takes, within
+/// what a frame to it holds.
+fn tcp_mss_of(n: &Net, t: u64) -> u64
+  requires net_ok(n) && t < TCBS
+  ensures 64 <= result && result <= TCP_MSS_LO
+{
+  let lim = mss_for(n, tw(n, t, W_RIP));
+  let mss = tw(n, t, W_MSS);
+  if mss < 64 || mss > lim {
+    return lim;
+  }
+  return mss;
+}
+
+fn cwnd_of(n: &Net, t: u64) -> u64
+  requires net_ok(n) && t < TCBS
+  ensures result < TCP_CWND_MAX
+{
+  return twb(n, t, W_CWND, TCP_CWND_MAX);
+}
+
+/// The window starts at ten segments when a connection is established.
+fn tcp_cc_init(n: &mut Net, t: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  tset(&mut n, t, W_CWND, TCP_IW * tcp_mss_of(n, t));
+  tset(&mut n, t, W_SSTH, TCP_CWND_MAX - 1);
+  tset(&mut n, t, W_RTO, TCP_RTO);
+}
+
+/// Start (lo = 0) or end (lo = 1) of stretch i held past a gap, as bytes
+/// past W_UNA.
+fn sb_get(n: &Net, t: u64, i: u64, end: bool) -> u64
+  requires net_ok(n) && t < TCBS && i < SB_N
+  ensures result < SEQ_MOD
+{
+  if end {
+    return twb(n, t, W_SB0 + 2 * i + 1, SEQ_MOD);
+  }
+  return twb(n, t, W_SB0 + 2 * i, SEQ_MOD);
+}
+
+fn sb_put(n: &mut Net, t: u64, i: u64, lo: u64, hi: u64)
+  requires net_ok(n) && t < TCBS && i < SB_N
+  ensures net_ok(n)
+{
+  tset(&mut n, t, W_SB0 + 2 * i, lo);
+  tset(&mut n, t, W_SB0 + 2 * i + 1, hi);
+}
+
+fn sb_clear(n: &mut Net, t: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  tset(&mut n, t, W_SBN, 0);
+  tset(&mut n, t, W_HISACK, 0);
+}
+
+/// Notes that the peer holds the bytes [lo0, hi0) past W_UNA (a SACK
+/// block). A block that starts at W_UNA, reaches past what was sent or is
+/// empty is not believed. Stretches that touch merge; with all SB_N in
+/// use, one that touches none is forgotten (the data is sent again
+/// needlessly, no more), but the furthest edge is kept.
+fn sb_add(n: &mut Net, t: u64, lo0: u64, hi0: u64)
+  requires net_ok(n) && t < TCBS && lo0 < SEQ_MOD && hi0 < SEQ_MOD
+  ensures net_ok(n)
+{
+  let flight = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA));
+  if lo0 == 0 || lo0 >= hi0 || hi0 > flight {
+    return;
+  }
+  let mut lo = lo0;
+  let mut hi = hi0;
+  let cnt = twb(n, t, W_SBN, SB_N + 1);
+  let mut w = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= SB_N && w <= i && lo <= hi && hi < SEQ_MOD && lo < SEQ_MOD && net_ok(n)
+  {
+    let a = sb_get(n, t, i, false);
+    let b = sb_get(n, t, i, true);
+    if lo <= b && a <= hi {
+      if a < lo {
+        lo = a;
+      }
+      if b > hi {
+        hi = b;
+      }
+    } else {
+      sb_put(&mut n, t, w, a, b);
+      w = w + 1;
+    }
+    i = i + 1;
+  }
+  if w < SB_N {
+    sb_put(&mut n, t, w, lo, hi);
+    w = w + 1;
+  }
+  tset(&mut n, t, W_SBN, w);
+  if hi > twb(n, t, W_HISACK, SEQ_MOD) {
+    tset(&mut n, t, W_HISACK, hi);
+  }
+}
+
+/// Bytes the peer is known to hold past the gap.
+fn sb_sacked(n: &Net, t: u64) -> u64
+  requires net_ok(n) && t < TCBS
+  ensures result <= SB_N * SEQ_MOD
+{
+  let cnt = twb(n, t, W_SBN, SB_N + 1);
+  let mut sum = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= SB_N && sum <= i * SEQ_MOD
+  {
+    let a = sb_get(n, t, i, false);
+    let b = sb_get(n, t, i, true);
+    if b > a {
+      sum = sum + (b - a);
+    }
+    i = i + 1;
+  }
+  return sum;
+}
+
+/// W_UNA moved on by k bytes: the stretches and the furthest edge move
+/// with it, and those it passed are dropped.
+fn sb_shift(n: &mut Net, t: u64, k: u64)
+  requires net_ok(n) && t < TCBS && k < SEQ_MOD
+  ensures net_ok(n)
+{
+  let cnt = twb(n, t, W_SBN, SB_N + 1);
+  let mut w = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= SB_N && w <= i && net_ok(n)
+  {
+    let a = sb_get(n, t, i, false);
+    let b = sb_get(n, t, i, true);
+    if b > k && b > a {
+      let mut na = 0;
+      if a > k {
+        na = a - k;
+      }
+      sb_put(&mut n, t, w, na, b - k);
+      w = w + 1;
+    }
+    i = i + 1;
+  }
+  tset(&mut n, t, W_SBN, w);
+  let h = twb(n, t, W_HISACK, SEQ_MOD);
+  if h > k {
+    tset(&mut n, t, W_HISACK, h - k);
+  } else {
+    tset(&mut n, t, W_HISACK, 0);
+  }
+  let rn = twb(n, t, W_RTXNXT, SEQ_MOD);
+  if rn > k {
+    tset(&mut n, t, W_RTXNXT, rn - k);
+  } else {
+    tset(&mut n, t, W_RTXNXT, 0);
+  }
+  let ro = twb(n, t, W_RTXOUT, SEQ_MOD);
+  if ro > k {
+    tset(&mut n, t, W_RTXOUT, ro - k);
+  } else {
+    tset(&mut n, t, W_RTXOUT, 0);
+  }
+}
+
+/// How far past W_UNA the peer is believed to hold data: the furthest
+/// SACKed byte, or, from a peer that takes no SACK blocks, one segment
+/// for each duplicate ACK (and the one lost). At most what was sent.
+fn tcp_hi_off(n: &Net, t: u64, mss: u64) -> u64
+  requires net_ok(n) && t < TCBS && 64 <= mss && mss <= TCP_MSS_LO
+  ensures result <= sdiff(get(n.tcbs, t * TCB_W + W_MAX), get(n.tcbs, t * TCB_W + W_UNA))
+{
+  let flight = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA));
+  let mut h = twb(n, t, W_HISACK, SEQ_MOD);
+  if tw(n, t, W_SACK) != 1 {
+    h = (twb(n, t, W_DUPS, 1001) + 1) * mss;
+  }
+  if h > flight {
+    return flight;
+  }
+  return h;
+}
+
+/// The bytes believed to be in the network during recovery (RFC 6675): what
+/// was sent past the furthest byte the peer holds, and what was sent again.
+fn tcp_pipe(n: &Net, t: u64, mss: u64) -> u64
+  requires net_ok(n) && t < TCBS && 64 <= mss && mss <= TCP_MSS_LO
+  ensures result <= 2 * SEQ_MOD
+{
+  let flight = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA));
+  let hi = tcp_hi_off(n, t, mss);
+  return (flight - hi) + twb(n, t, W_RTXOUT, SEQ_MOD);
+}
+
+/// The first byte at or past p (bytes past W_UNA) and before `hi` that the
+/// peer is not known to hold; `hi` if there is none.
+fn sb_hole(n: &Net, t: u64, p: u64, hi: u64) -> u64
+  requires net_ok(n) && t < TCBS && p < SEQ_MOD && hi < SEQ_MOD
+  ensures result <= hi
+{
+  let cnt = twb(n, t, W_SBN, SB_N + 1);
+  let mut q = p;
+  let mut pass = 0;
+  while pass <= SB_N
+    invariant pass <= SB_N + 1 && q < SEQ_MOD && cnt <= SB_N
+  {
+    let mut i = 0;
+    while i < cnt
+      invariant i <= cnt && cnt <= SB_N && q < SEQ_MOD
+    {
+      let a = sb_get(n, t, i, false);
+      let b = sb_get(n, t, i, true);
+      if a <= q && q < b {
+        q = b;
+      }
+      i = i + 1;
+    }
+    pass = pass + 1;
+  }
+  if q > hi {
+    return hi;
+  }
+  return q;
+}
+
+/// How long the segment that starts at hole q is: a segment, or up to the
+/// next stretch the peer holds.
+fn sb_hole_len(n: &Net, t: u64, q: u64, mss: u64) -> u64
+  requires net_ok(n) && t < TCBS && q < SEQ_MOD && 1 <= mss
+  ensures 1 <= result && result <= mss
+{
+  let cnt = twb(n, t, W_SBN, SB_N + 1);
+  let mut l = mss;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= SB_N && 1 <= l && l <= mss
+  {
+    let a = sb_get(n, t, i, false);
+    if a > q && a - q < l {
+      l = a - q;
+    }
+    i = i + 1;
+  }
+  return l;
+}
+
+/// Recovery: sends again what is missing, hole by hole, while the pipe has
+/// room in the window (`force`: the first one regardless, as the loss is
+/// found). Returns the segments sent.
+fn tcp_rtx(n: &mut Net, t: u64, mss: u64, cwnd: u64, force: bool) -> u64
+  requires net_ok(n) && t < TCBS && 64 <= mss && mss <= TCP_MSS_LO && cwnd < TCP_CWND_MAX
+  ensures net_ok(n)
+{
+  let una = twb(n, t, W_UNA, SEQ_MOD);
+  let txlen = twb(n, t, W_TXLEN, TCP_RING + 1);
+  let mut segs = 0;
+  let mut go = true;
+  while go && segs < TCP_BURST
+    invariant segs <= TCP_BURST && net_ok(n) && una < SEQ_MOD && txlen <= TCP_RING
+  {
+    let hi = tcp_hi_off(n, t, mss);
+    if !(force && segs == 0) && tcp_pipe(n, t, mss) + mss > cwnd {
+      go = false;
+    } else {
+      let q = sb_hole(n, t, twb(n, t, W_RTXNXT, SEQ_MOD), hi);
+      if q >= hi || q >= txlen {
+        go = false;
+      } else {
+        let mut l = sb_hole_len(n, t, q, mss);
+        if l > txlen - q {
+          l = txlen - q;
+        }
+        tcp_emit(&mut n, t, TF_ACK + TF_PSH, seq_add(una, q), q, l);
+        tset(&mut n, t, W_RTXNXT, q + l);
+        tset(&mut n, t, W_RTXOUT, twb(n, t, W_RTXOUT, SEQ_MOD) + l);
+        segs = segs + 1;
+      }
+    }
+  }
+  return segs;
+}
+
+/// A round trip of `m` ticks was measured (RFC 6298, in ticks of 10 ms: the
+/// smoothed time is kept times 8 and its variation times 4).
+fn tcp_rtt(n: &mut Net, t: u64, m: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let mut mm = m;
+  if mm > TCP_RTO_MAX {
+    mm = TCP_RTO_MAX;
+  }
+  let mut srtt = mm * 8;
+  let mut rvar = mm * 2;
+  if tw(n, t, W_RTTOK) == 1 {
+    srtt = twb(n, t, W_SRTT, 1048576);
+    rvar = twb(n, t, W_RVAR, 1048576);
+    let s8 = srtt / 8;
+    let mut d = 0;
+    if mm >= s8 {
+      d = mm - s8;
+      srtt = srtt + d;
+    } else {
+      d = s8 - mm;
+      srtt = srtt - d;
+    }
+    let v4 = rvar / 4;
+    if d >= v4 {
+      rvar = rvar + (d - v4);
+    } else {
+      rvar = rvar - (v4 - d);
+    }
+  }
+  tset(&mut n, t, W_RTTOK, 1);
+  tset(&mut n, t, W_SRTT, srtt);
+  tset(&mut n, t, W_RVAR, rvar);
+  let mut rto = srtt / 8 + rvar;
+  if rto < TCP_RTO_MIN {
+    rto = TCP_RTO_MIN;
+  }
+  if rto > TCP_RTO_MAX {
+    rto = TCP_RTO_MAX;
+  }
+  tset(&mut n, t, W_RTO, rto);
+}
+
+/// A duplicate ACK: the peer got a segment past a gap. Three of them (or
+/// three segments' worth of SACKed data) show a segment lost: the window
+/// halves, and recovery starts with the lost segment sent again at once.
+fn tcp_cc_dup(n: &mut Net, t: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let mss = tcp_mss_of(n, t);
+  let dups = twb(n, t, W_DUPS, 1000) + 1;
+  tset(&mut n, t, W_DUPS, dups);
+  if tw(n, t, W_INREC) == 1 || tw(n, t, W_NOFR) == 1 || is_local(n, tw(n, t, W_RIP)) {
+    return;
+  }
+  if dups >= TCP_DUPTHRESH || (tw(n, t, W_SACK) == 1 && sb_sacked(n, t) >= 3 * mss) {
+    let flight = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA));
+    let mut ss = flight / 2;
+    if ss < 2 * mss {
+      ss = 2 * mss;
+    }
+    if ss >= TCP_CWND_MAX {
+      ss = TCP_CWND_MAX - 1;
+    }
+    tset(&mut n, t, W_SSTH, ss);
+    tset(&mut n, t, W_CWND, ss);
+    tset(&mut n, t, W_INREC, 1);
+    tset(&mut n, t, W_REC, tw(n, t, W_MAX));
+    tset(&mut n, t, W_RTXNXT, 0);
+    tset(&mut n, t, W_RTXOUT, 0);
+    tset(&mut n, t, W_RTTAT, 0);
+    let sent = tcp_rtx(&mut n, t, mss, ss, true);
+  }
+}
+
+/// The ACK `ackn` moved W_UNA on by k bytes, from una_old: times the round
+/// trip, grows the window (slow start below the threshold, congestion
+/// avoidance above it), and carries recovery on or ends it.
+fn tcp_cc_advance(n: &mut Net, t: u64, una_old: u64, k: u64)
+  requires net_ok(n) && t < TCBS && una_old < SEQ_MOD && k < SEQ_MOD
+  ensures net_ok(n)
+{
+  let mss = tcp_mss_of(n, t);
+  let at = tw(n, t, W_RTTAT);
+  if at != 0 && k >= seq_diff(tw(n, t, W_RTTSEQ), una_old) {
+    if n.now >= at - 1 {
+      tcp_rtt(&mut n, t, n.now - (at - 1));
+    }
+    tset(&mut n, t, W_RTTAT, 0);
+  }
+  sb_shift(&mut n, t, k);
+  tset(&mut n, t, W_DUPS, 0);
+  let cw = cwnd_of(n, t);
+  let ss = twb(n, t, W_SSTH, TCP_CWND_MAX);
+  let past = k >= seq_diff(tw(n, t, W_REC), una_old);
+  if tw(n, t, W_INREC) == 1 {
+    if past {
+      tset(&mut n, t, W_INREC, 0);
+      tset(&mut n, t, W_CWND, ss);
+      sb_clear(&mut n, t);
+      tset(&mut n, t, W_RTXNXT, 0);
+      tset(&mut n, t, W_RTXOUT, 0);
+    } else if tw(n, t, W_SACK) != 1 {
+      // NewReno: a partial ACK shows the next segment lost too.
+      tset(&mut n, t, W_RTXNXT, 0);
+      let sent = tcp_rtx(&mut n, t, mss, cw, true);
+    }
+  } else {
+    if tw(n, t, W_NOFR) == 1 && past {
+      tset(&mut n, t, W_NOFR, 0);
+    }
+    let mut nc = cw;
+    if cw < ss {
+      let mut inc = k;
+      if inc > 2 * mss {
+        inc = 2 * mss;
+      }
+      nc = cw + inc;
+      if nc > ss {
+        nc = ss;
+      }
+    } else {
+      let mut b = k;
+      if b > 2 * mss {
+        b = 2 * mss;
+      }
+      let mut inc = b * mss / (cw + 1);
+      if inc == 0 {
+        inc = 1;
+      }
+      nc = cw + inc;
+    }
+    if nc > TCP_RING {
+      nc = TCP_RING;
+    }
+    if nc < mss {
+      nc = mss;
+    }
+    tset(&mut n, t, W_CWND, nc);
+  }
+}
+
+/// The resend timer ran out: the window falls to one segment and slow
+/// start begins again, the threshold at half of what was out; what the peer
+/// reported holding is forgotten, and no fast retransmit starts until
+/// everything now out is acknowledged (RFC 6582).
+fn tcp_cc_timeout(n: &mut Net, t: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let mss = tcp_mss_of(n, t);
+  let flight = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA));
+  let mut ss = flight / 2;
+  if ss < 2 * mss {
+    ss = 2 * mss;
+  }
+  if ss >= TCP_CWND_MAX {
+    ss = TCP_CWND_MAX - 1;
+  }
+  tset(&mut n, t, W_SSTH, ss);
+  tset(&mut n, t, W_CWND, mss);
+  tset(&mut n, t, W_INREC, 0);
+  tset(&mut n, t, W_NOFR, 1);
+  tset(&mut n, t, W_REC, tw(n, t, W_MAX));
+  tset(&mut n, t, W_DUPS, 0);
+  tset(&mut n, t, W_RTXNXT, 0);
+  tset(&mut n, t, W_RTXOUT, 0);
+  tset(&mut n, t, W_RTTAT, 0);
+  sb_clear(&mut n, t);
+}
+
+/// Arms the resend timer if it is off: the timeout (TCP_RTO until a round
+/// trip is measured), doubled for each resend so far, up to 64 times longer
+/// and no longer than TCP_RTO_MAX.
 fn tcp_arm(n: &mut Net, t: u64)
   requires net_ok(n) && t < TCBS
   ensures net_ok(n)
 {
   let tries = tw(n, t, W_TRIES);
-  let mut wait = TCP_RTO * 64;
-  if tries == 0 {
-    wait = TCP_RTO;
-  } else if tries == 1 {
-    wait = TCP_RTO * 2;
-  } else if tries == 2 {
-    wait = TCP_RTO * 4;
-  } else if tries == 3 {
-    wait = TCP_RTO * 8;
-  } else if tries == 4 {
-    wait = TCP_RTO * 16;
-  } else if tries == 5 {
-    wait = TCP_RTO * 32;
+  let mut base = twb(n, t, W_RTO, TCP_RTO_MAX + 1);
+  if base < TCP_RTO_MIN {
+    base = TCP_RTO;
   }
-  if tw(n, t, W_TIMER) == 0 && n.now < 18446744073709551615 - TCP_RTO * 64 {
+  let mut wait = base * 64;
+  if tries == 0 {
+    wait = base;
+  } else if tries == 1 {
+    wait = base * 2;
+  } else if tries == 2 {
+    wait = base * 4;
+  } else if tries == 3 {
+    wait = base * 8;
+  } else if tries == 4 {
+    wait = base * 16;
+  } else if tries == 5 {
+    wait = base * 32;
+  }
+  if wait > TCP_RTO_MAX {
+    wait = TCP_RTO_MAX;
+  }
+  if tw(n, t, W_TIMER) == 0 && n.now < 18446744073709551615 - TCP_RTO_MAX {
     tset(&mut n, t, W_TIMER, n.now + wait);
   }
 }
@@ -306,18 +810,27 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
   if off > txlen {
     off = txlen;                      // our FIN is out: no more data
   }
-  let mut mss = tw(n, t, W_MSS);
-  if mss == 0 || mss > mss_for(n, rip) {
-    mss = mss_for(n, rip);
-  }
+  let mss = tcp_mss_of(n, t);
+  let local = is_local(n, rip);
+  let cwnd = cwnd_of(n, t);
+  let rec = tw(n, t, W_INREC) == 1 && !local;
   let mut sent = false;
   let mut segs = 0;
+  if rec {
+    segs = tcp_rtx(&mut n, t, mss, cwnd, false);
+    if segs > 0 {
+      sent = true;
+    }
+  }
   // MSG_MORE holds back a segment shorter than mss until the next send
   // without it, the FIN, or the cork tick. To this machine, a full
   // loopback queue stops the burst rather than dropping what follows:
-  // the ACKs for what is queued send the rest.
+  // the ACKs for what is queued send the rest. To another machine, the
+  // congestion window limits what is out: a segment goes only if the
+  // window has room for all of it (in recovery, the pipe is what counts).
   let hold = tw(n, t, W_CORK) != 0 && tw(n, t, W_FIN) == 0;
-  while off < txlen && off < wnd && segs < TCP_BURST && tw(n, t, W_FIN) != 2 && !(hold && txlen - off < mss)
+  let mut go = true;
+  while go && off < txlen && off < wnd && segs < TCP_BURST && tw(n, t, W_FIN) != 2 && !(hold && txlen - off < mss)
     && !lo_full(n, rip)
     invariant off <= txlen && txlen <= TCP_RING && una < SEQ_MOD && net_ok(n)
   {
@@ -328,11 +841,31 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
     if l > wnd - off {
       l = wnd - off;
     }
-    tcp_emit(&mut n, t, TF_ACK + TF_PSH, seq_add(una, off), off, l);
-    off = off + l;
-    tnxt(&mut n, t, seq_add(una, off));
-    sent = true;
-    segs = segs + 1;
+    let mut room = TCP_CWND_MAX;
+    if !local {
+      let mut used = off;
+      if rec {
+        used = tcp_pipe(n, t, mss);
+      }
+      room = 0;
+      if cwnd > used {
+        room = cwnd - used;
+      }
+    }
+    if room < l {
+      go = false;
+    } else {
+      // The first new segment out is timed (Karn: a segment sent again never is).
+      if off >= seq_diff(tw(n, t, W_MAX), una) && tw(n, t, W_RTTAT) == 0 && !rec && n.now < 18446744073709551615 - 8 {
+        tset(&mut n, t, W_RTTSEQ, seq_add(una, off + l));
+        tset(&mut n, t, W_RTTAT, n.now + 1);
+      }
+      tcp_emit(&mut n, t, TF_ACK + TF_PSH, seq_add(una, off), off, l);
+      off = off + l;
+      tnxt(&mut n, t, seq_add(una, off));
+      sent = true;
+      segs = segs + 1;
+    }
   }
   if tw(n, t, W_FIN) == 1 && off == txlen {
     tcp_emit(&mut n, t, TF_FIN + TF_ACK, seq_add(una, txlen), 0, 0);
@@ -557,6 +1090,7 @@ fn tcp_acked(n: &mut Net, t: u64, ackn: u64)
   tset(&mut n, t, W_TXLEN, txlen - drop);
   rb_trim(&mut n.rb, tx_ring(t), head, drop, nhead, txlen - drop);
   tset(&mut n, t, W_UNA, ackn);
+  tcp_cc_advance(&mut n, t, una, k);
   if ahead {
     tset(&mut n, t, W_NXT, ackn);
   }
@@ -610,6 +1144,65 @@ fn tcp_opt(n: &Net, hl: u64, kind: u64, len: u64) -> u64
     }
   }
   return 0;
+}
+
+/// Where in the TCP header of the frame being handled (hl: its length) an
+/// option of this kind starts, whatever its length, or 0 if it has none.
+fn tcp_opt_kind(n: &Net, hl: u64, kind: u64) -> u64
+  requires net_ok(n) && 20 <= hl && 34 + hl <= FRAME_MAX
+  ensures result == 0 || (54 <= result && result + 2 <= 34 + hl)
+{
+  let end = 34 + hl;
+  let mut o = 54;
+  while o < end
+    invariant 54 <= o
+  {
+    let k = cast[u64](bget(n.pkt, o));
+    if k == 0 || o + 1 >= end {
+      return 0;
+    } else if k == 1 {
+      o = o + 1;
+    } else {
+      let l = cast[u64](bget(n.pkt, o + 1));
+      if l < 2 || o + l > end {
+        return 0;
+      }
+      if k == kind {
+        return o;
+      }
+      o = o + l;
+    }
+  }
+  return 0;
+}
+
+/// Takes the SACK blocks of the segment being handled into the scoreboard.
+/// True if they showed the peer holding bytes that were not known to be.
+fn tcp_sack_in(n: &mut Net, t: u64, hl: u64) -> bool
+  requires net_ok(n) && t < TCBS && 20 <= hl && 34 + hl <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if tw(n, t, W_SACK) != 1 {
+    return false;
+  }
+  let o = tcp_opt_kind(n, hl, 5);
+  if o == 0 {
+    return false;
+  }
+  let end = 34 + hl;
+  let l = cast[u64](bget(n.pkt, o + 1));
+  let before = sb_sacked(n, t) + twb(n, t, W_HISACK, SEQ_MOD);
+  let una = twb(n, t, W_UNA, SEQ_MOD);
+  let mut b = 0;
+  while b < 4 && o + 10 + 8 * b <= end && 10 + 8 * b <= l
+    invariant b <= 4 && net_ok(n) && una < SEQ_MOD && o + 2 <= end
+  {
+    let left = be32(n.pkt, o + 2 + 8 * b);
+    let right = be32(n.pkt, o + 6 + 8 * b);
+    sb_add(&mut n, t, seq_diff(left, una), seq_diff(right, una));
+    b = b + 1;
+  }
+  return sb_sacked(n, t) + twb(n, t, W_HISACK, SEQ_MOD) > before;
 }
 
 /// The largest segment a SYN says its sender takes: its MSS option, or
@@ -747,6 +1340,7 @@ fn tcp_in(n: &mut Net, total: u64)
       tset(&mut n, t, W_TIMER, 0);
       tset(&mut n, t, W_TRIES, 0);
       tset(&mut n, t, W_STATE, T_ESTABLISHED);
+      tcp_cc_init(&mut n, t);
       tcp_output(&mut n, t, true);
     }
     return;
@@ -765,12 +1359,18 @@ fn tcp_in(n: &mut Net, total: u64)
       tset(&mut n, t, W_TIMER, 0);
       tset(&mut n, t, W_TRIES, 0);
       tset(&mut n, t, W_STATE, T_ESTABLISHED);
+      tcp_cc_init(&mut n, t);
     } else {
       // A shut window that reopens without taking our probe: the peer
       // had no room for the probe byte and dropped it. Go back to it, or
       // the data sent after it sits in the peer behind a hole until the
       // resend timer, which by then has backed off for seconds.
       let wnd = tcp_wnd_in(n, t, false);
+      let newsack = tcp_sack_in(&mut n, t, hl);
+      if ackn == tw(n, t, W_UNA) && dlen == 0 && !is_fin && seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA)) > 0
+        && (wnd == tw(n, t, W_WND) || newsack) {
+        tcp_cc_dup(&mut n, t);
+      }
       if tw(n, t, W_WND) <= 1 && wnd > 1 && ackn == tw(n, t, W_UNA) && tw(n, t, W_NXT) != ackn {
         tset(&mut n, t, W_NXT, ackn);
         if tw(n, t, W_FIN) == 2 {
@@ -928,7 +1528,12 @@ fn tcp_tick(n: &mut Net, now: u64)
           tcp_emit(&mut n, t, TF_SYN + TF_ACK, iss, 0, 0);
         } else {
           // Go back: resend from the oldest unacknowledged byte. A FIN
-          // that was out goes again after the data.
+          // that was out goes again after the data. A timeout is a loss
+          // too: the congestion window falls to one segment (a peer that
+          // keeps its window shut is not congestion).
+          if !persist {
+            tcp_cc_timeout(&mut n, t);
+          }
           tset(&mut n, t, W_NXT, tw(n, t, W_UNA));
           if tw(n, t, W_FIN) == 2 {
             tset(&mut n, t, W_FIN, 1);
