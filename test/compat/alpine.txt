@@ -196,6 +196,11 @@ hi
 there
 68690a74686572650a
 
+== gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL gpg 2>/dev/null; bb mkdir -p /disk/a/root/gh; bb chmod 700 /disk/a/root/gh; bb printf 'hello gpg\n' > /disk/a/root/m.txt; bb chroot /disk/a /bin/sh -c 'export GNUPGHOME=/root/gh; gpg --batch --pinentry-mode loopback --passphrase s3 --symmetric -o /root/m.gpg /root/m.txt 2>/dev/null; gpg --batch --pinentry-mode loopback --passphrase s3 -d /root/m.gpg 2>/dev/null; gpg --version | head -n 1 | cut -c1-12'; bb chroot /disk/a /sbin/apk del -q --no-progress gpg 2>/dev/null
+hello gpg
+gpg (GnuPG) 
+
 == nvim: a script run without a terminal
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one", "two"])' -c 'w! /root/n.txt' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/n.txt; bb chroot /disk/a /usr/bin/nvim --version | bb head -n 1
 one
