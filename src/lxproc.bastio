@@ -301,7 +301,8 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   if src.file {
     hold = vfs_hold(&mut k.fs, src.f);
   }
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, isrc, args, alen, total, hold < HOLD_N);
+  let rn = layout_rnd(&mut k.rng, k.sys, k.procs, pid);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, rn, k.tsc, k.epoch, pid, src, isrc, args, alen, total, hold < HOLD_N);
   bfree(args);
   match sp {
     Space::Empty => {
@@ -320,7 +321,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   }
   hole_clear(&mut k, pid);                // a new window has no holes
   anon_clear(&mut k, pid);
-  lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
+  lazy_set(&mut k, pid, src, hold, rn);   // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
