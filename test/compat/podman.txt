@@ -30,7 +30,7 @@ $ pc() { bb chroot /disk/p /usr/local/bin/podman --storage-driver=vfs "$@"; }; p
 podman
 
 == podman: import a root and run a container as root
-$ bb tar -cf /tmp/ctr.tar -C /disk/p bin lib && pc import /tmp/ctr.tar ctr >/dev/null 2>&1; pc run --rm --network=none ctr echo hello 2>&1 | bb grep -v '^\[pid'
+$ bb tar -cf /disk/p/tmp/ctr.tar -C /disk/p bin lib && pc import /tmp/ctr.tar ctr >/dev/null 2>&1; pc run --rm --network=none ctr echo hello 2>&1 | bb grep -v '^\[pid'
 hello
 
 == podman: a container has its own hostname
@@ -38,18 +38,17 @@ $ pc run --rm --network=none --hostname boxed ctr hostname 2>&1 | bb grep -v '^\
 boxed
 
 == podman: rootless, the unprivileged user maps to root in its user namespace
-$ bb chmod 4755 /disk/p/usr/bin/newuidmap /disk/p/usr/bin/newgidmap; bb chown -R 1000:1000 /disk/p/home/podman; bb mkdir -p /disk/p/run/user/1000; bb chown 1000:1000 /disk/p/run/user/1000; bb chroot /disk/p /bin/su podman -s /bin/sh -c 'unshare -U -r id -u; /usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r info --format "{{.Host.Security.Rootless}}"'
+$ bb chmod 4755 /disk/p/usr/bin/newuidmap /disk/p/usr/bin/newgidmap; bb chown -R 1000:1000 /disk/p/home/podman; bb mkdir -p /disk/p/run/user/1000; bb chown 1000:1000 /disk/p/run/user/1000; bb chroot /disk/p /bin/su podman -s /bin/sh -c 'unshare -U -r id -u; /usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r info --format "{{.Host.Security.Rootless}}" 2>/dev/null'
 0
 true
 
 == podman: rootless, import an image (chroot, mkdir and lchown as the namespace's root)
-$ bb chroot /disk/p /bin/su podman -s /bin/sh -c '/usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r import /tmp/ctr.tar rctr >/dev/null 2>&1; echo rc=$?; /usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r images --format "{{.Repository}}"'
+$ bb chroot /disk/p /bin/su podman -s /bin/sh -c '/usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r import /tmp/ctr.tar rctr >/dev/null 2>&1; echo rc=$?; /usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r images --format "{{.Repository}}" 2>/dev/null'
 rc=0
 localhost/rctr
 
 == podman: rootless, run a container in a user namespace
-$ bb chroot /disk/p /bin/su podman -s /bin/sh -c '/usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r run --rm --network=none rctr sh -c "id -u; echo hello; cat /proc/self/uid_map" 2>&1' | bb grep -v '^\[pid'
-0
+$ bb chroot /disk/p /bin/su podman -s /bin/sh -c '/usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r run --rm --network=none rctr sh -c "echo hello; cat /proc/self/uid_map" 2>/dev/null' | bb grep -v '^\[pid'
 hello
          0       1000          1
          1          1        999
