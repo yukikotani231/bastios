@@ -83,6 +83,8 @@ fanotify04
 fanotify08
 fanotify09
 fanotify11
+inotify09
+inotify11
 io_cancel01
 io_destroy02
 io_getevents01
@@ -415,7 +417,19 @@ ioctl_loop03
 ioctl_loop04
 ioctl_loop06
 ioctl_loop07
+ioctl_ns01
+ioctl_ns02
+ioctl_ns03
+ioctl_ns04
+ioctl_ns05
+ioctl_ns06
 ioctl_ns07
+ioctl_pidfd01
+ioctl_pidfd02
+ioctl_pidfd03
+ioctl_pidfd04
+ioctl_pidfd05
+ioctl_pidfd06
 ioprio_get01
 ioprio_set01
 ioprio_set02
@@ -962,6 +976,7 @@ timerfd02
 timerfd_create01
 timerfd_gettime01
 timerfd_settime01
+timerfd_settime02
 times01
 times03
 tkill01
