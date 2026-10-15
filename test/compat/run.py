@@ -680,6 +680,7 @@ def main():
     ap.add_argument("--registry-image", help="the layer list (JSON) of an image in the cache, which the web server serves as a registry for ocipull.sh")
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
+    ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -700,6 +701,7 @@ def main():
     alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
+    go = load_applets(os.path.join(HERE, "go.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
@@ -804,6 +806,12 @@ def main():
         disk = os.path.join(args.out, "node-run.img")
         shutil.copyfile(args.node_disk, disk)
         lanes.append((disk, [("node", "Node.js (V8)", applets_lane(node, 300))], "1G"))
+    if args.go_disk:
+        # The compiler and the linker are large static programs and the
+        # runtime maps address space freely; the cases write the disk.
+        disk = os.path.join(args.out, "go-run.img")
+        shutil.copyfile(args.go_disk, disk)
+        lanes.append((disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
     lanes = [l for l in lanes if l[1]]
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
@@ -820,7 +828,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
