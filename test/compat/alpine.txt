@@ -119,7 +119,7 @@ $ bb chroot /disk/a /bin/sh -c 'mkdir -p /root/s/d && echo hi > /root/s/d/f && r
 hi
 
 == sshd: a Dropbear server inside the Alpine root takes a key login
-$ bb mkdir -p /disk/a/usr/local/sbin /disk/a/root/.ssh /disk/a/etc/dropbear && bb cp /disk/dropbear /disk/dbclient /disk/a/usr/local/sbin/ && bb cp /disk/ssh_host_key /disk/a/etc/dropbear/dropbear_ed25519_host_key && bb cp /disk/ssh_id /disk/a/root/.ssh/id_dropbear && bb cp /disk/ssh_authorized_keys /disk/a/root/.ssh/authorized_keys && bb chmod 700 /disk/a/root/.ssh && bb chmod 600 /disk/a/root/.ssh/*; (bb chroot /disk/a /usr/local/sbin/dropbear -F -E -s -p 2222 -P /run/db.pid > /disk/a/tmp/db.log 2>&1 &); bb sleep 1; bb chroot /disk/a /usr/local/sbin/dbclient -y -y -i /root/.ssh/id_dropbear -p 2222 root@127.0.0.1 'echo logged in as $(id -u)' 2>/dev/null
+$ bb mkdir -p /disk/a/usr/local/sbin /disk/a/root/.ssh /disk/a/etc/dropbear && bb cp /disk/dropbear /disk/dbclient /disk/a/usr/local/sbin/ && bb cp /disk/ssh_host_key /disk/a/etc/dropbear/dropbear_ed25519_host_key && bb cp /disk/ssh_id /disk/a/root/.ssh/id_dropbear && bb cp /disk/ssh_authorized_keys /disk/a/root/.ssh/authorized_keys && bb chmod 700 /disk/a/root/.ssh && bb chmod 600 /disk/a/root/.ssh/*; (bb chroot /disk/a /usr/local/sbin/dropbear -F -s -p 2222 -P /run/db.pid > /disk/a/tmp/db.log 2>&1 &); bb sleep 1; bb chroot /disk/a /usr/local/sbin/dbclient -y -y -i /root/.ssh/id_dropbear -p 2222 root@127.0.0.1 'echo logged in as $(id -u)' 2>/dev/null
 logged in as 0
 
 == rsync over ssh: push a tree, with its modes, times and links

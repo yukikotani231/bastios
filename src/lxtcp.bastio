@@ -453,6 +453,20 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
   return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h));
 }
 
+/// SO_ERROR of a stream socket: ECONNREFUSED (111) for a connect that was
+/// started and then refused (reset before it was reported), which a
+/// nonblocking program reads after poll (libpq, say); else 0.
+fn tcp_sock_error(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= 111
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err == 0 && tk.mode == TM_CONN && tk.port == 0 && tk.t < TCBS && tcp_was_reset(k.nic, tk.t) {
+    return 111;
+  }
+  return 0;
+}
+
 /// The bytes a stream socket has received and not yet handed out (FIONREAD).
 fn tcp_waiting(k: &Kernel, pid: u64, fd: u64) -> u64
   requires kok(k) && pid < NPROC
