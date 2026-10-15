@@ -720,6 +720,18 @@ fn copy_to(src: &mut Frame, d: Dirty) -> Frame
   return frame_copy(d, src);
 }
 
+/// copy_to, and the copy is marked as one that may be written and run if
+/// `src` is (the copying fork keeps that right, see l2_protect).
+fn copy_to_marked(src: &mut Frame, m: &mut Mem, d: Dirty) -> Frame
+  requires mem_ok(m)
+  ensures mem_ok(m)
+{
+  let x = is_x_frame(m, src);
+  let f = frame_copy(d, src);
+  mark_x(&mut m, f, x);
+  return f;
+}
+
 /// clone_l2 below a level-1 table.
 fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
   requires mem_ok(m) && pt_level(src) == 1 && (cow ==> pt_leases(src) == 0)
@@ -777,8 +789,14 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
           ok = false;
         } else {
           let w = pt_writable(src, p);      // a read-only page stays read-only in both
-          let f = pt_borrow_frame(&mut src, p, copy_to, take_dirty(&mut m, b));
-          pt_put_frame(&mut l1, p, f, w);
+          let d = take_dirty(&mut m, b);
+          let f = pt_borrow_frame(&mut src, p, copy_to_marked, &mut m, d);
+          if is_x_frame(m, f) {
+            pt_put_frame(&mut l1, p, f, false);
+            pt_set_access(&mut l1, p, 2);
+          } else {
+            pt_put_frame(&mut l1, p, f, w);
+          }
           if !pt_accessible(src, p) {
             pt_set_access(&mut l1, p, 0);
           }

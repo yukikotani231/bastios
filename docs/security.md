@@ -152,9 +152,8 @@ What the page tables enforce for a user process, and what they do not.
   - A page that is both writable and executable (a program asking for
     `PROT_WRITE|PROT_EXEC`, the flat images of the built-in programs) is
     marked in the page bitmap (`XPAGE`, `src/pages.bastio`), because the
-    entry cannot be asked; fork and the copy a write makes keep it. A
-    copying fork (a multi-threaded parent) and `mremap` of such a page drop
-    the execute right.
+    entry cannot be asked; fork (copy-on-write or copying) and the copy a
+    write makes keep it. `mremap` of such a page drops the execute right.
   - A program's text is not made read-only (only the pages shared from the
     page cache are), and read-only data in shared pages can run code.
   - The AArch64 port and the native backends do not set the bit.
