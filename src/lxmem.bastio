@@ -1040,7 +1040,7 @@ fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
 // file stays open after close, and so its cached pages stay), and the file
 // offset of the first page.
 //
-// Not done: a mapping beyond MAP_N is never written back, and its file can
+// Not done: a mapping beyond MAP_N (64) is never written back, and its file can
 // be closed under it (it keeps its pages, but they leave the cache); a row
 // opened O_APPEND is not written back; the write-back at exit and
 // execve gives up on blocks the disk has not cached.

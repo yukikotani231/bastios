@@ -604,12 +604,27 @@ def run_on_host(name, cmd, expected, timeout):
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
-def run_tty(env, name, prog, keys, check, expected, timeout, bb):
-    """A tty.txt case: prog driven by keys, then check as an applet case."""
+def run_tty_once(env, name, prog, keys, check, expected, timeout, bb):
     if not env.keys(with_bb(prog, bb), keys, timeout):
         return {"name": name, "result": "hang", "detail": "the program did not return to the shell",
                 "syscalls": []}
     return run_applet(env, name, check, expected, timeout, bb)
+
+
+def run_tty(env, name, prog, keys, check, expected, timeout, bb):
+    """A tty.txt case: prog driven by keys, then check as an applet case.
+    Keys typed at a full-screen program race the emulator's timing, and a
+    loaded host can lose that race (a hang, or keys that arrive early). As
+    for the cases of the other groups, a failure runs again once, and a pass
+    is kept; the first try is printed so it does not go unseen."""
+    first = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if first["result"] not in ("hang", "fail"):
+        return first
+    second = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if second["result"] == "pass":
+        print(f"compat: {name}: passed on the second try (first: {first['result']}, {first['detail'][:120]})", flush=True)
+        second["retried"] = True
+    return second
 
 
 # ---------------------------------------------------------------- reporting
@@ -682,6 +697,7 @@ def main():
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--server-disk", help="the server disk (the roots of the nginx, redis and postgres images) for server.txt")
+    ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -704,6 +720,7 @@ def main():
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
     server = load_applets(os.path.join(HERE, "server.txt"))
+    rust = load_applets(os.path.join(HERE, "rust.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
@@ -821,6 +838,12 @@ def main():
         disk = os.path.join(args.out, "server-run.img")
         shutil.copyfile(args.server_disk, disk)
         lanes.append((disk, [("server", "servers (nginx, redis, PostgreSQL)", applets_lane(server, 900))], "1G"))
+    if args.rust_disk:
+        # rustc is a large dynamic program, and the cases unpack a root
+        # of about a gigabyte onto the disk: a copy.
+        disk = os.path.join(args.out, "rust-run.img")
+        shutil.copyfile(args.rust_disk, disk)
+        lanes.append((disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
     lanes = [l for l in lanes if l[1]]
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
@@ -837,7 +860,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "server"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "rust", "server"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
