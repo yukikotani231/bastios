@@ -35,6 +35,8 @@ const TCP_IW: u64 = 10;               // the initial congestion window, in segme
 const TCP_CWND_MAX: u64 = 1073741824;
 const TCP_DUPTHRESH: u64 = 3;         // duplicate ACKs that show a segment lost
 const TCP_REO_MAX: u64 = 64;
+const RXH_N: u64 = 4;                   // stretches of early data the receiver keeps
+const TCP_DELACK: u64 = 4;            // ticks an ACK of one segment may wait for a second (40 ms)
 const SB_N: u64 = 4;                  // stretches past a gap the sender keeps track of
 const TCP_TRIES: u64 = 8;             // unanswered resends before the connection is reset
 const TCP_LINGER: u64 = 200;          // ticks in TIME_WAIT
@@ -82,8 +84,7 @@ const W_PEERFIN: u64 = 15;            // 1 once the peer's FIN arrived
 const W_RESET: u64 = 16;              // 1 if the connection was reset or timed out
 const W_ISS: u64 = 17;                // our initial sequence number
 const W_MAX: u64 = 18;                // the furthest W_NXT has been (it goes back on a resend)
-const W_HLO: u64 = 19;                // data that came early, held in the receive buffer
-const W_HHI: u64 = 20;                // at [W_HLO, W_HHI); W_HHI == 0: none
+// 19 and 20 are free (they held the one stretch of early data).
 const W_MSS: u64 = 21;                // the largest segment the peer takes
 const W_CORK: u64 = 22;               // MSG_MORE: the tick a short segment goes anyway; 0: none held
 const W_TXHEAD: u64 = 23;             // where the byte at W_UNA is in the send ring
@@ -115,6 +116,11 @@ const W_PCWND: u64 = 55;              // the window and threshold before recover
 const W_PSSTH: u64 = 56;
 const W_RTXN: u64 = 57;               // bytes sent again in this recovery
 const W_DSACKN: u64 = 58;             // ... and bytes the peer said (D-SACK) it had received twice
+const W_HN: u64 = 60;                 // stretches of data that came early, held in the receive buffer ...
+const W_H0: u64 = 61;                 // ... at [start, end) bytes past W_RXHEAD, past W_RXLEN: 61..68
+const W_HLAST: u64 = 69;              // the one that grew last
+const W_DSSEQ: u64 = 70;              // a duplicate to report (D-SACK) in the next ACK: where it starts ...
+const W_DSLEN: u64 = 71;              // ... and its length; 0: none
 const W_UNDO: u64 = 59;               // 1 from the start of a recovery until it is known whether it was needed
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
@@ -210,6 +216,67 @@ fn mss_for(n: &Net, ip: u64) -> u64
   return TCP_MSS;
 }
 
+/// Start or end of stretch i of early data held in the receive buffer.
+fn hd_get(n: &Net, t: u64, i: u64, end: bool) -> u64
+  requires net_ok(n) && t < TCBS && i < RXH_N
+  ensures result <= TCP_RING
+{
+  if end {
+    return twb(n, t, W_H0 + 2 * i + 1, TCP_RING + 1);
+  }
+  return twb(n, t, W_H0 + 2 * i, TCP_RING + 1);
+}
+
+fn hd_put(n: &mut Net, t: u64, i: u64, lo: u64, hi: u64)
+  requires net_ok(n) && t < TCBS && i < RXH_N
+  ensures net_ok(n)
+{
+  tset(&mut n, t, W_H0 + 2 * i, lo);
+  tset(&mut n, t, W_H0 + 2 * i + 1, hi);
+}
+
+/// Stretches held now.
+fn hd_count(n: &Net, t: u64) -> u64
+  requires net_ok(n) && t < TCBS
+  ensures result <= RXH_N
+{
+  return twb(n, t, W_HN, RXH_N + 1);
+}
+
+/// The sequence number of the byte `pos` bytes into the receive ring.
+fn hd_seq(n: &Net, t: u64, pos: u64) -> u64
+  requires net_ok(n) && t < TCBS && pos <= TCP_RING
+  ensures result < SEQ_MOD
+{
+  let rxlen = twb(n, t, W_RXLEN, TCP_RING + 1);
+  let rcv = twb(n, t, W_RCV, SEQ_MOD);
+  if pos < rxlen {
+    return rcv;
+  }
+  return seq_add(rcv, pos - rxlen);
+}
+
+/// How many SACK blocks the next ACK carries: a D-SACK if one is owed,
+/// then the stretches held, as many as fit (`room` bytes of options left
+/// after the 4 of the header) and at most four.
+fn hd_blocks(n: &Net, t: u64, room: u64) -> u64
+  requires net_ok(n) && t < TCBS
+  ensures result <= 4
+{
+  let mut have = hd_count(n, t);
+  if tw(n, t, W_DSLEN) > 0 {
+    have = have + 1;
+  }
+  let mut k = room / 8;
+  if k > 4 {
+    k = 4;
+  }
+  if have < k {
+    return have;
+  }
+  return k;
+}
+
 /// Sends a segment on connection t: flags, sequence number `seq`, and `dl`
 /// bytes of the send ring from `off` bytes past W_UNA. A SYN carries our
 /// MSS, and our window scale and SACK-permitted when we open or the peer
@@ -232,9 +299,10 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
   let o_ws = syn && (opening || ws > 0);
   let o_sackok = syn && (opening || tw(n, t, W_SACK) == 1);
   let rxlen = twb(n, t, W_RXLEN, TCP_RING + 1);
-  let hlo = twb(n, t, W_HLO, TCP_RING + 1);
-  let hhi = twb(n, t, W_HHI, TCP_RING + 1);
-  let o_sack = !syn && tw(n, t, W_SACK) == 1 && hhi > hlo && hlo > rxlen && 72 + dl <= FRAME_MAX - 14;
+  let mut nb = 0;
+  if !syn && tw(n, t, W_SACK) == 1 && !is_local(n, rip) && 44 + dl + 8 <= FRAME_MAX - 14 {
+    nb = hd_blocks(n, t, FRAME_MAX - 14 - 44 - dl);
+  }
   let mut hl = 20;
   if syn {
     hl = 24;                          // the MSS
@@ -244,8 +312,8 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     if o_sackok {
       hl = hl + 4;
     }
-  } else if o_sack {
-    hl = 32;
+  } else if nb > 0 {
+    hl = 24 + 8 * nb;
   }
   let tlen = hl + dl;
   if 20 + tlen > NET_BUF - 14 || (20 + tlen > FRAME_MAX - 14 && !is_local(n, rip)) {
@@ -281,12 +349,37 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     if o_sackok {
       put32(&mut n.out, o, 0x01010402);                    // NOP, NOP, SACK-permitted
     }
-  } else if o_sack {
-    // One block: the stretch held past the gap, as sequence numbers.
-    let rcv = twb(n, t, W_RCV, SEQ_MOD);
-    put32(&mut n.out, 54, 0x0101050A);                      // NOP, NOP, SACK of one block
-    put32(&mut n.out, 58, seq_add(rcv, hlo - rxlen));
-    put32(&mut n.out, 62, seq_add(rcv, hhi - rxlen));
+  } else if nb > 0 {
+    // SACK blocks, as sequence numbers: a duplicate first if one is owed
+    // (RFC 2883), then the stretch that grew last, then the others.
+    put32(&mut n.out, 54, 0x01010500 + 2 + 8 * nb);         // NOP, NOP, SACK, its length
+    let cnt = hd_count(n, t);
+    let last = twb(n, t, W_HLAST, RXH_N);
+    let mut k = 0;
+    let dsl = twb(n, t, W_DSLEN, 65536);
+    if dsl > 0 && k < nb {
+      let ds = twb(n, t, W_DSSEQ, SEQ_MOD);
+      put32(&mut n.out, 58 + 8 * k, ds);
+      put32(&mut n.out, 62 + 8 * k, seq_add(ds, dsl));
+      k = k + 1;
+      tset(&mut n, t, W_DSLEN, 0);
+    }
+    if last < cnt && k < nb {
+      put32(&mut n.out, 58 + 8 * k, hd_seq(n, t, hd_get(n, t, last, false)));
+      put32(&mut n.out, 62 + 8 * k, hd_seq(n, t, hd_get(n, t, last, true)));
+      k = k + 1;
+    }
+    let mut i = 0;
+    while i < cnt && k < nb
+      invariant i <= cnt && cnt <= RXH_N && k <= nb && nb <= 4 && net_ok(n)
+    {
+      if i != last {
+        put32(&mut n.out, 58 + 8 * k, hd_seq(n, t, hd_get(n, t, i, false)));
+        put32(&mut n.out, 62 + 8 * k, hd_seq(n, t, hd_get(n, t, i, true)));
+        k = k + 1;
+      }
+      i = i + 1;
+    }
   }
   let head = twb(n, t, W_TXHEAD, TCP_RING);
   rb_get(&mut n.rb, tx_ring(t), (head + off) % TCP_RING, &mut n.out, 34 + hl, dl);
@@ -295,6 +388,8 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
   if !is_local(n, rip) {
     put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, rip), rip, IP_TCP, tlen));
   }
+  tset(&mut n, t, W_DACK, 0);         // every segment carries our ACK
+  tset(&mut n, t, W_DSEG, 0);
   send_via(&mut n, next_hop(n, rip), 34 + tlen);
 }
 
@@ -1148,6 +1243,7 @@ fn tcb_close(n: &mut Net, t: u64, reset: bool)
 {
   tset(&mut n, t, W_STATE, T_CLOSED);
   tset(&mut n, t, W_TIMER, 0);
+  tset(&mut n, t, W_DACK, 0);
   if reset {
     tset(&mut n, t, W_RESET, 1);
   }
@@ -1492,31 +1588,75 @@ fn tcp_in(n: &mut Net, total: u64)
   let rcv = twb(n, t, W_RCV, SEQ_MOD);
   let taking = tw(n, t, W_PEERFIN) == 0
     && (st2 == T_ESTABLISHED || st2 == T_FIN_WAIT_1 || st2 == T_FIN_WAIT_2);
-  if taking && seq != rcv && dlen > 0 {
-    tcp_hold(&mut n, t, seq_diff(seq, rcv), doff, dlen);
+  // A segment that starts before the next byte we expect has some or all
+  // of its data already: the part we lack is taken, and the repeat is
+  // reported in the next ACK (D-SACK, RFC 2883) so the sender can tell a
+  // needless resend from a lost one.
+  let mut dseq = seq;
+  let mut ddoff = doff;
+  let mut ddlen = dlen;
+  let mut dup = false;
+  let mut stale = false;
+  let behind = seq_diff(rcv, seq);
+  if taking && dlen > 0 && behind > 0 && behind < SEQ_MOD / 2 {
+    dup = true;
+    if behind < dlen {
+      tset(&mut n, t, W_DSSEQ, seq);
+      tset(&mut n, t, W_DSLEN, behind);
+      dseq = rcv;
+      ddoff = doff + behind;
+      ddlen = dlen - behind;
+    } else {
+      tset(&mut n, t, W_DSSEQ, seq);
+      tset(&mut n, t, W_DSLEN, dlen);
+      stale = true;
+      ddlen = 0;
+      if behind == dlen {
+        dseq = rcv;
+        stale = false;
+      }
+    }
   }
-  if taking && seq == rcv {
+  let held_before = hd_count(n, t);
+  if taking && !stale && dseq != rcv && ddlen > 0 {
+    tcp_hold(&mut n, t, seq_diff(dseq, rcv), ddoff, ddlen);
+  }
+  if taking && !stale && dseq == rcv {
     let rxlen = twb(n, t, W_RXLEN, TCP_RING + 1);
-    let mut take = dlen;
+    let mut take = ddlen;
     if take > TCP_RING - rxlen {
       take = TCP_RING - rxlen;        // beyond our window: the peer resends
     }
     // Fewer if the ring found no page for the rest: dropped, and resent.
     let head = twb(n, t, W_RXHEAD, TCP_RING);
-    take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.pkt, doff, take);
+    take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.pkt, ddoff, take);
     let mut got = rxlen + take;
-    let hlo = twb(n, t, W_HLO, TCP_RING + 1);
-    let hhi = twb(n, t, W_HHI, TCP_RING + 1);
-    if hhi > 0 && got >= hlo {
-      if hhi > got {
-        got = hhi;                    // the gap is filled: what was held follows
+    // A gap that is filled: the stretches it reached follow (they are
+    // apart from each other, so one pass finds them all).
+    let cnt = hd_count(n, t);
+    let mut w = 0;
+    let mut i = 0;
+    while i < cnt
+      invariant i <= cnt && cnt <= RXH_N && w <= i && rxlen + take <= got && got <= TCP_RING && net_ok(n)
+    {
+      let a = hd_get(n, t, i, false);
+      let b = hd_get(n, t, i, true);
+      if a <= got {
+        if b > got {
+          got = b;
+        }
+      } else {
+        hd_put(&mut n, t, w, a, b);
+        w = w + 1;
       }
-      tset(&mut n, t, W_HLO, 0);
-      tset(&mut n, t, W_HHI, 0);
+      i = i + 1;
+    }
+    if w != cnt {
+      tset(&mut n, t, W_HN, w);
     }
     tset(&mut n, t, W_RXLEN, got);
     let mut r = seq_add(rcv, got - rxlen);
-    if is_fin && take == dlen && got == rxlen + take {
+    if is_fin && take == ddlen && got == rxlen + take {
       r = seq_add(r, 1);
       tset(&mut n, t, W_PEERFIN, 1);
       if st2 == T_ESTABLISHED {
@@ -1533,13 +1673,29 @@ fn tcp_in(n: &mut Net, total: u64)
     }
     tset(&mut n, t, W_RCV, r);
   }
+  // An ACK of one full-sized segment in order waits up to 40 ms for a
+  // second (RFC 1122 4.2.3.2: no more than every second segment); anything
+  // that shows a loss or reordering, a short segment (someone waiting for
+  // the answer), a FIN, a repeat, or a connection to this machine is
+  // acknowledged at once.
+  if need_ack && !dup && !is_fin && taking && dseq == rcv && ddlen * 2 >= tcp_mss_of(n, t) && held_before == 0
+    && hd_count(n, t) == 0 && st2 == T_ESTABLISHED && !is_local(n, tw(n, t, W_RIP)) {
+    let owed = twb(n, t, W_DSEG, 1000) + 1;
+    if owed < 2 {
+      need_ack = false;
+      tset(&mut n, t, W_DSEG, owed);
+      if tw(n, t, W_DACK) == 0 && n.now < 18446744073709551615 - TCP_DELACK {
+        tset(&mut n, t, W_DACK, n.now + TCP_DELACK);
+      }
+    }
+  }
   tcp_output(&mut n, t, need_ack);
 }
 
-/// Data that came `ahead` bytes before the next byte we expect: held in
-/// the receive buffer at its place if it is within our window and touches
-/// the stretch already held (or none is). Anything else is dropped, and
-/// the peer sends it again.
+/// Data that came `ahead` bytes past the next byte we expect: held in the
+/// receive buffer at its place if it is within our window, joining the
+/// stretches it touches, or as a new stretch if one of the RXH_N is free.
+/// Anything else is dropped, and the peer sends it again.
 fn tcp_hold(n: &mut Net, t: u64, ahead: u64, doff: u64, dl: u64)
   requires net_ok(n) && t < TCBS && doff + dl <= NET_BUF
   ensures net_ok(n)
@@ -1553,30 +1709,54 @@ fn tcp_hold(n: &mut Net, t: u64, ahead: u64, doff: u64, dl: u64)
   if hi > TCP_RING {
     hi = TCP_RING;
   }
-  let hlo = twb(n, t, W_HLO, TCP_RING + 1);
-  let hhi = twb(n, t, W_HHI, TCP_RING + 1);
-  if hhi > 0 && (hi < hlo || lo > hhi) {
-    return;                           // a second stretch
+  let cnt = hd_count(n, t);
+  let mut touches = false;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= RXH_N
+  {
+    if lo <= hd_get(n, t, i, true) && hd_get(n, t, i, false) <= hi {
+      touches = true;
+    }
+    i = i + 1;
   }
-  // The ring may find pages for only part of it: hold that part, if it
-  // still touches what is held.
+  if !touches && cnt >= RXH_N {
+    return;                           // no room to keep another stretch
+  }
+  // The ring may find pages for only part of it: hold that part.
   let head = twb(n, t, W_RXHEAD, TCP_RING);
   let got = rb_put(&mut n.rb, rx_ring(t), (head + lo) % TCP_RING, n.pkt, doff, hi - lo);
-  if got == 0 || (hhi > 0 && lo + got < hlo) {
+  if got == 0 {
     return;
   }
   let mut nlo = lo;
   let mut nhi = lo + got;
-  if hhi > 0 {
-    if hlo < nlo {
-      nlo = hlo;
+  let mut w = 0;
+  i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= RXH_N && w <= i && nlo <= nhi && nhi <= TCP_RING && net_ok(n)
+  {
+    let a = hd_get(n, t, i, false);
+    let b = hd_get(n, t, i, true);
+    if nlo <= b && a <= nhi {
+      if a < nlo {
+        nlo = a;
+      }
+      if b > nhi {
+        nhi = b;
+      }
+    } else {
+      hd_put(&mut n, t, w, a, b);
+      w = w + 1;
     }
-    if hhi > nhi {
-      nhi = hhi;
-    }
+    i = i + 1;
   }
-  tset(&mut n, t, W_HLO, nlo);
-  tset(&mut n, t, W_HHI, nhi);
+  if w < RXH_N {
+    hd_put(&mut n, t, w, nlo, nhi);
+    tset(&mut n, t, W_HLAST, w);
+    w = w + 1;
+  }
+  tset(&mut n, t, W_HN, w);
 }
 
 // ---------------------------------------------------------------- timers
@@ -1598,6 +1778,11 @@ fn tcp_tick(n: &mut Net, now: u64)
     if tw(n, t, W_HELD) == 0 && (tw(n, t, W_STATE) == T_CLOSED || tw(n, t, W_STATE) == T_TIME_WAIT) {
       rb_clear(&mut n.rb, rx_ring(t));
       rb_clear(&mut n.rb, tx_ring(t));
+    }
+    let dd = tw(n, t, W_DACK);
+    if dd != 0 && now >= dd {
+      tset(&mut n, t, W_DACK, 0);
+      tcp_output(&mut n, t, true);
     }
     let cork = tw(n, t, W_CORK);
     if cork != 0 && now >= cork {
@@ -1666,7 +1851,7 @@ fn nic_timers_idle(c: &Nic) -> bool
       while t < TCBS
         invariant t <= TCBS && net_ok(n)
       {
-        if tw(n, t, W_TIMER) != 0 || tw(n, t, W_CORK) != 0 {
+        if tw(n, t, W_TIMER) != 0 || tw(n, t, W_CORK) != 0 || tw(n, t, W_DACK) != 0 {
           return false;
         }
         t = t + 1;
@@ -1877,19 +2062,29 @@ fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
   let nhead = (head + k) % TCP_RING;
   tset(&mut n, t, W_RXHEAD, nhead);
   tset(&mut n, t, W_RXLEN, rxlen - k);
-  let hhi = twb(n, t, W_HHI, TCP_RING + 1);
   let mut live = rxlen - k;
-  if hhi > 0 {
-    let hlo = twb(n, t, W_HLO, TCP_RING + 1);
-    if hlo > k && hhi > hlo {
-      tset(&mut n, t, W_HLO, hlo - k);
-      tset(&mut n, t, W_HHI, hhi - k);
-      live = hhi - k;
-    } else {
-      tset(&mut n, t, W_HLO, 0);      // never: held data is past rxlen
-      tset(&mut n, t, W_HHI, 0);
+  let cnt = hd_count(n, t);
+  let mut w = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= RXH_N && w <= i && live <= TCP_RING && net_ok(n)
+  {
+    let a = hd_get(n, t, i, false);
+    let b = hd_get(n, t, i, true);
+    if b > k && b > a {
+      let mut na = 0;
+      if a > k {
+        na = a - k;
+      }
+      hd_put(&mut n, t, w, na, b - k);
+      if b - k > live {
+        live = b - k;
+      }
+      w = w + 1;
     }
+    i = i + 1;
   }
+  tset(&mut n, t, W_HN, w);
   rb_trim(&mut n.rb, rx_ring(t), head, k, nhead, live);
   // If the window had closed below a segment, tell the peer it reopened.
   if k > 0 && TCP_RING - rxlen < TCP_MSS {

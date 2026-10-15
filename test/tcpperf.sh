@@ -32,45 +32,15 @@ kernel, card, only, nbytes = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv
 sys.path.insert(0, "test")
 from netwire import *
 
-link = Link()
-net = Net(link)
-qemu = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", "256M", "-smp", "2",
-     "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-     "-serial", "stdio", "-monitor", "none",
-     "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
-                f"remote.type=inet,remote.host=127.0.0.1,remote.port={link.port}",
-     "-device", f"{card},netdev=n0"],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
-out = b""
+g = Guest(kernel, card)
+link, net = g.link, g.net
 fails = 0
 
-def pump(wait=0.01):
-    global out
-    for f in link.poll(wait):
-        net.handle(f)
-    if net.peer:
-        net.peer.tick()
-    while True:
-        r, _, _ = select.select([qemu.stdout], [], [], 0)
-        if not r:
-            break
-        chunk = qemu.stdout.read1(65536)
-        if not chunk:
-            break
-        out += chunk
-
 def until(cond, secs):
-    end = time.time() + secs
-    while time.time() < end:
-        if cond():
-            return True
-        pump()
-    return cond()
+    return g.until(cond, secs)
 
 def type_line(line):
-    qemu.stdin.write(line.encode() + b"\r")
-    qemu.stdin.flush()
+    g.type_line(line)
 
 def pat(n):
     return bytes(((i * 7 + 3) & 255) for i in range(n))
@@ -82,22 +52,7 @@ class Listener(Peer):
             self.rport = s["sport"]
         super().take(s)
 
-if not until(lambda: b"bastios> " in out, 90):
-    print("no prompt"); sys.exit(1)
-leased = False
-t_boot = time.time()
-while not leased and time.time() - t_boot < 15:
-    mark = len(out)
-    type_line("ifconfig")
-    until(lambda: b"bastios> " in out[mark:], 10)
-    leased = b"10.0.2.15" in out[mark:]
-    if not leased:
-        until(lambda: False, 0.5)
-if not leased:
-    print("no lease"); sys.exit(1)
-mark = len(out)
-type_line("ash")
-until(lambda: b"# " in out[mark:], 20)
+g.boot()
 
 port_next = [5000]
 def next_port():
@@ -116,7 +71,7 @@ def run(name, direction, size, fwd, rev, secs=240):
     port = next_port()
     link.out_rule, link.in_rule = fwd, rev
     link.seen = []
-    mark = len(out)
+    mark = len(g.out)
     data = pat(size)
     if direction == "up":
         p = Listener(net, port, 0, b"", active=False)
@@ -146,14 +101,14 @@ def run(name, direction, size, fwd, rev, secs=240):
             acks = [sg["ack"] for _, sg in p.log] if False else []
             order = [sg["seq"] for _, sg in link.seen if sg["data"]]
             back = sum(1 for a, b in zip(order, order[1:]) if (b - a) % M32 > M32 // 2)
-            for line in out[mark:].decode(errors="replace").replace("\r", "").split("\n"):
+            for line in g.out[mark:].decode(errors="replace").replace("\r", "").split("\n"):
                 if f":{port:04X} " in line or f":{port:04x} " in line:
                     print("    ", line.strip())
             print(f"     guest segments {len(order)}, backwards jumps {back}, peer dup acks {p.dup_acks}, duplicate data {p.dup_data}")
             print("     segments per 100 ms:", [sum(1 for t in ts if int((t - ts[0]) * 10) == b) for b in range(int((ts[-1] - ts[0]) * 10) + 1)] if ts else [])
     else:
         type_line(f"mtcp sink {port}")
-        until(lambda: b"listening on tcp port %d" % port in out[mark:], 20)
+        until(lambda: b"listening on tcp port %d" % port in g.out[mark:], 20)
         p = Peer(net, 41000 + port, port, data, active=True)
         tune(p)
         p.cc = True
@@ -162,11 +117,11 @@ def run(name, direction, size, fwd, rev, secs=240):
         p.emit(SYN, p.iss)
         p.timer = time.time() + p.rto
         t0 = time.time()
-        until(lambda: b"sunk" in out[mark:], secs)
-        ok = f"sunk {size} bytes, 0 wrong".encode() in out[mark:]
+        until(lambda: b"sunk" in g.out[mark:], secs)
+        ok = f"sunk {size} bytes, 0 wrong".encode() in g.out[mark:]
         dt = time.time() - t0
         note = ""
-    until(lambda: b"# " in out[mark:], 30)
+    until(lambda: b"# " in g.out[mark:], 30)
     dropped = getattr(fwd, "drops", 0) + getattr(rev, "drops", 0)
     rate = size / 1024 / dt if ok and dt > 0 else 0
     print(f"{'ok  ' if ok else 'FAIL'} {name:34} {direction:5} {rate:8.0f} KiB/s {dt:7.2f} s  "
@@ -195,7 +150,7 @@ run("rtt 20ms, 10% reordered 30ms", "up", q, Path(delay=D, seed=2), Path(delay=D
 run("rtt 20ms, 10% reordered 30ms", "down", q, Path(delay=D, reorder=0.1, reorder_by=0.03, seed=2), Path(delay=D, seed=3))
 run("rtt 100ms, 1% loss", "up", q // 2, Path(delay=0.05, seed=2), Path(delay=0.05, loss=0.01, seed=3), secs=400)
 
-qemu.kill(); qemu.wait()
+g.kill()
 print(f"---- {fails} failed ----")
 sys.exit(1 if fails else 0)
 PY

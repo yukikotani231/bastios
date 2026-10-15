@@ -36,6 +36,15 @@ class Link:
     def __init__(self):
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.sock.bind(("127.0.0.1", 0))
+        # A burst of a full window must not overflow the socket: frames lost
+        # here would look like loss on the wire. (The limit is the kernel's
+        # unless we may override it.)
+        for opt in (getattr(socket, "SO_RCVBUFFORCE", 33), socket.SO_RCVBUF):
+            try:
+                self.sock.setsockopt(socket.SOL_SOCKET, opt, 16 << 20)
+                break
+            except OSError:
+                pass
         self.port = self.sock.getsockname()[1]
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.bind(("127.0.0.1", 0))
@@ -522,3 +531,72 @@ class Path:
         if self.reorder and self.rng.random() < self.reorder:
             d += self.reorder_by
         return d
+
+
+# ------------------------------------------------------------------ a guest
+
+class Guest:
+    """A BastiOS guest in QEMU whose card is joined to this script's wire,
+    with its serial line in `out`. `boot()` waits for the shell, the DHCP
+    lease and (with ash=True) the Linux shell, where `mtcp` runs."""
+    def __init__(self, kernel, card="virtio-net-pci", mem="256M"):
+        self.link = Link()
+        self.net = Net(self.link)
+        self.out = b""
+        self.qemu = subprocess.Popen(
+            ["qemu-system-x86_64", "-kernel", kernel, "-m", mem, "-smp", "2",
+             "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+             "-serial", "stdio", "-monitor", "none",
+             "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={self.link.guest_port},"
+                        f"remote.type=inet,remote.host=127.0.0.1,remote.port={self.link.port}",
+             "-device", f"{card},netdev=n0"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+
+    def pump(self, wait=0.01):
+        for f in self.link.poll(wait):
+            self.net.handle(f)
+        if self.net.peer:
+            self.net.peer.tick()
+        while True:
+            r, _, _ = select.select([self.qemu.stdout], [], [], 0)
+            if not r:
+                break
+            chunk = self.qemu.stdout.read1(65536)
+            if not chunk:
+                break
+            self.out += chunk
+
+    def until(self, cond, secs):
+        end = time.time() + secs
+        while time.time() < end:
+            if cond():
+                return True
+            self.pump()
+        return cond()
+
+    def type_line(self, line):
+        self.qemu.stdin.write(line.encode() + b"\r")
+        self.qemu.stdin.flush()
+
+    def boot(self, ash=True):
+        if not self.until(lambda: b"bastios> " in self.out, 90):
+            raise SystemExit("no prompt")
+        t0 = time.time()
+        leased = False
+        while not leased and time.time() - t0 < 15:
+            mark = len(self.out)
+            self.type_line("ifconfig")
+            self.until(lambda: b"bastios> " in self.out[mark:], 10)
+            leased = b"10.0.2.15" in self.out[mark:]
+            if not leased:
+                self.until(lambda: False, 0.5)
+        if not leased:
+            raise SystemExit("no lease")
+        if ash:
+            mark = len(self.out)
+            self.type_line("ash")
+            self.until(lambda: b"# " in self.out[mark:], 20)
+
+    def kill(self):
+        self.qemu.kill()
+        self.qemu.wait()
