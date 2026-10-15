@@ -751,7 +751,10 @@ const MNS_TM: u64 = MNS_MO + MO_N * 2;
 // Owners of IPC namespaces (src/lxnsk.bastio): IO_N pairs (namespace id, id of the user namespace that made it) from MNS_IO.
 const IO_N: u64 = 64;
 const MNS_IO: u64 = MNS_TM + TM_N * TM_W;
-const MNS_LEN: u64 = MNS_IO + IO_N * 2;
+// Owners of cgroup namespaces: CO_N pairs (namespace id, owner) from MNS_CO.
+const CO_N: u64 = 32;
+const MNS_CO: u64 = MNS_IO + IO_N * 2;
+const MNS_LEN: u64 = MNS_CO + CO_N * 2;
 const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the extended attributes: XA_N rows of XA_ROW bytes, the name then the value
 const KDB: u64 = XAB + 32 * 320;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
 const KPB: u64 = KDB + KEY_N * KDESC;              // then KP_N payload slots of KPAY bytes
