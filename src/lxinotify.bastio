@@ -1308,9 +1308,6 @@ fn fan_mark(k: &mut Kernel, pid: u64, fd: u64, flags: u64, mask: u64, dirfd: u64
   if kind != 0 && !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;
   }
-  if kind != 0 && mask & FAN_EVENT_ON_CHILD != 0 {
-    return EINVAL;
-  }
   // The file or directory.
   let mut f = NO_FILE;
   let mut n = 0;
@@ -1560,9 +1557,6 @@ fn fan_event(k: &mut Kernel, f: u64, mask: u64)
           if ty == 0 {
             if w0 == f + 1 {
               hit = true;
-              if evm & FAN_MODIFY != 0 && iget(k, at + 4) % 2 == 0 {
-                iput(&mut k, at + 3, 0);    // a change ends what was ignored
-              }
             } else if parent != NO_FILE && w0 == parent + 1 && mm & FAN_EVENT_ON_CHILD != 0 {
               hit = true;
             }
@@ -1570,16 +1564,18 @@ fn fan_event(k: &mut Kernel, f: u64, mask: u64)
             hit = true;
           }
           if hit {
-            comb = comb | mm;
+            if evm & FAN_MODIFY != 0 && iget(k, at + 4) % 2 == 0 {
+              iput(&mut k, at + 3, 0);      // a change ends what was ignored
+            }
+            if !isdir || mm & FAN_ONDIR != 0 {
+              comb = comb | mm;             // a mark speaks for directories only with FAN_ONDIR
+            }
             ign = ign | iget(k, at + 3);
           }
         }
         mk = mk + 1;
       }
       let mut eff = evm & comb & !ign;
-      if isdir && comb & FAN_ONDIR == 0 {
-        eff = 0;
-      }
       if eff != 0 {
         if isdir {
           eff = eff | FAN_ONDIR;
@@ -1704,7 +1700,7 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
       store_le32(&mut k.fs.xfer, 0, cast[u32](FAN_META));
       bset(&mut k.fs.xfer, 4, 3);           // FANOTIFY_METADATA_VERSION
       bset(&mut k.fs.xfer, 6, cast[u8](FAN_META));
-      xfer_u64(&mut k.fs.xfer, 8, mask);
+      xfer_u64(&mut k.fs.xfer, 8, mask & !FAN_ONDIR);
       store_le32(&mut k.fs.xfer, 16, cast[u32](fd));
       store_le32(&mut k.fs.xfer, 20, cast[u32](rp % 0x100000000));
       if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, smaller(va, 0xFFFFFFFFFFFF) + off, k.fs.xfer, FAN_META) != FAN_META {
