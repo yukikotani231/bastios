@@ -7,8 +7,9 @@
 
 import "proc.bastio";
 
-const SCT_NUM: u64 = 47;
-const SCT_N: u64 = 51;
+const SCT_NUM: u64 = 49;
+const SCT_N: u64 = 53;
+const SCT_PING: u64 = 47;                // ping_group_range: two numbers, the low one's entry (the high one's, 48, has no file)
 
 fn sct_name(i: u64) -> Str {
   if i == 0 {
@@ -153,15 +154,21 @@ fn sct_name(i: u64) -> Str {
     return "sys/kernel/unprivileged_bpf_disabled";
   }
   if i == 47 {
-    return "sys/net/ipv4/ip_local_port_range";
+    return "sys/net/ipv4/ping_group_range";
   }
   if i == 48 {
-    return "sys/fs/file-nr";
+    return "sys/net/ipv4/ping_group_range";     // never reached: the first entry of that name wins
   }
   if i == 49 {
-    return "sys/kernel/random/entropy_avail";
+    return "sys/net/ipv4/ip_local_port_range";
   }
   if i == 50 {
+    return "sys/fs/file-nr";
+  }
+  if i == 51 {
+    return "sys/kernel/random/entropy_avail";
+  }
+  if i == 52 {
     return "sys/kernel/random/poolsize";
   }
   return "sys/kernel/tainted";
@@ -310,21 +317,24 @@ fn sct_default(i: u64) -> u64 {
   if i == 46 {
     return 2;
   }
+  if i == 47 {
+    return 1;
+  }
   return 0;
 }
 
 /// The text of entry i, for the entries after the numbers.
 fn sct_text(i: u64) -> Str {
-  if i == 47 {
+  if i == 49 {
     return "32768\t60999\n";
   }
-  if i == 48 {
+  if i == 50 {
     return "0\t0\t1048576\n";
   }
-  if i == 49 {
+  if i == 51 {
     return "256\n";
   }
-  if i == 50 {
+  if i == 52 {
     return "256\n";
   }
   return "\n";
@@ -412,7 +422,7 @@ fn sysd_count(j: u64) -> u64 {
     return 4;
   }
   if j == 7 {
-    return 8;
+    return 9;
   }
   if j == 8 {
     return 1;
@@ -714,6 +724,9 @@ fn sysd_child(j: u64, i: u64) -> Str {
   }
   if j == 15 && i == 0 {
     return "use_tempaddr";
+  }
+  if j == 7 && i == 8 {
+    return "ping_group_range";
   }
   return "";
 }

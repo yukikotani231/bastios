@@ -314,10 +314,11 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
 
 /// Whether process pid may bind port `port`: the ports below 1024 are
 /// root's, and only while it holds CAP_NET_BIND_SERVICE (a refinement:
-/// cap_has implies root); 0 asks for any free port.
+/// cap_has implies root, or kept capabilities, src/lxcap.bastio); 0 asks
+/// for any free port.
 fn may_bind(k: &Kernel, pid: u64, port: u64) -> bool
   requires kok(k) && pid < NPROC
-  ensures result ==> (port == 0 || port >= PROT_SOCK || is_root(k.procs, pid))
+  ensures result ==> (port == 0 || port >= PROT_SOCK || is_root(k.procs, pid) || is_kept(k, pid))
 {
   return port == 0 || port >= PROT_SOCK || cap_has(k, pid, CAP_NET_BIND_SERVICE);
 }

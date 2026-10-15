@@ -1893,6 +1893,10 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     bfree(src);
     return ENOENT;
   }
+  if kind == MK_PTS && dev_at(k.fs.xfer, n) == DEV_PTSDIR {
+    bfree(src);
+    return 0;                               // /dev/pts of a devtmpfs is the pseudo-terminals already
+  }
   if kind != MK_BIND && !tdir {
     bfree(src);
     return ENOTDIR;
