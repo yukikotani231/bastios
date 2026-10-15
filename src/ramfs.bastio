@@ -80,6 +80,18 @@ fn name_hash(b: &Bytes, from: u64, n: u64) -> u64
 {
   let mut h = 5381;
   let mut j = 0;
+  // Eight bytes at a time: fold the word into h, multiply, and fold the
+  // product's high half back down so every byte reaches the low bits that
+  // pick the slot. The tail goes a byte at a time.
+  while j + 8 <= n
+    invariant j <= n && j + 8 <= n + 8 && from + n <= blen(b) && h < 4294967296
+  {
+    let w = load_le64(b, from + j);
+    let t = (h + w % 4294967296 + w / 4294967296) % 4294967296;
+    let u = t * 2654435761;
+    h = (u % 4294967296 + u / 4294967296) % 4294967296;
+    j = j + 8;
+  }
   while j < n
     invariant j <= n && h < 4294967296
   {

@@ -258,6 +258,11 @@ Breakpoint 1, spin (n=1) at spin.c:1
 $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "#include <pthread.h>\n#include <unistd.h>\nvoid *w(void *a) { for (;;) usleep(1000); return a; }\nint main(void) { pthread_t t[2]; pthread_create(&t[0], 0, w, 0); pthread_create(&t[1], 0, w, 0); for (;;) usleep(1000); }\n" > th.c && gcc -g -O0 -pthread -o th th.c && (./th & P=$!; sleep 3; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "info threads" -ex detach </dev/null 2>&1 | grep -c "^[ *] [0-9] *LWP"; kill $P)'; bb umount /disk/a/proc; fi
 3
 
+== gdb: a core file of a crashed program shows where it died, its call chain and its arguments
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && rm -f core && printf "int depth(int n) { int *p = 0; if (n == 0) return *p; return depth(n - 1) + 1; }\nint main(void) { return depth(3); }\n" > crash.c && gcc -g -O0 -pie -fPIE -o crash crash.c && (ulimit -c unlimited; ./crash) 2>/dev/null; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" ./crash core -ex bt </dev/null 2>&1 | sed -n -e "s/^#0  0x[0-9a-f]* in \(depth (n=0) at crash.c:1\).*/\1/p" -e "s/^#3  0x[0-9a-f]* in \(depth (n=3)\) .*/\1/p" | uniq' 2>/dev/null; bb umount /disk/a/proc; fi
+depth (n=0) at crash.c:1
+depth (n=3)
+
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
 42
