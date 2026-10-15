@@ -62,6 +62,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Disk
 
+- NVMe and AHCI take a run of consecutive blocks in one command, as virtio already did: up to 32 blocks (128 KiB), through a PRP list (NVMe, bounded by the drive's MDTS) or one PRD entry per block (AHCI). `diskbench` writes 2 MiB in 3-4 ticks on both, 8-10 and 6-7 before.
 - The disk file system holds 5119 files and directories (was 4095): the
   directory has up to 320 blocks, all named by the superblock's block, so
   existing disks mount unchanged. The two directory tables (the disk's and

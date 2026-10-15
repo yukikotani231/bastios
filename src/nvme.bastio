@@ -6,7 +6,9 @@
 // queue pair. Each read or write is one command, for one 512-byte sector
 // or one 4 KiB block of eight, whose data goes through a page lent to the controller; the driver
 // waits for its completion before doing anything else, so there is never
-// more than one command in flight. A write is followed by a flush, so the
+// more than one command in flight. A background read or write of a run of
+// consecutive blocks (nvme_begin_n) is one command for up to VIO_BATCH of
+// them, the extra blocks' pages named by a PRP list. A write is followed by a flush, so the
 // data is on the medium (not just in the drive's cache) when it returns.
 //
 // Namespaces with 4 KiB logical blocks work too: the driver still counts

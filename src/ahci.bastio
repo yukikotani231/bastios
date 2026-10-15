@@ -6,7 +6,9 @@
 // mode, and uses the first port with a SATA disk on it. Each read or
 // write is one command in slot 0, for one 512-byte sector or one 4 KiB
 // block, whose data goes through a page lent to the controller; the driver
-// waits for it to finish before doing anything else. A write is followed
+// waits for it to finish before doing anything else. A background run of
+// consecutive blocks (ahci_begin_n) is one command with a PRD entry per
+// block, up to VIO_BATCH. A write is followed
 // by a cache flush, so the data is on the medium when the write returns.
 //
 // Disks with logical sectors longer than 512 bytes are left alone (QEMU

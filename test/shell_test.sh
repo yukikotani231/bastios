@@ -1233,6 +1233,7 @@ session("NVMe", None, [
     ("echo written by nvme > disk/nv", b""),
     ("cat disk/nv", b"written by nvme\r\n"),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # runs of blocks go in one command (nvme_begin_n)
     ("rm disk/big", b""),
     ("cat disk/hk2", b"dh\r\n"),
     ("rm disk/hk2", b""),
@@ -1250,6 +1251,7 @@ session("AHCI", None, [
     ("cat disk/nv", b"written by nvme\r\n"),
     ("echo and ahci >> disk/nv", b""),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # ahci_begin_n
     ("rm disk/big", b""),
 ], halt=True, ready=ahci_found)
 
