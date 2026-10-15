@@ -369,14 +369,22 @@ def write_repo(o, pkgs, index=""):
 def repository(images, cache, o):
     """Writes every package the images hold to directory o, with an
     APKINDEX.tar.gz. Returns how many packages it got."""
-    index, seen = "", set()
+    index, seen, names = "", set(), set()
     os.makedirs(o, exist_ok=True)
     for image in images:
-        files = merged(layers(image, cache))   # one image at a time: they are large
+        # An image written +NAME adds only packages no earlier image holds: its
+        # other packages (BusyBox, musl, ...) are of another build and would
+        # replace the ones the rest of the suite runs on.
+        extra = image.startswith("+")
+        files = merged(layers(image.lstrip("+"), cache))   # one image at a time: they are large
         kept = scripts(files)
+        held = set(names)
         for p in installed(files["lib/apk/db/installed"][1]):
             if (p["P"], p["V"]) in seen:
                 continue                   # images built at different times may hold two versions
+            if extra and p["P"] in held:
+                continue
+            names.add(p["P"])
             seen.add((p["P"], p["V"]))
             cgz, apk = package(files, p, kept)
             e = dict(p)
