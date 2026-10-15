@@ -84,7 +84,7 @@ def run_os(osname, card, args, tmp, mtcp_linux):
     common = ["-cpu", "qemu64,+pdpe1gb" if args.accel == "tcg" else "host", "-accel", args.accel,
               "-m", args.mem, "-smp", str(args.smp), "-display", "none", "-no-reboot",
               "-serial", "stdio", "-monitor", "none",
-              "-netdev", f"user,id=n0{fwd}", "-device", f"{card},netdev=n0"]
+              "-netdev", f"user,id=n0{fwd}", "-device", f"{card},netdev=n0"] + args.qemu_extra.split()
     log = os.path.join(R.B, f"net-{osname}-{card}.log")
     if osname == "bastios":
         cmd = ["qemu-system-x86_64", "-kernel", args.kernel,
@@ -143,6 +143,7 @@ def main():
     ap.add_argument("--kernel", default=os.path.join(R.ROOT, "build", "bastios.elf"))
     ap.add_argument("--linux", default=os.environ.get("LINUX_KERNEL", ""))
     ap.add_argument("--accel", default=R.accel())
+    ap.add_argument("--qemu-extra", default="", help="more QEMU options, e.g. a -object filter-dump to capture the traffic")
     ap.add_argument("--out", default=os.path.join(R.B, "net.json"))
     args = ap.parse_args()
     os.makedirs(R.B, exist_ok=True)

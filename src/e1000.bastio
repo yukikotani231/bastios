@@ -28,9 +28,9 @@
 // block of the device window, claimed as an `Mmio`, and every page it can
 // touch is a `Dma` lent at start and taken back after a reset at power off.
 //
-// Memory, six pages: one for the two descriptor rings (eight receive
-// descriptors at 0, eight transmit descriptors at 2048), four of receive
-// buffers (eight of 2 KiB) and one for the frame being sent.
+// Memory, nine pages: one for the two descriptor rings (sixteen receive
+// descriptors at 0, the frame being sent at 256, sixteen transmit
+// descriptors at 2048) and eight of receive buffers (sixteen of 2 KiB).
 
 import "virtio_net.bastio";
 
@@ -44,8 +44,9 @@ const E1K_PCH_LPT: u64 = 5;           // I217 and two I218: no ultra-low-power s
 const E1K_IGC: u64 = 6;               // I225 and I226: the igb's queues and descriptors, another PHY
 const E1K_LEN: u64 = 0x20000;         // the register block
 const E1K_TOP: u64 = 0xFEC00000;      // its BAR must lie below the I/O APIC, HPET and local APIC
-const E1K_PAGES: u64 = 6;
-const E1K_DESCS: u64 = 8;             // per ring: the smallest ring is 128 bytes
+const E1K_PAGES: u64 = 9;             // the ring page and eight receive pages
+const E1K_DESCS: u64 = 16;            // per ring: sixteen 2 KiB receive buffers (a burst of a dozen frames from QEMU's user-mode network does not overrun them)
+const E1K_TB: u64 = 256;              // where the frame being sent is built in the ring page: after the receive ring, before the transmit ring
 const E1K_TXR: u64 = 2048;            // where the transmit ring starts in the ring page
 
 // Registers.
@@ -129,12 +130,15 @@ const ICR_RX: u64 = 0x84;             // the interrupts asked for: a frame recei
 
 struct E1k {
   regs: Mmio,
-  ring: Dma,          // both descriptor rings
+  ring: Dma,          // both descriptor rings, and the frame being sent (E1K_TB)
   rb0: Dma,           // receive buffers 0-1
   rb1: Dma,           // 2-3
   rb2: Dma,           // 4-5
   rb3: Dma,           // 6-7
-  tb: Dma,            // the frame being sent
+  rb4: Dma,           // 8-9
+  rb5: Dma,           // 10-11
+  rb6: Dma,           // 12-13
+  rb7: Dma,           // 14-15
   rx_next: u64,       // the next receive descriptor the card fills
   tx_next: u64,       // the next transmit descriptor
   model: u64,         // E1K_8254X, E1K_82574, E1K_IGB, E1K_IGC ...
@@ -222,18 +226,25 @@ fn e1k_write(e: &mut E1k, r: u64, v: u64)
   mmio_write32(&mut e.regs, r, cast[u32](v));
 }
 
-/// The address of receive buffer b (0-7).
+/// The address of receive buffer b (0-15).
 fn e1k_rxbuf_addr(e: &E1k, b: u64) -> u64
   requires b < E1K_DESCS
-  ensures result <= ADDR_LIMIT + RX_BUF
 {
-  let mut a = dma_addr(e.rb3);
+  let mut a = dma_addr(e.rb7);
   if b < 2 {
     a = dma_addr(e.rb0);
   } else if b < 4 {
     a = dma_addr(e.rb1);
   } else if b < 6 {
     a = dma_addr(e.rb2);
+  } else if b < 8 {
+    a = dma_addr(e.rb3);
+  } else if b < 10 {
+    a = dma_addr(e.rb4);
+  } else if b < 12 {
+    a = dma_addr(e.rb5);
+  } else if b < 14 {
+    a = dma_addr(e.rb6);
   }
   if a > ADDR_LIMIT {
     return 0;                         // never: the pool is below 256 MiB
@@ -254,8 +265,16 @@ fn e1k_rxbuf_copy(e: &mut E1k, b: u64, pkt: &mut Bytes, n: u64)
     dma_to_bytes(&mut pkt, 0, &mut e.rb1, at, n);
   } else if b < 6 {
     dma_to_bytes(&mut pkt, 0, &mut e.rb2, at, n);
-  } else {
+  } else if b < 8 {
     dma_to_bytes(&mut pkt, 0, &mut e.rb3, at, n);
+  } else if b < 10 {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb4, at, n);
+  } else if b < 12 {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb5, at, n);
+  } else if b < 14 {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb6, at, n);
+  } else {
+    dma_to_bytes(&mut pkt, 0, &mut e.rb7, at, n);
   }
 }
 
@@ -575,10 +594,10 @@ fn e1k_reset(e: &mut E1k) -> bool
   return false;
 }
 
-/// Takes the card's registers and six pages, resets it, sets up both rings
+/// Takes the card's registers and nine pages, resets it, sets up both rings
 /// and reads its MAC address. A card that cannot be started is left with
 /// `live` false: it sends nothing and receives nothing.
-fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, t: Frame) -> E1k
+fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3: Frame, b4: Frame, b5: Frame, b6: Frame, b7: Frame) -> E1k
   requires mmio_len(regs) == E1K_LEN && mmio_base(regs) % 4096 == 0
   ensures e1k_ok(result)
 {
@@ -589,7 +608,7 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
     tq = IGB_TQ;
   }
   let mut e = E1k { regs: regs, ring: dma_lend(r), rb0: dma_lend(b0), rb1: dma_lend(b1), rb2: dma_lend(b2),
-    rb3: dma_lend(b3), tb: dma_lend(t), rx_next: 0, tx_next: 0, model: model, rq: rq, tq: tq, mac: 0, live: false, irq: false };
+    rb3: dma_lend(b3), rb4: dma_lend(b4), rb5: dma_lend(b5), rb6: dma_lend(b6), rb7: dma_lend(b7), rx_next: 0, tx_next: 0, model: model, rq: rq, tq: tq, mac: 0, live: false, irq: false };
   let ra = dma_addr(e.ring);
   // (An I217-I219 was reset by e1k_pch_reset.)
   if ra > ADDR_LIMIT - 4096 || (model != E1K_PCH && model != E1K_PCH_LPT && !e1k_reset(&mut e)) {
@@ -662,7 +681,7 @@ fn e1k_new(regs: Mmio, model: u64, r: Frame, b0: Frame, b1: Frame, b2: Frame, b3
   let m5 = hi / 256 % 256;
   let mac = ((((m0 * 256 + m1) * 256 + m2) * 256 + m3) * 256 + m4) * 256 + m5;
   e.mac = mac;
-  // Receive: eight 2 KiB buffers, all offered (the tail is one behind the
+  // Receive: sixteen 2 KiB buffers, all offered (the tail is one behind the
   // head, which the card never passes).
   let mut d = 0;
   while d < E1K_DESCS
@@ -748,7 +767,10 @@ fn e1k_free(e: E1k, m: &mut Mem) -> Mmio
   give_page(&mut m, dma_take(d.rb1));
   give_page(&mut m, dma_take(d.rb2));
   give_page(&mut m, dma_take(d.rb3));
-  give_page(&mut m, dma_take(d.tb));
+  give_page(&mut m, dma_take(d.rb4));
+  give_page(&mut m, dma_take(d.rb5));
+  give_page(&mut m, dma_take(d.rb6));
+  give_page(&mut m, dma_take(d.rb7));
   return d.regs;
 }
 
@@ -832,9 +854,13 @@ fn e1k_send(e: &mut E1k, pkt: &Bytes, n: u64) -> bool
   if !e.live {
     return false;
   }
-  bytes_to_dma(&mut e.tb, 0, pkt, 0, n);
+  let tb = dma_addr(e.ring);
+  if tb > ADDR_LIMIT {
+    return false;                     // never: the pool is below 256 MiB
+  }
+  bytes_to_dma(&mut e.ring, E1K_TB, pkt, 0, n);
   let d = E1K_TXR + e.tx_next * 16;
-  dma_write64(&mut e.ring, d, dma_addr(e.tb));
+  dma_write64(&mut e.ring, d, tb + E1K_TB);
   if e.model == E1K_IGB || e.model == E1K_IGC {
     dma_write64(&mut e.ring, d + 8, n + ADV_TX + n * 70368744177664);   // the payload length at bit 46
   } else {
