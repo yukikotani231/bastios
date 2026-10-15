@@ -1102,6 +1102,32 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
   {
     i = i + 1;
   }
+  if i >= MAP_N && of_get(k.ofd, h, 0) == OF_FILE {
+    // Every record is in use. A mapping of a file opened for writing is
+    // the one that must be written back, so it takes the place of the
+    // record of a read-only file's mapping, which only says that mapping
+    // may not become writable (a program that maps twenty input files and
+    // then a writable output file, as Go's linker does, would otherwise
+    // find no record left for the output, and its pages would never reach
+    // the file).
+    let row = of_get(k.ofd, h, 2);
+    if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 {
+      let mut j = 0;
+      while j < MAP_N && i >= MAP_N
+        invariant j <= MAP_N && kok(k)
+      {
+        let h2 = get(k.maps, mp_at(pid, j, 2));
+        if get(k.maps, mp_at(pid, j, 0)) != 0 && h2 < OFD_N && of_get(k.ofd, h2, 0) == OF_FILE {
+          let row2 = of_get(k.ofd, h2, 2);
+          if row2 < FD_ROWS && fget(k.fs.ftab, row2, FD_MODE) / O_WRITE % 2 == 0 {
+            map_drop(&mut k, pid, j);
+            i = j;
+          }
+        }
+        j = j + 1;
+      }
+    }
+  }
   if i >= MAP_N {
     return;
   }
@@ -1154,7 +1180,20 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
       let n = smaller(4096, size - foff);
       if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + p * 4096, &mut k.fs.xfer, n) == n {
         vfs_seek(&mut k.fs, row, foff);
-        if vfs_write(&mut k.fs, &mut k.mem, row, n) == VFS_MISS {
+        let mut w = vfs_write(&mut k.fs, &mut k.mem, row, n);
+        let mut tries = 0;
+        while w == VFS_MISS && tries < 64
+          invariant tries <= 64 && kok(k) && row < FD_ROWS
+        {
+          // Wait for the disk here and go on with this page: starting the
+          // call again would write the pages before it again, and a range
+          // larger than the disk's queue would never get to its end.
+          disk_wait(&mut k.fs.disk);
+          vfs_seek(&mut k.fs, row, foff);
+          w = vfs_write(&mut k.fs, &mut k.mem, row, n);
+          tries = tries + 1;
+        }
+        if w == VFS_MISS {
           r = DISK_RETRY;
         }
       }
