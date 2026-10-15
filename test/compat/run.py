@@ -122,6 +122,45 @@ def load_tty(path):
     return [(c["name"], c["prog"], c["keys"], c["check"], c["exp"]) for c in cases]
 
 
+class SntpServer:
+    """An SNTP server on the host, for NTPPORT (10.0.2.2 from the guest). Its
+    clock reads 2030-01-01 00:00:00 UTC when it starts and runs at the real
+    rate, so that a guest which takes the time from it shows a year no real
+    clock shows yet."""
+
+    START = 1893456000
+    NTP_UNIX = 2208988800
+
+    def __init__(self):
+        self.t0 = time.time()
+        self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.sock.bind(("127.0.0.1", 0))
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self.serve, daemon=True).start()
+
+    def now(self):
+        return self.START + (time.time() - self.t0) + self.NTP_UNIX
+
+    def stamp(self, t):
+        return struct.pack(">II", int(t), int((t % 1) * (1 << 32)))
+
+    def serve(self):
+        while True:
+            try:
+                req, peer = self.sock.recvfrom(512)
+            except OSError:
+                return
+            if len(req) < 48:
+                continue
+            t = self.now()
+            # LI 0, version 4, mode 4 (server), stratum 2, reference "LOCL".
+            head = bytes([0x24, 2, req[2], 0xEC]) + bytes(8) + b"LOCL"
+            self.sock.sendto(head + self.stamp(t) + req[40:48] + self.stamp(t) + self.stamp(t), peer)
+
+    def close(self):
+        self.sock.close()
+
+
 class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
@@ -162,6 +201,8 @@ class WebServer:
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.sntp = SntpServer()
+        self.ntpport = self.sntp.port
         # The same files over TLS, with a throwaway self-signed certificate.
         self.https, self.sport = None, 0
         cert, key = os.path.join(self.dir, "cert.pem"), os.path.join(self.dir, "key.pem")
@@ -236,6 +277,7 @@ class WebServer:
                 json.dump(index, f)
 
     def shutdown(self):
+        self.sntp.close()
         self.httpd.shutdown()
         if self.https:
             self.https.shutdown()
@@ -284,6 +326,7 @@ class Guest:
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
+        self.ntpport = f"{web.ntpport}" if web else ""
         self.hostsurl = f"https://10.0.2.2:{web.sport}" if web and web.sport else ""
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
@@ -556,7 +599,7 @@ def run_applet(env, name, cmd, expected, timeout, bb):
     expected = [arch_words(l) for l in expected]
     cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
     cmd = (cmd.replace("HOSTSURL", env.hostsurl).replace("HOSTURL", env.hosturl)
-           .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport)
+           .replace("HOSTADDR", env.hostaddr).replace("HOSTPORT", env.hostport).replace("NTPPORT", getattr(env, "ntpport", ""))
            .replace("SSHPORT", getattr(env, "sshport", "")))
     if cmd.startswith("@host "):
         return run_on_host(name, cmd[6:], expected, timeout)

@@ -331,6 +331,8 @@ fn lx_cred_call(k: &mut Kernel, pid: u64, n: u64, a0: u64, b0: u64, c0: u64) -> 
   } else if !root {
     root = ns_cap(k, pid, CAP_SETGID);
   }
+  let was_root = any_uid_root(k.procs, pid);
+  let was_perm = cap_perm_v(k, pid);
   let a = cred_in(k, pid, g, a0);
   let b = cred_in(k, pid, g, b0);
   let c = cred_in(k, pid, g, c0);
@@ -377,6 +379,18 @@ fn lx_cred_call(k: &mut Kernel, pid: u64, n: u64, a0: u64, b0: u64, c0: u64) -> 
   } else if n == LX_SETGROUPS {
     r = lx_setgroups(&mut k, pid, a0, b0);
   }
+  if r == 0 && (n == LX_SETUID || n == LX_SETREUID || n == LX_SETRESUID) {
+    cap_after_setuid(&mut k, pid, was_root, was_perm);
+  }
   ret(&mut k.procs, pid, r);
   return KEEP;
+}
+
+/// Whether one of process pid's user ids is root: it holds the permitted
+/// set (src/lxcap.bastio).
+fn any_uid_root(procs: &Buf, pid: u64) -> bool
+  requires ptab_ok(procs) && pid < NPROC
+{
+  return id_get(procs, pid, F_UID, false) == 0 || id_get(procs, pid, F_UID, true) == 0
+    || id_get(procs, pid, F_SUID, false) == 0;
 }

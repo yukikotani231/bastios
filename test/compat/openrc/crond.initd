@@ -1,0 +1,12 @@
+#!/sbin/openrc-run
+# The crond service of Alpine's busybox-openrc package (copied, as the
+# images the suite is made from do not hold that package).
+description="Cron daemon"
+command=/usr/sbin/crond
+command_args="-c /etc/crontabs ${CROND_OPTS}"
+pidfile=/var/run/crond.pid
+
+depend() {
+	need localmount
+	use logger
+}

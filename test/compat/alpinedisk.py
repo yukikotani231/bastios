@@ -264,6 +264,8 @@ def package(files, p, kept=({}, {})):
         path = f"{d}/{name}" if d else name
         if pruned(path):
             continue
+        if path not in files and path.startswith("etc/"):
+            continue                # a configuration file the image replaced or removed
         if path not in files:
             sys.exit(f"alpinedisk: {p['P']}: {path} is not in the image")
         src, body = files[path]
@@ -281,6 +283,8 @@ def package(files, p, kept=({}, {})):
             ti.size = len(body)
             ti.pax_headers = {"APK-TOOLS.checksum.SHA1": hashlib.sha1(body).hexdigest()}
             data.append((ti, body))
+    # A hard link names a file that comes before it in the archive.
+    data.sort(key=lambda e: e[0].type == tarfile.LNKTYPE)
     dgz = gz(tar(data))
     info = "".join(f"{n} = {p[k]}\n" for k, n in PKGINFO if k in p)
     for k, n in LISTS:
@@ -365,14 +369,22 @@ def write_repo(o, pkgs, index=""):
 def repository(images, cache, o):
     """Writes every package the images hold to directory o, with an
     APKINDEX.tar.gz. Returns how many packages it got."""
-    index, seen = "", set()
+    index, seen, names = "", set(), set()
     os.makedirs(o, exist_ok=True)
     for image in images:
-        files = merged(layers(image, cache))   # one image at a time: they are large
+        # An image written +NAME adds only packages no earlier image holds: its
+        # other packages (BusyBox, musl, ...) are of another build and would
+        # replace the ones the rest of the suite runs on.
+        extra = image.startswith("+")
+        files = merged(layers(image.lstrip("+"), cache))   # one image at a time: they are large
         kept = scripts(files)
+        held = set(names)
         for p in installed(files["lib/apk/db/installed"][1]):
             if (p["P"], p["V"]) in seen:
                 continue                   # images built at different times may hold two versions
+            if extra and p["P"] in held:
+                continue
+            names.add(p["P"])
             seen.add((p["P"], p["V"]))
             cgz, apk = package(files, p, kept)
             e = dict(p)

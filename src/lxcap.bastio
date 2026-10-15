@@ -2,13 +2,19 @@
 //
 // Who holds a capability still follows from the user ids, as before: a
 // process whose effective user is root holds every capability, and any
-// other holds none. What this file adds is giving them up. Each process
-// has CAP_W words in k.sys from SYS_CAP: the capabilities dropped from
-// its effective set, those dropped from its permitted set, its
-// inheritable set, and those dropped from its bounding set. All 0 means
-// the full sets of root. A fork copies the words; execve gives back what
-// the bounding set allows (as Linux does for root) and keeps the
-// inheritable set.
+// other holds none, with one exception: a process that gives up its last
+// root user id while PR_SET_KEEPCAPS is set keeps its permitted set, as
+// Linux does, and may then choose (capset) the part of it to hold in its
+// effective set. That is how chronyd and dnsmasq drop root and keep the
+// clock or the low ports. The kept sets are explicit words (CAPW_HP,
+// CAPW_HE); they end at execve and when a root id comes back. What this
+// file adds to the user ids is giving capabilities up. Each process has
+// CAP_W words in k.sys from SYS_CAP: the capabilities dropped from its
+// effective set, those dropped from its permitted set, its inheritable
+// set, those dropped from its bounding set and the two kept sets. All 0
+// means the full sets of root. A fork copies the words; execve gives back
+// what the bounding set allows (as Linux does for root), keeps the
+// inheritable set and ends the kept sets.
 //
 // Only some checks ask for a capability (cap_has) instead of root:
 // CAP_SYS_TIME (setting the clock, adjtimex), CAP_SYS_RESOURCE (pipe
@@ -21,11 +27,14 @@
 
 import "lxprctl.bastio";
 
-const CAP_W: u64 = 4;
+const CAP_W: u64 = 6;
 const CAPW_EFF: u64 = 0;                 // dropped from the effective set
 const CAPW_PERM: u64 = 1;                // dropped from the permitted set
 const CAPW_INH: u64 = 2;                 // the inheritable set
 const CAPW_BSET: u64 = 3;                // dropped from the bounding set
+const CAPW_HP: u64 = 4;                  // KEEPCAPS: the permitted set a non-root process keeps, plus CAP_HELD
+const CAPW_HE: u64 = 5;                  // KEEPCAPS: its effective set
+const CAP_HELD: u64 = 0x4000000000000000;   // in CAPW_HP while the process holds such sets
 const CAP_LAST: u64 = 40;                // CAP_CHECKPOINT_RESTORE
 const CAP_FULL: u64 = 0x1FFFFFFFFFF;     // capabilities 0 to CAP_LAST
 const CAP_V1: u64 = 0x19980330;          // _LINUX_CAPABILITY_VERSION_1: 32-bit sets
@@ -45,12 +54,63 @@ fn cap_put(k: &mut Kernel, p: u64, w: u64, v: u64)
   k.sys = set(k.sys, SYS_CAP + p * CAP_W + w, v & CAP_FULL);
 }
 
-/// Process p's effective set: everything not dropped, for root.
+/// A kept-set word, as it stands (cap_word would cut off CAP_HELD).
+fn cap_raw(k: &Kernel, p: u64, w: u64) -> u64
+  requires kok(k) && p < NPROC && w < CAP_W
+  ensures result == get(k.sys, SYS_CAP + p * CAP_W + w)
+{
+  return get(k.sys, SYS_CAP + p * CAP_W + w);
+}
+
+fn cap_raw_put(k: &mut Kernel, p: u64, w: u64, v: u64)
+  requires kok(k) && p < NPROC && w < CAP_W
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_CAP + p * CAP_W + w, v);
+}
+
+/// Does process p hold kept sets (it gave up root with KEEPCAPS set)? For
+/// specifications.
+spec fn is_kept(k: &Kernel, p: u64) -> bool {
+  SYS_CAP + p * CAP_W + CAPW_HP < len(k.sys) && get(k.sys, SYS_CAP + p * CAP_W + CAPW_HP) >= CAP_HELD
+}
+
+fn cap_kept(k: &Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures result == is_kept(k, p)
+{
+  return cap_raw(k, p, CAPW_HP) >= CAP_HELD;
+}
+
+/// The kept sets begin: permitted set perm, nothing effective yet (the
+/// effective user is no longer root).
+fn cap_keep(k: &mut Kernel, p: u64, perm: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  cap_raw_put(&mut k, p, CAPW_HP, CAP_HELD + (perm & CAP_FULL));
+  cap_raw_put(&mut k, p, CAPW_HE, 0);
+}
+
+/// The kept sets end.
+fn cap_unkeep(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  cap_raw_put(&mut k, p, CAPW_HP, 0);
+  cap_raw_put(&mut k, p, CAPW_HE, 0);
+}
+
+/// Process p's effective set: everything not dropped, for root; what a
+/// KEEPCAPS process chose to hold, for another.
 fn cap_eff(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
-  ensures !is_root(k.procs, p) ==> result == 0
+  ensures !is_root(k.procs, p) && !is_kept(k, p) ==> result == 0
 {
   if !cred_root(k.procs, p) {
+    if cap_kept(k, p) {
+      return cap_raw(k, p, CAPW_HE) & CAP_FULL;
+    }
     return 0;
   }
   return CAP_FULL & !cap_word(k, p, CAPW_EFF) & !cap_word(k, p, CAPW_PERM);
@@ -64,17 +124,20 @@ fn cap_perm(k: &Kernel, p: u64) -> u64
   let e = id_get(k.procs, p, F_UID, true);
   let s = id_get(k.procs, p, F_SUID, false);
   if r != 0 && e != 0 && s != 0 {
+    if cap_kept(k, p) {
+      return cap_raw(k, p, CAPW_HP) & CAP_FULL;
+    }
     return 0;
   }
   return CAP_FULL & !cap_word(k, p, CAPW_PERM);
 }
 
 /// Whether process p holds capability c in its effective set. Only root
-/// holds any: a capability refines the root rule of docs/security.md,
-/// never widens it.
+/// holds any, and a process that kept some when it gave up root: a
+/// capability refines the root rule of docs/security.md, never widens it.
 fn cap_has(k: &Kernel, p: u64, c: u64) -> bool
   requires kok(k) && p < NPROC && c <= CAP_LAST
-  ensures result ==> is_root(k.procs, p)
+  ensures result ==> is_root(k.procs, p) || is_kept(k, p)
 {
   return (cap_eff(k, p) >> c) % 2 == 1;
 }
@@ -86,7 +149,7 @@ fn cap_has(k: &Kernel, p: u64, c: u64) -> bool
 fn cap_eff_v(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
 {
-  if !cred_root(k.procs, p) && ns_root(k, p) {
+  if !cred_root(k.procs, p) && !cap_kept(k, p) && ns_root(k, p) {
     return CAP_FULL & !cap_word(k, p, CAPW_EFF) & !cap_word(k, p, CAPW_PERM);
   }
   return cap_eff(k, p);
@@ -96,10 +159,50 @@ fn cap_eff_v(k: &Kernel, p: u64) -> u64
 fn cap_perm_v(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
 {
-  if !cred_root(k.procs, p) && ns_root(k, p) {
+  if !cred_root(k.procs, p) && !cap_kept(k, p) && ns_root(k, p) {
     return CAP_FULL & !cap_word(k, p, CAPW_PERM);
   }
   return cap_perm(k, p);
+}
+
+/// After a successful setuid, setreuid or setresuid by pid, whose user ids
+/// held a root before or not (was_root) and whose permitted set was
+/// was_perm: Linux's rules for the capabilities. Giving up the last root id
+/// loses them, unless PR_SET_KEEPCAPS is set, which keeps the permitted
+/// set and empties the effective one; a root id back ends the kept sets.
+fn cap_after_setuid(k: &mut Kernel, pid: u64, was_root: bool, was_perm: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if any_uid_root(k.procs, pid) {
+    cap_unkeep(&mut k, pid);
+    return;
+  }
+  if !was_root {
+    return;                                 // not root before either: whatever it kept stays
+  }
+  if pr_get(k, pid, PRW_DEATH) / PRD_KEEPCAPS % 2 == 1 {
+    cap_keep(&mut k, pid, was_perm);
+  } else {
+    cap_unkeep(&mut k, pid);
+  }
+}
+
+/// Set w (0 inheritable, 1 permitted, 2 effective, 3 bounding) of process
+/// p, as /proc/PID/status shows it.
+fn cap_status(k: &Kernel, p: u64, w: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  if w == 0 {
+    return cap_word(k, p, CAPW_INH);
+  }
+  if w == 1 {
+    return cap_perm_v(k, p);
+  }
+  if w == 2 {
+    return cap_eff_v(k, p);
+  }
+  return CAP_FULL & !cap_word(k, p, CAPW_BSET);
 }
 
 /// A new process or thread c of p: the sets carry over.
@@ -111,12 +214,13 @@ fn cap_fork(k: &mut Kernel, p: u64, c: u64)
   while w < CAP_W
     invariant w <= CAP_W && kok(k)
   {
-    cap_put(&mut k, c, w, cap_word(k, p, w));
+    cap_raw_put(&mut k, c, w, cap_raw(k, p, w));
     w = w + 1;
   }
 }
 
-/// execve: the effective and permitted sets become the bounding set.
+/// execve: the effective and permitted sets become the bounding set, and
+/// the kept sets of a process that is not root end.
 fn cap_exec(k: &mut Kernel, p: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)
@@ -124,6 +228,7 @@ fn cap_exec(k: &mut Kernel, p: u64)
   let b = cap_word(k, p, CAPW_BSET);
   cap_put(&mut k, p, CAPW_EFF, b);
   cap_put(&mut k, p, CAPW_PERM, b);
+  cap_unkeep(&mut k, p);
 }
 
 /// Clears process p's words for the next process in its slot.
@@ -235,6 +340,12 @@ fn lx_capset(k: &mut Kernel, pid: u64, hdr: u64, data: u64) -> u64
   let oi = cap_word(k, pid, CAPW_INH);
   if p & !op != 0 || e & !p != 0 || i & !(oi | op) != 0 {
     return EPERM;
+  }
+  if !cred_root(k.procs, pid) && cap_kept(k, pid) {
+    cap_raw_put(&mut k, pid, CAPW_HP, CAP_HELD + p);
+    cap_raw_put(&mut k, pid, CAPW_HE, e);
+    cap_put(&mut k, pid, CAPW_INH, i);
+    return 0;
   }
   cap_put(&mut k, pid, CAPW_PERM, CAP_FULL & !p);
   cap_put(&mut k, pid, CAPW_EFF, CAP_FULL & !e);

@@ -1,0 +1,17 @@
+#!/sbin/openrc-run
+# The chronyd service of Alpine's chrony-openrc package (copied, as the
+# images the suite is made from do not hold that package).
+description="Chrony NTP daemon"
+command=/usr/sbin/chronyd
+command_args="-f /etc/chrony/chrony.conf ${FAST_STARTUP:+-q}"
+pidfile=/run/chrony/chronyd.pid
+
+depend() {
+	need net
+	use dns logger
+	provide ntp-client
+}
+
+start_pre() {
+	checkpath -d -m 0750 -o chrony:chrony /run/chrony
+}

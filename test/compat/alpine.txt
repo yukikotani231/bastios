@@ -572,3 +572,50 @@ hello from the host
 apk=0
 tig version 2.6.1
 status 0
+
+== openrc: install OpenRC, chrony and tzdata; set the root up as a machine (hostname, syslog, crond, chronyd on the host's time server)
+$ if [ %MACHINE% = x86_64 ]; then bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL openrc chrony tzdata ifupdown-ng 2>&1 | bb tail -n 1; bb sh /disk/openrc/setup.sh /disk/a NTPPORT; echo setup=$?; else echo "setup=0"; fi
+setup=0
+
+== openrc: boot the root as init of a PID namespace; the runlevels start, chronyd steps the clock to the server's, cron runs a job, OpenRC reboots
+$ if [ %MACHINE% = x86_64 ]; then bb sh /disk/openrc/boot.sh /disk/a; else printf '%s\n' 'check: boot 1' 'check: hostname bastio-box' 'check: service chronyd started' 'check: service crond started' 'check: service devfs started' 'check: service hostname started' 'check: service localmount started' 'check: service networking started' 'check: service seedrng started' 'check: service syslog started' 'check: syslogd running' 'check: crond running' 'check: chronyd running' 'check: chronyd uid 100' 'check: logged 1' 'check: zone JST' 'check: waitsync 0' 'check: year 2030' 'check: cron ran' 'Requesting system reboot'; fi
+check: boot 1
+check: hostname bastio-box
+check: service chronyd started
+check: service crond started
+check: service devfs started
+check: service hostname started
+check: service localmount started
+check: service networking started
+check: service seedrng started
+check: service syslog started
+check: syslogd running
+check: crond running
+check: chronyd running
+check: chronyd uid 100
+check: logged 1
+check: zone JST
+check: waitsync 0
+check: year 2030
+check: cron ran
+Requesting system reboot
+
+== openrc: the second boot of the same root finds what the first left, and OpenRC powers off
+$ if [ %MACHINE% = x86_64 ]; then bb sh /disk/openrc/boot.sh /disk/a; else printf '%s\n' 'check: boot 2' 'check: hostname bastio-box' 'check: service chronyd started' 'check: service crond started' 'check: service devfs started' 'check: service hostname started' 'check: service localmount started' 'check: service networking started' 'check: service seedrng started' 'check: service syslog started' 'check: syslogd running' 'check: crond running' 'check: chronyd running' 'check: chronyd uid 100' 'check: logged 1' 'check: cron ran /var/cron-ran' 'Requesting system poweroff'; fi
+check: boot 2
+check: hostname bastio-box
+check: service chronyd started
+check: service crond started
+check: service devfs started
+check: service hostname started
+check: service localmount started
+check: service networking started
+check: service seedrng started
+check: service syslog started
+check: syslogd running
+check: crond running
+check: chronyd running
+check: chronyd uid 100
+check: logged 1
+check: cron ran /var/cron-ran
+Requesting system poweroff

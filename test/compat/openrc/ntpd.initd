@@ -1,0 +1,13 @@
+#!/sbin/openrc-run
+# The ntpd service of Alpine's busybox-openrc package (copied, as the
+# images the suite is made from do not hold that package).
+description="BusyBox NTP daemon"
+command=/usr/sbin/ntpd
+command_args="${NTPD_OPTS}"
+pidfile=/var/run/ntpd.pid
+
+depend() {
+	need net
+	use dns
+	provide ntp-client
+}

@@ -538,6 +538,10 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
+    # What a service manager's sysctl.d and mounts need: more file system
+    # types, the keys Alpine sets, a writable ping_group_range, the
+    # capability lines of a process's status.
+    ("cat /proc/filesystems; echo 0 2147483647 > /proc/sys/net/ipv4/ping_group_range; cat /proc/sys/net/ipv4/ping_group_range /proc/sys/net/ipv4/conf/all/rp_filter; cat /proc/self/status", [b"nodev\tdevtmpfs", b"nodev\tdevpts", b"0\t2147483647\r\n0\r\n", b"CapPrm:\t", b"CapEff:\t", b"CapBnd:\t"], b"\n# "),
     ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
     # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
     # of the 1 GiB window and grows the stack past 6 MiB).

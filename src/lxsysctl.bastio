@@ -7,8 +7,9 @@
 
 import "proc.bastio";
 
-const SCT_NUM: u64 = 36;
-const SCT_N: u64 = 40;
+const SCT_NUM: u64 = 49;
+const SCT_N: u64 = 53;
+const SCT_PING: u64 = 47;                // ping_group_range: two numbers, the low one's entry (the high one's, 48, has no file)
 
 fn sct_name(i: u64) -> Str {
   if i == 0 {
@@ -120,15 +121,54 @@ fn sct_name(i: u64) -> Str {
     return "sys/fs/aio-max-nr";
   }
   if i == 36 {
-    return "sys/net/ipv4/ip_local_port_range";
+    return "sys/net/ipv4/conf/all/rp_filter";
   }
   if i == 37 {
-    return "sys/fs/file-nr";
+    return "sys/net/ipv4/conf/default/rp_filter";
   }
   if i == 38 {
-    return "sys/kernel/random/entropy_avail";
+    return "sys/net/ipv4/conf/all/accept_redirects";
   }
   if i == 39 {
+    return "sys/net/ipv4/conf/all/secure_redirects";
+  }
+  if i == 40 {
+    return "sys/net/ipv4/conf/all/accept_source_route";
+  }
+  if i == 41 {
+    return "sys/net/ipv4/tcp_rfc1337";
+  }
+  if i == 42 {
+    return "sys/net/ipv6/conf/all/accept_redirects";
+  }
+  if i == 43 {
+    return "sys/net/ipv6/conf/all/accept_source_route";
+  }
+  if i == 44 {
+    return "sys/net/ipv6/conf/all/use_tempaddr";
+  }
+  if i == 45 {
+    return "sys/net/ipv6/conf/default/use_tempaddr";
+  }
+  if i == 46 {
+    return "sys/kernel/unprivileged_bpf_disabled";
+  }
+  if i == 47 {
+    return "sys/net/ipv4/ping_group_range";
+  }
+  if i == 48 {
+    return "sys/net/ipv4/ping_group_range";     // never reached: the first entry of that name wins
+  }
+  if i == 49 {
+    return "sys/net/ipv4/ip_local_port_range";
+  }
+  if i == 50 {
+    return "sys/fs/file-nr";
+  }
+  if i == 51 {
+    return "sys/kernel/random/entropy_avail";
+  }
+  if i == 52 {
     return "sys/kernel/random/poolsize";
   }
   return "sys/kernel/tainted";
@@ -244,21 +284,57 @@ fn sct_default(i: u64) -> u64 {
   if i == 35 {
     return 65536;                       // fs/aio-max-nr
   }
+  if i == 36 {
+    return 0;
+  }
+  if i == 37 {
+    return 0;
+  }
+  if i == 38 {
+    return 1;
+  }
+  if i == 39 {
+    return 1;
+  }
+  if i == 40 {
+    return 0;
+  }
+  if i == 41 {
+    return 0;
+  }
+  if i == 42 {
+    return 1;
+  }
+  if i == 43 {
+    return 0;
+  }
+  if i == 44 {
+    return 0;
+  }
+  if i == 45 {
+    return 0;
+  }
+  if i == 46 {
+    return 2;
+  }
+  if i == 47 {
+    return 1;
+  }
   return 0;
 }
 
 /// The text of entry i, for the entries after the numbers.
 fn sct_text(i: u64) -> Str {
-  if i == 36 {
+  if i == 49 {
     return "32768\t60999\n";
   }
-  if i == 37 {
+  if i == 50 {
     return "0\t0\t1048576\n";
   }
-  if i == 38 {
+  if i == 51 {
     return "256\n";
   }
-  if i == 39 {
+  if i == 52 {
     return "256\n";
   }
   return "\n";
@@ -269,7 +345,7 @@ fn sct_text(i: u64) -> Str {
 // directory). Every file the kernel serves under /proc/sys is a child of
 // its parent; t_proc lists each directory and opens what it lists.
 
-const SYSD_N: u64 = 12;
+const SYSD_N: u64 = 16;
 
 fn sysd_path(j: u64) -> Str {
   if j == 0 {
@@ -308,6 +384,18 @@ fn sysd_path(j: u64) -> Str {
   if j == 11 {
     return "sys/vm";
   }
+  if j == 12 {
+    return "sys/net/ipv4/conf";
+  }
+  if j == 13 {
+    return "sys/net/ipv4/conf/all";
+  }
+  if j == 14 {
+    return "sys/net/ipv4/conf/default";
+  }
+  if j == 15 {
+    return "sys/net/ipv6/conf/default";
+  }
   return "sys";
 }
 
@@ -322,7 +410,7 @@ fn sysd_count(j: u64) -> u64 {
     return 3;
   }
   if j == 3 {
-    return 29;
+    return 30;
   }
   if j == 4 {
     return 2;
@@ -334,19 +422,31 @@ fn sysd_count(j: u64) -> u64 {
     return 4;
   }
   if j == 7 {
-    return 6;
+    return 9;
   }
   if j == 8 {
     return 1;
   }
   if j == 9 {
-    return 1;
+    return 2;
   }
   if j == 10 {
-    return 1;
+    return 4;
   }
   if j == 11 {
     return 13;
+  }
+  if j == 12 {
+    return 2;
+  }
+  if j == 13 {
+    return 4;
+  }
+  if j == 14 {
+    return 1;
+  }
+  if j == 15 {
+    return 1;
   }
   return 0;
 }
@@ -580,6 +680,54 @@ fn sysd_child(j: u64, i: u64) -> Str {
   if j == 11 && i == 12 {
     return "vfs_cache_pressure";
   }
+  if j == 3 && i == 29 {
+    return "unprivileged_bpf_disabled";
+  }
+  if j == 7 && i == 6 {
+    return "conf";
+  }
+  if j == 7 && i == 7 {
+    return "tcp_rfc1337";
+  }
+  if j == 9 && i == 1 {
+    return "default";
+  }
+  if j == 10 && i == 1 {
+    return "accept_redirects";
+  }
+  if j == 10 && i == 2 {
+    return "accept_source_route";
+  }
+  if j == 10 && i == 3 {
+    return "use_tempaddr";
+  }
+  if j == 12 && i == 0 {
+    return "all";
+  }
+  if j == 12 && i == 1 {
+    return "default";
+  }
+  if j == 13 && i == 0 {
+    return "rp_filter";
+  }
+  if j == 13 && i == 1 {
+    return "accept_redirects";
+  }
+  if j == 13 && i == 2 {
+    return "secure_redirects";
+  }
+  if j == 13 && i == 3 {
+    return "accept_source_route";
+  }
+  if j == 14 && i == 0 {
+    return "rp_filter";
+  }
+  if j == 15 && i == 0 {
+    return "use_tempaddr";
+  }
+  if j == 7 && i == 8 {
+    return "ping_group_range";
+  }
   return "";
 }
 
@@ -615,6 +763,18 @@ fn sysd_child_dir(j: u64, i: u64) -> bool {
     return true;
   }
   if j == 9 && i == 0 {
+    return true;
+  }
+  if j == 7 && i == 6 {
+    return true;
+  }
+  if j == 9 && i == 1 {
+    return true;
+  }
+  if j == 12 && i == 0 {
+    return true;
+  }
+  if j == 12 && i == 1 {
     return true;
   }
   return false;

@@ -1263,6 +1263,27 @@ fn put_h(o: &mut Bytes, at: u64, v: u64) -> u64
   return a;
 }
 
+/// Appends v as 16 lower-case hex digits, as a capability set in /proc/PID/status.
+fn put_cap(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  let mut sh = 16;
+  while sh > 0
+    invariant sh <= 16 && blen(o) == PROC_OUT && a <= PROC_OUT
+  {
+    sh = sh - 1;
+    let d = (v >> (4 * sh)) & 15;
+    if d < 10 {
+      a = put_c(&mut o, a, cast[u8](48 + d));
+    } else {
+      a = put_c(&mut o, a, cast[u8](87 + d));
+    }
+  }
+  return a;
+}
+
 /// Appends v in octal with a leading 0, as fdinfo's flags.
 fn put_oct(o: &mut Bytes, at: u64, v: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT
@@ -2026,6 +2047,21 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       }
       return put_s(&mut o, 0, px_text(w));
     }
+    if what == SY_SC + SCT_PING {
+      // the range of groups that may open ICMP echo sockets: two numbers
+      let mut lo = sct_default(SCT_PING);
+      let mut hi = sct_default(SCT_PING + 1);
+      if get(k.sys, SYS_SCT + SCT_PING) != 0 {
+        lo = get(k.sys, SYS_SCT + SCT_PING) - 1;
+      }
+      if get(k.sys, SYS_SCT + SCT_PING + 1) != 0 {
+        hi = get(k.sys, SYS_SCT + SCT_PING + 1) - 1;
+      }
+      let a = put_n(&mut o, 0, lo);
+      let b = put_c(&mut o, a, 9);
+      let c = put_n(&mut o, b, hi);
+      return put_c(&mut o, c, 10);
+    }
     if what >= SY_SC && what < SY_SC + SCT_NUM {
       let mut v = sct_default(what - SY_SC);
       let w = get(k.sys, SYS_SCT + (what - SY_SC));
@@ -2423,6 +2459,16 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, rl_locked(k, p) / 1024);
     a = put_s(&mut o, a, " kB\nThreads:\t");
     a = put_n(&mut o, a, group_size(k, p));
+    a = put_s(&mut o, a, "\nCapInh:\t");
+    a = put_cap(&mut o, a, cap_status(k, p, 0));
+    a = put_s(&mut o, a, "\nCapPrm:\t");
+    a = put_cap(&mut o, a, cap_status(k, p, 1));
+    a = put_s(&mut o, a, "\nCapEff:\t");
+    a = put_cap(&mut o, a, cap_status(k, p, 2));
+    a = put_s(&mut o, a, "\nCapBnd:\t");
+    a = put_cap(&mut o, a, cap_status(k, p, 3));
+    a = put_s(&mut o, a, "\nCapAmb:\t");
+    a = put_cap(&mut o, a, 0);
     a = put_s(&mut o, a, "\nNoNewPrivs:\t");
     if sc_nnp(k, p) {
       a = put_n(&mut o, a, 1);
@@ -3436,6 +3482,38 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
     invariant i <= n && n <= 32 && kok(k)
   {
     i = i + 1;
+  }
+  if f == PROC_DEV + PSYS + SY_SC + SCT_PING {
+    // two numbers: the first group and the last
+    if !any || v > 0x80000000 {
+      return EINVAL;
+    }
+    let lo = v;
+    let mut hi = 0;
+    let mut anyhi = false;
+    while i < n && (bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+      invariant i <= n && n <= 32 && kok(k)
+    {
+      i = i + 1;
+    }
+    while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && hi <= 0x80000000
+      invariant i <= n && n <= 32 && hi <= 0x80000009 * 10 && kok(k)
+    {
+      hi = hi * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
+      anyhi = true;
+      i = i + 1;
+    }
+    while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+      invariant i <= n && n <= 32 && kok(k)
+    {
+      i = i + 1;
+    }
+    if !anyhi || i < n || hi > 0x80000000 {
+      return EINVAL;
+    }
+    k.sys = set(k.sys, SYS_SCT + SCT_PING, lo + 1);
+    k.sys = set(k.sys, SYS_SCT + SCT_PING + 1, hi + 1);
+    return n;
   }
   if !any || i < n || v > 0x80000000 {
     return EINVAL;
