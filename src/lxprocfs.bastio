@@ -2213,7 +2213,49 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_s(&mut o, a, "\nprocs_blocked 0\n");
   }
   if what == PF_DISKSTATS && p == 0 {
-    return 0;                               // the disks keep no I/O counts
+    // One line for the disk (major 8, minor 0, "bastio0"): reads, merges
+    // (blocks beyond the first of a command), sectors and milliseconds
+    // (ticks of 10 ms) for reads and writes, none in flight, and after the
+    // discard fields the flushes. Then two fields of our own: how many
+    // times a process was woken from a disk wait, and the milliseconds
+    // all of them slept in total.
+    let rc = k.fs.disk.q.rd_cmd;
+    let rb = k.fs.disk.q.rd_blk;
+    let wc = k.fs.disk.q.wr_cmd;
+    let wb = k.fs.disk.q.wr_blk;
+    let mut rm = 0;
+    if rb > rc {
+      rm = rb - rc;
+    }
+    let mut wm = 0;
+    if wb > wc {
+      wm = wb - wc;
+    }
+    let mut a = put_s(&mut o, 0, "   8       0 bastio0 ");
+    a = put_n(&mut o, a, rc);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, rm);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, rb % 0x20000000000000 * 8);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.rd_tk % 0x20000000000000 * 10);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, wc);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, wm);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, wb % 0x20000000000000 * 8);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.wr_tk % 0x20000000000000 * 10);
+    a = put_s(&mut o, a, " 0 0 0 0 0 0 0 ");
+    a = put_n(&mut o, a, k.fs.disk.q.fl_cmd);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.fl_tk % 0x20000000000000 * 10);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.w_wakes);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.w_tk % 0x20000000000000 * 10);
+    return put_s(&mut o, a, "\n");
   }
   if what == PF_MODULES && p == 0 {
     return 0;                               // no loadable modules
