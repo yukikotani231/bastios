@@ -175,7 +175,14 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
   }
   let nfree = count_free(k.mem.bm);
   xfer_zero(&mut k, SYSINFO_SIZE);
-  xfer_u64(&mut k.fs.xfer, 0, k.ns / NS_PER_S);   // uptime
+  // Uptime rounds up, as Linux's does, so that it is never less than /proc/uptime's
+  // seconds rounded up; and it is the caller's time namespace's.
+  let up = tm_clock(k, pid, CLOCK_BOOTTIME, smaller(k.ns, FOREVER - 1));
+  let mut secs = up / NS_PER_S;
+  if up % NS_PER_S != 0 {
+    secs = secs + 1;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, secs);
   xfer_u64(&mut k.fs.xfer, 32, pool_size(k.mem.pool) * 4096);    // totalram: the RAM the pool holds
   xfer_u64(&mut k.fs.xfer, 40, nfree * 4096);     // freeram
   bset(&mut k.fs.xfer, 80, cast[u8](procs % 256));      // procs (u16)

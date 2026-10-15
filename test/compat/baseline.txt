@@ -1228,6 +1228,18 @@ t_time: nanosleep 100 ms
 t_time: sleep(1)
 t_time: strftime + localtime
 t_time: time
+t_timens: /proc/PID/timens_offsets reads back what was written
+t_timens: a clock other than monotonic or boottime, or a bad time, is EINVAL
+t_timens: an absolute clock_nanosleep waits on the shifted clock
+t_timens: an absolute timerfd waits on the shifted clock
+t_timens: an offset may be negative
+t_timens: setns to the first time namespace undoes the shift
+t_timens: setns with a different type is EINVAL
+t_timens: sysinfo and /proc/uptime show the shifted boot time
+t_timens: the first namespace's offsets are frozen
+t_timens: the offsets are frozen once a process is in the namespace
+t_timens: the time links name the first namespace, and NS_GET_NSTYPE says CLONE_NEWTIME
+t_timens: unshare moves the children only: they read the written offsets
 t_userns: /dev/full reads zeros and writes ENOSPC
 t_userns: a process may chown its own pipe to itself, not to others
 t_userns: an unprivileged process may raise its hard descriptor limit
