@@ -166,6 +166,7 @@ fn name_out(x: &mut Bytes, name: Str) -> u64
 fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_count_or_fail(result, count)
 {
   let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
   if v < FD_OFD || v - FD_OFD >= OFD_N {
