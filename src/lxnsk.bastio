@@ -1027,3 +1027,94 @@ fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
   }
   return 0;
 }
+
+// ---------------------------------------------------------------- ioctl_ns
+
+/// A new close-on-exec descriptor of process pid on namespace id of link
+/// kind f. Returns it, or -errno.
+fn ns_fd_new(k: &mut Kernel, pid: u64, f: u64, id: u64) -> u64
+  requires kok(k) && pid < NPROC && f < NF_N && id < MNS_MAX
+  ensures kok(k)
+{
+  let h = ofd_new(&mut k, OF_DEV, PROC_DEV + PSYS + SY_NS + pid * NF_N + f);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, id + 1);
+  ofd_access(&mut k, h, 0);
+  let fd = fd_install(&mut k, pid, h);
+  if fd < LXNFD {
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// ioctl on fd, a descriptor of /proc/PID/ns link d: NS_GET_USERNS (a
+/// descriptor of the user namespace that owns the namespace, or of a user
+/// namespace's parent), NS_GET_PARENT (the parent of a user or PID
+/// namespace), NS_GET_NSTYPE (its CLONE_NEW* flag) and NS_GET_OWNER_UID
+/// (the creator of a user namespace, as the caller sees ids). Parents and
+/// owners are only given to a caller that is in them or inside one that
+/// is, as on Linux, and namespaces are two levels deep, so every parent is
+/// the first one. A namespace other than a user namespace is owned by the
+/// user namespace of the process whose link was opened (the first
+/// namespaces by the first one).
+fn ns_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N
+  ensures kok(k)
+{
+  let f = nsf_kind(d);
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let id = nsf_held(k, h);
+  let mine = nsk_of(k, NSK_USER, pid);
+  if req == NS_GET_NSTYPE {
+    return nf_flag(f);
+  }
+  if req == NS_GET_USERNS {
+    let mut owner = 0;
+    if f == NF_USER {
+      if id == 0 {
+        return EPERM;                       // the first has no owner
+      }
+    } else if id != 0 {
+      owner = nsk_of(k, NSK_USER, nsf_proc(d));
+    }
+    if mine != 0 && mine != owner {
+      return EPERM;                         // out of the caller's reach
+    }
+    return ns_fd_new(&mut k, pid, NF_USER, owner);
+  }
+  if req == NS_GET_PARENT {
+    if f != NF_USER && f != NF_PID && f != NF_PIDC {
+      return EINVAL;                        // not hierarchical
+    }
+    let mut here = mine;
+    if f != NF_USER {
+      here = nsk_of(k, NSK_PID, pid);
+    }
+    if id == 0 || here != 0 {
+      return EPERM;
+    }
+    let mut g = f;
+    if f == NF_PIDC {
+      g = NF_PID;
+    }
+    return ns_fd_new(&mut k, pid, g, 0);
+  }
+  if req == NS_GET_OWNER_UID {
+    if f != NF_USER {
+      return EINVAL;
+    }
+    let mut uid = 0;
+    let s = usr_slot(k, id);
+    if s < USR_N {
+      uid = usr_get(k, s, 1);
+    }
+    xfer_u64(&mut k.fs.xfer, 0, id_out(k, pid, 0, uid % UM_BAD));
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  return ENOTTY;
+}
