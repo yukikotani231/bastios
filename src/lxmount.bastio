@@ -363,7 +363,7 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   // namespace in a mount namespace of its own, which has only that
   // namespace's mounts to change (not the file layer's).
   let full = cap_has(k, pid, CAP_SYS_ADMIN);
-  if !full && !(ns_of(k, pid) != 0 && ns_cap(k, pid, CAP_SYS_ADMIN)) {
+  if !full && !mnt_admin(k, pid) {
     return EPERM;
   }
   if n == LX_MOUNT {

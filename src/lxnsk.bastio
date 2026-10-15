@@ -209,6 +209,18 @@ fn uts_gc(k: &mut Kernel) -> u64
   return free;
 }
 
+/// The user namespace that made the UTS namespace of pid (0 for the first).
+fn uts_owner(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < MNS_MAX
+{
+  let s = uts_slot_of(k, pid);
+  if s >= UTS_N {
+    return 0;
+  }
+  return get(k.mns, MNS_UTS + s * UTS_W + UTS_OWN) % MNS_MAX;
+}
+
 /// Process pid moves to a new UTS namespace, with a copy of the names it
 /// saw. 0, or -ENOMEM if every slot is taken.
 fn uts_unshare(k: &mut Kernel, pid: u64) -> u64
@@ -224,12 +236,13 @@ fn uts_unshare(k: &mut Kernel, pid: u64) -> u64
     return ENOMEM;
   }
   let mut w = 0;
-  while w < UTS_W - 1
-    invariant w <= UTS_W - 1 && s < UTS_N && pid < NPROC && kok(k)
+  while w < UTS_W - 2
+    invariant w <= UTS_W - 2 && s < UTS_N && pid < NPROC && kok(k)
   {
     k.mns = set(k.mns, MNS_UTS + s * UTS_W + 1 + w, uts_rd(k, pid, w));
     w = w + 1;
   }
+  k.mns = set(k.mns, MNS_UTS + s * UTS_W + UTS_OWN, nsk_of(k, NSK_USER, pid));   // the user namespace it was made in
   k.mns = set(k.mns, MNS_UTS + s * UTS_W, id + 1);
   nsk_set(&mut k, NSK_UTS, pid, id);
   return 0;

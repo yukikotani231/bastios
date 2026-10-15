@@ -72,7 +72,7 @@ const MIN_SHIFT: u64 = 0xFFFFFFFE00000000;   // -MAX_SHIFT
 /// Word w of the names pid sees: k.sys's in the first UTS namespace, a
 /// slot of k.mns's in the others (src/lxns.bastio).
 fn uts_rd(k: &Kernel, pid: u64, w: u64) -> u64
-  requires kok(k) && pid < NPROC && w < UTS_W - 1
+  requires kok(k) && pid < NPROC && w < UTS_W - 2
 {
   let s = uts_slot_of(k, pid);
   if s < UTS_N {
@@ -82,7 +82,7 @@ fn uts_rd(k: &Kernel, pid: u64, w: u64) -> u64
 }
 
 fn uts_wr(k: &mut Kernel, pid: u64, w: u64, v: u64)
-  requires kok(k) && pid < NPROC && w < UTS_W - 1
+  requires kok(k) && pid < NPROC && w < UTS_W - 2
   ensures kok(k)
 {
   let s = uts_slot_of(k, pid);
@@ -140,7 +140,7 @@ fn name_set(k: &Kernel, pid: u64, bit: u64) -> bool
 fn uts_may_set(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
-  return cap_has(k, pid, CAP_SYS_ADMIN) || (nsk_of(k, NSK_UTS, pid) != 0 && ns_cap(k, pid, CAP_SYS_ADMIN));
+  return cap_has(k, pid, CAP_SYS_ADMIN) || (uts_slot_of(k, pid) < UTS_N && ns_cap_over(k, pid, uts_owner(k, pid), CAP_SYS_ADMIN));
 }
 
 /// Make the first n bytes of the transfer buffer the name `base` (bit as
