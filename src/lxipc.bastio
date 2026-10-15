@@ -17,7 +17,7 @@
 // Shared memory segments (shmget, shmat, shmdt, shmctl) keep their pages
 // in k.shm; /proc/sysvipc and the IPC sysctls are printed from here.
 //
-// Limits are small and fixed: 32 queues, 32 semaphore sets and 32 shared memory segments, SEMMSL 64 semaphores
+// Limits are small and fixed: 32 queues, 32 semaphore sets and 32 shared memory segments (SHMMAX 32 MiB each, 16 level-1 tables of the store), SEMMSL 64 semaphores
 // a set, MQ_MSGS messages a queue whatever msg_qbytes says, and IPC_SET
 // may not raise msg_qbytes past MSGMNB even for root. A wait runs the
 // call again and again rather than sleeping until a change. MSG_COPY
@@ -49,7 +49,7 @@ const SHM_INFO: u64 = 14;
 const SHM_STAT_ANY: u64 = 15;
 const SHM_DEST: u64 = 512;             // in the mode: removed, waiting for the last detach
 const SHM_LOCKED: u64 = 1024;
-const SHMMAX: u64 = 2097152;           // a segment is at most one level-1 table of pages
+const SHMMAX: u64 = 33554432;          // a segment is at most SHM_CHUNKS level-1 tables of pages
 
 /// The largest segment shmget makes: SHMMAX, or less if /proc/sys/kernel/shmmax was written.
 fn shmmax_now(k: &Kernel) -> u64
@@ -73,7 +73,9 @@ fn shmmax_shown(k: &Kernel) -> u64
   }
   return w - 1;
 }
-const SHM_PAGES: u64 = 512;
+const SHM_CHUNK: u64 = 512;            // pages in one level-1 table
+const SHM_CHUNKS: u64 = 16;            // tables a segment may use: slots seg, seg + IPC_SETS, ... of k.shm
+const SHM_PAGES: u64 = 8192;           // SHM_CHUNKS * SHM_CHUNK
 const SHMID_DS: u64 = 112;             // struct shmid64_ds
 
 const IPC_CREAT: u64 = 512;            // 01000
@@ -1415,25 +1417,57 @@ fn store_free(m: &mut Mem, store: &mut PageTable, slot: u64)
   requires mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0 && slot < IPC_SETS
   ensures mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0
 {
-  if pt_has(store, slot) {
-    free_l1(&mut m, pt_take(&mut store, slot));
+  let mut j = 0;
+  while j < SHM_CHUNKS
+    invariant j <= SHM_CHUNKS && mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0
+  {
+    let at = slot + j * IPC_SETS;
+    if at < 512 && pt_has(store, at) {
+      free_l1(&mut m, pt_take(&mut store, at));
+    }
+    j = j + 1;
   }
 }
 
-/// Fresh zero pages for a segment of `pages` pages. False if memory ran out.
+/// Fresh zero pages for a segment of `pages` pages, in as many level-1
+/// tables as it needs (slot, slot + IPC_SETS, ...). False if memory ran out.
 fn store_fill(m: &mut Mem, store: &mut PageTable, slot: u64, pages: u64) -> bool
   requires mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0 && slot < IPC_SETS && pages <= SHM_PAGES
   ensures mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0
 {
   store_free(&mut m, &mut store, slot);
+  let mut j = 0;
+  while j * SHM_CHUNK < pages
+    invariant j <= SHM_CHUNKS && pages <= SHM_PAGES && mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0
+  {
+    let left = pages - j * SHM_CHUNK;
+    let mut n = SHM_CHUNK;
+    if left < n {
+      n = left;
+    }
+    let at = slot + j * IPC_SETS;
+    if at >= 512 || pt_has(store, at) || !chunk_fill(&mut m, &mut store, at, n) {
+      store_free(&mut m, &mut store, slot);
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
+}
+
+/// One level-1 table of n fresh zero pages at slot `at` of the store.
+fn chunk_fill(m: &mut Mem, store: &mut PageTable, at: u64, n: u64) -> bool
+  requires mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0 && at < 512 && !pt_used(store, at) && n <= SHM_CHUNK
+  ensures mem_ok(m) && pt_level(store) == 2 && pt_leases(store) == 0
+{
   let a = find_free(&mut m);
   if a >= NPAGES {
     return false;
   }
   let mut l1 = pt_new(take_page(&mut m, a), 1);
   let mut i = 0;
-  while i < pages
-    invariant i <= pages && pages <= SHM_PAGES && mem_ok(m) && pt_level(l1) == 1
+  while i < n
+    invariant i <= n && n <= SHM_CHUNK && mem_ok(m) && pt_level(l1) == 1
   {
     let b = find_free(&mut m);
     if b >= NPAGES {
@@ -1445,11 +1479,7 @@ fn store_fill(m: &mut Mem, store: &mut PageTable, slot: u64, pages: u64) -> bool
     }
     i = i + 1;
   }
-  if pt_has(store, slot) {
-    free_l1(&mut m, l1);
-    return false;
-  }
-  pt_put(&mut store, slot, l1);
+  pt_put(&mut store, at, l1);
   return true;
 }
 
@@ -1502,8 +1532,8 @@ fn shm_new_pages(k: &mut Kernel, slot: u64, pages: u64) -> bool
 /// Maps pages 0 .. n of the segment in store slot seg at window pages
 /// from .. from + n of process pid, where nothing is mapped. False if the
 /// process has no window, a processor runs it, or memory ran out.
-fn win_attach(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: u64, seg: u64, from: u64, n: u64, w: bool) -> bool
-  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && seg < IPC_SETS && n <= SHM_PAGES && from + n <= WPAGES
+fn win_attach_chunk(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: u64, seg: u64, from: u64, n: u64, w: bool) -> bool
+  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && seg < 512 && n <= SHM_CHUNK && from + n <= WPAGES
   requires pt_level(store) == 2 && pt_leases(store) == 0
   ensures mem_ok(m) && spaces_ok(spaces) && pt_level(store) == 2 && pt_leases(store) == 0
 {
@@ -1518,7 +1548,7 @@ fn win_attach(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: 
           ok = true;
           let mut i = 0;
           while ok && i < n
-            invariant i <= n && n <= SHM_PAGES && from + n <= WPAGES && mem_ok(m)
+            invariant i <= n && n <= SHM_CHUNK && from + n <= WPAGES && mem_ok(m)
             invariant pt_level(l3) == 3 && pt_leases(l3) == 0 && pt_level(sl1) == 1
             invariant pt_level(store) == 2 && pt_leases(store) == 0 && !pt_used(store, seg)
           {
@@ -1563,6 +1593,30 @@ fn win_attach(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: 
       return ok;
     },
   }
+}
+
+/// win_attach_chunk for each level-1 table of segment `seg`.
+fn win_attach(m: &mut Mem, spaces: &mut Vec[Space], store: &mut PageTable, pid: u64, seg: u64, from: u64, n: u64, w: bool) -> bool
+  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC && seg < IPC_SETS && n <= SHM_PAGES && from + n <= WPAGES
+  requires pt_level(store) == 2 && pt_leases(store) == 0
+  ensures mem_ok(m) && spaces_ok(spaces) && pt_level(store) == 2 && pt_leases(store) == 0
+{
+  let mut j = 0;
+  while j * SHM_CHUNK < n
+    invariant j <= SHM_CHUNKS && n <= SHM_PAGES && from + n <= WPAGES && mem_ok(m) && spaces_ok(spaces)
+    invariant pt_level(store) == 2 && pt_leases(store) == 0
+  {
+    let left = n - j * SHM_CHUNK;
+    let mut c = SHM_CHUNK;
+    if left < c {
+      c = left;
+    }
+    if !win_attach_chunk(&mut m, &mut spaces, &mut store, pid, seg + j * IPC_SETS, from + j * SHM_CHUNK, c, w) {
+      return false;
+    }
+    j = j + 1;
+  }
+  return true;
 }
 
 fn shm_pages(k: &Kernel, slot: u64) -> u64

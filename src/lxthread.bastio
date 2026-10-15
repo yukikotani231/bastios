@@ -401,13 +401,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   put_fpu(&mut k.fpus, c, Fpu::State(fpu));
   let g = tgid(k.procs, pid);
   pset(&mut k.procs, g, F_TGID, g);
-  let mut f = 0;
-  while f < STRIDE
-    invariant f <= STRIDE && kok(k)
-  {
-    pset(&mut k.procs, c, f, pget(k.procs, pid, f));
-    f = f + 1;
-  }
+  wcopy(&mut k.procs, c * STRIDE, pid * STRIDE, STRIDE);
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
@@ -433,6 +427,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   cwd_fork(&mut k.croot, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the group's namespaces (src/lxns.bastio, src/lxnsk.bastio)
   nsk_fork(&mut k.mns, pid, c);
+  nsk_set(&mut k, NSK_TIME, c, nsk_of(k, NSK_TIME, pid));   // a thread shares its creator's time namespace, whatever its children get
   pidns_thread(&mut k, pid, c);
   pset(&mut k.procs, c, F_FUTEX, 0);
   pset(&mut k.procs, c, F_CTID, 0);
@@ -528,6 +523,9 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     let en = netns_unshare(&mut k, c);      // the child gets a network namespace of its own; past the limit it keeps the parent's
   }
   let e2 = nsk_unshare(&mut k, c, flags & (CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWUSER + CLONE_NEWCGROUP));   // nor this: uts_room did (src/lxnsk.bastio)
+  if flags & CLONE_NEWNS != 0 {
+    mntns_own(&mut k, c);                   // after the user namespace, if the same call made one
+  }
   if flags & CLONE_NEWNET != 0 {
     netns_own(&mut k, c);                   // after the user namespace, if the same call made one
   }
@@ -586,8 +584,8 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if ns & CLONE_NEWUSER == 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
       return EPERM;
     }
-    if ns & (CLONE_NEWNS + CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP) != ns {
-      return EINVAL;                        // not the time namespace
+    if ns & CLONE_NEWTIME != 0 && !tm_room(&mut k) {
+      return ENOMEM;
     }
     if ns & CLONE_NEWUSER != 0 && !userns_room(&mut k) {
       return ENOMEM;
@@ -625,6 +623,9 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     }
   }
   let e = nsk_unshare(&mut k, pid, ns);     // src/lxnsk.bastio
+  if e == 0 && ns & CLONE_NEWNS != 0 {
+    mntns_own(&mut k, pid);
+  }
   if e == 0 && ns & CLONE_NEWNET != 0 {
     netns_own(&mut k, pid);                 // after the user namespace, if the same call made one
   }
