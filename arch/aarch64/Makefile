@@ -440,12 +440,16 @@ $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test
 $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
 	COMPAT_ARCH=aarch64 test/compat/nodedisk.py $@ $(NODE_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
 
-COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
+# COMPAT_DISKS, COMPAT_LANES and COMPAT_SKIP_LANES (run.py --lanes and
+# --skip-lanes) let a CI runner build and run a part of the suite: the
+# images of its lanes, and those lanes.
+COMPAT_DISKS ?= $(B)/compat/disk.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --bastio-disk $(B)/compat/bastio.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http \
               --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
-              --node-disk $(B)/compat/node.img --out $(B)/compat
+              --node-disk $(B)/compat/node.img --out $(B)/compat \
+              $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
 compat-disks: $(B)/bastios.bin $(COMPAT_DISKS)
 

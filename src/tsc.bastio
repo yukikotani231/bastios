@@ -37,21 +37,13 @@ fn tsc_scale(d: u64, mult: u64) -> u64
   // product is checked against the bound by division first, as hpet_ns
   // does. The first term is not rare: with a counter near 1 GHz, mh is 1
   // and hi is 1 after about 4 seconds.
-  if mh != 0 && hi > (TWO32 - 1) / mh {
+  if hi != 0 && mh != 0 && hi > (TWO32 - 1) / mh {
     return NS_MAX;
   }
   let top = hi * mh * TWO32;
-  if ml != 0 && hi > NS_MAX / ml {
-    return NS_MAX;
-  }
+  // hi, lo and ml are below 2^32, so hi*ml, lo*mh and lo*ml cannot overflow.
   let a = hi * ml;
-  if mh != 0 && lo > NS_MAX / mh {
-    return NS_MAX;
-  }
   let b = lo * mh;
-  if ml != 0 && lo > NS_MAX / ml {
-    return NS_MAX;
-  }
   let c = lo * ml / TWO32;
   if a > NS_MAX - b {
     return NS_MAX;

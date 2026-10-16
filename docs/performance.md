@@ -41,49 +41,119 @@ system. Without `/dev/kvm`, `bench/run.py` downloads the kernel with
 | pipebw | 64 KiB writes through a pipe to a reader |
 | tcplat, tcpbw | the same over TCP on 127.0.0.1 |
 
+`make bench-workloads` adds whole-program workloads and `make bench-net` a TCP comparison over a network card (see Results).
+
 `bench/prof.py -- COMMAND` shows where the time goes for one command on
 BastiOS. It samples QEMU with Linux `perf` and charges each sample to a
 kernel function through QEMU's `-perfmap`, or to QEMU itself.
 
 ## Results
 
-BastiOS main (f71b0a8), after the loopback TCP ring and the COW fork work.
-This host ran slower than the one behind earlier tables (`cpu` 2.9 ns
-against 1.4), so compare the ratios, not the absolute figures.
-QEMU 8.2 TCG, `-smp 2`, `-m 512M`, median of 3 runs, on a 4-processor
-cloud container with no KVM. The ratio column is BastiOS's time divided by
-Linux's for the same work, so a figure above 1 means BastiOS is slower.
+BastiOS main (ed8a934). QEMU 8.2 TCG, `-smp 2`, `-m 512M`, median of 3
+runs, on a 4-processor cloud container with no KVM. The ratio column is
+BastiOS's time divided by Linux's for the same work, so a figure above 1
+means BastiOS is slower. Compare the ratios, not the absolute figures:
+TCG time depends on the host.
 
 | Test | Unit | BastiOS | Linux | BastiOS / Linux |
 |---|---|---:|---:|---:|
-| cpu | ns/iter | 2.89 | 3.00 | 0.96x |
-| memcpy | us/MiB | 110 | 112 | 0.99x |
-| syscall | ns | 9364 | 1026 | 9.13x |
-| clock | ns | 145 | 2623 | 0.06x |
-| open@tmp | us | 43.4 | 15.2 | 2.86x |
-| open@disk | us | 54.8 | 18.8 | 2.91x |
-| stat@tmp | us | 26.2 | 9.09 | 2.88x |
-| stat@disk | us | 64.3 | 8.08 | 7.95x |
-| create@tmp | us | 203 | 252 | 0.81x |
-| create@disk | us | 5638 | 734 | 7.68x |
-| filemap@tmp | ns/page | 7080 | 3927 | 1.80x |
-| filemap@disk | ns/page | 62277 | 4213 | 14.78x |
-| filewrite@tmp | MiB/s | 560.8 | 180.0 | 0.32x |
-| filewrite@disk | MiB/s | 5.6 | 126.9 | 22.75x |
-| fileread@tmp | MiB/s | 663.4 | 1147.4 | 1.73x |
-| fileread@disk | MiB/s | 47.2 | 1322.5 | 28.05x |
-| fork | us | 768 | 2313 | 0.33x |
-| forkbig | us | 1236 | 3722 | 0.33x |
-| exec | us | 1896 | 8446 | 0.22x |
-| spawn | us | 1555 | 7092 | 0.22x |
-| fault | ns/page | 66480 | 22687 | 2.93x |
-| pipelat | us | 165 | 250 | 0.66x |
-| pipebw | MiB/s | 281.4 | 167.8 | 0.60x |
-| tcplat | us | 278 | 482 | 0.58x |
-| tcpbw | MiB/s | 105.8 | 194.0 | 1.83x |
-| sleep | us | 1024 | 1329 | 0.77x |
-| epwait | us | 1054 | 1307 | 0.81x |
-| idle | % host CPU | 15.0 | 2.00 | 7.51x |
+| cpu | ns/iter | 1.09 | 1.27 | 0.86x |
+| memcpy | us/MiB | 54.5 | 61.3 | 0.89x |
+| syscall | ns | 16009 | 459 | 34.90x |
+| clock | ns | 104 | 999 | 0.10x |
+| open@tmp | us | 46.6 | 7.52 | 6.19x |
+| open@disk | us | 65.1 | 7.73 | 8.42x |
+| stat@tmp | us | 28.6 | 4.83 | 5.91x |
+| stat@disk | us | 31.7 | 4.29 | 7.38x |
+| create@tmp | us | 108 | 151 | 0.72x |
+| create@disk | us | 1326 | 444 | 2.99x |
+| filemap@tmp | ns/page | 3800 | 1704 | 2.23x |
+| filemap@disk | ns/page | 4246 | 1984 | 2.14x |
+| filewrite@tmp | MiB/s | 486.6 | 352.9 | 0.73x |
+| filewrite@disk | MiB/s | 76.2 | 202.4 | 2.66x |
+| fileread@tmp | MiB/s | 961.3 | 2371.0 | 2.47x |
+| fileread@disk | MiB/s | 930.0 | 2595.9 | 2.79x |
+| fork | us | 281 | 1259 | 0.22x |
+| forkbig | us | 412 | 2177 | 0.19x |
+| exec | us | 746 | 4239 | 0.18x |
+| spawn | us | 733 | 3645 | 0.20x |
+| fault | ns/page | 13612 | 9815 | 1.39x |
+| pipelat | us | 62.5 | 97.2 | 0.64x |
+| pipebw | MiB/s | 508.8 | 485.1 | 0.95x |
+| tcplat | us | 165 | 249 | 0.66x |
+| tcpbw | MiB/s | 189.1 | 413.4 | 2.19x |
+| sleep | us | 1031 | 1171 | 0.88x |
+| epwait | us | 1097 | 1164 | 0.94x |
+| idle | % host CPU | 11.3 | 1.00 | 11.34x |
+
+### Whole programs
+
+`bench/workloads.py` (`make bench-workloads`) runs the same Alpine programs
+on both systems, on the same Alpine root (the same binaries: gcc 15, GNU
+make, apk, BusyBox tar and gzip), each on its own kernel and file system
+(BastiOS's disk file system, ext4 on Linux). The host times each phase from
+the serial line, as `bench/run.py` does; `apk` and `untar` change the root
+and run once, the rest are medians of 3.
+
+| Workload | What it does | BastiOS (s) | Linux (s) | BastiOS / Linux |
+|---|---|---:|---:|---:|
+| untar | unpack Alpine's mini root (about 500 small files) | 1.08 | 0.22 | 4.96x |
+| apk | apk add gcc, make and musl-dev from a local repository | 10.54 | 5.64 | 1.87x |
+| hello | gcc -O2 of one small C file, compile and link | 2.45 | 0.55 | 4.49x |
+| make1 | make -j1 of a generated project: one gcc -O1 per file, then a link | 71.76 | 79.79 | 0.90x |
+| make2 | the same with make -j2 | 39.35 | 41.74 | 0.94x |
+| tgz | tar the gcc and header trees through gzip -1 into one file | 4.11 | 1.27 | 3.24x |
+| scan | find over the whole root, grep -rl over the headers | 12.79 | 0.27 | 47.54x |
+
+How to read it: a build of many files is CPU-bound, and `make1` and
+`make2` finish a little sooner on BastiOS than on Linux (inferred, not
+profiled: `fork` and `exec` cost a fifth as much, see the table above).
+File-system-heavy work is where BastiOS loses: `scan` walks the whole root and
+reads the headers (a directory listing used to walk every possible entry;
+that is fixed, see the commit history, and `scan` is now about 1.5 s on the
+host these figures were taken from, which the table above does not yet show).
+
+Much of the rest is the cache, not the work. `bench/workloads.py` also
+prints the first run (cold) apart from the median of the later runs (warm).
+On Linux the later runs find the gcc binaries and the header tree in the
+page cache: `hello` takes 2.4 s the first time and 1.2 s after, `tgz` about
+2.7 s and 1.3 s. BastiOS's block cache was 4 MiB on a 512 MiB machine, far
+below the 20 to 60 MB these programs read, so every run reads the disk again:
+`hello` stays at 3.8 to 4.1 s, and `tgz` takes 3.2 s whether cold or not.
+Cold against cold the gap is 1.2x to 1.6x, not 3x to 4.5x. The `gzip -1`
+of the 19 MB tar alone takes 2.8 s on BastiOS and is the same instructions on
+Linux (inferred, not measured there), so a bigger cache, not faster system calls, is what closes the rest.
+The cache is now a 16th of memory, between 1 MiB and 32 MiB (`dq_slots_for`
+in `src/diskq.bastio`; the kernel heap extension, which it takes half of, is an
+eighth of the page pool). A machine of 512 MiB or more gets the 32 MiB cap,
+which holds a 19 MB tree: a warm re-read of it is 3x faster on 2 GiB. Trees of
+the 20 to 60 MB that gcc reads still do not fit. The cap is 32 MiB because
+doubling it makes Z3 give up on `lx_syscall`.
+(These cold figures come from single runs on a shared host; read them as
+rough.)
+
+### Over a network card
+
+`bench/netcmp.py` (`make bench-net`) runs `mtcp echo` (`user/mtcp.c`, the same
+source on both systems, built with musl) in the guest, forwards a host port
+to it through QEMU's user-mode network and drives it from the host: the
+average round trip of 200 messages of 32 bytes, and the rate of echoing 2 MiB.
+QEMU's user-mode stack is on the path of both systems and caps the rate, so
+compare the two systems, not the absolute figures. Ubuntu's kernel builds
+e1000 as a module, which the bench's initramfs does not carry, so only
+BastiOS has an e1000 row.
+
+| Card | Test | Unit | BastiOS | Linux | BastiOS / Linux |
+|---|---|---|---:|---:|---:|
+| virtio-net | round trip, 32 bytes | us | 263.6 | 316.3 | 0.83x |
+| virtio-net | echo 2 MiB | MiB/s | 13.3 | 11.9 | 1.12x |
+| e1000 | round trip, 32 bytes | us | 143.8 | n/a | |
+| e1000 | echo 2 MiB | MiB/s | 0.2 | n/a | |
+
+The e1000 driver moves bulk data at a fiftieth of virtio-net's rate (0.2
+against 13.3 MiB/s) although its round trip is shorter; the cause is not
+known yet. It is the gap that matters for real network cards and for
+clouds that offer an e1000.
 
 ## Boot time and memory
 

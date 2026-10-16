@@ -53,7 +53,7 @@ fn sig_frame(k: &mut Kernel, p: u64, s: u64, rsp: u64, red: u64, restorer: u64, 
   let mut fr = balloc(FRAME_SIZE);
   // The siginfo: signo, errno, code (SI_USER), sender.
   bset(&mut fr, INFO_AT, cast[u8](s));
-  info_from(&mut fr, INFO_AT, wget(k.sigsave, sender_at(p, s)));   // si_pid, si_value
+  info_from(&mut fr, INFO_AT, wget(k.sigsave, sender_at(p, s)), wget(k.sigsave, value_at(p, s)));   // si_pid, si_value
   if wget(k.sigsave, sender_at(p, s)) < FAULT_MARK && nsk_of(k, NSK_PID, p) != 0 {
     xfer_u64(&mut fr, INFO_AT + 16, vpid_of(k, p, wget(k.sigsave, sender_at(p, s)) % 256));   // as p's PID namespace names the sender
   }
