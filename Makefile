@@ -754,10 +754,18 @@ build/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLANG)/stage1/*.bastio) |
 build/compat/bastioc1: build/compat/bastioc1.c
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
 
-build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc test/compat/bastiodisk.sh \
-    $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py
+# bastiolang's developer tools (tools/bastiofmt, tools/bastio-lsp), built here
+# the way bastioc1 is, as static PIEs against musl, to run on BastiOS.
+build/compat/bastiofmt.c build/compat/bastio-lsp.c: build/compat/%.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/tools/*/*.bastio) | build/compat
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/tools/$*/$(if $(filter bastio-lsp,$*),lsp,$*).bastio
+
+build/compat/bastiofmt build/compat/bastio-lsp: build/compat/%: build/compat/%.c
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
+build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc build/compat/bastiofmt build/compat/bastio-lsp test/compat/bastiodisk.sh \
+    $(wildcard test/compat/bastio/*) test/compat/mkdisk.py
 	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
-	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
+	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1 build/compat/bastiofmt build/compat/bastio-lsp
 
 # Alpine Linux on BastiOS, on a fourth disk (test/compat/alpinedisk.py) for
 # test/compat/alpine.txt: Alpine's root file system, which the checks enter

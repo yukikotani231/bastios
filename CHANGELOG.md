@@ -45,6 +45,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine (what Firecracker's `SendCtrlAltDel` sends), so a guest without ACPI has a way to end. The console prints `ctrl-alt-del: restarting` and the machine goes through the same path as `reboot`.
 - The local APIC timer is calibrated against PIT channel 0 when the speaker channel (2) is missing, as in QEMU's `microvm`, before falling back to two seconds of the RTC. A `microvm` boots in 0.3 s instead of 2.1 s under TCG. Trusted: about 30 more lines of C in `boot/smp.c`.
 
+### Tests
+
+- `test/compat/bastio.txt` runs bastiolang's `bastiofmt` (the formatter) and `bastio-lsp` (the language server) on BastiOS: the formatter on a line and on the compiler's parser, the language server over its standard input and output for hover, go to definition, formatting and a diagnostic from `bastioc1`.
+
 ### AArch64
 
 - BastiOS builds for AArch64 and boots to the shell on QEMU's `virt` machine
