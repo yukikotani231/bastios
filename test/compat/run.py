@@ -68,6 +68,11 @@ def syscall_names():
     return names
 
 
+# Cases that need longer than their lane's timeout say so with a line
+# "# timeout SECONDS" between their name and their command.
+SLOW = {}
+
+
 def load_applets(path):
     """The cases in applets.txt: (name, command, expected lines)."""
     cases, cur = [], None
@@ -76,6 +81,8 @@ def load_applets(path):
         if line.startswith("== "):
             cur = [line[3:].strip(), None, []]
             cases.append(cur)
+        elif cur is not None and cur[1] is None and line.startswith("# timeout "):
+            SLOW[cur[0]] = int(line[len("# timeout "):])
         elif cur is None or (cur[1] is None and (line.startswith("#") or not line.strip())):
             continue
         elif cur[1] is None and line.startswith("$ "):
@@ -122,13 +129,30 @@ def load_tty(path):
     return [(c["name"], c["prog"], c["keys"], c["check"], c["exp"]) for c in cases]
 
 
+def add_aports(www, tcc_src=None):
+    """The abuild cases' files in the web root: /aports.tar, the APKBUILDs
+    and sources of test/compat/aports (every directory but the *-src ones),
+    /libgreet-1.2.tar.gz, libgreet's source (the APKBUILD fetches it over
+    HTTP), and /tinycc-0.9.28.tar.gz, the tcc checkout in tcc_src."""
+    base = os.path.join(HERE, "aports")
+    with tarfile.open(os.path.join(www, "aports.tar"), "w") as t:
+        for d in sorted(os.listdir(base)):
+            if not d.endswith("-src"):
+                t.add(os.path.join(base, d), arcname=d, filter=lambda i: setattr(i, "uid", 0) or setattr(i, "gid", 0) or i)
+    with tarfile.open(os.path.join(www, "libgreet-1.2.tar.gz"), "w:gz") as t:
+        t.add(os.path.join(base, "libgreet-src"), arcname="libgreet-1.2", filter=lambda i: setattr(i, "uid", 0) or setattr(i, "gid", 0) or i)
+    if tcc_src:
+        subprocess.run(["git", "-C", tcc_src, "archive", "--format=tar.gz", "--prefix=tinycc-0.9.28/",
+                        "-o", os.path.join(www, "tinycc-0.9.28.tar.gz"), "HEAD"], check=True)
+
+
 class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
     /repo.git, a git repository for the dumb HTTP protocol, and
     /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
 
-    def __init__(self):
+    def __init__(self, tcc_src=None):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
         with open(os.path.join(self.dir, "hello.txt"), "w") as f:
             f.write("hello from the host\n")
@@ -158,6 +182,7 @@ class WebServer:
         for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "termdebug.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
+        add_aports(self.dir, tcc_src)
         handler = functools.partial(Quiet, directory=self.dir)
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
@@ -565,7 +590,7 @@ def run_applet(env, name, cmd, expected, timeout, bb):
            .replace("SSHPORT", getattr(env, "sshport", "")))
     if cmd.startswith("@host "):
         return run_on_host(name, cmd[6:], expected, timeout)
-    text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", timeout)
+    text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", max(timeout, SLOW.get(name, 0)))
     lines = text.split("\n")
     try:
         start = lines.index("@@begin") + 1
@@ -707,6 +732,7 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--podman-disk", help="the Podman disk (the root of the podman image) for podman.txt")
@@ -751,7 +777,7 @@ def main():
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
-    web = WebServer()
+    web = WebServer(args.tcc_src)
     if args.registry_image and lane_chosen("alpine"):
         web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None

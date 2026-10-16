@@ -14,6 +14,10 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Added
+
+- `mount -t ext4 IMAGE DIR` (also `ext2` and `ext3` images without a journal to replay) reads an ext4 image, a file anywhere (on the disk too) or a loop device, into a read-only mount on an empty in-memory directory (`src/ext4.bastio`, `docs/design/ext4-readonly.md`). Files, directories, symbolic links, hard links, device nodes, pipes, modes, owners and times are shown; extents and classic block maps are read; holes stay holes. It is a snapshot held in memory: at most 32768 nodes, paths up to 255 bytes and files up to 1 GiB (the mount fails with `ENOSPC`, `ENAMETOOLONG` or `EFBIG` otherwise), and an image with a journal to replay, inline data or encryption is refused with `EINVAL`. `test/ext4img.py` makes images with `mke2fs -d` and `user/mext4.c` checks them in `make test`.
+
 ### Boot
 
 - The ARP cache holds 64 neighbors (4 before): a machine on a network with more than four neighbors no longer asks again for the ones it just forgot.
@@ -45,6 +49,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine (what Firecracker's `SendCtrlAltDel` sends), so a guest without ACPI has a way to end. The console prints `ctrl-alt-del: restarting` and the machine goes through the same path as `reboot`.
 - The local APIC timer is calibrated against PIT channel 0 when the speaker channel (2) is missing, as in QEMU's `microvm`, before falling back to two seconds of the RTC. A `microvm` boots in 0.3 s instead of 2.1 s under TCG. Trusted: about 30 more lines of C in `boot/smp.c`.
 
+### Memory
+
+- Running out of memory no longer ends the faulting process with SIGSEGV. A page fault that finds no free page first gives the page cache back (a cached page nobody maps is freed) and runs the fault again; if that frees nothing the out-of-memory killer (`src/oom.bastio`) sends SIGKILL to the process with the highest `oom_score`, Linux's rule: the share of all pages it holds in thousandths, moved by its `oom_score_adj` (-1000 never kills it, 1000 makes it the first choice; process 1 is never chosen). The console says `Out of memory: Killed process N (name) oom_score S, K kB resident`, the faulting process waits while the victim dies, and /proc/vmstat counts `oom_kill`. `/proc/PID/oom_score` reports the score (it was always 0), `/proc/sys/vm/drop_caches` (1 or 3) drops the page cache, and `MemAvailable` counts the cached pages. Tested at 64 MiB of RAM by `test/memory_test.sh` (user/mhog.c) on one and four processors: reclaim before any kill, the biggest process chosen over the one that asked last, `oom_score_adj` moving the choice. Not done: a shortage of the kernel's own heap still halts, a system call that finds no page still fails with ENOMEM, and a stack that cannot grow still gets its SIGSEGV.
 ### Tests
 
 - `test/compat/bastio.txt` runs bastiolang's `bastiofmt` (the formatter) and `bastio-lsp` (the language server) on BastiOS: the formatter on a line and on the compiler's parser, the language server over its standard input and output for hover, go to definition, formatting and a diagnostic from `bastioc1`.
@@ -212,6 +219,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- A symbolic link or a device node made by `symlink` or `mknod` now belongs to the user who made it (it always belonged to root), so its owner can set its times (`touch -h`), and a device node takes the umask. `abuild` builds Alpine packages as an unprivileged user under `fakeroot`, signs them and installs them with `apk` (libraries with `-dev` and `-doc` subpackages, patches, `check()`, install scripts, tinycc from its source; `docs/using.md`, `test/compat/alpine.txt`).
 - A `bwm` client can give its window's pixels as shared memory: `BWM_CREATE_SHM` carries a `memfd` over the socket with `SCM_RIGHTS`, the client writes into it and a `BWM_DRAW` with no pixels names the rectangle that changed (`bwm_create_shm` and `bwm_damage` in `user/bwmlib.h`). `bterm` uses it and `bhello -s` shows it; `test/iso_test.sh` checks the pixels on the screendump.
 - `bterm` (`user/bterm.c`), a terminal window for `bwm`: an 80 x 24 grid drawn with the console font, with BusyBox's `ash` on a pseudo-terminal behind it. It reads a VT100 subset (CR, LF, backspace, tab, cursor moves, erase, insert and delete of characters and lines, scroll regions, the alternate screen, colours) and sends keys to the shell. `test/iso_test.sh` types a command into it and reads the output back cell by cell from the screendump.
 
