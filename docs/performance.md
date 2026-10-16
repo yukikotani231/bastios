@@ -124,7 +124,17 @@ instructions on both. Where BastiOS is behind:
   synchronous metadata writes (`disk_set_owner` and `disk_set_meta` write the
   entry's sector and wait for it), where Linux's ext4 batches them in its
   journal. Deferring those writes would save at most about 18% and changes
-  what survives a power cut, so it is not done.
+  what survives a power cut, so it is not done. Counting the disk's own
+  statistics (`/proc/diskstats`) for the 500-file root: 1082 write commands, about
+  2.2 a file and a little over a millisecond each as the host sees them, and a
+  `perf` profile of the run puts 40% of the host's samples in the guest's
+  submit and poll loops (`virtio_submit`, `blk_poll`). The time is the number
+  of round trips to the emulated disk, not the kernel's work between them.
+- `scan` (2.4x in the table) was profiled on a different machine from the
+  table's, where a warm run took 0.54 s: the guest's own time is mostly
+  `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
+  (2%); about a third of the samples are QEMU's own code, which the build
+  here has no symbols for. Not compared with Linux on that machine.
 - `hello` was 3.6x off Linux when run again (3.65 s against 1.02 s), and
   slower the second time than the first. The time was in the emulator, not
   the disk: the page cache that shares program code between runs
@@ -134,8 +144,6 @@ instructions on both. Where BastiOS is behind:
   translated cc1 again (about 80,000 translated blocks a run, against about
   13,000 when the pages are reused). The cache holds 32 MiB now and a warm
   `hello` takes about 0.7 s on the machine the first run takes about 1.5 s on.
-  `scan` is slower on BastiOS than on Linux (2.4x) for its own reasons: path
-  lookup and small reads.
 - The disk's block cache stops at 32 MiB because doubling it makes Z3 give up
   on `lx_syscall`; it is a sixteenth of memory below that (`dq_slots_for` in
   `src/diskq.bastio`; the kernel heap extension, which it takes half of, is
