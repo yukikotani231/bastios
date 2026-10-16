@@ -52,8 +52,11 @@ const PC_ONW: u64 = 12289;
 const PC_USED: u64 = 12290;
 const PC_NONE: u64 = 18446744073709551615;
 const PC_B: u64 = 8192;               // index buckets
-const PC_LK: u64 = 12288;             // PC_B bucket heads, then PC_N chain links
-const PC_HN: u64 = 16384;             // handles below this have a mark in `has`
+const PC_FHN: u64 = 1024;             // heads of the per-file chains
+const PC_FH: u64 = 12288;             // after the index: PC_FHN chain heads (file h is in chain h % PC_FHN),
+const PC_FN: u64 = 13312;             // then PC_N links: the next slot in the same chain
+const PC_LK: u64 = 17408;             // PC_B bucket heads, PC_N chain links, PC_FHN + PC_N file chain words
+const PC_HN: u64 = 16384;             // handles below this have a mark in `has` and a chain of their slots
 
 enum PcTab { Off, On(PageTable) }
 
@@ -130,6 +133,44 @@ fn pc_unlink(link: &mut Buf, k: u64, i: u64)
   link = set(link, PC_B + i, 0);
 }
 
+/// Puts slot i, holding a page of file h, at the front of h's chain:
+/// link[PC_FH + h % PC_FHN] is 1 + the first slot of the files with that
+/// remainder, and link[PC_FN + i] is 1 + the next slot of the chain, so
+/// pc_close and pc_resize visit the pages of a few files (each slot is
+/// checked against `keys`) rather than every slot.
+fn pc_flink(link: &mut Buf, h: u64, i: u64)
+  requires len(link) == PC_LK && i < PC_N
+  ensures len(link) == PC_LK
+{
+  link = set(link, PC_FN + i, get(link, PC_FH + h % PC_FHN));
+  link = set(link, PC_FH + h % PC_FHN, i + 1);
+}
+
+/// Takes slot i, which holds a page of file h, out of h's chain.
+fn pc_funlink(link: &mut Buf, h: u64, i: u64)
+  requires len(link) == PC_LK && i < PC_N
+  ensures len(link) == PC_LK
+{
+  if get(link, PC_FH + h % PC_FHN) == i + 1 {
+    link = set(link, PC_FH + h % PC_FHN, get(link, PC_FN + i));
+  } else {
+    let mut j = get(link, PC_FH + h % PC_FHN);
+    let mut steps = 0;
+    while j != 0 && j <= PC_N && steps < PC_N
+      invariant len(link) == PC_LK
+    {
+      if get(link, PC_FN + j - 1) == i + 1 {
+        link = set(link, PC_FN + j - 1, get(link, PC_FN + i));
+        j = 0;
+      } else {
+        j = get(link, PC_FN + j - 1);
+      }
+      steps = steps + 1;
+    }
+  }
+  link = set(link, PC_FN + i, 0);
+}
+
 /// Frees slot i's key, and takes it out of the index.
 fn pc_unkey(keys: &mut Buf, link: &mut Buf, i: u64)
   requires len(keys) == PCK_LEN && len(link) == PC_LK && i < PC_N
@@ -142,6 +183,7 @@ fn pc_unkey(keys: &mut Buf, link: &mut Buf, i: u64)
     if k != PC_NONE {
       pc_unlink(&mut link, k, i);
     }
+    pc_funlink(&mut link, h1 - 1, i);
     keys = set(keys, 3 * i, 0);
     keys = set(keys, 3 * i + 2, 0);
     if get(keys, PC_USED) > 0 {
@@ -404,6 +446,7 @@ fn pc_add(c: &mut PCache, m: &mut Mem, h: u64, pg: u64, src: &Bytes, n: u64, tex
   if h < PC_HN {
     bset(&mut c.has, h, 1);
   }
+  pc_flink(&mut c.link, h, i);
   let k = pc_key(h, pg);
   if k != PC_NONE {
     pc_link(&mut c.link, k, i);
@@ -612,6 +655,27 @@ fn clear_l1(t: &mut PageTable, m: &mut Mem, i: u64)
   pc_clear(&mut t, &mut m, i);
 }
 
+/// Slot i, if it holds a page of file h, loses it if it is past the end of a
+/// file size bytes long, and has its tail zeroed if it is the last.
+fn pc_resize_slot(keys: &mut Buf, link: &mut Buf, t: &mut PageTable, m: &mut Mem, h: u64, size: u64, i: u64, quiet: bool)
+  requires len(keys) == PCK_LEN && len(link) == PC_LK && pt_level(t) == 2 && mem_ok(m) && i < PC_N && h < PC_NONE - 1
+  requires quiet ==> pt_leases(t) == 0
+  ensures len(keys) == PCK_LEN && len(link) == PC_LK && pt_level(t) == 2 && mem_ok(m)
+  ensures quiet ==> pt_leases(t) == 0
+{
+  if get(keys, 3 * i) == h + 1 {
+    let pg = get(keys, 3 * i + 1);
+    if pg >= size / 4096 + 1 || (pg == size / 4096 && size % 4096 == 0) {
+      pc_unkey(&mut keys, &mut link, i);
+      if quiet && pt_has(t, i / 512) {
+        pt_borrow(&mut t, i / 512, clear_l1, &mut m, i % 512);
+      }
+    } else if pg == size / 4096 && pt_has(t, i / 512) {
+      pt_borrow(&mut t, i / 512, zero_l1, i % 512, size % 4096);
+    }
+  }
+}
+
 /// File h is now size bytes long: drops its cached pages past the end and
 /// zeroes the bytes past the end on the last.
 fn pc_resize(c: &mut PCache, m: &mut Mem, h: u64, size: u64)
@@ -628,24 +692,17 @@ fn pc_resize(c: &mut PCache, m: &mut Mem, h: u64, size: u64)
     PcTab::Off => {},
     PcTab::On(mut t) => {
       let quiet = pt_lease_count(&mut t) == 0;
-      let mut i = 0;
-      while i < PC_N
-        invariant i <= PC_N && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN
+      let mut j = get(c.link, PC_FH + h % PC_FHN);
+      let mut steps = 0;
+      while j != 0 && j <= PC_N && steps < PC_N
+        invariant pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN
         invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
         invariant quiet ==> pt_leases(t) == 0
       {
-        if get(c.keys, 3 * i) == h + 1 {
-          let pg = get(c.keys, 3 * i + 1);
-          if pg >= size / 4096 + 1 || (pg == size / 4096 && size % 4096 == 0) {
-            pc_unkey(&mut c.keys, &mut c.link, i);
-            if quiet && pt_has(t, i / 512) {
-              pt_borrow(&mut t, i / 512, clear_l1, &mut m, i % 512);
-            }
-          } else if pg == size / 4096 && pt_has(t, i / 512) {
-            pt_borrow(&mut t, i / 512, zero_l1, i % 512, size % 4096);
-          }
-        }
-        i = i + 1;
+        let nx = get(c.link, PC_FN + j - 1);
+        pc_resize_slot(&mut c.keys, &mut c.link, &mut t, &mut m, h, size, j - 1, quiet);
+        j = nx;
+        steps = steps + 1;
       }
       pc_put(&mut c, PcTab::On(t));
     },
@@ -671,6 +728,16 @@ fn data_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
   return true;
 }
 
+/// Slot i, if it holds a page of file h that is not program text, loses it.
+fn pc_close_slot(keys: &mut Buf, link: &mut Buf, t: &mut PageTable, m: &mut Mem, h: u64, i: u64)
+  requires len(keys) == PCK_LEN && len(link) == PC_LK && pt_level(t) == 2 && mem_ok(m) && pt_leases(t) == 0 && i < PC_N && h < PC_NONE - 1
+  ensures len(keys) == PCK_LEN && len(link) == PC_LK && pt_level(t) == 2 && mem_ok(m) && pt_leases(t) == 0
+{
+  if get(keys, 3 * i) == h + 1 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, data_l1, &mut m, i % 512) {
+    pc_unkey(&mut keys, &mut link, i);
+  }
+}
+
 /// File h was closed for the last time: drops its pages but the program
 /// text ones. Those are what a next run of the program wants, and `mem`
 /// counts them as available; a page a MAP_SHARED mapping wrote is neither.
@@ -685,15 +752,16 @@ fn pc_close(c: &mut PCache, m: &mut Mem, h: u64)
     PcTab::Off => {},
     PcTab::On(mut t) => {
       if pt_lease_count(&mut t) == 0 {
-        let mut i = 0;
-        while i < PC_N
-          invariant i <= PC_N && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
+        let mut j = get(c.link, PC_FH + h % PC_FHN);
+        let mut steps = 0;
+        while j != 0 && j <= PC_N && steps < PC_N
+          invariant pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
           invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
         {
-          if get(c.keys, 3 * i) == h + 1 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, data_l1, &mut m, i % 512) {
-            pc_unkey(&mut c.keys, &mut c.link, i);
-          }
-          i = i + 1;
+          let nx = get(c.link, PC_FN + j - 1);
+          pc_close_slot(&mut c.keys, &mut c.link, &mut t, &mut m, h, j - 1);
+          j = nx;
+          steps = steps + 1;
         }
       }
       pc_put(&mut c, PcTab::On(t));
