@@ -245,6 +245,35 @@ fn ino_free(k: &mut Kernel, i: u64)
   iput(&mut k, ino_base(i), 0);
 }
 
+/// The overlay copied the file or directory at handle `from` up to handle
+/// `to` (ovl_make_up): inotify watches on it follow, as Linux hashes the
+/// copy by the lower inode.
+fn ino_retarget(k: &mut Kernel, from: u64, to: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if from >= 0xFFFFFFFFFFFF || to >= 0xFFFFFFFFFFFF || from == to || iget(k, INO_G + G_WATCHES) == 0 {
+    return;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    if iget(k, ino_base(i)) == 1 {
+      let mut w = 0;
+      while w < INO_W
+        invariant w <= INO_W && i < INO_N && kok(k)
+      {
+        if iget(k, wat_at(i, w)) == from + 1 {
+          iput(&mut k, wat_at(i, w), to + 1);
+        }
+        w = w + 1;
+      }
+    }
+    i = i + 1;
+  }
+}
+
 /// Frees watch w of instance i.
 fn wat_drop(k: &mut Kernel, i: u64, w: u64)
   requires kok(k) && i < INO_N && w < INO_W

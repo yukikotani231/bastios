@@ -82,7 +82,7 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
                "-device", "virtio-net-pci,netdev=n0"]
     # 1G: the kernel's arena is a fraction of RAM (4 MiB up to 128 MiB, 32 MiB
     # here). The per-process tables take 24 KiB a process and double with the
-    # process table, so the 300 processes of mproc need several MiB of it.
+    # process table, so the 700 processes of mproc need several MiB of it.
     return subprocess.Popen(
         [qemu_bin, "-kernel", kernel_path or kernel, "-m", "1G", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -195,6 +195,7 @@ steps = [
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
+    ("echo a\\eb", b"a\x1bb"),
     ("add 2 40", b"42"),
     ("mul 3 7", b"21"),
     ("mul 4294967296 4294967296", b"overflow"),
@@ -262,6 +263,10 @@ steps = [
     ("mhello > lxout; read y < lxout; echo y=$y", b"y=hello from musl: mhello, argc 1, 6", b"\n# "),
     ("export GREETING=hey; ash", b"built-in shell (ash)", b"\n# "),
     ("echo env $GREETING", b"env hey", b"\n# "),
+    # The environment the kernel gives what it starts names a UTF-8 locale,
+    # and /etc/profile (read by login shells) says the same.
+    ("echo lang $LANG", b"lang C.UTF-8", b"\n# "),
+    ("while read l; do echo p:$l; done < /etc/profile", b"p:export LANG=C.UTF-8", b"\n# "),
     ("exit", b"", b"\n# "),
     ("elfpie a b", b"elfpie: ok", b"\n# "),
     # execve of a file: elfdemo is the elfpie program installed at boot.
@@ -452,7 +457,14 @@ steps = [
      [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
+    # A symbolic link belongs to whoever made it, who can set its times
+    # (touch -h).
+    ("su alice -c 'ln -s nowhere /tmp/al; stat -c \"%u %g\" /tmp/al; touch -h -d @1000000000 /tmp/al; echo t=$?; stat -c %Y /tmp/al'; rm /tmp/al",
+     [b"\r\n1000 1000\r\n", b"t=0", b"1000000000"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
+    # A symbolic link belongs to its creator (who can lchown it), and the
+    # root of a user namespace may chown what it owns to ids it maps.
+    ("su alice -c 'cd /home/alice; ln -s tgtx slk; ls -ln slk; chown -h $(id -u) slk; echo c1=$?; touch cf; unshare -U -r sh -c \"chown 0:0 cf; echo c2=\\$?; chown -h 0:0 slk; echo c3=\\$?; chown 5:5 cf; echo c4=\\$?\"'; rm -f /home/alice/slk /home/alice/cf", [b"slk -> tgtx", b"c1=0", b"c2=0", b"c3=0", b"c4=1"], b"\n# "),
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
     # With a disk, /etc, /root and /home are links into it (src/main.bastio,
@@ -538,7 +550,7 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n1024\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
     # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
     # of the 1 GiB window and grows the stack past 6 MiB).
     ("ulimit -s", b"\r\n8192\r\n", b"\n# "),
@@ -1214,8 +1226,13 @@ session("virtio", True, [
     ("mcont", b"mcont: ok", b"\n# "),
     # Far more open file descriptions than the 1024 the table once held, from several processes (user/mfd.c).
     ("mfd", b"mfd: ok, 8 processes held 1856 descriptions", b"\n# "),
-    # More processes at once than the 256 the process table once held (user/mproc.c).
-    ("mproc", b"mproc: ok, 300 processes at once", b"\n# "),
+    # More processes at once than the 512 the process table once held (user/mproc.c).
+    ("mproc", b"mproc: ok, 700 processes at once", b"\n# "),
+    # /dev/fb0 without a screen (this machine has none): ENODEV (user/mfb.c; the drawing is tested in test/iso_test.sh).
+    ("mfb", b"mfb: no screen (ENODEV)", b"\n# "),
+    ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
+    ("bhello", b"bhello: no window server", b"\n# "),
+    ("bterm", b"bterm: no window server", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
@@ -1233,6 +1250,7 @@ session("NVMe", None, [
     ("echo written by nvme > disk/nv", b""),
     ("cat disk/nv", b"written by nvme\r\n"),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # runs of blocks go in one command (nvme_begin_n)
     ("rm disk/big", b""),
     ("cat disk/hk2", b"dh\r\n"),
     ("rm disk/hk2", b""),
@@ -1250,6 +1268,7 @@ session("AHCI", None, [
     ("cat disk/nv", b"written by nvme\r\n"),
     ("echo and ahci >> disk/nv", b""),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # ahci_begin_n
     ("rm disk/big", b""),
 ], halt=True, ready=ahci_found)
 
@@ -1284,6 +1303,23 @@ def nvme_ns2_found():
 session("NVMe namespace 2", None, [
     ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
 ], halt=True, ready=nvme_ns2_found)
+
+# An NVMe drive that takes only 8 KiB per command (MDTS 1): batches are cut
+# to two blocks (src/nvme.bastio, nvme_room), and what is read and written
+# in runs is still right.
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=none,id=nvm",
+                      "-device", "nvme,serial=bastios,drive=nvm,mdts=1"])
+def nvme_mdts_found():
+    global fails
+    ok = b"disk: NVMe\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(NVMe MDTS 1) disk driver: NVMe")
+    fails += not ok
+session("NVMe MDTS 1", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),
+    ("rm disk/big", b""),
+], halt=True, ready=nvme_mdts_found)
 
 # And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
 # what is written here is where the ATA boot below looks for it.
@@ -1693,6 +1729,21 @@ qemu.kill(); qemu.wait()
 print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
+# A UHCI controller (src/uhci.bastio), as on PCs from before xHCI: the
+# driver only looks, so the boot log says one controller with one device on
+# its ports and that it has no driver, and the keyboard stays the PS/2 one.
+qemu = boot(1, extra=["-device", "piix3-usb-uhci", "-device", "usb-kbd"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"usb: 1 UHCI controller(s), 1 device(s) on their ports (" in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) the boot log counts the controller and the device on its port")
+fails += not good
+good = ok and b"keyboard: USB" not in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) a UHCI keyboard is not mistaken for an xHCI one")
+fails += not good
+qemu.kill(); qemu.wait()
+
 # A USB stick with a BastiOS partition (tools/mkusb.py --blank: a GPT and
 # the partition, no boot image) on the same xHCI controller as the USB
 # keyboard: the partition is the disk, ahead of the virtio disk, which must
@@ -1874,6 +1925,64 @@ session("after the power cuts", False, [
     ("ls", b"about"),
 ], halt=True)
 fsck("at the end", clean=True)
+# Power cuts with several processes writing at once (user/mpc.c, on a disk
+# that holds it): files grow, are cut back, renamed across directories,
+# made and removed, and replaced whole after an fsync. After each cut the
+# image is checked, and the next boot's mpc finds every byte of every file
+# as it wrote it (test/powercut.py runs many more of these).
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mpc=build/user/mpc.elf"], check=True)
+for n, delay in enumerate([0.6, 1.1, 0.35]):
+    qemu = boot(2, with_disk=n % 2 == 0, virtio=n % 2 == 1)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    if ok:
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        ok = read_until(b"\n# ")
+    mark = len(out)
+    if ok:
+        qemu.stdin.write(b"/disk/mpc run /disk/pc 4\r"); qemu.stdin.flush()
+        ok = read_until(b"mpc: running", mark) and b"mpc: clean" in out[mark:]
+    time.sleep(delay)
+    qemu.kill(); qemu.wait()
+    line = next((l for l in out[mark:].split(b"\n") if b"mpc:" in l), b"(nothing)")
+    print(("ok  " if ok else "FAIL"), f"concurrent writers, power cut {n + 1} after {delay} s:", line.strip().decode(errors="replace"))
+    fails += not ok
+    fsck(f"after concurrent writers' power cut {n + 1}")
+qemu = boot(1, with_disk=True)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ")
+mark = len(out)
+if ok:
+    qemu.stdin.write(b"/disk/mpc check /disk/pc\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ", mark) and b"mpc: clean" in out[mark:]
+qemu.kill(); qemu.wait()
+print(("ok  " if ok else "FAIL"), "after the concurrent writers' power cuts mpc finds every file whole")
+fails += not ok
+# Mounting ext4 (src/ext4.bastio): images made on this machine with mke2fs
+# -d (test/ext4img.py) sit on the disk, and user/mext4.c mounts each of
+# them, checks every file, link, hole and refusal of a write, and unmounts.
+# Four damaged or unsupported images must be refused with EINVAL.
+img_dir = os.path.join(disk_dir.name, "ext4")
+if subprocess.run([sys.executable, "test/ext4img.py", img_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mext4=build/user/mext4.elf"]
+                   + [f"{n}={img_dir}/{f}.img" for n, f in (("e4", "e4"), ("e2", "e2"), ("e4k", "e4k"), ("bz", "bad-zero"), ("bs", "bad-short"), ("br", "bad-recover"), ("bi", "bad-inline"))], check=True)
+    qemu = boot(2, with_disk=True)
+    session("ext4", False, [
+        ("ash", b"", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4 m", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e2 m ext2", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4k m", b"mext4: clean", b"\n# "),
+        ("for i in bz bs br bi; do mkdir m; /disk/mext4 refuse /disk/$i m; rmdir m; done", b"mext4: clean\r\nmext4: clean\r\nmext4: clean\r\nmext4: clean", b"\n# "),
+        ("mkdir fz; /disk/mext4 fuzz /disk/e4k fz 100 1", b"mext4: clean", b"\n# "),
+        ("exit", b"", b"bastios> "),
+    ], halt=True)
+else:
+    print("SKIP ext4: mke2fs is missing")
 # What a power cut inside disk_take_name leaves: a file under the name its
 # hard link still has (disk/b), and a link naming a free entry (disk/c).
 # The mount drops both links; the file stays, and the image is clean. The
@@ -2269,7 +2378,7 @@ for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35,
 # 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
 # must still find them (the processors, power off). Each pause in the report
 # waits for a key, which the serial line gives.
-def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
+def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None, settle=None):
     global qemu, out, deadline
     qemu = subprocess.Popen(
         [qemu_bin, "-kernel", kernel, "-display", "none", "-nic", "none",
@@ -2289,7 +2398,10 @@ def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off", mark)
     try:
-        code = qemu.wait(timeout=max(1, deadline - time.time()))
+        # settle: seconds to wait for QEMU to exit, for a machine that is
+        # expected to stay up (no ACPI to switch it off) so that the test
+        # does not wait out the whole TIMEOUT for it.
+        code = qemu.wait(timeout=settle if settle else max(1, deadline - time.time()))
     except subprocess.TimeoutExpired:
         qemu.kill(); qemu.wait(); code = None
     print(f"---- {name} transcript ----")
@@ -2465,7 +2577,18 @@ for machine, name, extra, status, wants in (
         time.sleep(2)
         t1, c1, w1 = uptime(), clock(), time.time()
         marks.extend([t0, t1, c0, c1, w1 - w0])
-    ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure)
+    # The two timing checks compare guest time with the host's clock over
+    # two seconds, so a host that stalls the guest for a moment fails them
+    # for no fault of the kernel: a boot whose timing was off is repeated
+    # once, and the second boot's results count.
+    for attempt in range(2):
+        marks = []
+        ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure,
+                               settle=5 if status is None else None)
+        if (len(marks) == 5 and None not in marks and 60 * marks[4] <= marks[1] - marks[0] <= 200 * marks[4]
+                and 0.6e9 * marks[4] <= marks[3] - marks[2] <= 1.5e9 * marks[4]):
+            break
+        print(f"({name}) timing off on boot {attempt + 1}: {marks}")
     text = out.decode(errors="replace").replace("\r", "")
     for want, what in wants:
         good = ok and want in text

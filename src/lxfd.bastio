@@ -408,6 +408,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     ino_free(&mut k, x);
   } else if kind == OF_SECCOMP && x < SC_N {
     sc_listener_closed(&mut k, x);          // src/lxseccomp.bastio
+  } else if kind == OF_DEV && x == DEV_FB {
+    fb_closed(&mut k);                      // src/lxfb.bastio: the console is drawn again after the last one
   } else if kind == OF_BPF && x < DVP_N {
     bpf_release(&mut k, x, w);              // src/lxbpf.bastio
   } else if kind == OF_PIPE_R && x < NPIPES {
@@ -653,6 +655,7 @@ fn fd_free_in(t: &Buf, pid: u64, from: u64) -> u64
 fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
   requires kok(k) && pid < NPROC && h < OFD_N
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
@@ -668,6 +671,7 @@ fn fd_install(k: &mut Kernel, pid: u64, h: u64) -> u64
 fn fd_install_console(k: &mut Kernel, pid: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let fd = fd_free(k, pid, 0);
   if fd >= LXNFD {
@@ -905,6 +909,9 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if (flags % 4 != 0 && (!proc_writable(pf) || (fs_id(k.procs, pid, false) != 0 && !um_owner(k, pid, pf)))) || is_exe_file(pf) {
       return EACCES;
     }
+    if proc_secret(k.procs, pid, pf) {
+      return EACCES;                        // another user's layout, memory or I/O counts
+    }
     let hp = ofd_new(&mut k, OF_DEV, pf);
     if hp >= OFD_N {
       return ENFILE;
@@ -969,6 +976,9 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   if dev == DEV_MICE {
     return mice_open(&mut k, pid, flags);   // src/lxmouse.bastio
   }
+  if dev == DEV_FB {
+    return fb_open(&mut k, pid, flags);     // src/lxfb.bastio
+  }
   let hv = ofd_new(&mut k, OF_DEV, dev);
   if hv >= OFD_N {
     return ENFILE;
@@ -1006,8 +1016,8 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
 {
   let fh = vfs_lookup(&mut k.fs, n);
   let fm = vfs_meta(&mut k.fs, fh);
-  if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 {
-    return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio)
+  if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 && flags & LO_PATH == 0 {
+    return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio); O_PATH holds it, and connect follows /proc/self/fd/N to it
   }
   if fh != NO_FILE && flags & LO_PATH == 0 && vfs_is_fifo(&mut k.fs, fh) {   // O_PATH holds the name, not an end
     if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {
@@ -1137,6 +1147,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
 fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
   if v == 0 || new >= fd_limit(k, pid) {
@@ -1159,6 +1170,7 @@ fn lx_dup2(k: &mut Kernel, pid: u64, src: u64, new: u64, cloexec: bool) -> u64
 fn lx_dup(k: &mut Kernel, pid: u64, src: u64, from: u64, cloexec: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_fd_or_errno(result)
 {
   let v = fd_get(k.lxfd, pid, src) % FD_CLOEXEC;
   if v == 0 {
@@ -1364,6 +1376,7 @@ fn lx_pipe(k: &mut Kernel, pid: u64, fds: u64, flags: u64) -> u64
 fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let mut r = pipe_ring(k.pipes, p);
   let count = r.n;
@@ -1394,6 +1407,7 @@ fn pipe_read1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   if pi_get(k.pipes, p, 2) == 0 {
     return EPIPE;
@@ -1421,6 +1435,7 @@ fn pipe_write1(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let first = pipe_read1(&mut k, pid, p, va, n);
   if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {
@@ -1444,6 +1459,7 @@ fn pipe_read(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
 fn pipe_write(k: &mut Kernel, pid: u64, p: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && p < NPIPES
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let first = pipe_write1(&mut k, pid, p, va, n);
   if first == 0 || first > n || first < XFER || va >= 0x8000000000000000 {

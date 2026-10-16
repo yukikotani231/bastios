@@ -68,10 +68,17 @@ apps: wget: HTTPS from the host (BusyBox's own TLS)
 apps: wget: a file from the host
 apps: wget: a missing file is an error
 apps: wget: an IPv6 loopback server
+bastio: bastio-lsp: a type error from bastioc1 becomes a diagnostic
+bastio: bastio-lsp: formatting
+bastio: bastio-lsp: go to definition
+bastio: bastio-lsp: hover shows the signature and the doc comment
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
 bastio: bastioc1: prove, build with tcc, run
+bastio: bastiofmt: --check names an unformatted file
+bastio: bastiofmt: formats the compiler's parser, and the result is formatted
+bastio: bastiofmt: lays a line out
 bastio: z3: a query
 busybox: awk
 busybox: base64
@@ -89,6 +96,7 @@ busybox: diff
 busybox: du
 busybox: echo
 busybox: env
+busybox: lang
 busybox: expr
 busybox: find
 busybox: free
@@ -476,6 +484,7 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_ipc: splice from an empty pipe into a read-only, O_PATH or non-writable descriptor fails at once
 t_isol: a loop-mounted image is nosuid
 t_isol: /dev/console is root's
 t_isol: SHM_LOCK needs RLIMIT_MEMLOCK or root
@@ -566,6 +575,9 @@ t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
+t_ltp2: SIGBUS: a mapped page past the end of the file is a bus error
+t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
+t_ltp2: SIGBUS: a forked child gets it too
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
@@ -669,6 +681,7 @@ t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
 t_misc: /proc/diskstats opens
+t_misc: /proc/diskstats has the disk's line with its counts
 t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory
@@ -749,6 +762,8 @@ t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
+t_net: IPV6_V6ONLY reads back
+t_net: IPV6_V6ONLY: an IPv6-only listener and an IPv4 one share a port
 t_net: SO_REUSEADDR
 t_net: TCP bind/listen
 t_net: TCP loopback connect/accept
@@ -757,10 +772,13 @@ t_net: TCP_NODELAY
 t_net: UDP bind port 0
 t_net: UDP loopback
 t_net: UDP socket
+t_net: a dual-stack listener cannot take it
 t_net: getaddrinfo localhost
+t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_net: ping6 ::1 (raw ICMPv6 socket)
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
 t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
@@ -846,6 +864,18 @@ t_nsioctl: the first user namespace has no owner and no parent
 t_nsioctl: the first user namespace is owned by uid 0
 t_nsioctl: the first user namespace owns the first UTS namespace
 t_nsioctl: the owner of a user namespace its creator has no map for is 65534
+t_nx: a fork child's copy-on-write stack stays no-execute
+t_nx: a mapping moved by mremap and made executable runs
+t_nx: code in a data array does not run
+t_nx: code in a read-write mapping does not run
+t_nx: code in a shared read-write mapping does not run
+t_nx: code on the heap does not run
+t_nx: code on the stack does not run
+t_nx: code runs from a read-write-execute mapping
+t_nx: mprotect back to read-write stops the code
+t_nx: mprotect to read-write-execute keeps the code running
+t_nx: mprotect(PROT_EXEC) after writing makes the code run
+t_nx: mprotect(PROT_EXEC) on a shared mapping makes the code run
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
@@ -962,6 +992,7 @@ t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
 t_proc: sysctl somaxconn reads 4096
+t_proc: keys root_maxkeys reads 200 and a larger value reads back
 t_proc: sysctl overcommit_memory reads 0
 t_proc: sysctl max_map_count reads 65530
 t_proc: sysctl cap_last_cap reads 40
@@ -976,7 +1007,7 @@ t_proc: /proc/sys/net/core is a directory
 t_proc: a directory under /proc/sys that is not there is ENOENT
 t_proc: every file listed under /proc/sys opens
 t_proc: /proc/sys/vm lists swappiness
-t_proc: oom_score reads 0
+t_proc: oom_score reads a number
 t_proc: oom_score_adj starts at 0
 t_proc: loginuid is unset
 t_proc: coredump_filter reads its default
@@ -1103,6 +1134,7 @@ t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
 t_sig2: 24 processes at once
+t_sig2: sigqueue carries a 64-bit sigval whole
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once
 t_sig2: SA_RESTART does not restart epoll_wait
@@ -1205,7 +1237,9 @@ t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
+t_sysv: shmat and shmdt in a loop reuse the address space
 t_sysv: shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL
+t_sysv: msgmni is written: that many queues, then ENOSPC
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
@@ -1314,6 +1348,15 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+java: java: unpack the root, make the device nodes
+java: java: version
+java: java: compile and run a program
+java: java: records, streams and collections
+java: java: threads and an executor
+java: java: exit status and an uncaught exception
+java: java: files and directories
+java: java: a jar with a main class
+java: java: a compile error is reported
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
@@ -1324,6 +1367,13 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a compile error is reported
+podman: podman: unpack the image root and set it up
+podman: podman: version
+podman: podman: import a root and run a container as root
+podman: podman: a container has its own hostname
+podman: podman: rootless, the unprivileged user maps to root in its user namespace
+podman: podman: rootless, import an image (chroot, mkdir and lchown as the namespace's root)
+podman: podman: rootless, run a container in a user namespace
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
@@ -1349,6 +1399,7 @@ alpine: strace: traces a program's system calls with ptrace, following the child
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
 alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: gdb: a core file of a crashed program shows where it died, its call chain and its arguments
+alpine: nvim: Termdebug drives gdb over MI in terminal windows: a breakpoint in add, the stop, the signs on the source line and an expression
 alpine: gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
 alpine: gdb: attach to a program with three threads, and every thread is listed
 alpine: nvim: LuaJIT loads a shared object that gcc built
@@ -1372,6 +1423,7 @@ alpine: container: crun and runc: a profile that denies mount, module, ptrace an
 alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
+alpine: container: rootless runc runs a rootless runc inside its container (docker-in-docker)
 alpine: container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
@@ -1391,13 +1443,36 @@ alpine: nvim: the edit-build-run loop on a C project: :make with make and gcc re
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
+alpine: nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
 alpine: apk: free the disk, then install python3 over HTTP
 alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
 alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+alpine: abuild: install it with fakeroot and the build tools
+alpine: abuild-keygen: a builder user makes a signing key and trusts it
+alpine: symlink: a new symlink belongs to the user who made it, who can set its times
+alpine: abuild: libgreet: a patch, a test suite, and -dev and -doc packages
+alpine: abuild: greeter: build-time dependencies come from the repository just made, and the runtime one is traced
+alpine: apk: install the built packages from the signed repository, with their scripts
+alpine: apk: a repository signed with a key that is not trusted is refused
+alpine: abuild: tinycc: a C compiler built from its source, which then compiles a program
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+t_pty: IUTF8 can be set
+t_pty: erasing a wide character echoes whole erasures
+t_pty: erasing a two-byte character takes back one cell
+t_pty: with IUTF8 erase takes whole characters
+t_pty: IUTF8 can be cleared
+t_pty: without IUTF8 erase takes one byte
+tty: utf-8: erase takes back a whole character on the console
+alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
+alpine-tty: nvim: it counts characters and cells of Japanese text
+t_time: TZ=JST-9 is nine hours ahead
+t_time: TZ with a DST rule
+t_time: and outside the DST period
+t_time: a zone file is written
+t_time: TZ naming a zone file reads it

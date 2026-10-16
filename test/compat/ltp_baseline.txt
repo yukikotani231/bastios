@@ -101,6 +101,7 @@ fsetxattr01
 getxattr01
 getxattr02
 inotify06
+inotify07
 inotify09
 inotify11
 io_cancel01
@@ -111,6 +112,7 @@ io_submit02
 io_submit03
 io_submit04
 keyctl01
+keyctl02
 keyctl03
 keyctl04
 keyctl05
@@ -140,6 +142,7 @@ llistxattr01
 llistxattr02
 llistxattr03
 lremovexattr01
+msgget03
 removexattr01
 removexattr02
 request_key01
@@ -542,6 +545,7 @@ mmap05
 mmap06
 mmap08
 mmap09
+mmap13
 mmap14
 mmap15
 mmap17
@@ -953,6 +957,7 @@ splice02
 splice03
 splice04
 splice06
+splice07
 stat01
 stat01_64
 stat02

@@ -1,0 +1,3 @@
+# System-wide settings for login shells (SSH and login). The kernel also
+# gives the programs it starts LANG=C.UTF-8 itself.
+export LANG=C.UTF-8

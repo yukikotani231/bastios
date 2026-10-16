@@ -624,7 +624,10 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
     cap = CAP_SETGID;
   }
   let wn = nsk_of(k, NSK_USER, pid);
-  if !cred_root(k.procs, pid) && !(wn != 0 && wn == par && ns_cap(k, pid, cap)) {
+  // A set-user-ID helper (newuidmap, newgidmap) that lowered its effective
+  // user keeping the capability: it can take its root user id back anyway.
+  let kept = (id_get(k.procs, pid, F_SUID, false) == 0 || id_get(k.procs, pid, F_UID, false) == 0) && (cap_perm(k, pid) >> cap) % 2 == 1;
+  if !cred_root(k.procs, pid) && !kept && !(wn != 0 && wn == par && ns_cap(k, pid, cap)) {
     // Anyone else maps only the one id they have: their effective user to
     // anything, their group only once setgroups is off.
     let mut own = id_get(k.procs, pid, F_UID, true);
