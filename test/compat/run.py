@@ -797,16 +797,20 @@ def main():
     # installs runs that case too; such a shared case is counted from the
     # lane it belongs to. The group stays alpine.
     #   alpine   the cases up to the install of tmux, cmake and
-    #            lua-language-server, but the container cases;
+    #            lua-language-server, but the container cases and Vim's;
     #   alpine2  the container cases: they need nothing else the other cases
     #            install. The bridged-network cases stay where they are: the
     #            package they install brings libraries the other cases
     #            already put on the disk, and without them its download
-    #            through the container's network outlasts the case's timeout;
+    #            through the container's network outlasts the case's timeout.
+    #            Then Vim's case, which installs what it needs;
     #   alpine3  the install of tmux, cmake and lua-language-server and the
-    #            cases after it (they use Neovim and gcc too);
-    #   alpine4  the programs on the terminal (alpine_tty.txt: Neovim, gcc,
-    #            make and tmux).
+    #            cases after it (they use Neovim and gcc too), but cmake's;
+    #   alpine4  cmake's case, after that install, and the programs on the
+    #            terminal (alpine_tty.txt: Neovim, gcc, make and tmux).
+    # The lanes are cut so that each takes about as long as the others
+    # under emulation on aarch64 (CI runs alpine and alpine2 on one runner,
+    # alpine3 and alpine4 on another).
     at = {c[0]: i for i, c in enumerate(alpine)}
     alpine_setup = alpine[:3]
     nvim_gcc = [alpine[at["apk: install neovim over HTTP"]],
@@ -814,15 +818,17 @@ def main():
     tools_at = at["apk: install tmux, cmake and lua-language-server over HTTP"]
     containers = [c for c in alpine[3:] if c[0].startswith("container:")
                   and "joins a network namespace" not in c[0]]
-    alpine1 = [c for c in alpine[:tools_at] if c not in containers]
-    alpine2 = alpine_setup + containers
-    alpine3 = alpine_setup + nvim_gcc + [c for c in alpine[tools_at:] if c not in containers]
-    alpine4 = alpine_setup + nvim_gcc + [alpine[tools_at]]
+    vim = [alpine[at["vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it"]]]
+    cmake = [alpine[at["cmake: configure, build and run a C project"]]]
+    alpine1 = [c for c in alpine[:tools_at] if c not in containers + vim]
+    alpine2 = alpine_setup + containers + vim
+    alpine3 = alpine_setup + nvim_gcc + [c for c in alpine[tools_at:] if c not in containers + cmake]
+    alpine4 = alpine_setup + nvim_gcc + [alpine[tools_at]] + cmake
     # Each lane's cases, by the key its results come back under, and the
     # lane each case belongs to.
     alpine_parts = {"alpine": alpine1, "alpine#2": alpine2, "alpine#3": alpine3, "alpine#4": alpine4}
     alpine_owner = {}
-    for k in ["alpine", "alpine#2", "alpine#3"]:
+    for k in ["alpine", "alpine#2", "alpine#3", "alpine#4"]:
         for c in alpine_parts[k]:
             alpine_owner.setdefault(c[0], k)
     alpine_lanes = ["alpine", "alpine2", "alpine3", "alpine4"]
