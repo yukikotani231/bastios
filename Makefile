@@ -5,6 +5,7 @@
 #   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
 #   make usb        build/bastios-usb.img: the ISO plus a partition for the files
 #   make run-usb    boot that image from a USB stick in QEMU
+#   make installer  build/bastios-installer.iso: installs BastiOS and Alpine on a disk (docs/install.md)
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
@@ -69,7 +70,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb bwm bhello bterm
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb bwm bhello bterm mhog mpc mext4 mserial
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 # Which backend built the kernel and the user programs, rewritten only when it
@@ -164,7 +165,7 @@ build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf build/user/mhog.elf build/user/mpc.elf build/user/mext4.elf build/user/mserial.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # bwm draws text with the console's font.
@@ -221,12 +222,12 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin src/font16.bin
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio src/x86_64/default/extra/*.bastio) src/font8x8.bin src/font16.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
 
 build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
 	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
@@ -235,7 +236,7 @@ build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
 build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native --emit-asm -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel --backend native-ir --emit-asm -o $@ src/main.bastio
 
 # build/kernel.backend is defined with the user programs' rules (the kernel and
 # the user programs are built the same way).
@@ -245,7 +246,7 @@ build/kernel.o: build/kernel.s build/kernel.backend
 	$(CC) -c -o $@ $<
 else
 build/kernel.o: build/kernel.c build/kernel.backend
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -ffunction-sections -c -o $@ $<
 endif
 
 build/libc.o: boot/libc.c | build
@@ -255,10 +256,10 @@ build/boot.o: boot/boot.S boot/core.h | build
 	$(CC) -c -o $@ $<
 
 build/platform.o: boot/platform.c | build
-	$(CC) $(TCFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -ffunction-sections -c -o $@ $<
 
 build/smp.o: boot/smp.c boot/core.h | build
-	$(CC) $(TCFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -ffunction-sections -c -o $@ $<
 
 build/multiboot.o: boot/multiboot.c | build
 	$(CC) $(TCFLAGS) -c -o $@ $<
@@ -270,7 +271,11 @@ build/ap.o: boot/ap.S | build
 #    Multiboot loader only accepts 32-bit ELF images. The code is unchanged.
 KOBJS := build/boot.o build/ap.o build/platform.o build/smp.o build/multiboot.o build/kernel.o build/libc.o
 
-build/bastios64.elf: $(KOBJS) boot/linker.ld
+# The kernel functions the hot paths run, first in the text (bench/hot-functions.txt).
+build/hot.ld: bench/hot-functions.txt | build
+	grep -v '^#' $< | sed 's/.*/        *(.text.& .text.&.*)/' > $@
+
+build/bastios64.elf: $(KOBJS) boot/linker.ld build/hot.ld
 	$(CC) $(LDFLAGS) -o $@ $(KOBJS)
 
 build/bastios.elf: build/bastios64.elf
@@ -323,6 +328,63 @@ build/bastios-usb.img: build/bastios-gpt.iso tools/mkusb.py
 	build/limine/limine bios-install --quiet --no-gpt-to-mbr-isohybrid-conversion $@
 
 usb: build/bastios-usb.img
+
+# The installer image (docs/install.md): the same kernel with the installer
+# and everything it installs built in as files (/install), booted by a menu
+# entry with the boot option `install`. It is written to a CD or a USB stick
+# like the live ISO. The payload (tools/mkinstall.py) holds Limine and the
+# plain kernel as they go on the new disk's EFI system partition; Alpine
+# Linux's root file system and a fuller BusyBox come from the compat suite's
+# sources. Needs mkfs.fat and mcopy (dosfstools, mtools) besides xorriso.
+INSTALL_DIR := build/installer
+INSTALL_FILES := $(INSTALL_DIR)/binstall.elf build/compat/busybox $(INSTALL_DIR)/pay $(INSTALL_DIR)/root.tgz installer/run.sh installer/profile
+ALPINE_BASE_IMAGE ?= $(ALPINE_BASE)
+
+$(INSTALL_DIR):
+	mkdir -p $@
+
+$(INSTALL_DIR)/binstall.elf: user/binstall.c | $(INSTALL_DIR)
+	$(MUSLCC) -static-pie -O2 -Wall -Wextra -Werror -o $@ $<
+
+$(INSTALL_DIR)/pay: tools/mkinstall.py tools/mkusb.py build/bastios.elf boot/limine.conf build/limine/limine | $(INSTALL_DIR)
+	tools/mkinstall.py $@ --kernel build/bastios.elf --limine build/limine --conf boot/limine.conf
+
+$(INSTALL_DIR)/root.tgz: tools/alpineroot.py test/compat/alpinedisk.py | $(INSTALL_DIR)
+	tools/alpineroot.py $@ $(ALPINE_BASE_IMAGE) $(ALPINE_CACHE)
+
+$(INSTALL_DIR)/lib/extra/initextra.bastio: tools/mkinitextra.py $(INSTALL_FILES) | $(INSTALL_DIR)
+	tools/mkinitextra.py $@ install/binstall=$(INSTALL_DIR)/binstall.elf:755 install/busybox=build/compat/busybox:755 \
+	  install/pay=$(INSTALL_DIR)/pay install/root.tgz=$(INSTALL_DIR)/root.tgz install/run=installer/run.sh:755 etc/profile=installer/profile
+
+# Proved and compiled again with the installer's files; the proof cache
+# makes that only the file table.
+$(INSTALL_DIR)/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) $(INSTALL_DIR)/lib/extra/initextra.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib $(INSTALL_DIR)/lib --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
+
+$(INSTALL_DIR)/kernel.o: $(INSTALL_DIR)/kernel.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(INSTALL_DIR)/bastios64.elf: $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS)) boot/linker.ld
+	$(CC) $(LDFLAGS) -o $@ $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS))
+
+$(INSTALL_DIR)/bastios.elf: $(INSTALL_DIR)/bastios64.elf
+	objcopy -O elf32-i386 $< $@
+
+build/bastios-installer.iso: $(INSTALL_DIR)/bastios.elf boot/limine-installer.conf build/limine/limine
+	rm -rf $(INSTALL_DIR)/iso
+	mkdir -p $(INSTALL_DIR)/iso/boot/limine $(INSTALL_DIR)/iso/EFI/BOOT
+	cp $(INSTALL_DIR)/bastios.elf $(INSTALL_DIR)/iso/boot/bastios.elf
+	cp boot/limine-installer.conf $(INSTALL_DIR)/iso/boot/limine/limine.conf
+	cp build/limine/limine-bios.sys build/limine/limine-bios-cd.bin build/limine/limine-uefi-cd.bin build/limine/LICENSE \
+	  $(INSTALL_DIR)/iso/boot/limine/
+	cp build/limine/BOOTX64.EFI $(INSTALL_DIR)/iso/EFI/BOOT/
+	xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin \
+	  -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus -apm-block-size 2048 \
+	  --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+	  --protective-msdos-label $(INSTALL_DIR)/iso -o $@ 2>/dev/null
+	build/limine/limine bios-install --quiet $@
+
+installer: build/bastios-installer.iso
 
 # The disk: a raw image, here as a virtio block device. BastiOS formats it
 # the first time it boots, and the files under disk/ live there across
@@ -835,23 +897,29 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
+# Rootless-capable Podman (the static mgoltzsche/podman image), as a tar file
+# the cases unpack, for podman.txt. Pinned by digest, its layers kept in
+# ALPINE_CACHE like the others'. x86-64 only.
+build/compat/podman.img: test/compat/podmandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/podmandisk.py $@ $(PODMAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
 # Every disk image `make compat` boots. `make compat-disks` builds them
 # alone (CI builds them in a step of their own, then caches what they were
 # made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
 # COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
 # and run a part of the suite: the images of its lanes, and those lanes.
-COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/podman.img
 
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
 compat: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS)
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
@@ -971,6 +1039,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb installer run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

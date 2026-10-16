@@ -247,14 +247,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(("echo " + "x" * 113 + "日\r").encode()); q.stdin.flush()
         until(b"bastios> ", mark)
         dump = os.path.join(tmp.name, "screen.ppm")
-        mon.sendall(f"screendump {dump}\n".encode())
-        text = []
-        for _ in range(50):
-            time.sleep(0.1)
-            if os.path.exists(dump) and os.path.getsize(dump) > 1024 * 768 * 3:
-                text = screen_text(open(dump, "rb").read())
-                break
-        mon.close()
+        def grab():
+            if os.path.exists(dump):
+                os.unlink(dump)
+            mon.sendall(f"screendump {dump}\n".encode())
+            for _ in range(50):
+                time.sleep(0.1)
+                if os.path.exists(dump) and os.path.getsize(dump) > 1024 * 768 * 3:
+                    time.sleep(0.2)
+                    return screen_text(open(dump, "rb").read())
+            return []
+        text = grab()
         want = ["screen: 1024x768 framebuffer", "bastios> echo On_screen", "On_screen",
                 "日本語かな café ─│ ｱｲｳ", "bastios> echo " + "x" * 113, "日", "x" * 113 + "日"]
         good = all(w in text for w in want)
@@ -262,6 +265,40 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if not good:
             print("\n".join(l for l in text if l))
         fails += not good
+        # Escape sequences: `echo` writes them (`\\e` is ESC) and the screen
+        # obeys them. Clear, move to row 5 column 10, write
+        # kanji, step back two cells and overwrite with a letter, delete a
+        # character, then draw on the alternate screen and come back.
+        mark = len(out)
+        q.stdin.write(b"echo \\e[2J\\e[5;10H\xe6\x97\xa5\xe6\x9c\xac\\e[2DAB\\e[1P\\e[8;3Hhere\\e[?1049hALT\\e[?1049l\r")
+        q.stdin.flush()
+        until(b"bastios> ", mark)
+        time.sleep(0.5)
+        text = grab()
+        good = len(text) > 8 and text[4] == " " * 9 + "日AB" and text[7].startswith("  here") and not any("ALT" in l for l in text)
+        print(("ok  " if good else "FAIL"), f"({name}) the framebuffer console obeys escape sequences")
+        if not good:
+            print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
+        fails += not good
+        # Editing keys: the arrows send ESC [ A to ESC [ D, Delete ESC [ 3 ~,
+        # Insert ESC [ 2 ~, F1 ESC O P, F5 ESC [ 1 5 ~ and F12 ESC [ 2 4 ~;
+        # the line editor drops the ESC, so the rest shows in the line.
+        mark = len(out)
+        keys = ["e", "c", "h", "o", "spc", "up", "down", "right", "left", "delete", "insert", "f1", "f5", "f12"]
+        if usb:
+            usbkeys(qmp_path, keys)
+        else:
+            sendkeys(mon, keys)
+        time.sleep(1)
+        text = grab()
+        good = any(l.endswith("bastios> echo [A[B[C[D[3~[2~OP[15~[24~") for l in text)
+        print(("ok  " if good else "FAIL"), f"({name}) arrow, Delete, Insert and function keys send escape sequences")
+        if not good:
+            print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
+        fails += not good
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"bastios> ", mark)
+        mon.close()
     if ok and not diag and not usb and not nvme and not stick:
         # /dev/fb0 (user/mfb.c): a program draws on the screen, and the
         # console stops drawing while it holds the device and comes back
@@ -418,6 +455,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
+        # A terminal in line mode keeps ESC in the line (and Tab), so the
+        # escape sequences of the special keys reach a program that reads
+        # it: cat takes them into a file, whose size is then counted (the
+        # console drops ESC when it prints one). ESC [ A, ESC [ 1 5 ~,
+        # ESC [ 3 ~, ESC [ D and ESC [ H are 18 bytes, and the line's end 1.
+        mark = len(out)
+        q.stdin.write(b"cat > /tmp/keys\r"); q.stdin.flush()
+        time.sleep(1)
+        monitor("sendkey up", "sendkey f5", "sendkey delete", "sendkey left", "sendkey home", "sendkey ret", "sendkey ctrl-d")
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"ls -l /tmp/keys\r"); q.stdin.flush()
+        good = until(b" 19 ", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a line-mode terminal keeps the escape sequences of the special keys")
+        fails += not good
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.

@@ -74,11 +74,14 @@ clone06
 clone07
 clone10
 clone11
+clone301
 clone302
 clone303
 clone304
 close01
 close02
+close_range01
+close_range02
 confstr01
 connect01
 connect02
@@ -86,6 +89,7 @@ connect03
 fanotify01
 fanotify02
 fanotify04
+fanotify06
 fanotify08
 fanotify09
 fanotify11
@@ -100,7 +104,9 @@ fremovexattr02
 fsetxattr01
 getxattr01
 getxattr02
+inotify02
 inotify06
+inotify07
 inotify09
 inotify11
 io_cancel01
@@ -1040,6 +1046,8 @@ unlink10
 unlinkat01
 unshare01
 unshare02
+unshare03
+unshare04
 ustat01
 ustat02
 utime01
@@ -1097,3 +1105,4 @@ writev02
 writev05
 writev06
 writev07
+futex_wake05

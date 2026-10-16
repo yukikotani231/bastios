@@ -1,0 +1,331 @@
+// A USB serial port for Linux programs: /dev/ttyUSB0 (an FTDI adapter) and
+// /dev/ttyACM0 (a CDC-ACM modem or board; the same device under the name
+// Linux gives it), found by the xHCI driver (src/xhci.bastio). It is a raw
+// byte stream, 115200 baud 8N1: a read gets the bytes received, a write
+// sends bytes, and termios calls are answered and kept but change nothing
+// (the line speed is set when the port is found).
+//
+// k.mice holds, after the mouse's ring, a header (SER_HDR bytes: where the oldest received byte is
+// and how many there are, the same for the bytes waiting to be sent, what
+// kind of port there is, and the termios settings) and two rings of
+// SER_CAP bytes: received (SER_RX_AT) and to send (SER_TX_AT). The console
+// pump (`exchange` in src/main.bastio) moves received bytes into the first
+// and hands the second to the driver, a chunk at a time, as it does for the
+// mouse and the screen.
+//
+// A read takes what is there (up to the count); with nothing there it fails
+// with EAGAIN if the file was opened O_NONBLOCK, else it sleeps until the
+// next tick and looks again (`wait_asleep`). A write puts what fits into the
+// ring and returns that count; with the ring full it waits for room (the
+// descriptor is always blocking for writes: O_NONBLOCK set later with
+// fcntl is not seen, as for the mouse). poll says POLLIN when bytes are
+// there and POLLOUT when there is room. Without a port, opening the device
+// fails with ENODEV.
+
+import "linux.bastio";
+
+const SER_OFF: u64 = 824;               // where the port's buffer starts in k.mice (after the mouse's)
+const SER_HDR: u64 = 128;
+const SER_CAP: u64 = 1024;
+const SER_RX_AT: u64 = SER_OFF + 128;
+const SER_TX_AT: u64 = SER_OFF + 1152;
+const S_RHEAD: u64 = SER_OFF + 0;
+const S_RCOUNT: u64 = SER_OFF + 8;
+const S_THEAD: u64 = SER_OFF + 16;
+const S_TCOUNT: u64 = SER_OFF + 24;
+const S_KIND: u64 = SER_OFF + 32;                 // SER_NONE, SER_FTDI or SER_ACM
+const S_TT_SET: u64 = SER_OFF + 48;
+const S_TT: u64 = SER_OFF + 64;                   // struct termios, TERMIOS_SIZE bytes
+
+const TIOCEXCL: u64 = 0x540C;
+const TIOCNXCL: u64 = 0x540D;
+const TIOCMGET: u64 = 0x5415;
+const TIOCMBIS: u64 = 0x5416;
+const TIOCMBIC: u64 = 0x5417;
+const TIOCMSET: u64 = 0x5418;
+
+/// SER_NONE, SER_FTDI or SER_ACM: the port the driver found.
+fn ser_kind(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SER_ACM
+{
+  return smaller(get_u64(k.mice, S_KIND), SER_ACM);
+}
+
+/// Records the port the driver found (at boot).
+fn ser_set_kind(k: &mut Kernel, kind: u64)
+  requires kok(k) && kind <= SER_ACM
+  ensures kok(k)
+{
+  put_u64(&mut k.mice, S_KIND, kind);
+}
+
+/// Bytes received and not yet read.
+fn ser_rx_count(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SER_CAP
+{
+  return smaller(get_u64(k.mice, S_RCOUNT), SER_CAP);
+}
+
+/// Bytes written and not yet sent.
+fn ser_tx_count(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SER_CAP
+{
+  return smaller(get_u64(k.mice, S_TCOUNT), SER_CAP);
+}
+
+/// Queues byte b as received, unless the ring is full.
+fn ser_put(k: &mut Kernel, b: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let head = get_u64(k.mice, S_RHEAD) % SER_CAP;
+  let cnt = ser_rx_count(k);
+  if cnt >= SER_CAP {
+    return;
+  }
+  bset(&mut k.mice, SER_RX_AT + (head + cnt) % SER_CAP, cast[u8](b % 256));
+  put_u64(&mut k.mice, S_RCOUNT, cnt + 1);
+}
+
+/// Queues the first n bytes of src as received, as many as fit.
+fn ser_push(k: &mut Kernel, src: &Bytes, n: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let m = smaller(n, blen(src));
+  let head = get_u64(k.mice, S_RHEAD) % SER_CAP;
+  let mut cnt = ser_rx_count(k);
+  let mut i = 0;
+  while i < m && cnt < SER_CAP
+    invariant kok(k) && m <= blen(src) && i <= m && cnt <= SER_CAP && head < SER_CAP
+  {
+    bset(&mut k.mice, SER_RX_AT + (head + cnt) % SER_CAP, bget(src, i));
+    cnt = cnt + 1;
+    i = i + 1;
+  }
+  put_u64(&mut k.mice, S_RCOUNT, cnt);
+}
+
+/// Copies up to `max` of the bytes waiting to be sent into dst, leaving
+/// them queued; returns how many.
+fn ser_peek(k: &Kernel, dst: &mut Bytes, max: u64) -> u64
+  requires kok(k)
+  ensures result <= max && result <= blen(dst)
+{
+  let head = get_u64(k.mice, S_THEAD) % SER_CAP;
+  let cnt = ser_tx_count(k);
+  let m = smaller(smaller(cnt, max), blen(dst));
+  let mut i = 0;
+  while i < m
+    invariant kok(k) && i <= m && m <= blen(dst) && m <= SER_CAP && head < SER_CAP
+  {
+    bset(&mut dst, i, bget(k.mice, SER_TX_AT + (head + i) % SER_CAP));
+    i = i + 1;
+  }
+  return m;
+}
+
+/// Forgets the first n bytes waiting to be sent: the driver has them.
+fn ser_drop(k: &mut Kernel, n: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let cnt = ser_tx_count(k);
+  let m = smaller(n, cnt);
+  let head = get_u64(k.mice, S_THEAD) % SER_CAP;
+  put_u64(&mut k.mice, S_THEAD, (head + m) % SER_CAP);
+  put_u64(&mut k.mice, S_TCOUNT, cnt - m);
+}
+
+/// open(2) of the port with these flags: a descriptor, -ENODEV without a
+/// port, or -ENFILE.
+fn ser_open(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if ser_kind(k) == SER_NONE {
+    return 18446744073709551597;            // -ENODEV
+  }
+  let h = ofd_new(&mut k, OF_DEV, DEV_SER);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // O_NONBLOCK, for ser_read
+  return fd_install(&mut k, pid, h);
+}
+
+/// What poll finds on the port.
+fn ser_bits(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let mut r = 0;
+  if ser_rx_count(k) > 0 {
+    r = POLLIN;
+  }
+  if ser_tx_count(k) < SER_CAP {
+    r = r + POLLOUT;
+  }
+  return r;
+}
+
+/// read(2) (system call n) of up to len bytes into va on descriptor fd, the
+/// port. Returns KEEP or SWITCH, as linux_syscall does.
+fn ser_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let cnt = ser_rx_count(k);
+  if len == 0 {
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
+  }
+  if cnt == 0 {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
+      ret(&mut k.procs, pid, EAGAIN);       // O_NONBLOCK
+      return KEEP;
+    }
+    return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
+  }
+  let take = smaller(smaller(cnt, len), XFER);
+  let head = get_u64(k.mice, S_RHEAD) % SER_CAP;
+  let mut i = 0;
+  while i < take
+    invariant kok(k) && i <= take && take <= XFER && take <= SER_CAP && head < SER_CAP
+  {
+    bset(&mut k.fs.xfer, i, bget(k.mice, SER_RX_AT + (head + i) % SER_CAP));
+    i = i + 1;
+  }
+  let done = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, take);
+  if done == NO_RESULT || done < take {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  put_u64(&mut k.mice, S_RHEAD, (head + take) % SER_CAP);
+  put_u64(&mut k.mice, S_RCOUNT, cnt - take);
+  ret(&mut k.procs, pid, take);
+  return KEEP;
+}
+
+/// Is device d the mouse (10) or the serial port (14)? One test, because
+/// linux_syscall is close to the solver limit.
+fn is_mice_or_ser(d: u64) -> bool {
+  return (d | 4) == DEV_SER;
+}
+
+/// read(2) on the mouse or the serial port, whichever descriptor fd is.
+/// linux_syscall calls this one name for both, which keeps its proof small.
+fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_DEV && d.x == DEV_SER {
+    return ser_read(&mut k, pid, n, fd, va, len);
+  }
+  return mouse_read(&mut k, pid, n, fd, va, len);
+}
+
+/// write(2) of n bytes at va to the port: the count queued, or EAGAIN if
+/// the ring is full (lx_write_call then waits for room).
+fn ser_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == 0 {
+    return 0;
+  }
+  let cnt = ser_tx_count(k);
+  if cnt >= SER_CAP {
+    return EAGAIN;
+  }
+  let want = smaller(smaller(n, SER_CAP - cnt), XFER);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
+  if got == NO_RESULT || (got == 0 && want > 0) {
+    return EFAULT;
+  }
+  let m = smaller(got, want);
+  let head = get_u64(k.mice, S_THEAD) % SER_CAP;
+  let mut i = 0;
+  while i < m
+    invariant kok(k) && i <= m && m <= XFER && cnt + m <= SER_CAP && head < SER_CAP
+  {
+    bset(&mut k.mice, SER_TX_AT + (head + cnt + i) % SER_CAP, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  put_u64(&mut k.mice, S_TCOUNT, cnt + m);
+  return m;
+}
+
+/// Byte i of the port's struct termios: raw mode at 115200 baud, 8 data
+/// bits, until a program sets it.
+fn ser_tt_byte(k: &Kernel, i: u64) -> u64
+  requires kok(k) && i < TERMIOS_SIZE
+  ensures result < 256
+{
+  if get_u64(k.mice, S_TT_SET) == 1 {
+    return cast[u64](bget(k.mice, S_TT + i));
+  }
+  if i == 8 { return 0xB2; }              // c_cflag: B115200 | CS8 | CREAD | CLOCAL (0x18B2)
+  if i == 9 { return 0x18; }
+  if i == VMIN_AT { return 1; }
+  return 0;
+}
+
+/// ioctl on the port: the termios settings (kept, not acted on), the
+/// bytes waiting, the modem lines (reported as DTR and RTS up), and the
+/// calls that need no answer.
+fn ser_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == TCGETS {
+    let mut i = 0;
+    while i < TERMIOS_SIZE
+      invariant i <= TERMIOS_SIZE && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, cast[u8](ser_tt_byte(k, i)));
+      i = i + 1;
+    }
+    return lx_put_out(&mut k, pid, arg, TERMIOS_SIZE);
+  }
+  if req == TCSETS || (req > TCSETS && req <= TCSETSF) {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, TERMIOS_SIZE) != TERMIOS_SIZE {
+      return EFAULT;
+    }
+    let mut i = 0;
+    while i < TERMIOS_SIZE
+      invariant i <= TERMIOS_SIZE && kok(k)
+    {
+      bset(&mut k.mice, S_TT + i, bget(k.fs.xfer, i));
+      i = i + 1;
+    }
+    put_u64(&mut k.mice, S_TT_SET, 1);
+    if req == TCSETSF {
+      put_u64(&mut k.mice, S_RCOUNT, 0);     // TCSAFLUSH: drop what was received and not read
+    }
+    return 0;
+  }
+  if req == FIONREAD {
+    xfer_u64(&mut k.fs.xfer, 0, ser_rx_count(k));
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == TIOCMGET {
+    xfer_u64(&mut k.fs.xfer, 0, 6);         // TIOCM_DTR | TIOCM_RTS
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == TCFLSH {
+    if arg == 0 || arg == 2 {
+      put_u64(&mut k.mice, S_RCOUNT, 0);     // TCIFLUSH, TCIOFLUSH
+    }
+    return 0;
+  }
+  if req == TIOCMBIS || req == TIOCMBIC || req == TIOCMSET || req == TCSBRK || req == TCXONC
+    || req == TIOCEXCL || req == TIOCNXCL {
+    return 0;
+  }
+  return ENOTTY;
+}

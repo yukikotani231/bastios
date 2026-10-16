@@ -1,0 +1,148 @@
+// The editing keys as a terminal sends them: ESC [ A for Up and so on. A
+// key gives ESC at once and the rest of its bytes packed into one number
+// (first byte lowest, none zero), so a keyboard driver that hands over one
+// byte at a time can feed them out afterwards.
+
+const NAV_UP: u64 = 0;
+const NAV_DOWN: u64 = 1;
+const NAV_RIGHT: u64 = 2;
+const NAV_LEFT: u64 = 3;
+const NAV_HOME: u64 = 4;
+const NAV_END: u64 = 5;
+const NAV_DELETE: u64 = 6;
+const NAV_PGUP: u64 = 7;
+const NAV_PGDN: u64 = 8;
+const NAV_INSERT: u64 = 9;
+const NAV_F1: u64 = 10;              // F1 to F12 are NAV_F1 .. NAV_F1 + 11
+const NAV_NONE: u64 = 30;            // no such key
+
+/// The bytes after ESC for navigation key n (NAV_*): `[` and a letter,
+/// `[`, a digit and `~`, `O` and a letter (F1 to F4), or `[`, two digits
+/// and `~` (F5 to F12). At most four bytes.
+fn nav_rest(n: u64) -> u64
+  ensures result < 4294967296
+{
+  if n >= NAV_F1 && n < NAV_F1 + 4 {
+    return 79 + (80 + n - NAV_F1) * 256;
+  } else if n >= NAV_F1 + 4 && n < NAV_F1 + 12 {
+    let v = nav_fcode(n - NAV_F1);         // 15 17 18 19 20 21 23 24
+    return 91 + (48 + v / 10) * 256 + (48 + v % 10) * 65536 + 126 * 16777216;
+  } else if n == NAV_INSERT {
+    return 91 + 50 * 256 + 126 * 65536;
+  }
+  if n == NAV_UP {
+    return 91 + 65 * 256;
+  } else if n == NAV_DOWN {
+    return 91 + 66 * 256;
+  } else if n == NAV_RIGHT {
+    return 91 + 67 * 256;
+  } else if n == NAV_LEFT {
+    return 91 + 68 * 256;
+  } else if n == NAV_HOME {
+    return 91 + 72 * 256;
+  } else if n == NAV_END {
+    return 91 + 70 * 256;
+  } else if n == NAV_DELETE {
+    return 91 + 51 * 256 + 126 * 65536;
+  } else if n == NAV_PGUP {
+    return 91 + 53 * 256 + 126 * 65536;
+  } else if n == NAV_PGDN {
+    return 91 + 54 * 256 + 126 * 65536;
+  }
+  return 0;
+}
+
+/// The key for PS/2 extended scan code c (after 0xE0), or NAV_NONE.
+fn nav_ps2(c: u64) -> u64
+  ensures result <= NAV_NONE
+{
+  if c == 0x48 {
+    return NAV_UP;
+  } else if c == 0x50 {
+    return NAV_DOWN;
+  } else if c == 0x4D {
+    return NAV_RIGHT;
+  } else if c == 0x4B {
+    return NAV_LEFT;
+  } else if c == 0x47 {
+    return NAV_HOME;
+  } else if c == 0x4F {
+    return NAV_END;
+  } else if c == 0x53 {
+    return NAV_DELETE;
+  } else if c == 0x49 {
+    return NAV_PGUP;
+  } else if c == 0x51 {
+    return NAV_PGDN;
+  } else if c == 0x52 {
+    return NAV_INSERT;
+  }
+  return NAV_NONE;
+}
+
+/// The key for HID usage u, or NAV_NONE.
+fn nav_usb(u: u64) -> u64
+  ensures result <= NAV_NONE
+{
+  if u == 0x52 {
+    return NAV_UP;
+  } else if u == 0x51 {
+    return NAV_DOWN;
+  } else if u == 0x4F {
+    return NAV_RIGHT;
+  } else if u == 0x50 {
+    return NAV_LEFT;
+  } else if u == 0x4A {
+    return NAV_HOME;
+  } else if u == 0x4D {
+    return NAV_END;
+  } else if u == 0x4C {
+    return NAV_DELETE;
+  } else if u == 0x4B {
+    return NAV_PGUP;
+  } else if u == 0x4E {
+    return NAV_PGDN;
+  } else if u == 0x49 {
+    return NAV_INSERT;
+  } else if u >= 0x3A && u <= 0x45 {
+    return NAV_F1 + u - 0x3A;
+  }
+  return NAV_NONE;
+}
+
+/// The key for the PS/2 scan code c (not extended) of a function key, or
+/// NAV_NONE: F1 to F10 are 0x3B to 0x44, F11 0x57 and F12 0x58.
+fn nav_ps2_fn(c: u64) -> u64
+  ensures result <= NAV_NONE
+{
+  if c >= 0x3B && c <= 0x44 {
+    return NAV_F1 + c - 0x3B;
+  } else if c == 0x57 {
+    return NAV_F1 + 10;
+  } else if c == 0x58 {
+    return NAV_F1 + 11;
+  }
+  return NAV_NONE;
+}
+
+/// The number in ESC [ number ~ for F5 (n = 4) to F12 (n = 11).
+fn nav_fcode(n: u64) -> u64
+  ensures result < 100
+{
+  if n == 4 {
+    return 15;
+  } else if n == 5 {
+    return 17;
+  } else if n == 6 {
+    return 18;
+  } else if n == 7 {
+    return 19;
+  } else if n == 8 {
+    return 20;
+  } else if n == 9 {
+    return 21;
+  } else if n == 10 {
+    return 23;
+  }
+  return 24;
+}

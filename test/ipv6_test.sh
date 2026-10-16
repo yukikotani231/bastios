@@ -71,6 +71,7 @@ class Wire:
         self.got = []                   # (kind, details) seen from the guest
         self.tcp = {}                   # guest port -> state of a connection to :80
         self.bad = []                   # frames from the guest with a wrong checksum
+        self.cli = []                   # TCP segments from the guest to the script's client port
 
     def send(self, f):
         self.sock.sendto(f, ("127.0.0.1", self.guest_port))
@@ -94,6 +95,8 @@ class Wire:
             return
         if nh == 58:
             self.icmp(f, src, dst, p, hops)
+        elif nh == 17 and dst in OURS and struct.unpack("!H", p[2:4])[0] == 4000:
+            self.got.append(("udp-back", src, p[8:]))
         elif nh == 17 and dst in OURS:
             sport, dport = struct.unpack("!HH", p[:4])
             self.got.append(("udp", dst, f[0:6]))
@@ -116,12 +119,18 @@ class Wire:
                 self.send(ip6(58, target, src, na, hops=255, at=2))
         elif kind == 136:
             self.got.append(("na", p[8:24], p[26:32] if len(p) >= 32 else b"", hops))
+        elif kind == 1:
+            self.got.append(("unreach", src, dst, p[1], p[8:]))
         elif kind == 129:
             self.got.append(("echo-reply", src, dst, p[4:]))
+        elif kind == 128 and dst in OURS:   # a ping from the guest
+            self.got.append(("ping", dst, f[0:6]))
+            self.send(ip6(58, dst, src, bytes([129, 0, 0, 0]) + p[4:], at=2))
 
     def ra(self):
         ra = struct.pack("!BBHBBHII", 134, 0, 0, 64, 0, 1800, 0, 0)
         ra += bytes([1, 1]) + HOST_MAC
+        ra += struct.pack("!BBHI", 25, 3, 0, 1800) + ipaddress.IPv6Address("2001:db8:1::53").packed   # RDNSS
         ra += struct.pack("!BBBBIII", 3, 4, 64, 0xC0, 86400, 14400, 0) + ipaddress.IPv6Address("2001:db8:1::").packed
         self.send(ip6(58, ROUTER_LL, ALL_NODES, ra, hops=255, at=2))
 
@@ -129,6 +138,7 @@ class Wire:
         sport, dport, seq, ack, off, flags, wnd = struct.unpack("!HHIIBBH", p[:16])
         data = p[(off >> 4) * 4:]
         if dport != 80:
+            self.cli.append((flags, seq, ack, data))
             return
         c = self.tcp.get(sport)
         def seg(fl, s, a, body=b"", opts=b""):
@@ -228,6 +238,10 @@ mark = len(out)
 type_line("ash")
 until(lambda: b"# " in out[mark:], 20)
 mark = len(out)
+type_line("cat /etc/resolv.conf")
+until(lambda: b"# " in out[mark:], 10)
+check(b"nameserver 2001:db8:1:0:0:0:0:53" in out[mark:], "the router advertisement's name server is in /etc/resolv.conf")
+mark = len(out)
 type_line("/disk/ipv6probe")
 done = until(lambda: b"done " in out[mark:], 90)
 text = out[mark:].decode(errors="replace").replace("\r", "")
@@ -235,12 +249,45 @@ for line in text.split("\n"):
     if line.startswith("ok ") or line.startswith("FAIL "):
         check(line.startswith("ok "), "guest: " + line.split(" ", 1)[1])
 check(done and "done 0" in text, "the guest program finished with every check passing")
-if not done:
+if not done or os.environ.get("V6DEBUG"):
     print(text[-2000:])
 check(any(g[0] == "ns" and g[1] == ON_LINK for g in wire.got), "asked for a neighbor's MAC before sending to it")
 off = [g for g in wire.got if g[0] == "udp" and g[1] == OFF_LINK]
 check(off and all(g[2] == HOST_MAC for g in off), "sent off-link traffic to the router's MAC")
 check(any(g[0] == "tcp-served" for g in wire.got), "TCP reached the server over IPv6")
+
+# The script as a client of the guest's dual-stack servers (9001 UDP, 9002 TCP).
+mark = len(out)
+type_line("/disk/ipv6probe serve &")
+ready = until(lambda: b"ready" in out[mark:], 60)
+text = out[mark:].decode(errors="replace").replace("\r", "")
+for line in text.split("\n"):
+    if line.startswith("ok ") or line.startswith("FAIL "):
+        check(line.startswith("ok "), "guest: " + line.split(" ", 1)[1])
+check(ready, "the servers are listening")
+u = struct.pack("!HHHH", 4000, 9001, 8 + 5, 0) + b"hello"
+wire.send(ip6(17, ON_LINK, GUEST_GL, u, at=6))
+check(until(lambda: any(g[0] == "udp-back" for g in wire.got), 5), "a dual-stack UDP socket answers an IPv6 peer")
+u = struct.pack("!HHHH", 4002, 9999, 8 + 3, 0) + b"abc"
+wire.send(ip6(17, ON_LINK, GUEST_GL, u, at=6))
+check(until(lambda: any(g[0] == "unreach" and g[1] == GUEST_GL and g[2] == ON_LINK and g[3] == 4
+                        and g[4][40:46] == u[:6] for g in wire.got), 5),
+      "a datagram to a closed port is answered with destination unreachable (port) quoting it")
+def tseg(fl, s, a, body=b""):
+    t = struct.pack("!HHIIBBHHH", 4001, 9002, s, a, 5 << 4, fl, 65535, 0, 0) + body
+    wire.send(ip6(6, ON_LINK, GUEST_GL, t, at=16))
+tseg(0x02, 1000, 0)
+check(until(lambda: any(c[0] & 0x12 == 0x12 for c in wire.cli), 5), "a dual-stack listener accepts an IPv6 connection")
+syn = [c for c in wire.cli if c[0] & 0x12 == 0x12]
+if syn:
+    tseg(0x18, 1001, syn[0][1] + 1, b"hi\n")
+    until(lambda: any(c[3] for c in wire.cli), 5)
+    reply = b"".join(c[3] for c in wire.cli if c[3])
+    check(reply == b"peer 2001:db8:1::2 port 4001 own 2001:db8:1:0:5054:ff:fe12:3456\n",
+          f"getpeername and getsockname of the accepted connection are IPv6 ({reply!r})")
+
+ping = [g for g in wire.got if g[0] == "ping" and g[1] == OFF_LINK]
+check(ping and all(g[2] == HOST_MAC for g in ping), "sent a ping to an off-link host to the router's MAC")
 check(not wire.bad, f"every frame from the guest had a right checksum {wire.bad[:3]}")
 
 qemu.kill()

@@ -297,7 +297,7 @@ t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
 t_fanotify: a child's event comes to its directory
-t_fanotify: a class other than notification is refused
+t_fanotify: the content classes are accepted, both at once are refused, and a permission mask is refused
 t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
 t_fanotify: a mark on a missing file is ENOENT
 t_fanotify: a mark with no operation is EINVAL
@@ -326,6 +326,18 @@ t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
 t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
 t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
+t_fdshare: a descriptor the child closes is closed in the parent
+t_fdshare: a descriptor the child opens is open in the parent
+t_fdshare: after unshare(CLONE_FILES) the child's changes stay with it
+t_fdshare: close_range with CLOSE_RANGE_UNSHARE closes only the caller's copy
+t_fdshare: execve gives the program a table of its own
+t_fdshare: kcmp(KCMP_FILES) tells sharing processes from the rest
+t_fdshare: /proc/PID/fd/N of a process that shares the table reads the shared descriptors
+t_fdshare: unshare(CLONE_FILES) is EMFILE past nr_open
+t_fdshare: a working directory the child sets is the parent's
+t_fdshare: a umask the child sets is the parent's
+t_fdshare: after unshare(CLONE_FS) the child's chdir stays with it
+t_fdshare: kcmp(KCMP_FS) says processes that share a working directory do
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
@@ -575,9 +587,13 @@ t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
+t_ltp2: mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt
+t_ltp2: madvise: a range with a munmapped page in it is ENOMEM, one without is not
 t_ltp2: SIGBUS: a mapped page past the end of the file is a bus error
 t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
 t_ltp2: SIGBUS: a forked child gets it too
+t_ltp2: SIGBUS: a file cut under a mapping takes the pages past the new end
+t_ltp2: rename: a directory moved from under the working directory leaves it in the moved directory
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
@@ -762,6 +778,8 @@ t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
+t_net: IPV6_V6ONLY reads back
+t_net: IPV6_V6ONLY: an IPv6-only listener and an IPv4 one share a port
 t_net: SO_REUSEADDR
 t_net: TCP bind/listen
 t_net: TCP loopback connect/accept
@@ -770,10 +788,42 @@ t_net: TCP_NODELAY
 t_net: UDP bind port 0
 t_net: UDP loopback
 t_net: UDP socket
+t_net: a dual-stack listener cannot take it
 t_net: getaddrinfo localhost
+t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd
+t_pidapi: waitid(P_PIDFD) on it reports the child's status
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at two addresses fill both
+t_pidapi: a child killed by the signal is reported as CLD_KILLED with its signal
+t_pidapi: a second waitid(P_PIDFD) is ECHILD
+t_pidapi: clone3 with CLONE_PIDFD returns a pidfd
+t_pidapi: clone3 with a size below 64 is EINVAL
+t_pidapi: clone3 with an exit signal above 255 is EINVAL
+t_pidapi: epoll on the pidfd of an ended child
+t_pidapi: pidfd_getfd copies the child's descriptor, close-on-exec
+t_pidapi: pidfd_getfd of a closed descriptor is EBADF
+t_pidapi: pidfd_getfd with flags is EINVAL
+t_pidapi: pidfd_open of a pid with no process is ESRCH
+t_pidapi: pidfd_open of a zombie works and waitid reaps it
+t_pidapi: pidfd_open of pid 0 is EINVAL
+t_pidapi: pidfd_open with PIDFD_NONBLOCK sets O_NONBLOCK
+t_pidapi: pidfd_open with PIDFD_THREAD on the caller works
+t_pidapi: pidfd_send_signal to the reaped child is ESRCH
+t_pidapi: pidfd_send_signal with PIDFD_SIGNAL_THREAD and PIDFD_SIGNAL_PROCESS_GROUP together is EINVAL
+t_pidapi: pidfd_send_signal with PIDFD_SIGNAL_THREAD_GROUP to itself
+t_pidapi: pidfd_send_signal with a siginfo of the right signal
+t_pidapi: poll on a running child's pidfd says nothing
+t_pidapi: poll on the pidfd of a child that exits says POLLIN
+t_pidapi: the pidfd is close-on-exec
+t_pidapi: waitid on a non-blocking pidfd with nothing to report is EAGAIN
+t_pidapi: waitid(P_PIDFD) reaps it
+t_pidapi: waitid(P_PIDFD, WNOHANG) of a running child returns 0 with si_pid 0
+t_pidapi: waitid(P_PIDFD, WNOWAIT) reads the status and leaves the zombie
+t_net: ping6 ::1 (raw ICMPv6 socket)
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
 t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
@@ -1002,7 +1052,7 @@ t_proc: /proc/sys/net/core is a directory
 t_proc: a directory under /proc/sys that is not there is ENOENT
 t_proc: every file listed under /proc/sys opens
 t_proc: /proc/sys/vm lists swappiness
-t_proc: oom_score reads 0
+t_proc: oom_score reads a number
 t_proc: oom_score_adj starts at 0
 t_proc: loginuid is unset
 t_proc: coredump_filter reads its default
@@ -1362,6 +1412,13 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a compile error is reported
+podman: podman: unpack the image root and set it up
+podman: podman: version
+podman: podman: import a root and run a container as root
+podman: podman: a container has its own hostname
+podman: podman: rootless, the unprivileged user maps to root in its user namespace
+podman: podman: rootless, import an image (chroot, mkdir and lchown as the namespace's root)
+podman: podman: rootless, run a container in a user namespace
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
@@ -1438,6 +1495,14 @@ alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
 alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+alpine: abuild: install it with fakeroot and the build tools
+alpine: abuild-keygen: a builder user makes a signing key and trusts it
+alpine: symlink: a new symlink belongs to the user who made it, who can set its times
+alpine: abuild: libgreet: a patch, a test suite, and -dev and -doc packages
+alpine: abuild: greeter: build-time dependencies come from the repository just made, and the runtime one is traced
+alpine: apk: install the built packages from the signed repository, with their scripts
+alpine: apk: a repository signed with a key that is not trusted is refused
+alpine: abuild: tinycc: a C compiler built from its source, which then compiles a program
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
