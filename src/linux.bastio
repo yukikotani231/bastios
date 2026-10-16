@@ -2438,6 +2438,14 @@ fn stack_reach(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
   if va < USER_BASE + STACK_FIRST * 4096 || va >= USER_BASE + STACK_LOW * 4096 {
     return false;
   }
+  // The stack is mapped without a gap from its top down to the page it has
+  // reached, so a mapped page means every page above it is mapped too. Every
+  // system call comes here with a stack pointer that, since the stack top is
+  // randomized, lies below the top pages a new window maps: without this
+  // check each call visited every page up to the top again.
+  if user_present(&mut spaces, pid, va) {
+    return true;
+  }
   return lx_map_pages(&mut m, &mut spaces, pid, (va - USER_BASE) / 4096, WPAGES, false);
 }
 
