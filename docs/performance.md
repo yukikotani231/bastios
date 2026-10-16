@@ -142,6 +142,10 @@ instructions on both. Where BastiOS is behind:
   `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
   (2%); about a third of the samples are QEMU's own code, which the build
   here has no symbols for. Not compared with Linux on that machine.
+  Listing a directory on the disk asked `vfs_readdir` about every slot of the
+  disk in turn, since a directory's entries are not stored together; `getdents`
+  now skips over the slots of other directories in one tight loop, which took the
+  same run on this host from 0.16-0.18 s to 0.14 s.
 - `hello` was 3.6x off Linux when run again (3.65 s against 1.02 s), and
   slower the second time than the first. The time was in the emulator, not
   the disk: the page cache that shares program code between runs

@@ -1699,6 +1699,66 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
   return NO_FILE;
 }
 
+/// The first index at or after i that can be an entry of disk directory p
+/// (DTOP: the top) of file system d: vfs_readdir finds nothing, and no
+/// entry of p lives, below it. The end of the directory's slots (or i, if
+/// it is past them) if there is none.
+fn dk_skip(d: &DiskFs, p: u64, i: u64) -> u64
+  requires disk_ok(d)
+  ensures result >= i && (result <= DSLOTS || i > DSLOTS)
+{
+  let mut j = i;
+  while j < DSLOTS && j < d.slots && !(dent_used(d, j) && dent_parent(d, j) == p)
+    invariant j >= i && disk_ok(d) && (j <= DSLOTS || j == i)
+  {
+    j = j + 1;
+  }
+  return j;
+}
+
+/// Where a walk over directory d's entries, which has just found nothing at
+/// index i, can go on: vfs_readdir finds nothing at any index between i
+/// and the result (at least i, at most i + DSLOTS). The disk's directories
+/// hold only the entries whose parent they are, among all of its slots, so
+/// listing one would otherwise ask about every slot in turn.
+fn vfs_skip(v: &mut Vfs, d: u64, i: u64) -> u64
+  requires vfs_ok(v) && i < 0x100000000
+  ensures vfs_ok(v) && result >= i && result <= i + DSLOTS
+{
+  let mut dk = d;
+  let mut lo = false;
+  if d == VDIR_DISK || (d >= NFILES && d < NFILES + DSLOTS) {
+    dk = DTOP;
+    if d != VDIR_DISK {
+      if !dent_dir(v.disk, d - NFILES) {
+        return i;
+      }
+      dk = d - NFILES;
+    }
+  } else if d == VDIR_LO || (d >= LO0 && d < HFILES) {
+    lo = true;
+    dk = DTOP;
+    if d != VDIR_LO {
+      if !dent_dir(v.lo, d - LO0) {
+        return i;
+      }
+      dk = d - LO0;
+    }
+  } else {
+    return i;
+  }
+  let mut j = 0;
+  if lo {
+    j = dk_skip(v.lo, dk, i);
+  } else {
+    j = dk_skip(v.disk, dk, i);
+  }
+  if j > i + DSLOTS {
+    return i;
+  }
+  return j;
+}
+
 /// vfs_readdir of entry i of directory entry p (DTOP: the top) of disk
 /// file system d.
 fn dk_readdir(d: &DiskFs, x: &mut Bytes, p: u64, i: u64) -> u64
