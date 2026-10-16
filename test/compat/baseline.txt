@@ -68,10 +68,17 @@ apps: wget: HTTPS from the host (BusyBox's own TLS)
 apps: wget: a file from the host
 apps: wget: a missing file is an error
 apps: wget: an IPv6 loopback server
+bastio: bastio-lsp: a type error from bastioc1 becomes a diagnostic
+bastio: bastio-lsp: formatting
+bastio: bastio-lsp: go to definition
+bastio: bastio-lsp: hover shows the signature and the doc comment
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
 bastio: bastioc1: prove, build with tcc, run
+bastio: bastiofmt: --check names an unformatted file
+bastio: bastiofmt: formats the compiler's parser, and the result is formatted
+bastio: bastiofmt: lays a line out
 bastio: z3: a query
 busybox: awk
 busybox: base64
