@@ -856,6 +856,41 @@ fn proc_meta(f: u64) -> Meta {
   return Meta { ok: true, mode: S_IFREG_RO, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
 }
 
+/// The process whose directory /proc directory number rel (a DIR_PROC
+/// offset) is: /proc/PID, its ns, fd, task and fdinfo; 0 for any other.
+fn proc_dir_pid(rel: u64) -> u64
+  ensures result < NPROC
+{
+  let mut t = 0;
+  if rel < NS_DIRS {
+    t = rel;
+  } else if rel >= FDI_DIRS {
+    t = rel - FDI_DIRS;
+  } else if rel >= FD_DIRS && rel < NET_DIR {
+    t = rel % 1024;
+  } else if rel >= NS_DIRS && rel < FD_DIRS {
+    t = rel - NS_DIRS;
+  }
+  if t >= NPROC {
+    return 0;
+  }
+  return t;
+}
+
+/// What stat says about /proc file pf, owned by the process it belongs to.
+fn proc_file_meta(k: &Kernel, pf: u64) -> Meta
+  requires kok(k)
+{
+  let m = proc_meta(pf);
+  if pf >= PROC_DEV && pf < PROC_DEV + PSYS {
+    let t = (pf - PROC_DEV) / 16;
+    if t != 0 && t < NPROC {
+      return Meta { ok: m.ok, mode: m.mode, size: m.size, ino: m.ino, mtime: m.mtime, own: proc_own(k, t) };
+    }
+  }
+  return m;
+}
+
 /// What stat says about /proc directory d (a proc_dir description).
 fn proc_dir_meta(d: u64) -> Meta {
   if d >= DIR_PROC + SYSD && d < DIR_PROC + SYSD + SYSD_N {
