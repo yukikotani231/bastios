@@ -683,7 +683,7 @@ const ME_W: u64 = 5;                  // words per mount
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
 // names are in k.sys), and the IPC namespace of each POSIX queue.
-const NSK_N: u64 = 12;                // kinds, per process:
+const NSK_N: u64 = 15;                // kinds, per process:
 const NSK_UTS: u64 = 0;
 const NSK_IPC: u64 = 1;
 const NSK_PID: u64 = 2;               //   the PID namespace it is in
@@ -696,6 +696,10 @@ const NSK_TIMEC: u64 = 9;            //   the time namespace its children are in
 const NSK_CGN: u64 = 7;               //   the root of its cgroup namespace: slot + 1 (0: the first namespace)
 const NSK_VP1: u64 = 10;              //   its id in the PID namespace around its own (0: that is the first)
 const NSK_VP2: u64 = 11;              //   and in the one around that
+const NSK_VP3: u64 = 12;              //   then the next ones out, up to PN_LEVELS - 1 levels around its own
+const NSK_VP4: u64 = 13;
+const NSK_VP5: u64 = 14;
+const PN_LEVELS: u64 = 6;             // PID namespaces nest this deep besides the first
 const CG_N: u64 = 128;                // cgroups in all (slot 0 is the root, always there)
 const CG_W: u64 = 140;                // words per cgroup: see CGW_*
 const CGW_USED: u64 = 0;

@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <dirent.h>
+#include <errno.h>
 
 #define N 24
 
@@ -90,11 +92,68 @@ static int many_tmpfs(void) {
     return ok && n == 60;
 }
 
+/* PID namespaces nest six deep: each process makes one and starts the init
+ * of the next (id 1 there). The init of the sixth cannot make a seventh
+ * (ENOSPC), and from the first namespace its /proc/PID/status lists its id
+ * in all seven (NSpid), the last being 1. */
+static int nest(int depth, int up, int down) {
+    if (depth == 7) {
+        char b;
+        if (getpid() != 1) return 1;
+        if (unshare(CLONE_NEWPID) != -1 || errno != ENOSPC) return 2;
+        if (write(up, "r", 1) != 1 || read(down, &b, 1) < 0) return 3;
+        return 0;
+    }
+    if (unshare(CLONE_NEWPID) != 0) return 10 + depth;
+    pid_t c = fork();
+    if (c < 0) return 20 + depth;
+    if (c == 0) _exit(nest(depth + 1, up, down));
+    int st;
+    if (waitpid(c, &st, 0) != c || !WIFEXITED(st)) return 30 + depth;
+    return WEXITSTATUS(st);
+}
+
+static int nested_pidns(void) {
+    int up[2], down[2];
+    if (pipe(up) != 0 || pipe(down) != 0) return 0;
+    pid_t c = fork();
+    if (c == 0) _exit(nest(1, up[1], down[0]));
+    close(up[1]);
+    close(down[0]);
+    signal(SIGPIPE, SIG_IGN);
+    char r = 0;
+    int found = 0;
+    if (read(up[0], &r, 1) == 1 && r == 'r') {
+        DIR *d = opendir("/proc");
+        struct dirent *e;
+        while (d && (e = readdir(d))) {
+            char path[64], line[256];
+            snprintf(path, sizeof path, "/proc/%s/status", e->d_name);
+            FILE *f = fopen(path, "r");
+            while (f && fgets(line, sizeof line, f)) {
+                if (strncmp(line, "NSpid:", 6) != 0) continue;
+                int fields = 0;
+                for (char *q = line + 6; *q; q++)
+                    if (*q != ' ' && *q != '\t' && *q != '\n' && (q[-1] == ' ' || q[-1] == '\t' || q[-1] == ':')) fields++;
+                if (fields == 7 && strstr(line, "\t1\n")) found = 1;   /* the first and six inside, the init of the last is 1 */
+            }
+            if (f) fclose(f);
+        }
+        if (d) closedir(d);
+    }
+    (void)!write(down[1], "g", 1);
+    int st;
+    int ok = waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!ok) errno = WIFEXITED(st) ? 1000 + WEXITSTATUS(st) : 2000;
+    return ok && found;
+}
+
 int main(void) {
     setup();
     EXPECT("24 UTS namespaces at once, each with its own name", many(CLONE_NEWUTS) == N);
     EXPECT("and 24 more once those are gone", many(CLONE_NEWUTS) == N);
     EXPECT("24 PID namespaces at once", many(CLONE_NEWPID) == N);
+    EXPECT("PID namespaces nest six deep, and no deeper", nested_pidns());
     EXPECT("24 IPC namespaces at once", many(CLONE_NEWIPC) == N);
     EXPECT("60 tmpfs mounts at once, each with its own files", many_tmpfs());
     return done();
