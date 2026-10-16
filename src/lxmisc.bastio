@@ -75,7 +75,6 @@ const RLIMIT_STACK: u64 = 3;
 const RLIMIT_NOFILE: u64 = 7;
 const RLIMIT_CORE: u64 = 4;
 const RLIM_NLIMITS: u64 = 16;
-const NR_OPEN: u64 = 1048576;          // Linux's default /proc/sys/fs/nr_open
 const STACK_BYTES: u64 = 8388608;     // STACK_PAGES pages
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
@@ -864,6 +863,21 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// Writes a call's result and keeps the process running, or retries it when
+/// the disk blocks it needs are not cached yet. (Its own function so the proof
+/// of lx_misc_call's long chain of cases does not have to carry the whole kernel
+/// invariant through this last step.)
+fn lx_misc_done(k: &mut Kernel, pid: u64, n: u64, r: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -1043,9 +1057,5 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   // Everything else (madvise, sync) succeeds doing nothing.
   assert kok(k) && con_ok(con);
-  if r == DISK_RETRY {
-    return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
-  }
-  ret(&mut k.procs, pid, r);
-  return KEEP;
+  return lx_misc_done(&mut k, pid, n, r);
 }

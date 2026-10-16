@@ -1089,17 +1089,15 @@ fn cgns_root(k: &Kernel, pid: u64) -> u64
 
 /// unshare(CLONE_NEWCGROUP) or clone with it: the group the process is in
 /// becomes the root of its cgroup namespace. A namespace is named by its
-/// root, so one made at the root group is the first namespace.
+/// root group, so the processes that unshare in the same group share one
+/// namespace; at the root group it is number 1, which looks like the first
+/// namespace (number 0) but is a namespace of its own, with an owner.
 fn cgns_unshare(k: &mut Kernel, pid: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let c = cg_of(k, pid);
-  if c == 0 {
-    nsk_set(&mut k, NSK_CGN, pid, 0);
-  } else {
-    nsk_set(&mut k, NSK_CGN, pid, c + 1);
-  }
+  nsk_set(&mut k, NSK_CGN, pid, c + 1);
 }
 
 /// Does any process (not a zombie) have group s as the root of its cgroup
@@ -1834,7 +1832,7 @@ fn lx_clone3_cg(k: &mut Kernel, mmu: &Mmu, pid: u64, va: u64, size: u64) -> Clon
   }
   let cflags = flags + sig.v;
   if thread {
-    let r = lx_thread_clone(&mut k, pid, cflags, sp, ptid.v, ctid.v, tls.v);
+    let r = lx_thread_clone(&mut k, pid, cflags, sp, ptid.v, ptid.v, ctid.v, tls.v);
     if r < NPROC {
       pt_fork_event(&mut k, pid, r, 3);
     }
@@ -1854,7 +1852,7 @@ fn lx_clone3_cg(k: &mut Kernel, mmu: &Mmu, pid: u64, va: u64, size: u64) -> Clon
   if !clone_proc_flags(cflags) {
     return Clone3Cg { r: EINVAL, wait: false };
   }
-  let r = lx_clone_proc(&mut k, mmu, pid, cflags, sp, ptid.v, ctid.v, tls.v);
+  let r = lx_clone_proc(&mut k, mmu, pid, cflags, sp, ptid.v, ptid.v, ctid.v, tls.v);
   if r < NPROC {
     if into {
       cg_move(&mut k, r, dest);
