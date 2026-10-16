@@ -1216,6 +1216,11 @@ session("virtio", True, [
     ("mfd", b"mfd: ok, 8 processes held 1856 descriptions", b"\n# "),
     # More processes at once than the 512 the process table once held (user/mproc.c).
     ("mproc", b"mproc: ok, 700 processes at once", b"\n# "),
+    # /dev/fb0 without a screen (this machine has none): ENODEV (user/mfb.c; the drawing is tested in test/iso_test.sh).
+    ("mfb", b"mfb: no screen (ENODEV)", b"\n# "),
+    ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
+    ("bhello", b"bhello: no window server", b"\n# "),
+    ("bterm", b"bterm: no window server", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 

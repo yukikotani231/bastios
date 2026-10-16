@@ -45,6 +45,20 @@ def screen_text(ppm):
         lines.append(line.rstrip())
     return lines
 
+def screen_text_at(px, w, ox, oy, cols, rows):
+    # Lines of text in a block of cells at pixel (ox, oy), read from the pixels of a screendump.
+    lines = []
+    for cy in range(rows):
+        line = ""
+        for cx in range(cols):
+            cell = []
+            for r in range(16):
+                i = ((oy + cy * 16 + r) * w + ox + cx * 8) * 3
+                cell.append(sum(1 << p for p in range(8) if px[i + p * 3] > 0x60))
+            line += glyphs.get(tuple(cell), "?")
+        lines.append(line.rstrip())
+    return lines
+
 def usbkeys(path, keys):
     # Key presses through QMP, which QEMU hands to the USB keyboard (the
     # machine has no other).
@@ -212,6 +226,188 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if not good:
             print("\n".join(l for l in text if l))
         fails += not good
+    if ok and not diag and not usb and not nvme and not stick:
+        # /dev/fb0 (user/mfb.c): a program draws on the screen, and the
+        # console stops drawing while it holds the device and comes back
+        # when it closes it. The pixels are read back from screendumps.
+        def screendump():
+            m2 = socket.socket(socket.AF_UNIX)
+            m2.connect(mon_path)
+            path = os.path.join(tmp.name, "fb.ppm")
+            if os.path.exists(path):
+                os.remove(path)
+            m2.sendall(f"screendump {path}\n".encode())
+            for _ in range(50):
+                time.sleep(0.1)
+                if os.path.exists(path) and os.path.getsize(path) > 1024 * 768 * 3:
+                    time.sleep(0.2)
+                    break
+            m2.close()
+            d = open(path, "rb").read()
+            _, rest = d.split(b"\n", 1)
+            dims, rest = rest.split(b"\n", 1)
+            _, px = rest.split(b"\n", 1)
+            w, h = map(int, dims.split())
+            return w, h, px
+        mark = len(out)
+        q.stdin.write(b"mfb\r"); q.stdin.flush()
+        good = until(b"mfb: drawn 1024x768", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) mfb opens /dev/fb0, reads its mode and draws")
+        fails += not good
+        if good:
+            w, h, px = screendump()
+            def at(x, y):
+                i = (y * w + x) * 3
+                return tuple(px[i:i + 3])
+            good = (at(10, 10) == (255, 0, 0) and at(900, 380) == (255, 0, 0) and at(10, 700) == (0, 0, 255)
+                    and at(100, 100) == (0, 255, 0) and at(163, 163) == (0, 255, 0)
+                    and at(164, 164) == (255, 0, 0) and at(99, 99) == (255, 0, 0))
+            print(("ok  " if good else "FAIL"), f"({name}) the program's pixels are on the screen")
+            fails += not good
+            q.stdin.write(b"\r"); q.stdin.flush()
+            good = until(b"mfb: done", mark) and until(b"bastios> ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) mfb ends (a write at the end of the screen is ENOSPC)")
+            fails += not good
+            time.sleep(0.5)
+            w, h, px = screendump()
+            lines = screen_text(b"P6\n%d %d\n255\n" % (w, h) + px)
+            good = any("mfb: drawn 1024x768" in l for l in lines) and any("mfb: done" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the console is drawn again, its text from before and after, once the device is closed")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+        # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
+        # dragging and typing, driven through QEMU's monitor.
+        def monitor(*cmds):
+            m3 = socket.socket(socket.AF_UNIX)
+            m3.connect(mon_path)
+            for c in cmds:
+                m3.sendall(c.encode() + b"\n")
+                time.sleep(0.15)
+            time.sleep(0.4)
+            m3.close()
+        mark = len(out)
+        q.stdin.write(b"bwm\r"); q.stdin.flush()
+        good = until(b"bwm: ready 1024x768", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) bwm starts on /dev/fb0")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            def at(x, y):
+                i = (y * w + x) * 3
+                return tuple(px[i:i + 3])
+            blue, grey, wall = (40, 90, 200), (110, 110, 120), at(10, 10)
+            good = (at(400, 125) == blue and at(300, 70) == grey and at(400, 300) == (235, 235, 235)
+                    and wall[2] > 70 and wall != blue and at(650, 300) == (220, 235, 250))
+            print(("ok  " if good else "FAIL"), f"({name}) bwm draws the wallpaper and three windows, the top one focused")
+            fails += not good
+            # Click the title bar of the Notes window (under the others'
+            # corners), drag it 100 right and 100 down: it comes to the front.
+            monitor("mouse_move -212 -314", "mouse_button 1", "mouse_move 50 50", "mouse_move 50 50", "mouse_button 0")
+            w, h, px = screendump()
+            good = at(300, 170) == blue and at(300, 70) == at(10, 70) and at(300, 70) != grey
+            print(("ok  " if good else "FAIL"), f"({name}) dragging a title bar moves the window and focuses it")
+            fails += not good
+            # Typed text goes into the focused window, after "for BastiOS." on its second line.
+            monitor("sendkey h")
+            w, h, px = screendump()
+            cell = [at(x, y) for y in range(200, 216) for x in range(282, 290)]
+            good = (10, 10, 10) in cell
+            print(("ok  " if good else "FAIL"), f"({name}) a typed key appears in the focused window")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")
+            fails += not good
+        # A client over the socket (user/bhello.c): a window of its own
+        # pixels, keys and clicks sent back to it, and its close box.
+        # The native shell passes no arguments, so this runs from BusyBox's ash.
+        mark = len(out)
+        q.stdin.write(b"ash\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bhello\r"); q.stdin.flush()
+        good = until(b"bhello: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a client opens a window on bwm over its socket")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            wall = lambda y: at(10, y)
+            good = (at(80, 100) == (255, 0, 0) and at(260, 100) == (0, 0, 255) and at(150, 75) == blue
+                    and at(10, 100) == wall(100) and at(80, 100) != wall(100))
+            print(("ok  " if good else "FAIL"), f"({name}) the client's pixels are in its window")
+            fails += not good
+            monitor("sendkey g")
+            good = until(b"bhello: key g", mark)
+            w, h, px = screendump()
+            good = good and at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a key typed goes to the client, which redraws")
+            fails += not good
+            monitor("mouse_move -362 -244", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: mouse 78 50 1", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a click inside the window reaches the client, in its own coordinates")
+            fails += not good
+            monitor("mouse_move 114 -60", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: closed", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(80, 100) == wall(100) and at(150, 75) == wall(75)
+            print(("ok  " if good else "FAIL"), f"({name}) the close box tells the client, whose window goes when it ends")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"# ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm again")
+            fails += not good
+        # bterm (user/bterm.c): a terminal window with ash behind it. A line
+        # typed is run and what it prints is read back off the screen, cell
+        # by cell, from the window's contents.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+        good = until(b"bterm: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) bterm opens a terminal window")
+        fails += not good
+        if good:
+            time.sleep(1.5)
+            monitor("sendkey e", "sendkey c", "sendkey h", "sendkey o", "sendkey spc", "sendkey t", "sendkey e", "sendkey r", "sendkey m", "sendkey ret")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "term" for l in lines) and any("echo term" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) a line typed into the terminal window runs in ash and its output is drawn")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # The alternate screen (what vi uses): alt is drawn over a blank
+            # screen, and leaving it brings the shell's screen back.
+            keys = {" ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
+            def typed(text):
+                monitor(*[f"sendkey {keys.get(c, c)}" for c in text], "sendkey ret")
+            typed("printf '\\033[?1049halt\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.startswith("alt") for l in lines) and not any("echo term" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal's alternate screen replaces the shell's screen")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            typed("printf '\\033[?1049l'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "term" for l in lines) and not any(l.startswith("alt") for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) leaving the alternate screen brings the shell's screen back")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey ctrl-q")
+            until(b"bwm: bye", mark)
+            time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"exit\r"); q.stdin.flush()
+        until(b"bastios> ", mark)
     steps = [("hello", b"hello from user mode"),
              ("echo from the iso > disk/iso", b""),
              ("cat disk/iso", b"from the iso"),

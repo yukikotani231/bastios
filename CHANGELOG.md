@@ -45,6 +45,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine (what Firecracker's `SendCtrlAltDel` sends), so a guest without ACPI has a way to end. The console prints `ctrl-alt-del: restarting` and the machine goes through the same path as `reboot`.
 - The local APIC timer is calibrated against PIT channel 0 when the speaker channel (2) is missing, as in QEMU's `microvm`, before falling back to two seconds of the RTC. A `microvm` boots in 0.3 s instead of 2.1 s under TCG. Trusted: about 30 more lines of C in `boot/smp.c`.
 
+### Tests
+
+- `test/compat/bastio.txt` runs bastiolang's `bastiofmt` (the formatter) and `bastio-lsp` (the language server) on BastiOS: the formatter on a line and on the compiler's parser, the language server over its standard input and output for hover, go to definition, formatting and a diagnostic from `bastioc1`.
+
 ### AArch64
 
 - BastiOS builds for AArch64 and boots to the shell on QEMU's `virt` machine
@@ -53,6 +57,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   console and PSCI power off, with the native-ABI programs (`sh`, `hello`,
   `spin`, `true`) running at EL0. `test/aarch64_test.sh` is part of `make test`.
   The Linux layer, the file system and the network are still x86-64 only.
+- Programs get AT_HWCAP and AT_HWCAP2 in their auxiliary vector (`HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID` on AArch64, 0 on x86-64). A musl built with optimised string routines reads them before it has a thread pointer and crashed without them. `/proc/PID/auxv` reads the longer vector, and core files carry an AArch64 `NT_PRSTATUS`, so gdb 16 debugs programs on AArch64 (breakpoints in a PIE program, attach, threads, a core file).
+- `mprotect` that makes never-touched pages of a PROT_NONE reservation writable records them to be mapped when touched (as a writable anonymous `mmap` does) instead of mapping them all at once, so V8's 4 GiB-wide code range no longer fails with ENOMEM on a small machine: Alpine's Node 24 runs its JIT.
 
 ### Network
 
@@ -198,6 +204,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   first one. Tested with a QEMU NVMe controller whose only namespace is 2.
 
 ### Linux programs
+
+- `bterm` (`user/bterm.c`), a terminal window for `bwm`: an 80 x 24 grid drawn with the console font, with BusyBox's `ash` on a pseudo-terminal behind it. It reads a VT100 subset (CR, LF, backspace, tab, cursor moves, erase, insert and delete of characters and lines, scroll regions, the alternate screen, colours) and sends keys to the shell. `test/iso_test.sh` types a command into it and reads the output back cell by cell from the screendump.
+
+- `bwm` takes windows from other programs over a UNIX socket at `/tmp/bwm.sock` (`user/bwmproto.h`, with a header-only client library in `user/bwmlib.h`): a client opens a window, draws rectangles of pixels, and gets key, pointer and close events back; the pixels are kept by bwm and the close box tells the client. `bwm -n` starts with no windows of its own and `bwm -c PROGRAM` starts a client. `user/bhello.c` is the test client; `test/iso_test.sh` checks its pixels on a screendump and the key, click and close round trips.
+
+- `bwm` (`user/bwm.c`), a window manager for `/dev/fb0` and `/dev/input/mice`: a wallpaper, three windows with title bars, a pointer, click to raise and focus, drag a title bar to move a window, typing into the focused window, Ctrl-Q to leave. Frames are composed in memory and only the changed rectangles are written. `test/iso_test.sh` drives it through QEMU's monitor (mouse and keys) and reads the screen back. The windows are its own; there is no protocol for other programs yet.
+
+- `/dev/fb0`: the screen for programs that draw their own pixels (`src/lxfb.bastio`). `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` give the 32-bit mode; `write` and `lseek` store pixels. The text console stops drawing while a description is open and is drawn again when the last one closes. `user/mfb.c` draws a pattern, and `test/iso_test.sh` reads it back from a QEMU screendump under BIOS and UEFI. The framebuffer stays inside the proved device window; the pixels reach it through a ring the console pump empties. There is no `mmap` of it yet.
 
 - A read of a regular file on the disk is no longer cut short when some of its blocks are not cached yet: `read`, `pread64` and the calls built on them wait for the disk and return the whole count (they returned the cached part first, and a program that takes the count for granted, such as the JVM reading its modules file, got zeros for the rest). The JDK of the eclipse-temurin image (`java`, `javac`, `jar`; records, streams, threads, files, exit status) now runs in the compatibility suite; the lane unpacks the image's root (about 400 MB) from a tar file on its disk.
 - A writable `MAP_SHARED` mapping of a file is written back even after a program has mapped twenty files read-only (a writable mapping of a file takes the place of a read-only file's mapping when a process's 16 write-back records are all in use), and `munmap` or `msync` of a range of a disk file larger than the disk's write queue now finishes (it waited for the disk and started over from the first page, for ever). Go's linker does both; the Go toolchain of the golang image (`go run`, `go build`, `go test`, `gofmt`; goroutines and the collector) now runs in the compatibility suite.
