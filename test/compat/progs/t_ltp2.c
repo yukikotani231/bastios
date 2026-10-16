@@ -39,6 +39,9 @@ static volatile int ticks;
 static void vt(int s) { (void)s; ticks++; }
 static sigjmp_buf back;
 static void segv(int s) { (void)s; siglongjmp(back, 1); }
+static volatile int bus_code = -1;
+static void busplain(int s) { (void)s; bus_code = 2; siglongjmp(back, 1); }
+static void bus(int s, siginfo_t *i, void *u) { (void)s; (void)u; bus_code = i->si_code; siglongjmp(back, 1); }
 
 /* Three connections in turn to a server that accepts, greets and closes
  * each: the closed ones must not be handed out by accept again. */
@@ -688,6 +691,39 @@ int main(void) {
            int r2 = mprotect(m, 4096, PROT_READ);
            munmap(m, 4096); close(z);
            m != MAP_FAILED && r == -1 && e == EACCES && w == MAP_FAILED && we == EACCES && r2 == 0; }));
+    EXPECT("SIGBUS: a mapped page past the end of the file is a bus error", ({
+           struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = bus; sa.sa_flags = SA_SIGINFO; sigaction(SIGBUS, &sa, 0);
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 2048);
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+           int in = 0, hit = 0;
+           if (sigsetjmp(back, 1) == 0) { m[100] = 7; in = 1; m[4096 + 1] = 0; } else hit = 1;
+           int code = bus_code;
+           signal(SIGBUS, SIG_DFL); munmap(m, 8192); close(f); unlink("/tmp/sigbus.tmp");
+           m != MAP_FAILED && in && hit && code == BUS_ADRERR; }));
+    EXPECT("SIGBUS: the same page is ordinary memory once the file has grown", ({
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 2048);
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+           ftruncate(f, 8192);
+           m[4096 + 1] = 9; int after = m[4096 + 1] == 9;
+           munmap(m, 8192); close(f); unlink("/tmp/sigbus.tmp");
+           m != MAP_FAILED && after; }));
+    EXPECT("SIGBUS: a forked child gets it too", ({
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 2048);
+           pid_t c = fork();
+           if (c == 0) {
+             signal(SIGBUS, busplain);
+             char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, f, 0);
+             if (m == MAP_FAILED) _exit(2);
+             int hit = 0;
+             if (sigsetjmp(back, 1) == 0) { char *ch = m + 4096 + 1; *ch = 0; } else hit = 1;
+             _exit(hit ? 0 : 3);
+           }
+           int st = 0; if (c > 0) waitpid(c, &st, 0);
+           signal(SIGBUS, SIG_DFL); close(f); unlink("/tmp/sigbus.tmp");
+           c > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     EXPECT("clock_getres: the coarse clocks report their tick, at least 1 ms", ({
            struct timespec a, b;
            int x = clock_getres(CLOCK_REALTIME_COARSE, &a), y = clock_getres(CLOCK_MONOTONIC_COARSE, &b);

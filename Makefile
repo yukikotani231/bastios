@@ -69,7 +69,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb bwm bhello bterm
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 # Which backend built the kernel and the user programs, rewritten only when it
@@ -164,8 +164,21 @@ build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
+
+# bwm draws text with the console's font.
+build/user/font8x8.h: src/font8x8.bin | build/user
+	(echo 'static const unsigned char font8x8[] = {'; od -An -v -tu1 -w16 $< | sed 's/ \+/,/g; s/^,//; s/$$/,/'; echo '};') > $@
+
+build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
+	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+
+build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
+	$(MUSLCC) -static-pie -O2 -o $@ $<
+
+build/user/bterm.elf: user/bterm.c user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
+	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
 # also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.
@@ -208,7 +221,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin 
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin src/font16.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
@@ -506,6 +519,13 @@ build/compat/tree-sitter-c.so: | build/compat/src
 	$(MUSLCC) -shared -fPIC -O2 -Wl,-s -I build/compat/src/tree-sitter-c/src -o $@.part build/compat/src/tree-sitter-c/src/parser.c
 	mv $@.part $@
 
+# python-lsp-server and the pure-Python packages it needs, as a tar file for
+# the case that runs it under Alpine's python3 with Neovim's LSP client. The
+# wheels come from PyPI, each pinned by SHA-256 in test/compat/pylsp.py, and are
+# unpacked without pip. x86-64 only.
+build/compat/pylsp.tar: test/compat/pylsp.py | build/compat/src
+	test/compat/pylsp.py $@ build/compat/src/pylsp-wheels
+
 # strace, for the cases that trace a program on the Alpine disk (ptrace). Alpine's
 # package is not on the disk's repository, so this is the layer of the stagex/strace
 # image on Docker Hub (musl, linked to Alpine's libc), pinned by the layer's SHA-256.
@@ -734,10 +754,18 @@ build/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLANG)/stage1/*.bastio) |
 build/compat/bastioc1: build/compat/bastioc1.c
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
 
-build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc test/compat/bastiodisk.sh \
-    $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py
+# bastiolang's developer tools (tools/bastiofmt, tools/bastio-lsp), built here
+# the way bastioc1 is, as static PIEs against musl, to run on BastiOS.
+build/compat/bastiofmt.c build/compat/bastio-lsp.c: build/compat/%.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/tools/*/*.bastio) | build/compat
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/tools/$*/$(if $(filter bastio-lsp,$*),lsp,$*).bastio
+
+build/compat/bastiofmt build/compat/bastio-lsp: build/compat/%: build/compat/%.c
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
+build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc build/compat/bastiofmt build/compat/bastio-lsp test/compat/bastiodisk.sh \
+    $(wildcard test/compat/bastio/*) test/compat/mkdisk.py
 	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
-	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
+	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1 build/compat/bastiofmt build/compat/bastio-lsp
 
 # Alpine Linux on BastiOS, on a fourth disk (test/compat/alpinedisk.py) for
 # test/compat/alpine.txt: Alpine's root file system, which the checks enter
@@ -764,10 +792,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
@@ -807,11 +835,22 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+# Every disk image `make compat` boots. `make compat-disks` builds them
+# alone (CI builds them in a step of their own, then caches what they were
+# made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
+# COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
+# and run a part of the suite: the images of its lanes, and those lanes.
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
+
+COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
+
+compat-disks: build/bastios.elf $(COMPAT_DISKS)
+
+compat: build/bastios.elf $(COMPAT_DISKS)
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
+compat-baseline: build/bastios.elf $(COMPAT_DISKS)
 	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
@@ -932,6 +971,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif
