@@ -852,6 +852,30 @@ fn ino_bits(k: &Kernel, x: u64) -> u64
 
 // ---------------------------------------------------------------- the calls
 
+/// Whether some inotify or fanotify instance has half its queue full. The
+/// kernel then lets another process run after the call that queued the
+/// event, so a reader gets its turn before the queue (INO_Q events, far
+/// fewer than Linux's 16384) overflows and drops events a fast writer made
+/// within one time slice.
+fn ino_pressed(k: &Kernel) -> bool
+  requires kok(k)
+{
+  if iget(k, INO_G + G_WATCHES) == 0 && iget(k, INO_G + G_FANM) == 0 {
+    return false;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    let b = ino_base(i);
+    if iget(k, b) != 0 && iget(k, b + 2) >= INO_Q / 2 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 /// Before process pid's Linux system call runs: which call it is, and
 /// what it will remove, rename or create, looked up now while its old
 /// names still resolve.
