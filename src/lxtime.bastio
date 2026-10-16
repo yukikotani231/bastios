@@ -378,6 +378,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_DEV && is_pty_dev(f.x) {
     return pty_bits(k, f.x);                // src/lxpty.bastio
   }
+  if f.kind == K_DEV && f.x == DEV_KEYEV {
+    return keyev_bits(k);                   // src/lxkeyev.bastio
+  }
   if f.kind == K_DEV && f.x == DEV_MICE {
     return mice_bits(k);                    // src/lxmouse.bastio
   }

@@ -471,6 +471,30 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         print(("ok  " if good else "FAIL"), f"({name}) a line-mode terminal keeps the escape sequences of the special keys")
         fails += not good
         until(b"# ", mark)
+        # /dev/input/event0 gives the key events as Linux's evdev does:
+        # a press and a release of one key are an EV_KEY and an EV_SYN
+        # record each, 24 bytes a record, 96 bytes in all. Shift and Ctrl make
+        # no character, so only this device sees them (192 bytes after both).
+        mark = len(out)
+        q.stdin.write(b"cat /dev/input/event0 > /tmp/ev &\r"); q.stdin.flush()
+        time.sleep(1)
+        monitor("sendkey shift")
+        time.sleep(1)
+        q.stdin.write(b"ls -l /tmp/ev\r"); q.stdin.flush()
+        good = until(b" 96 ", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) /dev/input/event0 reports the press and the release of a key")
+        fails += not good
+        until(b"# ", mark)
+        mark = len(out)
+        monitor("sendkey ctrl")
+        time.sleep(1)
+        q.stdin.write(b"ls -l /tmp/ev\r"); q.stdin.flush()
+        good = until(b" 192 ", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a modifier is reported as keys of its own")
+        fails += not good
+        until(b"# ", mark)
+        q.stdin.write(b"kill $!\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.

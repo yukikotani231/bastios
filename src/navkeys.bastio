@@ -146,3 +146,47 @@ fn nav_fcode(n: u64) -> u64
   }
   return 24;
 }
+
+/// The Linux key code (input-event-codes.h) of the key that the PS/2 set-1
+/// code c names after an 0xE0 prefix, or 0 for a key without one here.
+/// Without the prefix, set-1 codes 1 to 88 are the Linux key codes.
+fn evkey_ext(c: u64) -> u64
+  ensures result < 256
+{
+  if c == 0x48 {
+    return 103;                             // KEY_UP
+  } else if c == 0x50 {
+    return 108;                             // KEY_DOWN
+  } else if c == 0x4B {
+    return 105;                             // KEY_LEFT
+  } else if c == 0x4D {
+    return 106;                             // KEY_RIGHT
+  } else if c == 0x47 {
+    return 102;                             // KEY_HOME
+  } else if c == 0x4F {
+    return 107;                             // KEY_END
+  } else if c == 0x49 {
+    return 104;                             // KEY_PAGEUP
+  } else if c == 0x51 {
+    return 109;                             // KEY_PAGEDOWN
+  } else if c == 0x52 {
+    return 110;                             // KEY_INSERT
+  } else if c == 0x53 {
+    return 111;                             // KEY_DELETE
+  } else if c == 0x1C {
+    return 96;                              // KEY_KPENTER
+  } else if c == 0x1D {
+    return 97;                              // KEY_RIGHTCTRL
+  } else if c == 0x38 {
+    return 100;                             // KEY_RIGHTALT
+  } else if c == 0x35 {
+    return 98;                              // KEY_KPSLASH
+  } else if c == 0x5B {
+    return 125;                             // KEY_LEFTMETA
+  } else if c == 0x5C {
+    return 126;                             // KEY_RIGHTMETA
+  } else if c == 0x5D {
+    return 127;                             // KEY_COMPOSE
+  }
+  return 0;
+}
