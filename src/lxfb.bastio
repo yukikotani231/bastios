@@ -1,0 +1,321 @@
+// /dev/fb0 for Linux programs: the screen as Linux's fbdev gives it, 32 bits
+// a pixel, so a program (a window server, a game) can draw its own pixels
+// instead of the text console. write(2) at the file's position stores
+// pixels in the framebuffer (line after line, `line_length` bytes apart),
+// lseek(2) moves the position, and FBIOGET_VSCREENINFO and
+// FBIOGET_FSCREENINFO tell the geometry and the channel positions. The
+// requests that would change the mode, pan or blank the screen are
+// accepted and change nothing, as a driver with one fixed mode may do.
+//
+// While some description of /dev/fb0 is open the text console stops
+// drawing on the screen (it goes on filling its text buffer and the serial
+// line), as it does on Linux between KD_GRAPHICS and KD_TEXT; when the last
+// one closes, the console is drawn again from that buffer, which also
+// removes whatever the program left. There is no mmap yet.
+//
+// The pixels do not go to the screen from here: the screen belongs to the
+// console devices, whose lock the kernel does not hold, so a write queues
+// a record in the ring k.gfx and the console pump (`pump` in
+// src/main.bastio) moves it to the framebuffer. The header of k.gfx:
+// whether there is a screen, its size, pitch and channel shifts, the
+// ring's head and count, how many descriptions of /dev/fb0 are open, and
+// whether the pump has told the screen to hold off the console. The ring
+// is GFX_SLOTS records of GFX_SLOT bytes: the position the pixels go to,
+// their count, and up to XFER of them. A write that finds the ring full
+// sleeps until the pump has emptied some of it. Without a screen, opening
+// /dev/fb0 fails with ENODEV.
+
+import "linux.bastio";
+
+const GFX_HDR: u64 = 80;
+const GFX_SLOTS: u64 = 32;
+const GFX_SLOT: u64 = 4112;             // offset (8), count (8), then XFER bytes
+const G_PRESENT: u64 = 0;
+const G_W: u64 = 8;
+const G_H: u64 = 16;
+const G_PITCH: u64 = 24;
+const G_RGB: u64 = 32;                  // the bit positions of red, green and blue, a byte each
+const G_HEAD: u64 = 40;
+const G_COUNT: u64 = 48;
+const G_OPEN: u64 = 56;
+const G_HELD: u64 = 64;                 // 1 once the pump has told the screen to hold off the console
+
+/// What `gfx_take` hands the pump: a kind (GX_NONE, GX_HOLD, GX_RELEASE or
+/// GX_BLIT), for a blit the position and count, then the pixels.
+const GXB_LEN: u64 = 4120;
+const GX_NONE: u64 = 0;
+const GX_HOLD: u64 = 1;
+const GX_RELEASE: u64 = 2;
+const GX_BLIT: u64 = 3;
+
+// fbdev requests.
+const FBIOGET_VSCREENINFO: u64 = 0x4600;
+const FBIOPUT_VSCREENINFO: u64 = 0x4601;
+const FBIOGET_FSCREENINFO: u64 = 0x4602;
+const FBIOPAN_DISPLAY: u64 = 0x4606;
+const FBIOBLANK: u64 = 0x4611;
+
+/// The ring, empty, with no screen (at boot).
+fn gfx_new() -> Bytes
+  ensures blen(result) == GFX_LEN
+{
+  let mut b = balloc(GFX_LEN);
+  let mut i = 0;
+  while i < GFX_HDR
+    invariant blen(b) == GFX_LEN && i <= GFX_HDR
+  {
+    bset(&mut b, i, 0);
+    i = i + 1;
+  }
+  return b;
+}
+
+/// Says there is a screen: width by height pixels, pitch bytes a line,
+/// `rgb` the bit positions of the channels.
+fn gfx_screen(k: &mut Kernel, w: u64, h: u64, pitch: u64, rgb: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  put_u64(&mut k.gfx, G_W, w);
+  put_u64(&mut k.gfx, G_H, h);
+  put_u64(&mut k.gfx, G_PITCH, pitch);
+  put_u64(&mut k.gfx, G_RGB, rgb);
+  put_u64(&mut k.gfx, G_PRESENT, 1);
+}
+
+fn gfx_present(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get_u64(k.gfx, G_PRESENT) == 1;
+}
+
+/// The bytes of the framebuffer: pitch * height.
+fn gfx_size(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= 0xFFFFFFFFFFFF
+{
+  let p = smaller(get_u64(k.gfx, G_PITCH), 1048576);
+  let h = smaller(get_u64(k.gfx, G_H), 65535);
+  return p * h;
+}
+
+/// Records waiting for the pump, and what else it has to do (hold the
+/// console off, or draw it again): the pump runs while this is not 0.
+fn gfx_pending(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= GFX_SLOTS + 1
+{
+  let c = smaller(get_u64(k.gfx, G_COUNT), GFX_SLOTS);
+  if c > 0 {
+    return c;
+  }
+  let open = get_u64(k.gfx, G_OPEN) > 0;
+  let held = get_u64(k.gfx, G_HELD) == 1;
+  if open != held {
+    return 1;
+  }
+  return 0;
+}
+
+/// Under the kernel lock: the next thing the screen must be told, in gx
+/// (GXB_LEN bytes: its kind first). A description opened since the last
+/// call holds the console off first; pixels follow in the order written;
+/// the console comes back only once the last description is closed and the
+/// pixels written before that have gone out. Returns whether there was
+/// anything.
+fn gfx_take(k: &mut Kernel, gx: &mut Bytes) -> bool
+  requires kok(k) && blen(gx) == GXB_LEN
+  ensures kok(k) && blen(gx) == GXB_LEN
+{
+  put_u64(&mut gx, 0, GX_NONE);
+  let open = get_u64(k.gfx, G_OPEN) > 0;
+  let held = get_u64(k.gfx, G_HELD) == 1;
+  if open && !held {
+    put_u64(&mut k.gfx, G_HELD, 1);
+    put_u64(&mut gx, 0, GX_HOLD);
+    return true;
+  }
+  let cnt = smaller(get_u64(k.gfx, G_COUNT), GFX_SLOTS);
+  if cnt > 0 {
+    let head = get_u64(k.gfx, G_HEAD) % GFX_SLOTS;
+    let at = GFX_HDR + head * GFX_SLOT;
+    let n = smaller(get_u64(k.gfx, at + 8), XFER);
+    put_u64(&mut gx, 0, GX_BLIT);
+    put_u64(&mut gx, 8, get_u64(k.gfx, at));
+    put_u64(&mut gx, 16, n);
+    let mut i = 0;
+    while i < n
+      invariant i <= n && n <= XFER && kok(k) && blen(gx) == GXB_LEN && at == GFX_HDR + head * GFX_SLOT && head < GFX_SLOTS
+    {
+      bset(&mut gx, 24 + i, bget(k.gfx, at + 16 + i));
+      i = i + 1;
+    }
+    put_u64(&mut k.gfx, G_HEAD, (head + 1) % GFX_SLOTS);
+    put_u64(&mut k.gfx, G_COUNT, cnt - 1);
+    return true;
+  }
+  if !open && held {
+    put_u64(&mut k.gfx, G_HELD, 0);
+    put_u64(&mut gx, 0, GX_RELEASE);
+    return true;
+  }
+  return false;
+}
+
+/// open(2) of /dev/fb0: a descriptor, -ENODEV without a screen, or
+/// -ENFILE. The position starts at 0.
+fn fb_open(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !gfx_present(k) {
+    return ENODEV;
+  }
+  let h = ofd_new(&mut k, OF_DEV, DEV_FB);
+  if h >= OFD_N {
+    return ENFILE;
+  }
+  ofd_access(&mut k, h, flags);
+  of_set(&mut k.ofd, h, 3, 0);              // the position
+  put_u64(&mut k.gfx, G_OPEN, smaller(get_u64(k.gfx, G_OPEN), 0xFFFFFFFF) + 1);
+  return fd_install(&mut k, pid, h);
+}
+
+/// The last reference to a description of /dev/fb0 went.
+fn fb_closed(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let n = get_u64(k.gfx, G_OPEN);
+  if n > 0 {
+    put_u64(&mut k.gfx, G_OPEN, n - 1);
+  }
+}
+
+/// write(2) on /dev/fb0: up to n bytes from va at the description's
+/// position, which moves on. Returns the count, -EFAULT, -EFBIG past the
+/// end, -ENOSPC at it, or CON_FULL when the ring is full (the caller
+/// sleeps until the pump has made room).
+fn fb_write(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let size = gfx_size(k);
+  let pos = of_get(k.ofd, h, 3);
+  if n == 0 {
+    return 0;
+  }
+  if pos > size {
+    return EFBIG;
+  }
+  if pos == size {
+    return ENOSPC;
+  }
+  let cnt = smaller(get_u64(k.gfx, G_COUNT), GFX_SLOTS);
+  if cnt >= GFX_SLOTS {
+    return CON_FULL;
+  }
+  let want = smaller(smaller(n, XFER), size - pos);
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
+  if got == NO_RESULT || got == 0 || got > want {
+    return EFAULT;
+  }
+  let head = get_u64(k.gfx, G_HEAD) % GFX_SLOTS;
+  let at = GFX_HDR + ((head + cnt) % GFX_SLOTS) * GFX_SLOT;
+  put_u64(&mut k.gfx, at, pos);
+  put_u64(&mut k.gfx, at + 8, got);
+  let mut i = 0;
+  while i < got
+    invariant i <= got && got <= XFER && kok(k) && at == GFX_HDR + ((head + cnt) % GFX_SLOTS) * GFX_SLOT && head < GFX_SLOTS && cnt < GFX_SLOTS
+  {
+    bset(&mut k.gfx, at + 16 + i, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  put_u64(&mut k.gfx, G_COUNT, cnt + 1);
+  of_set(&mut k.ofd, h, 3, pos + got);
+  return got;
+}
+
+/// lseek(2) on /dev/fb0, with a signed offset.
+fn fb_seek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let size = gfx_size(k);
+  let mut base = 0;
+  if whence == 1 {
+    base = smaller(of_get(k.ofd, h, 3), 0xFFFFFFFFFFFF);
+  } else if whence == 2 {
+    base = size;
+  } else if whence != 0 {
+    return EINVAL;
+  }
+  let mut to = 0;
+  if off < 0x8000000000000000 {
+    if off > 0xFFFFFFFFFFFF {
+      return EINVAL;
+    }
+    to = base + off;
+  } else {
+    let back = 0xFFFFFFFFFFFFFFFF - off + 1;
+    if whence == 0 || back > base {
+      return EINVAL;
+    }
+    to = base - back;
+  }
+  of_set(&mut k.ofd, h, 3, to);
+  return to;
+}
+
+/// The little-endian 32-bit pair (a, b) as one word.
+fn fbpair(a: u64, b: u64) -> u64 {
+  return a % 4294967296 + (b % 4294967296) * 4294967296;
+}
+
+/// ioctl(2) on /dev/fb0.
+fn fb_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == FBIOPUT_VSCREENINFO || req == FBIOPAN_DISPLAY || req == FBIOBLANK {
+    return 0;                           // one fixed mode: nothing to change
+  }
+  let w = smaller(get_u64(k.gfx, G_W), 65535);
+  let h = smaller(get_u64(k.gfx, G_H), 65535);
+  let pitch = smaller(get_u64(k.gfx, G_PITCH), 1048576);
+  if req == FBIOGET_VSCREENINFO {
+    // struct fb_var_screeninfo: 160 bytes, in 32-bit words: xres, yres,
+    // the virtual size, the offsets, bits per pixel, grayscale, then
+    // (offset, length, msb_right) of red, green, blue and transparency.
+    let rgb = get_u64(k.gfx, G_RGB);
+    xfer_zero(&mut k, 160);
+    xfer_u64(&mut k.fs.xfer, 0, fbpair(w, h));
+    xfer_u64(&mut k.fs.xfer, 8, fbpair(w, h));
+    xfer_u64(&mut k.fs.xfer, 24, 32);
+    xfer_u64(&mut k.fs.xfer, 32, fbpair(rgb % 32, 8));
+    xfer_u64(&mut k.fs.xfer, 40, fbpair(0, rgb / 256 % 32));
+    xfer_u64(&mut k.fs.xfer, 48, 8);
+    xfer_u64(&mut k.fs.xfer, 56, fbpair(rgb / 65536 % 32, 8));
+    xfer_u64(&mut k.fs.xfer, 88, fbpair(0xFFFFFFFF, 0xFFFFFFFF));   // height and width in mm: unknown
+    return lx_put_out(&mut k, pid, arg, 160);
+  }
+  if req == FBIOGET_FSCREENINFO {
+    // struct fb_fix_screeninfo: id "BastiOS", smem_len, type
+    // FB_TYPE_PACKED_PIXELS, visual FB_VISUAL_TRUECOLOR, line_length.
+    xfer_zero(&mut k, 80);
+    xfer_u64(&mut k.fs.xfer, 0, 0x00534F6974736142);
+    xfer_u64(&mut k.fs.xfer, 24, fbpair(pitch * h, 0));
+    xfer_u64(&mut k.fs.xfer, 32, fbpair(0, 2));
+    xfer_u64(&mut k.fs.xfer, 48, pitch);
+    return lx_put_out(&mut k, pid, arg, 80);
+  }
+  return ENOTTY;
+}
