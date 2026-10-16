@@ -696,6 +696,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     return p;
   }
+  let mut is_bus = false;
   if v == 14 {
     let lz = lazy_fault(&mut s.k, p);
     if lz == LZ_WAIT && state(s.k.procs, p) == READY {
@@ -708,6 +709,12 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
         return (p + 1) % NPROC;
       }
       return p;
+    }
+    let bus = bus_fault(&mut s.k, p);       // a page past a mapped file's end (src/lxmem.bastio)
+    is_bus = bus == 2;
+    if bus == 1 {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+      return p;                             // the file has grown to cover it
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
       pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
@@ -736,6 +743,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // SIGSEGV (or SIGFPE, SIGILL, SIGTRAP), and a shell prints 128 + it.
     // A handler for it runs instead, if the process has one.
     let mut sig = SIGSEGV;
+    if is_bus {
+      sig = SIGBUS;
+    }
     if v == 0 {
       sig = SIGFPE;
     } else if v == 6 {
@@ -1486,6 +1496,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     hi = hi + 1;
   }
   free(hw);
+  let hr = rng_hw_boot(&mut k, cpu);
+  if hr > 0 {
+    puts(&mut con, "rng: the processor's RDSEED/RDRAND, ");
+    put_num(&mut con, hr);
+    puts(&mut con, " bytes of entropy\r\n");
+  }
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {

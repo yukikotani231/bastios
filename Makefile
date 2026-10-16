@@ -827,11 +827,22 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+# Every disk image `make compat` boots. `make compat-disks` builds them
+# alone (CI builds them in a step of their own, then caches what they were
+# made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
+# COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
+# and run a part of the suite: the images of its lanes, and those lanes.
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
+
+COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
+
+compat-disks: build/bastios.elf $(COMPAT_DISKS)
+
+compat: build/bastios.elf $(COMPAT_DISKS)
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
+compat-baseline: build/bastios.elf $(COMPAT_DISKS)
 	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
@@ -952,6 +963,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

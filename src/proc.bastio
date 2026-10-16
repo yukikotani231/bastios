@@ -527,7 +527,8 @@ const LK_WW: u64 = 4;
 const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is in an entry below this
 const LK_LEN: u64 = LK_HI + 1;
 const IPC_LEN: u64 = 9728 + NPROC * 96;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
-const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
+const INFO_RAND: u64 = 12;            // boot_info: the processor's RDSEED / RDRAND (x86-64 only; AArch64 answers 0): 0 which there are (bit 0 RDSEED, bit 1 RDRAND), else a word (0: none given)
+const RNG_LEN: u64 = 21;              // the random generator's words (src/lxdev.bastio)
 const SYS_SHMMAX: u64 = 154;           // /proc/sys/kernel/shmmax as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_PQ: u64 = 160;
 const SYS_NEXTID: u64 = 151;           // 151 .. 153: the id /proc/sys/kernel/{msg,sem,shm}_next_id asks the next new queue, set or segment to get, + 1 (0: none; src/lxipc.bastio)
@@ -1436,7 +1437,7 @@ fn new_pid(k: &mut Kernel) -> u64
   return new_pid_from(&mut k, false);
 }
 
-/// new_pid for a thread or a forked process: it searches on from the id
+/// new_pid for a thread: it searches on from the id
 /// handed out last, so one that just ended does not share its id with the
 /// next (Linux numbers ids round and round). Programs the kernel starts
 /// itself (spawn) keep the lowest free id, which the shell and the docs show.
@@ -1445,6 +1446,39 @@ fn new_tid(k: &mut Kernel) -> u64
   ensures kok(k) && result < NPROC
 {
   return new_pid_from(&mut k, true);
+}
+
+/// new_pid for a forked process. It takes the lowest free id, as the shell
+/// and the docs show, but never the id handed out last, so a child that just
+/// ended does not give its id to the next fork. Numbering round and round
+/// instead (as new_tid does) lets the ids spread over every row of the table,
+/// and every scan for a ready process then walks all of them, so it is done
+/// only while pid_max is set to something else than its default (LTP fork13).
+fn new_fork_pid(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  let w = get(k.sys, SYS_PIDMX);
+  if w != 0 && w != NPROC + 1 {
+    return new_pid_from(&mut k, true);
+  }
+  let last = pget(k.procs, 0, F_START);
+  let pid = free_pid(k.procs, 1);
+  if pid != 0 && pid == last {
+    let other = free_pid(k.procs, pid + 1);
+    if other != 0 && other != pid {
+      if other >= k.pid_hi {
+        k.pid_hi = other + 1;
+      }
+      pset(&mut k.procs, 0, F_START, other);
+      return other;
+    }
+  }
+  let c = new_pid_from(&mut k, false);
+  if c != 0 {
+    pset(&mut k.procs, 0, F_START, c);
+  }
+  return c;
 }
 
 fn new_pid_from(k: &mut Kernel, round: bool) -> u64
