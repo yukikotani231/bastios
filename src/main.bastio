@@ -88,6 +88,7 @@ import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
+import "lxfb.bastio";
 import "arch/rnghw.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
@@ -816,7 +817,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   after_trap(&mut s, p);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
   return Next { job: j, from: c };
 }
@@ -874,7 +875,7 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
     s.idle = s.idle - 1;
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
   return j;
 }
@@ -885,7 +886,7 @@ fn idled_p(s: &mut Sys, cpu: &Cpu, v: u64, pend: &Atomic[u64])
   ensures sys_ok(s)
 {
   idled(&mut s, cpu, v);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
 }
 
 /// `finish`, then publishes how much console output waits in `pend`.
@@ -896,7 +897,7 @@ fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64, p
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   after_trap(&mut s, p);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   return c;
 }
 
@@ -906,9 +907,9 @@ const CHUNK: u64 = 256;
 /// Under the kernel lock, for `pump`: queues the rn bytes received in rx as
 /// typed input, and moves the next chunk of output into tx. Returns how
 /// many bytes of tx to send.
-fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, cad: bool, pend: &Atomic[u64]) -> u64
-  requires sys_ok(s)
-  ensures sys_ok(s)
+fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, cad: bool, pend: &Atomic[u64]) -> u64
+  requires sys_ok(s) && blen(gx) == GXB_LEN
+  ensures sys_ok(s) && blen(gx) == GXB_LEN
 {
   if cad {
     // Ctrl-Alt-Delete restarts the machine, as on Linux, so a host that
@@ -951,10 +952,12 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u6
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line, s.k.pid_hi);
   }
   let n = con_take(&mut s.con, &mut tx);
-  if con_room(s.con) >= OUTCAP / 2 {
+  // What the screen is told next, if a program draws on it (src/lxfb.bastio).
+  let drew = gfx_take(&mut s.k, &mut gx);
+  if con_room(s.con) >= OUTCAP / 2 || drew {
     wake_writers(&mut s.k.procs);
   }
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   return n;
 }
 
@@ -972,10 +975,11 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
   let mut tx = balloc(CHUNK);
   let mut rx = balloc(CHUNK);
   let mut mx = balloc(CHUNK);
+  let mut gx = balloc(GXB_LEN);
   let mut rounds = 0;
   let mut more = true;
-  while more && rounds < 16
-    invariant term_ok(t) && blen(rx) == CHUNK && blen(mx) == CHUNK
+  while more && rounds < 64
+    invariant term_ok(t) && blen(rx) == CHUNK && blen(mx) == CHUNK && blen(gx) == GXB_LEN
   {
     let mut rn = 0;
     let mut mn = 0;
@@ -999,14 +1003,27 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
         mn = mn + 4;
       }
     }
-    let tn = locked(s, exchange, &mut tx, rx, rn, mx, mn, cad, pend);
+    let tn = locked(s, exchange, &mut tx, &mut gx, rx, rn, mx, mn, cad, pend);
     term_send(&mut t, tx, tn);
-    more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK;
+    let gk = get_u64(gx, 0);
+    if gk == GX_HOLD {
+      screen_hold(&mut t.screen);
+    } else if gk == GX_RELEASE {
+      screen_release(&mut t.screen);
+    } else if gk == GX_BLIT {
+      let go = get_u64(gx, 8);
+      let gn = get_u64(gx, 16);
+      if go <= 281474976710656 {
+        screen_blit(&mut t.screen, go, gx, 24, smaller(gn, XFER));
+      }
+    }
+    more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK || gk != GX_NONE;
     rounds = rounds + 1;
   }
   bfree(tx);
   bfree(rx);
   bfree(mx);
+  bfree(gx);
 }
 
 /// Pumps the console if no other processor is already doing it. One that
@@ -1468,6 +1485,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
   }
   let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
+  if screen_on(term.screen) {
+    gfx_screen(&mut k, fb_w, fb_h, fb_pitch, boot_info(cpu, INFO_FB, 4));   // /dev/fb0 (src/lxfb.bastio)
+  }
   let mut hi = 0;
   while hi < hw_n
     invariant hi <= hw_n && hw_n <= VRNG_WORDS && len(hw) == VRNG_WORDS && kok(k)
@@ -1476,6 +1496,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     hi = hi + 1;
   }
   free(hw);
+  let hr = rng_hw_boot(&mut k, cpu);
+  if hr > 0 {
+    puts(&mut con, "rng: the processor's RDSEED/RDRAND, ");
+    put_num(&mut con, hr);
+    puts(&mut con, " bytes of entropy\r\n");
+  }
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {
@@ -1566,6 +1592,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.ptys);
   bfree(sys.k.ptyb);
   bfree(sys.k.mice);
+  bfree(sys.k.gfx);
   free(sys.k.ipc);
   bfree(sys.k.ipcb);
   free(sys.k.sys);
