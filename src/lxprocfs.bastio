@@ -104,6 +104,8 @@ const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern ("core":
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
+const SY_VMSTAT: u64 = 99;             // /proc/vmstat (src/oom.bastio's counters)
+const SY_SWAPS: u64 = 100;             // /proc/swaps
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 10;
@@ -497,6 +499,12 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     if xfer_is(x, 5, n, "diskstats") {
       return PROC_DEV + PF_DISKSTATS;
+    }
+    if xfer_is(x, 5, n, "vmstat") {
+      return PROC_DEV + PSYS + SY_VMSTAT;
+    }
+    if xfer_is(x, 5, n, "swaps") {
+      return PROC_DEV + PSYS + SY_SWAPS;
     }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
@@ -1060,7 +1068,13 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 13 {
     return Ent { len: name_out(&mut k.fs.xfer, "sys"), dir: true, end: false };
   }
-  let p = i - 13;
+  if i == 14 {
+    return Ent { len: name_out(&mut k.fs.xfer, "vmstat"), dir: false, end: false };
+  }
+  if i == 15 {
+    return Ent { len: name_out(&mut k.fs.xfer, "swaps"), dir: false, end: false };
+  }
+  let p = i - 15;
   if p >= NPROC {
     return end;
   }
@@ -1850,6 +1864,18 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
     }
+    if what == SY_VMSTAT {
+      let mut a = put_s(&mut o, 0, "nr_free_pages ");
+      a = put_n(&mut o, a, count_free(k.mem.bm));
+      a = put_s(&mut o, a, "\nnr_file_pages ");
+      a = put_n(&mut o, a, pc_count(k.fs.pc));
+      a = put_s(&mut o, a, "\noom_kill ");
+      a = put_n(&mut o, a, get(k.sys, SYS_VM));
+      return put_s(&mut o, a, "\n");
+    }
+    if what == SY_SWAPS {
+      return put_s(&mut o, 0, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+    }
     if what == SY_NETARP {
       // The card's ARP cache; only the namespace the machine boots in
       // has one. The device is the card.
@@ -1948,18 +1974,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       // The address, reference count and inode are not kept.
       let mut a = put_s(&mut o, 0, "Num       RefCount Protocol Flags    Type St Inode Path\n");
       let mut l = 0;
-      while l < UX_LIS && a + 160 < PROC_OUT
+      while l < UX_LIS && a + 330 < PROC_OUT
         invariant l <= UX_LIS && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {
         let st = ul_row(k, l, 0, 0);
         if st != UL_FREE {
           a = put_s(&mut o, a, "0000000000000000: 00000002 00000000 ");
-          if st == UL_LISTEN {
+          if st == UL_LISTEN || st == UL_SEQ {
             a = put_s(&mut o, a, "00010000 ");
           } else {
             a = put_s(&mut o, a, "00000000 ");
           }
-          if st == UL_DGRAM {
+          if st == UL_SEQ {
+            a = put_s(&mut o, a, "0005 01 0");
+          } else if st == UL_DGRAM {
             a = put_s(&mut o, a, "0002 01 0");
           } else {
             a = put_s(&mut o, a, "0001 01 0");
@@ -2036,6 +2064,11 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         let a = put_c(&mut o, 0, 45);
         let b = put_n(&mut o, a, 1002 - s);
         return put_c(&mut o, b, 10);
+      }
+      if w == 0 {
+        let g = tgid(k.procs, smaller((what - SY_PX) / PXF_N, NPROC - 1));
+        let a = put_n(&mut o, 0, oom_score(&mut k, g));   // src/oom.bastio
+        return put_c(&mut o, a, 10);
       }
       if w == 10 {
         return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
@@ -2124,15 +2157,16 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_MEMINFO && p == 0 {
     let total = pool_size(k.mem.pool) * 4;   // the RAM the pool holds
-    let avail = count_free(k.mem.bm) * 4;
+    let free = count_free(k.mem.bm) * 4;
+    let cached = smaller(pc_count(k.fs.pc), PC_N) * 4;   // the kernel gives these back when memory runs short (src/oom.bastio)
     let mut a = put_s(&mut o, 0, "MemTotal: ");
     a = put_n(&mut o, a, total);
     a = put_s(&mut o, a, " kB\nMemFree: ");
-    a = put_n(&mut o, a, avail);
+    a = put_n(&mut o, a, free);
     a = put_s(&mut o, a, " kB\nMemAvailable: ");
-    a = put_n(&mut o, a, avail);
+    a = put_n(&mut o, a, free + cached);
     a = put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: ");
-    a = put_n(&mut o, a, smaller(pc_count(k.fs.pc), PC_N) * 4);
+    a = put_n(&mut o, a, cached);
     return put_s(&mut o, a, " kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
   }
   if what == PF_CPUINFO && p == 0 {
@@ -3426,11 +3460,14 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   ensures result <= n || result > XFER
 {
   if f == PROC_DEV + PSYS + SY_DROP {
-    // 1, 2 or 3 drop the caches; there is nothing to drop that anyone could
-    // tell, so the write is accepted and forgotten.
+    // 1 and 3 drop the page cache (src/pcache.bastio); 2 (the slab) and 4
+    // have nothing to drop.
     let c = bget(k.fs.xfer, 0);
     if c < 49 || c > 52 || (n > 1 && bget(k.fs.xfer, 1) != 10) {
       return EINVAL;
+    }
+    if c == 49 || c == 51 {
+      pc_shrink(&mut k.fs.pc, &mut k.mem, PC_N);
     }
     return n;
   }

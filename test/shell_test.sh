@@ -458,6 +458,9 @@ steps = [
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
+    # A symbolic link belongs to its creator (who can lchown it), and the
+    # root of a user namespace may chown what it owns to ids it maps.
+    ("su alice -c 'cd /home/alice; ln -s tgtx slk; ls -ln slk; chown -h $(id -u) slk; echo c1=$?; touch cf; unshare -U -r sh -c \"chown 0:0 cf; echo c2=\\$?; chown -h 0:0 slk; echo c3=\\$?; chown 5:5 cf; echo c4=\\$?\"'; rm -f /home/alice/slk /home/alice/cf", [b"slk -> tgtx", b"c1=0", b"c2=0", b"c3=0", b"c4=1"], b"\n# "),
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
     # With a disk, /etc, /root and /home are links into it (src/main.bastio,

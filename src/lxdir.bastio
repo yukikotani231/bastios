@@ -378,6 +378,8 @@ fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
 /// chroot(path): the directory becomes process pid's root, which absolute
 /// paths, absolute link targets and ".." at the top stay inside (see
 /// lx_path_from). The working directory does not move, as on Linux.
+const CAP_SYS_CHROOT: u64 = 18;
+
 /// Needs root (CAP_SYS_CHROOT), checked after the path, as Linux does.
 fn lx_chroot(k: &mut Kernel, pid: u64, path: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -397,8 +399,8 @@ fn lx_chroot(k: &mut Kernel, pid: u64, path: u64) -> u64
   if e != 0 {
     return e;
   }
-  if id_get(k.procs, pid, F_UID, true) != 0 {
-    return EPERM;
+  if id_get(k.procs, pid, F_UID, true) != 0 && !ns_cap(k, pid, CAP_SYS_CHROOT) {
+    return EPERM;                           // root of a user namespace chroots there (podman's layer unpack)
   }
   let rlen = len(k.croot);
   if (pid + 1) * CWD_STRIDE <= rlen {         // a live process has its row
