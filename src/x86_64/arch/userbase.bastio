@@ -4,3 +4,8 @@
 // below PIE_AT, so a null pointer (and a small offset from one) faults.
 const USER_BASE: u64 = 0;
 const PIE_AT: u64 = 0x400000;
+
+// 1 where the page-fault handler turns a touch past the end of a mapped file
+// into SIGBUS (bus_fault, src/lxmem.bastio); 0 where it does not yet, so the
+// pages there stay ordinary zero pages.
+const SIGBUS_PAGES: u64 = 1;
