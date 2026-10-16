@@ -435,6 +435,7 @@ class Net:
         self.link = link
         self.peer = None
         self.dhcp_done = False
+        self.arp_asked = []
 
     def send_ip(self, proto, payload):
         mac = self.link.guest_mac or BCAST
@@ -451,8 +452,21 @@ class Net:
             if op == 1 and tip == HOST_IP:
                 arp = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2) + HOST_MAC + f[38:42] + f[22:28] + f[28:32]
                 self.link.send(f[6:12] + HOST_MAC + b"\x08\x06" + arp)
+            elif op == 1 and HOST_IP < tip <= HOST_IP + 12:
+                self.arp_asked.append(tip)
+                mac = bytes([2, 0, 0, 0, 1, tip - HOST_IP])
+                arp = struct.pack("!HHBBH", 1, 0x0800, 6, 4, 2) + mac + f[38:42] + f[22:28] + f[28:32]
+                self.link.send(f[6:12] + mac + b"\x08\x06" + arp)
             return
         if f[12:14] != b"\x08\x00":
+            return
+        dst = struct.unpack("!I", f[30:34])[0]
+        if f[23] == 1 and f[34] == 8 and HOST_IP < dst <= HOST_IP + 12:
+            # An echo request for one of the twelve neighbors: answer as it.
+            body = b"\0\0\0\0" + f[38:14 + struct.unpack("!H", f[16:18])[0]]
+            body = b"\0\0" + struct.pack("!H", csum(body)) + body[4:]
+            mac = bytes([2, 0, 0, 0, 1, dst - HOST_IP])
+            self.link.send(f[6:12] + mac + b"\x08\x00" + ip_packet(1, dst, GUEST_IP, body))
             return
         if f[23] == 17 and len(f) >= 282 + 4 and struct.unpack("!H", f[36:38])[0] == 67:
             self.dhcp(f)

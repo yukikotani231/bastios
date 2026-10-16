@@ -325,6 +325,26 @@ check(syns and all(k in syns[0]["opts"] for k in (2, 3, 4)),
       "connecting out: the SYN offers an MSS, window scaling and SACK (and nothing is scaled when we do not)")
 net.peer = None
 
+# 7. The ARP cache holds more than four neighbors: the guest pings twelve
+#    hosts that this script answers for, then the same twelve again. The
+#    second round needs no ARP request.
+def ping_round():
+    for i in range(12):
+        mark = len(out)
+        type_line(f"ping 10.0.2.{3 + i}")
+        until(lambda: b"bastios> " in out[mark:], 10)
+        if f"reply from 10.0.2.{3 + i}".encode() not in out[mark:]:
+            return False
+    return True
+
+net.arp_asked = []
+first = ping_round()
+asked_first = len(net.arp_asked)
+second = ping_round()
+asked_second = len(net.arp_asked) - asked_first
+check(first and second, "ARP cache: twelve neighbors answer a ping, twice")
+check(asked_first >= 12 and asked_second == 0, f"ARP cache: {asked_first} requests for twelve neighbors, {asked_second} the second time")
+
 qemu.kill(); qemu.wait()
 print("---- transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
