@@ -58,6 +58,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   `spin`, `true`) running at EL0. `test/aarch64_test.sh` is part of `make test`.
   The Linux layer, the file system and the network are still x86-64 only.
 - Programs get AT_HWCAP and AT_HWCAP2 in their auxiliary vector (`HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID` on AArch64, 0 on x86-64). A musl built with optimised string routines reads them before it has a thread pointer and crashed without them. `/proc/PID/auxv` reads the longer vector, and core files carry an AArch64 `NT_PRSTATUS`, so gdb 16 debugs programs on AArch64 (breakpoints in a PIE program, attach, threads, a core file).
+- Vim and xxd are in the AArch64 Alpine repository (the arm64 manifest of the same Docker Hub tag the x86-64 suite pins).
 - `mprotect` that makes never-touched pages of a PROT_NONE reservation writable records them to be mapped when touched (as a writable anonymous `mmap` does) instead of mapping them all at once, so V8's 4 GiB-wide code range no longer fails with ENOMEM on a small machine: Alpine's Node 24 runs its JIT.
 
 ### Network
@@ -83,6 +84,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Terminal
 
+- Programs the kernel starts get `LANG=C.UTF-8` in their environment, and a new `/etc/profile` (read by login shells, including SSH logins) exports it, so musl's locale functions and programs that check for a UTF-8 locale (BusyBox with Unicode support, Neovim's `ambiwidth` and `fileencoding` defaults) agree with the terminal. `t_time` now also checks `TZ`: a POSIX string, a DST rule and a zone file. A zone file under `/usr/share/zoneinfo` works as on any musl system (Alpine's `tzdata` package); there is no zone by default, so the time is UTC. The Alpine tty group types Japanese into Neovim and checks the bytes it saves and the cells and characters it counts.
+- The framebuffer console decodes UTF-8 and draws Japanese: kana, kanji (JIS X 0208) and fullwidth forms in two cells, Latin-1, Greek, box drawing and half-width katakana in one, from `src/font16.bin` (about 230 KiB, built by `tools/mkfont.py` from the public-domain Shinonome fonts and font8x8). Before, every byte of a multi-byte character drew as a blank. A character with no glyph shows as `?`. `test/iso_test.sh` types a Japanese line and reads the screen back.
+- The console and pseudo-terminals start with `IUTF8` set, and Backspace takes back a whole UTF-8 character instead of one byte: typing a Japanese word and correcting it no longer leaves half a character in the line. The echo backs over as many columns as the character filled (two for East Asian wide characters; Linux backs over one), so the cursor ends where the erased character began. `IUTF8` can be cleared with `tcsetattr`, which restores erasing a byte at a time. Table of cell widths: `src/utf8.bastio`.
+- The framebuffer console obeys ANSI escape sequences (cursor movement, erase, insert and delete of lines and characters, scroll regions, save and restore of the cursor, reverse video and the alternate screen), so a full-screen program such as Neovim draws properly on the local screen, Japanese text included; before, they were skipped. The shell's `echo` writes `\e` as ESC, which `test/iso_test.sh` uses to drive the screen and read it back.
+- The arrow keys, Home, End, Delete, Page Up and Page Down on a PS/2 or USB keyboard send the escape sequences a terminal sends (`ESC [ A` and so on, `ESC [ 3 ~`); before they were dropped, so Neovim and line editors could not be driven by them on the local console. `test/iso_test.sh` presses them under QEMU.
 - Keys typed at the console reach a program that waits in `epoll_wait`,
   `select` or `pselect6` (libuv, and so Neovim); before, they stayed queued
   for the native shell unless the program was in `poll`, `ppoll` or `read`.
@@ -205,6 +211,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- A `bwm` client can give its window's pixels as shared memory: `BWM_CREATE_SHM` carries a `memfd` over the socket with `SCM_RIGHTS`, the client writes into it and a `BWM_DRAW` with no pixels names the rectangle that changed (`bwm_create_shm` and `bwm_damage` in `user/bwmlib.h`). `bterm` uses it and `bhello -s` shows it; `test/iso_test.sh` checks the pixels on the screendump.
 - `bterm` (`user/bterm.c`), a terminal window for `bwm`: an 80 x 24 grid drawn with the console font, with BusyBox's `ash` on a pseudo-terminal behind it. It reads a VT100 subset (CR, LF, backspace, tab, cursor moves, erase, insert and delete of characters and lines, scroll regions, the alternate screen, colours) and sends keys to the shell. `test/iso_test.sh` types a command into it and reads the output back cell by cell from the screendump.
 
 - `bwm` takes windows from other programs over a UNIX socket at `/tmp/bwm.sock` (`user/bwmproto.h`, with a header-only client library in `user/bwmlib.h`): a client opens a window, draws rectangles of pixels, and gets key, pointer and close events back; the pixels are kept by bwm and the close box tells the client. `bwm -n` starts with no windows of its own and `bwm -c PROGRAM` starts a client. `user/bhello.c` is the test client; `test/iso_test.sh` checks its pixels on a screendump and the key, click and close round trips.

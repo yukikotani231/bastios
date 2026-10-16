@@ -189,6 +189,13 @@ luajit
 libuv
 tree-sitter
 
+== vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL vim xxd 2>/dev/null; echo status $?; bb chroot /disk/a /usr/bin/vim -es -u NONE -c 'call setline(1, ["hi", "there"])' -c 'w! /root/v.txt' -c 'qa!' </dev/null >/dev/null 2>&1; bb cat /disk/a/root/v.txt; bb chroot /disk/a /usr/bin/xxd -p /root/v.txt; bb chroot /disk/a /sbin/apk del -q --no-progress vim xxd 2>/dev/null
+status 0
+hi
+there
+68690a74686572650a
+
 == nvim: a script run without a terminal
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one", "two"])' -c 'w! /root/n.txt' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/n.txt; bb chroot /disk/a /usr/bin/nvim --version | bb head -n 1
 one

@@ -66,6 +66,13 @@ $ /disk/kilo /tmp/ct_s
 $ bb stty -a < /dev/tty 2>/dev/null | bb tr ' ;' '\n\n' | bb grep -x -e icanon -e -icanon -e echo -e -echo | bb tr '\n' ,; echo
 icanon,echo,
 
+== utf-8: erase takes back a whole character on the console
+$ bb sh -c 'echo ready; read x; read y; printf "%s %s" "$x" "$y" > /tmp/ct_u8'
+> a\xc3\xa9\x7fb\r
+> c\xe6\x97\xa5\x7fd\r
+$ bb cat /tmp/ct_u8; echo; bb rm /tmp/ct_u8
+ab cd
+
 == python: the REPL, and Ctrl-C is KeyboardInterrupt
 $ PYTHONHOME=/disk/py /disk/python
 > x = 6 * 7\r

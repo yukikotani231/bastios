@@ -135,3 +135,19 @@ $ bb chroot /disk/a /bin/sh -c 'cd /root && TERM=xterm nvim -u NONE size.txt'
 > :wq\r
 $ bb cat /disk/a/root/size.txt
 80x24 colour
+
+== nvim: Japanese text is typed in, edited by character and saved as UTF-8
+$ bb chroot /disk/a /bin/sh -c 'cd /root && TERM=xterm LANG=C.UTF-8 nvim -u NONE ja.txt'
+> i\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\x1b
+> $x
+> :wq\r
+$ bb od -An -tx1 /disk/a/root/ja.txt | bb tr -s ' '
+ e6 97 a5 e6 9c ac 0a
+
+== nvim: it counts characters and cells of Japanese text
+$ bb chroot /disk/a /bin/sh -c 'cd /root && TERM=xterm LANG=C.UTF-8 nvim -u NONE wid.txt'
+> :let s = "\\u65e5\\u672c\\u8a9e"\r
+> :call setline(1, strchars(s) . " " . strdisplaywidth(s) . " " . len(s))\r
+> :wq\r
+$ bb cat /disk/a/root/wid.txt
+3 6 9
