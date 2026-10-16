@@ -1,0 +1,4 @@
+# /etc/profile of the installer image (docs/install.md): the console is a
+# login shell, which reads this, and it starts the installer. When the
+# installer ends, or stops, the shell stays for a look around.
+sh /install/run

@@ -524,8 +524,10 @@ const DEV_FULL: u64 = 11;               // OF_DEV device /dev/full: zeros to rea
 const DEV_FB: u64 = 12;                // OF_DEV device /dev/fb0, the screen (src/lxfb.bastio)
 const DEV_KEYEV: u64 = 13;              // OF_DEV device /dev/input/event0, the keyboard's key events (src/lxkeyev.bastio)
 const DEV_MICE: u64 = 10;               // OF_DEV device /dev/input/mice and /dev/psaux (src/lxmouse.bastio)
+const SER_LEN: u64 = 2176;              // its buffer: a 128-byte header and two rings of 1024 bytes (src/lxserial.bastio)
+const DEV_SER: u64 = 14;                // OF_DEV device /dev/ttyUSB0 and /dev/ttyACM0 (src/lxserial.bastio)
+const MICE_LEN: u64 = 3528;              // the mouse's buffer (a 56-byte header and 192 packets of 4 bytes), then the USB serial port's (SER_LEN, src/lxserial.bastio), then the key events (src/lxkeyev.bastio): a 16-byte header and 128 events of 4 bytes
 const GFX_LEN: u64 = 131664;            // GFX_HDR + GFX_SLOTS * GFX_SLOT: /dev/fb0's queue (src/lxfb.bastio)
-const MICE_LEN: u64 = 1352;             // its packets: a 56-byte header and 192 packets of 4 bytes, then the key events (src/lxkeyev.bastio): a 16-byte header and 128 events of 4 bytes
 const DEV_PTM: u64 = 128;              // an OF_PTY master is DEV_PTM + N
 const DEV_PTS: u64 = 192;              // and its slave, /dev/pts/N, DEV_PTS + N
 const DISK_GID: u64 = 6;               // group disk (files/group): the loop devices'
@@ -1169,7 +1171,7 @@ fn nr_open(k: &Kernel) -> u64
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 40;
+const NPROGS: u64 = 41;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1292,6 +1294,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 39 {
     return "bterm";
+  }
+  if i == 40 {
+    return "mserial";
   }
   return "(file)";                    // a program loaded from a file
 }

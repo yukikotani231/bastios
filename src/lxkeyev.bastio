@@ -24,7 +24,7 @@
 
 import "linux.bastio";
 
-const KEY_BASE: u64 = 824;                // MICE_HDR + MICE_CAP: where the key events start in k.mice
+const KEY_BASE: u64 = 3000;               // after the mouse's ring and the serial port's buffer: where the key events start in k.mice
 const KEY_HDR: u64 = 16;
 const KEY_CAP: u64 = 512;                 // 128 events
 const KEY_HEAD: u64 = KEY_BASE;

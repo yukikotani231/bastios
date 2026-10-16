@@ -90,6 +90,7 @@ import "hda.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";
+import "lxserial.bastio";
 import "arch/rnghw.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
@@ -938,7 +939,8 @@ const CHUNK: u64 = 256;
 /// Under the kernel lock, for `pump`: queues the rn bytes received in rx as
 /// typed input, and moves the next chunk of output into tx. Returns how
 /// many bytes of tx to send.
-fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, cad: bool, pend: &Atomic[u64]) -> u64
+fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, sx: &Bytes, sn: u64, sacc: u64,
+  stx: &mut Bytes, cad: bool, pend: &Atomic[u64]) -> u64
   requires sys_ok(s) && blen(gx) == GXB_LEN
   ensures sys_ok(s) && blen(gx) == GXB_LEN
 {
@@ -951,6 +953,8 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx
     s.reboot = true;
   }
   mice_push(&mut s.k, mx, mn);              // mouse packets (src/lxmouse.bastio)
+  ser_drop(&mut s.k, sacc);                 // what the last round sent to the USB serial port (src/lxserial.bastio)
+  ser_push(&mut s.k, sx, sn);               // and what it received
   let mut typed = rn > 0;
   let mut i = 0;
   while i < rn && i < blen(rx)
@@ -970,6 +974,9 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx
       q_push(&mut s.k.q, c);
       typed = true;
       k = k + 1;
+    } else if c >= SER_PKT {
+      ser_put(&mut s.k, c - SER_PKT);       // a byte from a USB serial port
+      k = k + 1;
     } else if c > 256 {
       mice_put(&mut s.k, c - MOUSE_PKT);
       k = k + 1;
@@ -982,6 +989,18 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx
     tty_cook(&mut s.con, &mut s.k);
     wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line, s.k.pid_hi);
   }
+  // Bytes written to a USB serial port on the disk's controller go out
+  // here; for one on the console devices' controller, `pump` is handed up
+  // to CHUNK of them (in stx, the count in the result's high half) and
+  // says how many it sent in the next call's sacc.
+  let mut stn = 0;
+  if vfs_ser(s.k.fs) != SER_NONE {
+    let m = ser_peek(s.k, &mut stx, CHUNK);
+    let a = vfs_ser_send(&mut s.k.fs, stx, m);
+    ser_drop(&mut s.k, a);
+  } else {
+    stn = ser_peek(s.k, &mut stx, CHUNK);
+  }
   let n = con_take(&mut s.con, &mut tx);
   // What the screen is told next, if a program draws on it (src/lxfb.bastio).
   let drew = gfx_take(&mut s.k, &mut gx);
@@ -989,7 +1008,16 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx
     wake_writers(&mut s.k.procs);
   }
   atomic_store(pend, s.con.r.n + gfx_pending(s.k));
-  return n;
+  return smaller(n, 65535) + smaller(stn, CHUNK) * 65536;
+}
+
+/// Under the kernel lock, for `pump`: the USB serial port took n of the
+/// bytes it was handed in the last round.
+fn ser_ack(s: &mut Sys, n: u64)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  ser_drop(&mut s.k, n);
 }
 
 /// Under the console devices' lock: moves output from the kernel's ring to
@@ -1006,18 +1034,22 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
   let mut tx = balloc(CHUNK);
   let mut rx = balloc(CHUNK);
   let mut mx = balloc(CHUNK);
+  let mut sx = balloc(CHUNK);
+  let mut stx = balloc(CHUNK);
+  let mut sacc = 0;
   let mut gx = balloc(GXB_LEN);
   let mut rounds = 0;
   let mut more = true;
   while more && rounds < 64
-    invariant term_ok(t) && blen(rx) == CHUNK && blen(mx) == CHUNK && blen(gx) == GXB_LEN
+    invariant term_ok(t) && blen(rx) == CHUNK && blen(mx) == CHUNK && blen(sx) == CHUNK && blen(stx) == CHUNK && blen(gx) == GXB_LEN
   {
     let mut rn = 0;
     let mut mn = 0;
+    let mut sn = 0;
     let mut cad = false;
     let mut c = 0;
-    while c != 256 && rn < CHUNK && mn + 4 <= CHUNK
-      invariant term_ok(t) && rn <= CHUNK && mn <= CHUNK && blen(rx) == CHUNK && blen(mx) == CHUNK
+    while c != 256 && rn < CHUNK && mn + 4 <= CHUNK && sn < CHUNK
+      invariant term_ok(t) && rn <= CHUNK && mn <= CHUNK && sn <= CHUNK && blen(rx) == CHUNK && blen(mx) == CHUNK && blen(sx) == CHUNK
     {
       c = term_poll(&mut t);
       if c == KBD_CAD {
@@ -1025,6 +1057,9 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
       } else if c < 256 {
         bset(&mut rx, rn, cast[u8](c));
         rn = rn + 1;
+      } else if c >= SER_PKT {
+        bset(&mut sx, sn, cast[u8](c - SER_PKT));   // a byte from a USB serial port
+        sn = sn + 1;
       } else if c > 256 {
         let p = c - MOUSE_PKT;              // a mouse packet: its four bytes
         bset(&mut mx, mn, cast[u8](p / 16777216 % 256));
@@ -1034,8 +1069,10 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
         mn = mn + 4;
       }
     }
-    let tn = locked(s, exchange, &mut tx, &mut gx, rx, rn, mx, mn, cad, pend);
+    let r = locked(s, exchange, &mut tx, &mut gx, rx, rn, mx, mn, sx, sn, sacc, &mut stx, cad, pend);
+    let tn = r % 65536;
     term_send(&mut t, tx, tn);
+    sacc = term_ser_send(&mut t, stx, r / 65536);
     let gk = get_u64(gx, 0);
     if gk == GX_HOLD {
       screen_hold(&mut t.screen);
@@ -1048,12 +1085,17 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
         screen_blit(&mut t.screen, go, gx, 24, smaller(gn, XFER));
       }
     }
-    more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK || gk != GX_NONE;
+    more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK || sacc > 0 || gk != GX_NONE;
     rounds = rounds + 1;
+  }
+  if sacc > 0 {
+    locked(s, ser_ack, sacc);
   }
   bfree(tx);
   bfree(rx);
   bfree(mx);
+  bfree(sx);
+  bfree(stx);
   bfree(gx);
 }
 
@@ -1371,7 +1413,19 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
-  let disk = disk_mount(dev, dq_slots_for(pool_pages));
+  // The BastiOS partition of a GPT on an internal disk is the file system
+  // (the installer makes one, docs/install.md); a USB stick's partition is
+  // the whole device already. With the boot option `install` nothing is
+  // mounted: the disk is for the installer's raw sector access.
+  let mut dmode = DM_GPT;
+  if blk_is_usb(dev) {
+    dmode = DM_WHOLE;
+  }
+  let installing = boot_word(cpu, "install");
+  if installing {
+    dmode = DM_RAW;
+  }
+  let disk = disk_mount(dev, dmode, dq_slots_for(pool_pages));
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
   } else if blk_is_nvme(disk.dev) {
@@ -1386,7 +1440,18 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if usb_disk == MSD_UNUSED {
     puts(&mut con, "usb: a USB disk without a BastiOS partition; not used\r\n");
   }
-  if disk.foreign {
+  if disk.plo != 0 {
+    puts(&mut con, "disk: the BastiOS partition at sector ");
+    put_num(&mut con, disk.plo);
+    puts(&mut con, " (");
+    put_num(&mut con, disk.psz);
+    puts(&mut con, " sectors)\r\n");
+  }
+  if installing {
+    puts(&mut con, "disk: install mode, ");
+    put_num(&mut con, blk_sectors(disk.dev));
+    puts(&mut con, " sectors for the installer; no file system mounted\r\n");
+  } else if disk.foreign {
     puts(&mut con, "disk: it holds a partition table or other data; left alone\r\n");
   }
   if blk_irq(disk.dev) {
@@ -1394,6 +1459,10 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let usb_on = usb_live(usb) || blk_kbd(disk.dev);
   let usb_mouse_on = usb_mouse(usb) || blk_mouse(disk.dev);
+  let mut ser_on = usb_ser(usb);
+  if ser_on == SER_NONE {
+    ser_on = blk_ser(disk.dev);
+  }
   match term.usb {
     Usb::None => {},
     Usb::Xhci(stale) => { mmio_release(&mut win, xhci_free(stale, &mut m)); },
@@ -1410,10 +1479,15 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   if usb_on {
     puts(&mut con, "keyboard: USB (xHCI)\r\n");
-  } else if xn > 0 {
+  } else if xn > 0 && ser_on == SER_NONE {
     puts(&mut con, "usb: no keyboard on the xHCI controllers (");
     put_num(&mut con, xn);
     puts(&mut con, ")\r\n");
+  }
+  if ser_on == SER_FTDI {
+    puts(&mut con, "serial: USB FTDI adapter (/dev/ttyUSB0)\r\n");
+  } else if ser_on == SER_ACM {
+    puts(&mut con, "serial: USB CDC-ACM device (/dev/ttyACM0)\r\n");
   }
   // The sound card, if any, with six pages from SND_AT.
   let snd = snd_find(&mut pci, &mut m, &mut win, SND_AT, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
@@ -1516,6 +1590,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     diag_pause(&mut term, &mut con, &mut clock, &mut acpi);
   }
   let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
+  ser_set_kind(&mut k, ser_on);
   if screen_on(term.screen) {
     gfx_screen(&mut k, fb_w, fb_h, fb_pitch, boot_info(cpu, INFO_FB, 4));   // /dev/fb0 (src/lxfb.bastio)
   }
@@ -1540,6 +1615,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     if login == 0 {
       puts(&mut con, "cannot start login\r\n");
     }
+  } else if installing {
+    // The installer image (docs/install.md): BusyBox's ash as a login
+    // shell, which reads /etc/profile, and that runs the installer.
+    if spawn_as(&mut k, ASH_PROG, 0, "-sh") == 0 {
+      puts(&mut con, "cannot start the installer\r\n");
+    }
   } else if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
   }
@@ -1552,7 +1633,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // Every processor runs the scheduler until the kernel stops; then they
   // are all back in their park loops and the state is this one's again.
   con_flush(&mut term, &mut con);
-  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false, login: login, slept: 0, polled: usb_on || usb_mouse_on || (term.kbd.aux && !term.kbd.aux_irq) });
+  let sl = lock_new(Sys { k: k, con: con, pic: pic, apic: apic, clock: clock, acpi: acpi, stop: false, reboot: false, idle: 0, ticked: false, login: login, slept: 0, polled: usb_on || usb_mouse_on || ser_on != SER_NONE || (term.kbd.aux && !term.kbd.aux_irq) });
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);

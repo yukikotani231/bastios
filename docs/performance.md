@@ -125,20 +125,25 @@ instructions on both. Where BastiOS is behind:
   entry's sector and wait for it), where Linux's ext4 batches them in its
   journal. Deferring those writes would save at most about 18% and changes
   what survives a power cut, so it is not done.
-- `hello` and `scan` are slower the second time than the first on BastiOS
-  (`hello` 3.06 then 3.65 s) and 2.4x to 3.6x off Linux, which gets faster once
-  its page cache is warm (2.12 then 1.02 s). A 32 MiB block cache cannot hold
-  the 20 to 60 MB gcc, cc1, as, ld and the headers read, so a warm run still
-  reads the disk. Which part of the warm `hello` is the disk and which is
-  emulation is not known: a `perf` profile of it needed the QEMU code map,
-  which could not be written on the full disk the figures were taken on, and
-  the 39% of its samples in unmapped translated code say nothing about
-  functions. QEMU's own work (translating code blocks, zeroing the host's
-  pages the first time the guest touches them) was 8% and 7.5% of them.
-- The cache stops at 32 MiB because doubling it makes Z3 give up on
-  `lx_syscall`; it is a sixteenth of memory below that (`dq_slots_for` in
+- `hello` was 3.6x off Linux when run again (3.65 s against 1.02 s), and
+  slower the second time than the first. The time was in the emulator, not
+  the disk: the page cache that shares program code between runs
+  (`src/pcache.bastio`) held 16 MiB, less than the code gcc, cc1, as and ld
+  run, so each run found its code gone, loaded it into different pages, and
+  QEMU's translator (TCG, which keys translated blocks by physical address)
+  translated cc1 again (about 80,000 translated blocks a run, against about
+  13,000 when the pages are reused). The cache holds 32 MiB now and a warm
+  `hello` takes about 0.7 s on the machine the first run takes about 1.5 s on.
+  `scan` is slower on BastiOS than on Linux (2.4x) for its own reasons: path
+  lookup and small reads.
+- The disk's block cache stops at 32 MiB because doubling it makes Z3 give up
+  on `lx_syscall`; it is a sixteenth of memory below that (`dq_slots_for` in
   `src/diskq.bastio`; the kernel heap extension, which it takes half of, is
-  an eighth of the page pool).
+  an eighth of the page pool). The page cache stops at 32 MiB because its
+  arrays are fixed in size and so take kernel heap on a small machine too: 64
+  MiB (16384 slots) took enough of a 30 MiB machine's heap that crashsim and
+  the memory test failed. Sizing the arrays to the machine would fix that
+  but gave Z3 more than it could prove in `lx_syscall`.
 
 ### Over a network card
 

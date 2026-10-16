@@ -1353,6 +1353,9 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   if dev == DEV_FB {
     return fb_open(&mut k, pid, flags);     // src/lxfb.bastio
   }
+  if dev == DEV_SER {
+    return ser_open(&mut k, pid, flags);    // src/lxserial.bastio
+  }
   let hv = ofd_new(&mut k, OF_DEV, dev);
   if hv >= OFD_N {
     return ENFILE;

@@ -34,7 +34,7 @@ import "linux.bastio";
 import "lxkeyev.bastio";
 
 const MICE_HDR: u64 = 56;
-const MICE_CAP: u64 = 768;              // MICE_LEN - MICE_HDR: 192 packets
+const MICE_CAP: u64 = 768;              // 192 packets
 const M_HEAD: u64 = 0;
 const M_COUNT: u64 = 8;
 const M_PRESENT: u64 = 16;
@@ -49,10 +49,17 @@ fn mice_new(present: bool) -> Bytes
 {
   let mut b = balloc(MICE_LEN);
   let mut i = 0;
-  while i < MICE_HDR
-    invariant blen(b) == MICE_LEN && i <= MICE_HDR
+  while i < 952
+    invariant blen(b) == MICE_LEN && i <= 952
   {
     bset(&mut b, i, 0);
+    i = i + 1;
+  }
+  i = 0;
+  while i < KEY_HDR
+    invariant blen(b) == MICE_LEN && i <= KEY_HDR && KEY_BASE + KEY_HDR <= MICE_LEN
+  {
+    bset(&mut b, KEY_BASE + i, 0);
     i = i + 1;
   }
   if present {
@@ -245,7 +252,7 @@ fn wheel_byte(z: u64) -> u64
 
 /// read(2) (system call n) of up to len bytes into va on descriptor fd, the
 /// mouse. Returns KEEP or SWITCH, as linux_syscall does.
-fn mice_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+fn mouse_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
