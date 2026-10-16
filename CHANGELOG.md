@@ -14,8 +14,16 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
+### Added
+
+- `mount -t ext4 IMAGE DIR` (also `ext2` and `ext3` images without a journal to replay) reads an ext4 image, a file anywhere (on the disk too) or a loop device, into a read-only mount on an empty in-memory directory (`src/ext4.bastio`, `docs/design/ext4-readonly.md`). Files, directories, symbolic links, hard links, device nodes, pipes, modes, owners and times are shown; extents and classic block maps are read; holes stay holes. It is a snapshot held in memory: at most 32768 nodes, paths up to 255 bytes and files up to 1 GiB (the mount fails with `ENOSPC`, `ENAMETOOLONG` or `EFBIG` otherwise), and an image with a journal to replay, inline data or encryption is refused with `EINVAL`. `test/ext4img.py` makes images with `mke2fs -d` and `user/mext4.c` checks them in `make test`.
+
 ### Boot
 
+- The ARP cache holds 64 neighbors (4 before): a machine on a network with more than four neighbors no longer asks again for the ones it just forgot.
+- The system runs 1023 processes and threads at once (511 before). `NPROC` is 1024; the per-process tables follow it, and `/proc/PID` names, `dec_out` and `proc_pid` take four-digit ids. `mproc` holds 700 children at once and checks ids past 511. A machine with a small kernel heap still stops sooner (about 250 at 256 MiB), because the per-process tables double at 257 rows.
+- The kernel looks at UHCI (USB 1.1) controllers and says in the boot log how many there are and how many devices are on their ports. There is no driver for them yet; this shows whether a USB keyboard on an older PC is out of reach.
+- The hardware report's `pci` lines say when a SATA controller is in RAID mode (Intel RST) or Intel VMD is on, which hide the disks from BastiOS, and what to change in the firmware.
 - On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.
 - A System V shared memory segment can be 32 MiB (2 MiB before; `shmmax` reads 33554432): its pages hang from up to 16 level-1 tables of the shared store instead of one. Pages are still all taken when the segment is made, so a small VM refuses a big one with ENOMEM.
 - The in-memory file system holds 32768 files and directories (8192 before); the console shell's `ls` looks at the first 32768 disk entries after them. The node table now grows as nodes are made instead of being filled at boot, so a small machine pays only for the nodes it uses; the name index (1 MiB) and the open-description table are still allocated at boot. `ram_create` starts its search at a hint, so making many names is not quadratic. `rmdir` and the rename of a directory no longer walk the whole table when nothing lies under the directory: a count per hash of each ancestor directory name, kept where names enter and leave the index, answers that first.
@@ -41,6 +49,13 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Alt-Delete on the PS/2 keyboard restarts the machine (what Firecracker's `SendCtrlAltDel` sends), so a guest without ACPI has a way to end. The console prints `ctrl-alt-del: restarting` and the machine goes through the same path as `reboot`.
 - The local APIC timer is calibrated against PIT channel 0 when the speaker channel (2) is missing, as in QEMU's `microvm`, before falling back to two seconds of the RTC. A `microvm` boots in 0.3 s instead of 2.1 s under TCG. Trusted: about 30 more lines of C in `boot/smp.c`.
 
+### Memory
+
+- Running out of memory no longer ends the faulting process with SIGSEGV. A page fault that finds no free page first gives the page cache back (a cached page nobody maps is freed) and runs the fault again; if that frees nothing the out-of-memory killer (`src/oom.bastio`) sends SIGKILL to the process with the highest `oom_score`, Linux's rule: the share of all pages it holds in thousandths, moved by its `oom_score_adj` (-1000 never kills it, 1000 makes it the first choice; process 1 is never chosen). The console says `Out of memory: Killed process N (name) oom_score S, K kB resident`, the faulting process waits while the victim dies, and /proc/vmstat counts `oom_kill`. `/proc/PID/oom_score` reports the score (it was always 0), `/proc/sys/vm/drop_caches` (1 or 3) drops the page cache, and `MemAvailable` counts the cached pages. Tested at 64 MiB of RAM by `test/memory_test.sh` (user/mhog.c) on one and four processors: reclaim before any kill, the biggest process chosen over the one that asked last, `oom_score_adj` moving the choice. Not done: a shortage of the kernel's own heap still halts, a system call that finds no page still fails with ENOMEM, and a stack that cannot grow still gets its SIGSEGV.
+### Tests
+
+- `test/compat/bastio.txt` runs bastiolang's `bastiofmt` (the formatter) and `bastio-lsp` (the language server) on BastiOS: the formatter on a line and on the compiler's parser, the language server over its standard input and output for hover, go to definition, formatting and a diagnostic from `bastioc1`.
+
 ### AArch64
 
 - BastiOS builds for AArch64 and boots to the shell on QEMU's `virt` machine
@@ -49,6 +64,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   console and PSCI power off, with the native-ABI programs (`sh`, `hello`,
   `spin`, `true`) running at EL0. `test/aarch64_test.sh` is part of `make test`.
   The Linux layer, the file system and the network are still x86-64 only.
+- Programs get AT_HWCAP and AT_HWCAP2 in their auxiliary vector (`HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID` on AArch64, 0 on x86-64). A musl built with optimised string routines reads them before it has a thread pointer and crashed without them. `/proc/PID/auxv` reads the longer vector, and core files carry an AArch64 `NT_PRSTATUS`, so gdb 16 debugs programs on AArch64 (breakpoints in a PIE program, attach, threads, a core file).
+- Vim and xxd are in the AArch64 Alpine repository (the arm64 manifest of the same Docker Hub tag the x86-64 suite pins).
+- `mprotect` that makes never-touched pages of a PROT_NONE reservation writable records them to be mapped when touched (as a writable anonymous `mmap` does) instead of mapping them all at once, so V8's 4 GiB-wide code range no longer fails with ENOMEM on a small machine: Alpine's Node 24 runs its JIT.
 
 ### Network
 
@@ -62,6 +80,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Disk
 
+- NVMe and AHCI take a run of consecutive blocks in one command, as virtio already did: up to 32 blocks (128 KiB), through a PRP list (NVMe, bounded by the drive's MDTS) or one PRD entry per block (AHCI). `diskbench` writes 2 MiB in 3-4 ticks on both, 8-10 and 6-7 before.
 - The disk file system holds 5119 files and directories (was 4095): the
   directory has up to 320 blocks, all named by the superblock's block, so
   existing disks mount unchanged. The two directory tables (the disk's and
@@ -72,6 +91,11 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Terminal
 
+- Programs the kernel starts get `LANG=C.UTF-8` in their environment, and a new `/etc/profile` (read by login shells, including SSH logins) exports it, so musl's locale functions and programs that check for a UTF-8 locale (BusyBox with Unicode support, Neovim's `ambiwidth` and `fileencoding` defaults) agree with the terminal. `t_time` now also checks `TZ`: a POSIX string, a DST rule and a zone file. A zone file under `/usr/share/zoneinfo` works as on any musl system (Alpine's `tzdata` package); there is no zone by default, so the time is UTC. The Alpine tty group types Japanese into Neovim and checks the bytes it saves and the cells and characters it counts.
+- The framebuffer console decodes UTF-8 and draws Japanese: kana, kanji (JIS X 0208) and fullwidth forms in two cells, Latin-1, Greek, box drawing and half-width katakana in one, from `src/font16.bin` (about 230 KiB, built by `tools/mkfont.py` from the public-domain Shinonome fonts and font8x8). Before, every byte of a multi-byte character drew as a blank. A character with no glyph shows as `?`. `test/iso_test.sh` types a Japanese line and reads the screen back.
+- The console and pseudo-terminals start with `IUTF8` set, and Backspace takes back a whole UTF-8 character instead of one byte: typing a Japanese word and correcting it no longer leaves half a character in the line. The echo backs over as many columns as the character filled (two for East Asian wide characters; Linux backs over one), so the cursor ends where the erased character began. `IUTF8` can be cleared with `tcsetattr`, which restores erasing a byte at a time. Table of cell widths: `src/utf8.bastio`.
+- The framebuffer console obeys ANSI escape sequences (cursor movement, erase, insert and delete of lines and characters, scroll regions, save and restore of the cursor, reverse video and the alternate screen), so a full-screen program such as Neovim draws properly on the local screen, Japanese text included; before, they were skipped. The shell's `echo` writes `\e` as ESC, which `test/iso_test.sh` uses to drive the screen and read it back.
+- The arrow keys, Home, End, Delete, Page Up and Page Down on a PS/2 or USB keyboard send the escape sequences a terminal sends (`ESC [ A` and so on, `ESC [ 3 ~`); before they were dropped, so Neovim and line editors could not be driven by them on the local console. `test/iso_test.sh` presses them under QEMU.
 - Keys typed at the console reach a program that waits in `epoll_wait`,
   `select` or `pselect6` (libuv, and so Neovim); before, they stayed queued
   for the native shell unless the program was in `poll`, `ppoll` or `read`.
@@ -194,7 +218,19 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- A symbolic link or a device node made by `symlink` or `mknod` now belongs to the user who made it (it always belonged to root), so its owner can set its times (`touch -h`), and a device node takes the umask. `abuild` builds Alpine packages as an unprivileged user under `fakeroot`, signs them and installs them with `apk` (libraries with `-dev` and `-doc` subpackages, patches, `check()`, install scripts, tinycc from its source; `docs/using.md`, `test/compat/alpine.txt`).
+- A `bwm` client can give its window's pixels as shared memory: `BWM_CREATE_SHM` carries a `memfd` over the socket with `SCM_RIGHTS`, the client writes into it and a `BWM_DRAW` with no pixels names the rectangle that changed (`bwm_create_shm` and `bwm_damage` in `user/bwmlib.h`). `bterm` uses it and `bhello -s` shows it; `test/iso_test.sh` checks the pixels on the screendump.
+- `bterm` (`user/bterm.c`), a terminal window for `bwm`: an 80 x 24 grid drawn with the console font, with BusyBox's `ash` on a pseudo-terminal behind it. It reads a VT100 subset (CR, LF, backspace, tab, cursor moves, erase, insert and delete of characters and lines, scroll regions, the alternate screen, colours) and sends keys to the shell. `test/iso_test.sh` types a command into it and reads the output back cell by cell from the screendump.
+
+- `bwm` takes windows from other programs over a UNIX socket at `/tmp/bwm.sock` (`user/bwmproto.h`, with a header-only client library in `user/bwmlib.h`): a client opens a window, draws rectangles of pixels, and gets key, pointer and close events back; the pixels are kept by bwm and the close box tells the client. `bwm -n` starts with no windows of its own and `bwm -c PROGRAM` starts a client. `user/bhello.c` is the test client; `test/iso_test.sh` checks its pixels on a screendump and the key, click and close round trips.
+
+- `bwm` (`user/bwm.c`), a window manager for `/dev/fb0` and `/dev/input/mice`: a wallpaper, three windows with title bars, a pointer, click to raise and focus, drag a title bar to move a window, typing into the focused window, Ctrl-Q to leave. Frames are composed in memory and only the changed rectangles are written. `test/iso_test.sh` drives it through QEMU's monitor (mouse and keys) and reads the screen back. The windows are its own; there is no protocol for other programs yet.
+
+- `/dev/fb0`: the screen for programs that draw their own pixels (`src/lxfb.bastio`). `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` give the 32-bit mode; `write` and `lseek` store pixels. The text console stops drawing while a description is open and is drawn again when the last one closes. `user/mfb.c` draws a pattern, and `test/iso_test.sh` reads it back from a QEMU screendump under BIOS and UEFI. The framebuffer stays inside the proved device window; the pixels reach it through a ring the console pump empties. There is no `mmap` of it yet.
+
+- A read of a regular file on the disk is no longer cut short when some of its blocks are not cached yet: `read`, `pread64` and the calls built on them wait for the disk and return the whole count (they returned the cached part first, and a program that takes the count for granted, such as the JVM reading its modules file, got zeros for the rest). The JDK of the eclipse-temurin image (`java`, `javac`, `jar`; records, streams, threads, files, exit status) now runs in the compatibility suite; the lane unpacks the image's root (about 400 MB) from a tar file on its disk.
 - A writable `MAP_SHARED` mapping of a file is written back even after a program has mapped twenty files read-only (a writable mapping of a file takes the place of a read-only file's mapping when a process's 16 write-back records are all in use), and `munmap` or `msync` of a range of a disk file larger than the disk's write queue now finishes (it waited for the disk and started over from the first page, for ever). Go's linker does both; the Go toolchain of the golang image (`go run`, `go build`, `go test`, `gofmt`; goroutines and the collector) now runs in the compatibility suite.
+- The Rust toolchain of the rust:alpine image (`rustc`, `cargo build`, `cargo run`, `cargo test`, threads, files, panics) runs in the compatibility suite, with no kernel change; the lane unpacks the image's root (about 1 GB) from a tar file on its disk.
 - ptrace for debuggers: a tracer can write into the read-only code of a program it traces (a breakpoint), read code the program has not run yet, and read and write its x87/SSE registers (`PTRACE_GETFPREGS`, `SETFPREGS`); a breakpoint trap says `SI_KERNEL` and a single step `TRAP_TRACE` in `PTRACE_GETSIGINFO`; `strace -p` hears of the death of a process whose parent is elsewhere. `/proc/PID/auxv` exists (gdb finds where a PIE program was loaded), and lseek on it moves its offset (lseek on the other /proc files is still ignored). Tested: `strace -p`, and gdb 16 stops at a breakpoint of a dynamically linked PIE program, prints its arguments and backtrace and finishes the function, and attaches to a running one (`gdb -p`), stops it at a breakpoint and detaches (x86-64; it needs Alpaquita's musl loader for ifunc relocations and an x86-64-v2 CPU, which the compat lane's QEMU now asks for).
 - `/proc/PID/mem`: read and write another process's memory (or the program's own) at an address, with `read`, `write`, `pread64`, `pwrite64` and `lseek`. A write goes into read-only code too, as ptrace's poke does, and a read finds code the program has not run yet. Allowed for the process itself, root, and a process with the same ids. gdb no longer warns that it cannot open it. Tested in `t_ptrace` (own memory, a child's).
 - Core files: a process that dies of a signal that dumps core (SIGSEGV, SIGABRT, SIGBUS, SIGFPE, SIGILL, SIGQUIT, SIGTRAP, SIGSYS, SIGXCPU, SIGXFSZ) with `RLIMIT_CORE` above 0 leaves an ELF core file called `core` in its working directory, up to the limit: the registers of the thread that took the signal, the auxiliary vector, and the pages the process had touched. `gdb PROGRAM core` shows the call chain and the arguments. x86-64 only for now; the default limit is still 0, as on Linux. The wait status of such a process carries the core flag (`WCOREDUMP`, and `CLD_DUMPED` in `waitid`). Tested in `t_core` and with gdb 16 in the Alpine lane.
@@ -432,6 +468,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Build and test
 
+- For contributors: `tools/setup-dev.sh` sets up a Debian or Ubuntu machine in one command (and a dev container runs it), CONTRIBUTING.md explains the issue labels and where to find a first issue, and a feature-request issue template and `.github/labels.yml` (synced by a workflow) were added.
 - `test/stackdepth.py` checks that the deepest chain of kernel calls in a native kernel fits the kernel stack (it fails above 64 KiB of the 92 KiB; today 41 KiB). It was written after a native kernel built with an older compiler overflowed its stack in the UDP path under a loaded test run: its functions had frames up to 19 KiB where the current compiler's are under 4.5 KiB (the boot function aside).
 
 ### Files and disks

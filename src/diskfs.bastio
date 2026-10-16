@@ -828,15 +828,15 @@ fn disk_blank(dev: &mut Blk, sec: &mut Bytes, n: u64) -> bool
 /// blank (else it is left alone: `foreign`), and works out which blocks
 /// are in use. Without a disk (or one too small) the file
 /// system has no entries and every operation on it fails.
-fn disk_mount(dev: Blk) -> DiskFs
-  requires blk_ok(dev)
+fn disk_mount(dev: Blk, cslots: u64) -> DiskFs
+  requires blk_ok(dev) && cslots >= NC_MIN && cslots <= NC
   ensures disk_ok(result)
 {
   let mut n = blk_sectors(dev) / BSECT;
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
   }
-  let mut nc = NC;
+  let mut nc = cslots;
   if n < DATA_B0 + 16 {
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
@@ -1130,7 +1130,7 @@ fn disk_size(d: &DiskFs, i: u64) -> u64
 fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
 {
-  if i >= d.slots || !dent_live(d, i) || cast[u64](dent_byte(d, i, E_NLEN)) != n || n > DNAME_MAX {
+  if i >= d.slots || cast[u64](dent_byte(d, i, E_NLEN)) != n || n > DNAME_MAX || !dent_live(d, i) {
     return false;
   }
   return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, n);

@@ -255,7 +255,7 @@ fn user_shared_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> u64
         r = pt_borrow(&mut root, 1, l3_shared, off);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
-      if r < len(bm) && get(bm, r) == COW_PAGE {
+      if r < len(bm) && bm_cow(get(bm, r)) {
         return NO_RESULT;
       }
       return r;
@@ -285,7 +285,7 @@ fn user_cow_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> bool
         r = pt_borrow(&mut root, 1, l3_shared, off);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
-      return r < len(bm) && get(bm, r) == COW_PAGE;
+      return r < len(bm) && bm_cow(get(bm, r));
     },
   }
 }
@@ -579,9 +579,16 @@ fn cow_l1(l1: &mut PageTable, m: &mut Mem, i: u64, text: bool) -> u64
     pt_put_shared(&mut l1, i, s, false);
     return COW_NOMEM;
   }
+  let x = is_cow_x(m, s);
   let f = shared_copy(take_dirty(&mut m, b), s);
   drop_shared(&mut m, s);
-  pt_put_frame(&mut l1, i, f, cow);
+  if x {
+    mark_x(&mut m, f, true);
+    pt_put_frame(&mut l1, i, f, false);
+    pt_set_access(&mut l1, i, 2);           // read, write and run, as before fork
+  } else {
+    pt_put_frame(&mut l1, i, f, cow);
+  }
   return COW_DONE;
 }
 
