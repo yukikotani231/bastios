@@ -1691,7 +1691,12 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
     if i < NFILES {
       let l = ram_name(&mut k.fs.ram, i, &mut k.fs.name);
       if l != NO_FILE {
-        a = put_s(&mut o, a, "tmpfs /");
+        let ext = vfs_mount_ext(k.fs, s);
+        if ext {
+          a = put_s(&mut o, a, "ext4 /");
+        } else {
+          a = put_s(&mut o, a, "tmpfs /");
+        }
         let mut j = 0;
         while j < l
           invariant j <= l && l <= NAMEBUF && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
@@ -1699,7 +1704,9 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
           a = put_c(&mut o, a, bget(k.fs.name, j));
           j = j + 1;
         }
-        if vfs_mount_ro(k.fs, s) {
+        if ext {
+          a = put_s(&mut o, a, " ext4 ro 0 0\n");
+        } else if vfs_mount_ro(k.fs, s) {
           a = put_s(&mut o, a, " tmpfs ro 0 0\n");
         } else {
           a = put_s(&mut o, a, " tmpfs rw 0 0\n");
