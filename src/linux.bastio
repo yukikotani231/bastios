@@ -603,11 +603,11 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_stat_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
-  return lx_proc_call(&mut con, &mut k, mmu, pid, n, was, a, b, c, ctid, tls, clear);
+  return lx_proc_call(&mut con, &mut k, mmu, pid, n, was, a, b, c, pfdp, ctid, tls, clear);
 }
 
 /// The process-creating and exec calls, apart from linux_syscall so that its proof stays small.
-fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64, ctid: u64, tls: u64, clear: bool) -> u64
+fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64, pfdp: u64, ctid: u64, tls: u64, clear: bool) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
