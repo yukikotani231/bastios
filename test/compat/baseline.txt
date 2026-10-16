@@ -762,6 +762,8 @@ t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
+t_net: IPV6_V6ONLY reads back
+t_net: IPV6_V6ONLY: an IPv6-only listener and an IPv4 one share a port
 t_net: SO_REUSEADDR
 t_net: TCP bind/listen
 t_net: TCP loopback connect/accept
@@ -770,10 +772,13 @@ t_net: TCP_NODELAY
 t_net: UDP bind port 0
 t_net: UDP loopback
 t_net: UDP socket
+t_net: a dual-stack listener cannot take it
 t_net: getaddrinfo localhost
+t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_net: ping6 ::1 (raw ICMPv6 socket)
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
 t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
