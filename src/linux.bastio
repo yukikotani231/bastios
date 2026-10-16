@@ -1570,11 +1570,18 @@ fn tty_key(con: &mut Con, l: &mut Buf, c: u64, echo: bool)
         }
       }
     }
-  } else if c >= 32 && c <= 255 && n + 1 < LINE_MAX {
+  } else if (c >= 32 || c == 9 || c == 27) && c <= 255 && n + 1 < LINE_MAX {
+    // Tab and ESC are kept in the line, as on Linux, so the escape
+    // sequences of the arrow and function keys reach the program.
     l = set(l, 2 + n, c);
     l = set(l, 0, n + 1);
     if echo {
-      con_write(&mut con, cast[u8](c));
+      if c == 27 {
+        con_write(&mut con, 94);              // ECHOCTL: ESC is shown as ^[
+        con_write(&mut con, 91);
+      } else {
+        con_write(&mut con, cast[u8](c));
+      }
     }
   }
 }
