@@ -396,6 +396,28 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm again")
             fails += not good
+        # The same client with its pixels in memory shared with bwm
+        # (bhello -s: a memfd sent over the socket with SCM_RIGHTS).
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bhello -s\r"); q.stdin.flush()
+        good = until(b"bhello: shared window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a client opens a window whose pixels are shared memory")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = at(80, 100) == (255, 0, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) bwm shows what the client wrote into the shared pixels")
+            fails += not good
+            monitor("sendkey y")
+            good = until(b"bhello: key y", mark)
+            w, h, px = screendump()
+            good = good and at(80, 100) == (255, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a change in the shared pixels shows after the client says where")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"# ", mark)
+            fails += not good
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
@@ -412,6 +434,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             lines = screen_text_at(px, w, 72, 90, 80, 24)
             good = any(l.strip() == "term" for l in lines) and any("echo term" in l for l in lines)
             print(("ok  " if good else "FAIL"), f"({name}) a line typed into the terminal window runs in ash and its output is drawn")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # The alternate screen (what vi uses): alt is drawn over a blank
+            # screen, and leaving it brings the shell's screen back.
+            keys = {" ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
+            def typed(text):
+                monitor(*[f"sendkey {keys.get(c, c)}" for c in text], "sendkey ret")
+            typed("printf '\\033[?1049halt\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.startswith("alt") for l in lines) and not any("echo term" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal's alternate screen replaces the shell's screen")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            typed("printf '\\033[?1049l'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "term" for l in lines) and not any(l.startswith("alt") for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) leaving the alternate screen brings the shell's screen back")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
