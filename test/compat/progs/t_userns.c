@@ -235,8 +235,8 @@ static int setns_child_mntns(void) {
  * children start there (crun exec's way into a container); a user outside
  * is refused. */
 static int pidns_join_by_owner(void) {
-    int up[2], down[2];
-    if (pipe(up) || pipe(down)) return 0;
+    int up[2], down[2], gdown[2];
+    if (pipe(up) || pipe(down) || pipe(gdown)) return 0;
     pid_t c = fork();
     if (c == 0) {
         char b;
@@ -251,7 +251,7 @@ static int pidns_join_by_owner(void) {
         pid_t g = fork();
         if (g == 0) {
             if (getpid() != 1) _exit(1);
-            if (write(rd[1], "x", 1) != 1 || read(down[0], &b, 1) != 1) _exit(2);
+            if (write(rd[1], "x", 1) != 1 || read(gdown[0], &b, 1) != 1) _exit(2);
             _exit(0);
         }
         if (g < 0 || read(rd[0], &b, 1) != 1) _exit(14);
@@ -264,7 +264,7 @@ static int pidns_join_by_owner(void) {
         if (h == 0) _exit(getpid() == 2 ? 0 : 1);
         int st;
         if (h < 0 || waitpid(h, &st, 0) != h || !WIFEXITED(st) || WEXITSTATUS(st) != 0) _exit(17);
-        if (write(down[1], "z", 1) != 1) _exit(18);
+        if (write(gdown[1], "z", 1) != 1) _exit(18);
         _exit(0);
     }
     pid_t g;
