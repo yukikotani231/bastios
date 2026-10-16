@@ -1,6 +1,6 @@
-/* More processes than the 256 the process table once held: 300 children
- * alive at once, ids past 255 in the places that once packed an id into a
- * byte or a /proc directory number: si_pid of a queued signal (and its
+/* More processes than the 512 the process table once held: 700 children
+ * alive at once, ids past 511 (four digits from 1000 on) in the places that
+ * once packed an id into a byte or a /proc directory number: si_pid of a queued signal (and its
  * value beside it), and /proc/PID/fd of the last child. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -12,7 +12,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
-#define KIDS 300
+#define KIDS 700
 
 static volatile sig_atomic_t got_pid, got_val;
 
@@ -57,8 +57,8 @@ int main(void)
         if (p > top)
             top = p;
     }
-    if (top <= 255) {
-        printf("mproc: FAIL no id past 255 (top %d)\n", (int)top);
+    if (top <= 511) {
+        printf("mproc: FAIL no id past 511 (top %d)\n", (int)top);
         return 1;
     }
     /* A child with the highest id signals the parent. */
@@ -78,7 +78,7 @@ int main(void)
     if (q > 0) {
         int st;
         waitpid(q, &st, 0);
-        if (q > 255 && (got_pid != q || got_val != 12345)) {
+        if (q > 511 && (got_pid != q || got_val != 12345)) {
             printf("mproc: FAIL si_pid %d (want %d) value %d\n", (int)got_pid, (int)q, (int)got_val);
             return 1;
         }

@@ -123,9 +123,10 @@ fn pr_exit(k: &mut Kernel, p: u64)
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut c = 1;
-  while c < NPROC
-    invariant 1 <= c && c <= NPROC && kok(k)
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k)
   {
     let s = pr_get(k, c, PRW_DEATH) % 256;
     let st = state(k.procs, c);

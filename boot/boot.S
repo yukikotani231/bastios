@@ -222,7 +222,7 @@ _start:
         mov     %eax, %cr4
         mov     $0xC0000080, %ecx     /* EFER */
         rdmsr
-        or      $0x101, %eax          /* LME | SCE (the `syscall` instruction) */
+        or      $0x901, %eax          /* LME | SCE (the `syscall` instruction) | NXE (user pages the program may write are not executable) */
         wrmsr
         mov     %cr0, %eax
         and     $0xFFFFFFFB, %eax     /* clear EM: x87/SSE run natively */
