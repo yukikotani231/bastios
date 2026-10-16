@@ -173,6 +173,43 @@ static int cgroup_ns(void) {
     return ok;
 }
 
+/* The other memory files a runtime writes: memory.high, memory.low,
+ * memory.min and memory.swap.max read back what was written ("max" and 0 as
+ * they start), memory.swap.current is 0 and memory.stat counts the pages the
+ * group's processes have touched as anon. */
+static int cgroup_mem_files(void) {
+    if (mkdir("/sys/fs/cgroup/cgf", 0755) != 0) return 0;
+    pid_t p = fork();
+    if (p == 0) {
+        char me[32], buf[1024];
+        snprintf(me, sizeof me, "%d", (int)getpid());
+        if (!put("/sys/fs/cgroup/cgf/cgroup.procs", me)) _exit(1);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.high", buf, sizeof buf) || strcmp(buf, "max\n") != 0) _exit(2);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.low", buf, sizeof buf) || strcmp(buf, "0\n") != 0) _exit(3);
+        if (!put("/sys/fs/cgroup/cgf/memory.high", "134217728") || !put("/sys/fs/cgroup/cgf/memory.low", "4096")) _exit(4);
+        if (!put("/sys/fs/cgroup/cgf/memory.min", "max") || !put("/sys/fs/cgroup/cgf/memory.swap.max", "0")) _exit(5);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.high", buf, sizeof buf) || strcmp(buf, "134217728\n") != 0) _exit(6);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.low", buf, sizeof buf) || strcmp(buf, "4096\n") != 0) _exit(7);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.min", buf, sizeof buf) || strcmp(buf, "max\n") != 0) _exit(8);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.swap.max", buf, sizeof buf) || strcmp(buf, "0\n") != 0) _exit(9);
+        if (put("/sys/fs/cgroup/cgf/memory.high", "lots")) _exit(10);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.swap.current", buf, sizeof buf) || strcmp(buf, "0\n") != 0) _exit(11);
+        char *a = mmap(0, 4 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (a == MAP_FAILED) _exit(12);
+        memset(a, 1, 4 << 20);
+        if (!slurp("/sys/fs/cgroup/cgf/memory.stat", buf, sizeof buf) || strncmp(buf, "anon ", 5) != 0 || atol(buf + 5) < (4 << 20)) _exit(13);
+        if (!strstr(buf, "\nfile 0\n")) _exit(14);
+        if (!put("/sys/fs/cgroup/cgroup.procs", me)) _exit(15);
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(p, &st, 0);
+    int ok = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!ok) errno = WIFEXITED(st) ? 1000 + WEXITSTATUS(st) : 2000 + WTERMSIG(st);
+    ok = rmdir("/sys/fs/cgroup/cgf") == 0 && ok;
+    return ok;
+}
+
 /* memory.max: memory.current counts the pages the group's processes have
  * touched, a mapping nobody uses costs nothing, and the process with the most
  * pages in a group that passes the limit is killed (memory.events counts
@@ -601,6 +638,7 @@ int main(void) {
     EXPECT("adjtimex reads and sets", adjust());
     EXPECT("not root: EPERM", not_root());
     EXPECT("a cgroup namespace roots the tree", cgroup_ns());
+    EXPECT("memory.high, low, min, swap.max and stat read back what a runtime writes", cgroup_mem_files());
     EXPECT("memory.max kills the biggest process of a group that passes it", cgroup_mem());
     EXPECT("seccomp USER_NOTIF: a supervisor answers a call", notifier());
     EXPECT("seccomp NOTIF_ADDFD installs a descriptor in the caller", notif_addfd());

@@ -114,7 +114,7 @@ const NF_N: u64 = 10;
 const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroups at P * 3 + 0, 1, 2 (src/lxuser.bastio)
 const UMF_N: u64 = 3;
 const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot * CGF_N + f (src/lxcgroup.bastio)
-const CGF_N: u64 = 18;
+const CGF_N: u64 = 24;
 const SY_LOOP: u64 = SY_CG + CG_N * CGF_N;   // after the cgroups: loop device n's attribute a at n * LOOP_SYS + a
 const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
@@ -854,6 +854,41 @@ fn proc_meta(f: u64) -> Meta {
     return Meta { ok: true, mode: 0x81A4, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
   }
   return Meta { ok: true, mode: S_IFREG_RO, size: 0, ino: INO_PROC + f % 4096, mtime: 0, own: 0 };
+}
+
+/// The process whose directory /proc directory number rel (a DIR_PROC
+/// offset) is: /proc/PID, its ns, fd, task and fdinfo; 0 for any other.
+fn proc_dir_pid(rel: u64) -> u64
+  ensures result < NPROC
+{
+  let mut t = 0;
+  if rel < NS_DIRS {
+    t = rel;
+  } else if rel >= FDI_DIRS {
+    t = rel - FDI_DIRS;
+  } else if rel >= FD_DIRS && rel < NET_DIR {
+    t = rel % 1024;
+  } else if rel >= NS_DIRS && rel < FD_DIRS {
+    t = rel - NS_DIRS;
+  }
+  if t >= NPROC {
+    return 0;
+  }
+  return t;
+}
+
+/// What stat says about /proc file pf, owned by the process it belongs to.
+fn proc_file_meta(k: &Kernel, pf: u64) -> Meta
+  requires kok(k)
+{
+  let m = proc_meta(pf);
+  if pf >= PROC_DEV && pf < PROC_DEV + PSYS {
+    let t = (pf - PROC_DEV) / 16;
+    if t != 0 && t < NPROC {
+      return Meta { ok: m.ok, mode: m.mode, size: m.size, ino: m.ino, mtime: m.mtime, own: proc_own(k, t) };
+    }
+  }
+  return m;
 }
 
 /// What stat says about /proc directory d (a proc_dir description).
