@@ -453,6 +453,71 @@ fn name_keep(t: &mut Buf, tlen: u64, row: u64, x: &Bytes, n: u64)
   t = set(t, row * CWD_STRIDE, n);
 }
 
+/// Saves the last lookup's logical path to t[at..], returning its length.
+fn lname_save(k: &Kernel, t: &mut Bytes, at: u64) -> u64
+  requires kok(k) && at + FNAME_MAX <= blen(t)
+  ensures result <= FNAME_MAX && blen(t) == old(blen(t))
+{
+  let n = lpath_len(k);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && at + FNAME_MAX <= blen(t) && kok(k) && blen(t) == old(blen(t))
+  {
+    bset(&mut t, at + i, bget(k.mstr, i));
+    i = i + 1;
+  }
+  return n;
+}
+
+/// A directory was renamed from x[0..on] to x[F..F+nn] (F = FNAME_MAX, logical names, saved by lname_save):
+/// every row of path table t (cwd or dpath) at or below the old name
+/// follows it. A name that would not fit stays as it was.
+fn path_moved(t: &mut Buf, x: &Bytes, on: u64, nn: u64)
+  requires len(t) <= DPATH_LEN && on > 0 && on <= FNAME_MAX && nn <= FNAME_MAX && blen(x) == 2 * FNAME_MAX
+  ensures len(t) <= DPATH_LEN
+{
+  let mut tmp = balloc(FNAME_MAX);
+  let mut r = 0;
+  while (r + 1) * CWD_STRIDE <= len(t)
+    invariant len(t) <= DPATH_LEN && r <= OFD_N && on > 0 && on <= FNAME_MAX && nn <= FNAME_MAX && blen(x) == 2 * FNAME_MAX && blen(tmp) == FNAME_MAX
+  {
+    let cl = smaller(wget(t, r * CWD_STRIDE), FNAME_MAX);
+    let mut hit = cl >= on;
+    if hit && cl > on && wget(t, r * CWD_STRIDE + 1 + on) != 47 {
+      hit = false;
+    }
+    let mut i = 0;
+    while i < on && hit
+      invariant i <= on && on <= FNAME_MAX && cl <= FNAME_MAX && blen(x) == 2 * FNAME_MAX && len(t) <= DPATH_LEN && (r + 1) * CWD_STRIDE <= len(t)
+    {
+      if wget(t, r * CWD_STRIDE + 1 + i) != cast[u64](bget(x, i)) {
+        hit = false;
+      }
+      i = i + 1;
+    }
+    if hit && cl >= on && nn + (cl - on) <= FNAME_MAX {
+      let rest = cl - on;
+      let mut j = 0;
+      while j < nn
+        invariant j <= nn && nn + rest <= FNAME_MAX && nn <= FNAME_MAX && blen(x) == 2 * FNAME_MAX && blen(tmp) == FNAME_MAX
+      {
+        bset(&mut tmp, j, bget(x, FNAME_MAX + j));
+        j = j + 1;
+      }
+      let mut q = 0;
+      while q < rest
+        invariant q <= rest && nn + rest <= FNAME_MAX && on + rest == cl && cl <= FNAME_MAX && blen(tmp) == FNAME_MAX && len(t) <= DPATH_LEN && (r + 1) * CWD_STRIDE <= len(t)
+      {
+        bset(&mut tmp, nn + q, cast[u8](wget(t, r * CWD_STRIDE + 1 + on + q) % 256));
+        q = q + 1;
+      }
+      name_keep(&mut t, len(t), r, tmp, nn + rest);
+    }
+    r = r + 1;
+  }
+  bfree(tmp);
+}
+
 /// Row `h` of k.dpath, grown to hold it (doubling, so a run of directories
 /// does not copy the table each time). False, with the table as it was,
 /// when memory runs out.
@@ -817,18 +882,24 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   }
   let src_disk = vfs_dev_of(&mut k.fs, n);
   let mut t = balloc(2 * FNAME_MAX);
+  let mut lg = balloc(2 * FNAME_MAX);      // the two logical names
   xfer_save(k, &mut t, 0, n);
+  let oln = lname_save(k, &mut lg, 0);
   let m = lx_path_at_nf_w(&mut k, pid, ndir, npath);
   if m == NO_RESULT {
     bfree(t);
+    bfree(lg);
     return k.perr;
   }
+  let nln = lname_save(k, &mut lg, FNAME_MAX);
   if k.pdir && d == NO_FILE {
     bfree(t);
+    bfree(lg);
     return ENOTDIR;                         // a file renamed to "new/"
   }
   if path_ro(&mut k, m) {
     bfree(t);
+    bfree(lg);
     return EROFS;
   }
   let mut e2 = may_dir(&mut k, pid, m);
@@ -837,6 +908,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   }
   if e2 != 0 {
     bfree(t);
+    bfree(lg);
     return e2;
   }
   xfer_save(k, &mut t, n, m);
@@ -850,6 +922,7 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   }
   if same || (d == NO_FILE && vfs_lookup(&mut k.fs, m) == src_f) {
     bfree(t);
+    bfree(lg);
     return 0;                               // a name renamed to itself, or to another name of its file
   }
   if d != NO_FILE && m > n && bget(t, n + n) == 47 {
@@ -864,23 +937,34 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     }
     if inside {
       bfree(t);
+    bfree(lg);
       return EINVAL;
     }
   }
   if vfs_dev_of(&mut k.fs, m) != src_disk {
     bfree(t);
+    bfree(lg);
     return EXDEV;
   }
   let r = rename_clear(&mut k, m, d != NO_FILE, flags & RENAME_NOREPLACE != 0);
   if r != 0 {
     bfree(t);
+    bfree(lg);
     return r;
   }
   xfer_load(&mut k, t, 0, n + m);
-  bfree(t);
   if !vfs_rename(&mut k.fs, n, m) {
+    bfree(t);
+    bfree(lg);
     return ENOENT;                          // no such directory, or a directory into itself
   }
+  if d != NO_FILE && oln > 0 {
+    // Working directories and open directories under it follow the new name.
+    path_moved(&mut k.cwd, lg, oln, nln);
+    path_moved(&mut k.dpath, lg, oln, nln);
+  }
+  bfree(t);
+  bfree(lg);
   if st != 0 {
     return ovl_commit(&mut k, pid);         // a lower layer's name is hidden now
   }
