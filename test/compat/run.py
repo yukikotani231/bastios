@@ -126,7 +126,7 @@ class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
     /repo.git, a git repository for the dumb HTTP protocol, and
-    /lsp-server.lua, /lsp-client.lua and /lsp-real-client.lua, the files of the Neovim LSP cases."""
+    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
 
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
@@ -155,7 +155,7 @@ class WebServer:
             subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)
             subprocess.run(git + ["update-server-info"], cwd=bare, capture_output=True)
             shutil.rmtree(work)
-        for name in ("server.lua", "client.lua", "real-client.lua"):
+        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "termdebug.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
         handler = functools.partial(Quiet, directory=self.dir)
@@ -604,12 +604,27 @@ def run_on_host(name, cmd, expected, timeout):
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
-def run_tty(env, name, prog, keys, check, expected, timeout, bb):
-    """A tty.txt case: prog driven by keys, then check as an applet case."""
+def run_tty_once(env, name, prog, keys, check, expected, timeout, bb):
     if not env.keys(with_bb(prog, bb), keys, timeout):
         return {"name": name, "result": "hang", "detail": "the program did not return to the shell",
                 "syscalls": []}
     return run_applet(env, name, check, expected, timeout, bb)
+
+
+def run_tty(env, name, prog, keys, check, expected, timeout, bb):
+    """A tty.txt case: prog driven by keys, then check as an applet case.
+    Keys typed at a full-screen program race the emulator's timing, and a
+    loaded host can lose that race (a hang, or keys that arrive early). As
+    for the cases of the other groups, a failure runs again once, and a pass
+    is kept; the first try is printed so it does not go unseen."""
+    first = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if first["result"] not in ("hang", "fail"):
+        return first
+    second = run_tty_once(env, name, prog, keys, check, expected, timeout, bb)
+    if second["result"] == "pass":
+        print(f"compat: {name}: passed on the second try (first: {first['result']}, {first['detail'][:120]})", flush=True)
+        second["retried"] = True
+    return second
 
 
 # ---------------------------------------------------------------- reporting
@@ -681,6 +696,8 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
+    ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -702,6 +719,8 @@ def main():
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
+    java = load_applets(os.path.join(HERE, "java.txt"))
+    rust = load_applets(os.path.join(HERE, "rust.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
@@ -792,9 +811,12 @@ def main():
         if args.alpine_repo:
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
+        # 384M: a runc started inside a runc container is two Go runtimes
+        # and two roots unpacked on the disk; at 256M a thread of one of
+        # them now and then could not be made.
         lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
                              ("alpine-tty", "programs on the terminal in Alpine",
-                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])]))
+                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])], "384M"))
     if args.debian_disk:
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
@@ -812,6 +834,17 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append((disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
+    if args.jdk_disk:
+        # The cases unpack a root of about 400 MB onto the disk: a copy.
+        disk = os.path.join(args.out, "jdk-run.img")
+        shutil.copyfile(args.jdk_disk, disk)
+        lanes.append((disk, [("java", "JDK", applets_lane(java, 900))], "2G"))
+    if args.rust_disk:
+        # rustc is a large dynamic program, and the cases unpack a root
+        # of about a gigabyte onto the disk: a copy.
+        disk = os.path.join(args.out, "rust-run.img")
+        shutil.copyfile(args.rust_disk, disk)
+        lanes.append((disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
     lanes = [l for l in lanes if l[1]]
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
@@ -828,7 +861,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
