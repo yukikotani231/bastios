@@ -45,6 +45,20 @@ def screen_text(ppm):
         lines.append(line.rstrip())
     return lines
 
+def screen_text_at(px, w, ox, oy, cols, rows):
+    # Lines of text in a block of cells at pixel (ox, oy), read from the pixels of a screendump.
+    lines = []
+    for cy in range(rows):
+        line = ""
+        for cx in range(cols):
+            cell = []
+            for r in range(16):
+                i = ((oy + cy * 16 + r) * w + ox + cx * 8) * 3
+                cell.append(sum(1 << p for p in range(8) if px[i + p * 3] > 0x60))
+            line += glyphs.get(tuple(cell), "?")
+        lines.append(line.rstrip())
+    return lines
+
 def usbkeys(path, keys):
     # Key presses through QMP, which QEMU hands to the USB keyboard (the
     # machine has no other).
@@ -346,6 +360,28 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm again")
             fails += not good
+        # bterm (user/bterm.c): a terminal window with ash behind it. A line
+        # typed is run and what it prints is read back off the screen, cell
+        # by cell, from the window's contents.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+        good = until(b"bterm: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) bterm opens a terminal window")
+        fails += not good
+        if good:
+            time.sleep(1.5)
+            monitor("sendkey e", "sendkey c", "sendkey h", "sendkey o", "sendkey spc", "sendkey t", "sendkey e", "sendkey r", "sendkey m", "sendkey ret")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "term" for l in lines) and any("echo term" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) a line typed into the terminal window runs in ash and its output is drawn")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey ctrl-q")
+            until(b"bwm: bye", mark)
+            time.sleep(0.5)
         mark = len(out)
         q.stdin.write(b"exit\r"); q.stdin.flush()
         until(b"bastios> ", mark)
