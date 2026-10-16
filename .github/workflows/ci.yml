@@ -402,7 +402,7 @@ jobs:
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
       - name: Build the disks
-        run: make ARCH=aarch64 compat-disks COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
+        run: make -j4 ARCH=aarch64 compat-disks COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
       - name: Save the third-party programs
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
