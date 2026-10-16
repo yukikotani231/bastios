@@ -27,6 +27,20 @@ for c in range(32, 127):
     glyphs[g] = chr(c)
     glyphs[tuple(255 - b for b in g)] = chr(c)              # under the cursor
 
+# src/font16.bin (layout in tools/mkfont.py): one-cell glyphs of 16 rows, and
+# two-cell ones of 16 rows of two bytes, by code point.
+f16 = open("src/font16.bin", "rb").read()
+nw, nn = int.from_bytes(f16[0:4], "little"), int.from_bytes(f16[4:8], "little")
+wcp = [int.from_bytes(f16[8 + 2 * i:10 + 2 * i], "little") for i in range(nw)]
+ncp = [int.from_bytes(f16[8 + 2 * nw + 2 * i:10 + 2 * nw + 2 * i], "little") for i in range(nn)]
+wbase, nbase = 8 + 2 * nw + 2 * nn, 8 + 2 * nw + 2 * nn + 32 * nw
+wide = {tuple(f16[wbase + 32 * i:wbase + 32 * i + 32]): chr(c) for i, c in enumerate(wcp)}
+for i, c in enumerate(ncp):
+    g = tuple(f16[nbase + 16 * i:nbase + 16 * i + 16])
+    if g not in glyphs:                                     # Greek capitals look like Latin ones
+        glyphs[g] = chr(c)
+        glyphs[tuple(255 - b for b in g)] = chr(c)
+
 def screen_text(ppm):
     # The lines of text on a screendump (binary PPM), read cell by cell.
     head, rest = ppm.split(b"\n", 1)
@@ -35,13 +49,23 @@ def screen_text(ppm):
     w, h = map(int, dims.split())
     lines = []
     for cy in range(h // 16):
-        line = ""
+        line, cells = "", []
         for cx in range(w // 8):
             cell = []
             for r in range(16):
                 i = ((cy * 16 + r) * w + cx * 8) * 3
                 cell.append(sum(1 << p for p in range(8) if px[i + p * 3] > 0x40))
-            line += glyphs.get(tuple(cell), "?")
+            cells.append(tuple(cell))
+        i = 0
+        while i < len(cells):
+            if cells[i] in glyphs:
+                line += glyphs[cells[i]]
+            elif i + 1 < len(cells) and tuple(b for r in range(16) for b in (cells[i][r], cells[i + 1][r])) in wide:
+                line += wide[tuple(b for r in range(16) for b in (cells[i][r], cells[i + 1][r]))]
+                i += 1
+            else:
+                line += "?"
+            i += 1
         lines.append(line.rstrip())
     return lines
 
@@ -211,21 +235,69 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if firmware != []:
                 print(("ok  " if high else "FAIL"), f"({name}) the 64-bit BARs lie above 4 GiB")
                 fails += not high
+        # UTF-8 on the screen: the serial line takes the bytes, the screen
+        # draws them (kana and kanji in two cells, accented letters, box
+        # drawing and half-width katakana in one; a two-cell character that
+        # would straddle the right edge wraps whole: the typed line is 113 letters
+        # after the prompt, and the kanji after them starts the next line).
+        mark = len(out)
+        q.stdin.write("echo 日本語かな café ─│ ｱｲｳ\r".encode()); q.stdin.flush()
+        until(b"bastios> ", mark)
+        mark = len(out)
+        q.stdin.write(("echo " + "x" * 113 + "日\r").encode()); q.stdin.flush()
+        until(b"bastios> ", mark)
         dump = os.path.join(tmp.name, "screen.ppm")
-        mon.sendall(f"screendump {dump}\n".encode())
-        text = []
-        for _ in range(50):
-            time.sleep(0.1)
-            if os.path.exists(dump) and os.path.getsize(dump) > 1024 * 768 * 3:
-                text = screen_text(open(dump, "rb").read())
-                break
-        mon.close()
-        want = ["screen: 1024x768 framebuffer", "bastios> echo On_screen", "On_screen"]
+        def grab():
+            if os.path.exists(dump):
+                os.unlink(dump)
+            mon.sendall(f"screendump {dump}\n".encode())
+            for _ in range(50):
+                time.sleep(0.1)
+                if os.path.exists(dump) and os.path.getsize(dump) > 1024 * 768 * 3:
+                    time.sleep(0.2)
+                    return screen_text(open(dump, "rb").read())
+            return []
+        text = grab()
+        want = ["screen: 1024x768 framebuffer", "bastios> echo On_screen", "On_screen",
+                "日本語かな café ─│ ｱｲｳ", "bastios> echo " + "x" * 113, "日", "x" * 113 + "日"]
         good = all(w in text for w in want)
         print(("ok  " if good else "FAIL"), f"({name}) the framebuffer console shows it")
         if not good:
             print("\n".join(l for l in text if l))
         fails += not good
+        # Escape sequences: `echo` writes them (`\\e` is ESC) and the screen
+        # obeys them. Clear, move to row 5 column 10, write
+        # kanji, step back two cells and overwrite with a letter, delete a
+        # character, then draw on the alternate screen and come back.
+        mark = len(out)
+        q.stdin.write(b"echo \\e[2J\\e[5;10H\xe6\x97\xa5\xe6\x9c\xac\\e[2DAB\\e[1P\\e[8;3Hhere\\e[?1049hALT\\e[?1049l\r")
+        q.stdin.flush()
+        until(b"bastios> ", mark)
+        time.sleep(0.5)
+        text = grab()
+        good = len(text) > 8 and text[4] == " " * 9 + "日AB" and text[7].startswith("  here") and not any("ALT" in l for l in text)
+        print(("ok  " if good else "FAIL"), f"({name}) the framebuffer console obeys escape sequences")
+        if not good:
+            print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
+        fails += not good
+        # Editing keys: the arrows send ESC [ A to ESC [ D, Delete ESC [ 3 ~;
+        # the line editor drops the ESC, so the rest shows in the line.
+        mark = len(out)
+        keys = ["e", "c", "h", "o", "spc", "up", "down", "right", "left", "delete"]
+        if usb:
+            usbkeys(qmp_path, keys)
+        else:
+            sendkeys(mon, keys)
+        time.sleep(1)
+        text = grab()
+        good = any(l.endswith("bastios> echo [A[B[C[D[3~") for l in text)
+        print(("ok  " if good else "FAIL"), f"({name}) arrow and Delete keys send escape sequences")
+        if not good:
+            print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
+        fails += not good
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"bastios> ", mark)
+        mon.close()
     if ok and not diag and not usb and not nvme and not stick:
         # /dev/fb0 (user/mfb.c): a program draws on the screen, and the
         # console stops drawing while it holds the device and comes back
@@ -360,6 +432,28 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm again")
             fails += not good
+        # The same client with its pixels in memory shared with bwm
+        # (bhello -s: a memfd sent over the socket with SCM_RIGHTS).
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bhello -s\r"); q.stdin.flush()
+        good = until(b"bhello: shared window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a client opens a window whose pixels are shared memory")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = at(80, 100) == (255, 0, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) bwm shows what the client wrote into the shared pixels")
+            fails += not good
+            monitor("sendkey y")
+            good = until(b"bhello: key y", mark)
+            w, h, px = screendump()
+            good = good and at(80, 100) == (255, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a change in the shared pixels shows after the client says where")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"# ", mark)
+            fails += not good
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
@@ -376,6 +470,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             lines = screen_text_at(px, w, 72, 90, 80, 24)
             good = any(l.strip() == "term" for l in lines) and any("echo term" in l for l in lines)
             print(("ok  " if good else "FAIL"), f"({name}) a line typed into the terminal window runs in ash and its output is drawn")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # The alternate screen (what vi uses): alt is drawn over a blank
+            # screen, and leaving it brings the shell's screen back.
+            keys = {" ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
+            def typed(text):
+                monitor(*[f"sendkey {keys.get(c, c)}" for c in text], "sendkey ret")
+            typed("printf '\\033[?1049halt\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.startswith("alt") for l in lines) and not any("echo term" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal's alternate screen replaces the shell's screen")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            typed("printf '\\033[?1049l'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "term" for l in lines) and not any(l.startswith("alt") for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) leaving the alternate screen brings the shell's screen back")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
