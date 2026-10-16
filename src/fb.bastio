@@ -32,6 +32,7 @@ struct Fb {
   cy: u64,
   fg: u64,            // the text colour, as a pixel
   esc: u64,           // 0, or inside an escape sequence: 1 after ESC, 2 after ESC [
+  held: bool,         // a program draws on the screen (src/lxfb.bastio): the text is kept, not drawn
   text: Bytes,        // cols * rows characters
   shown: Bytes,       // what each cell shows now
 }
@@ -51,6 +52,9 @@ fn fb_draw(f: &mut Fb, col: u64, row: u64, c: u64, inv: bool)
   requires fb_ok(f) && col < f.cols && row < f.rows
   ensures fb_ok(f)
 {
+  if f.held {
+    return;
+  }
   let g = font();
   let mut ch = c;
   if ch >= 128 {
@@ -224,7 +228,7 @@ fn fb_new(regs: Mmio, size: u64, pitch: u64, width: u64, height: u64, rgb: u64) 
   let rows = height / CELL_H;
   let fg = (FG_LEVEL << (rgb % 32)) + (FG_LEVEL << (rgb / 256 % 32)) + (FG_LEVEL << (rgb / 65536 % 32));
   let mut f = Fb { regs: regs, size: size, pitch: pitch, cols: cols, rows: rows, cx: 0, cy: 0,
-    fg: fg % 4294967296, esc: 0, text: balloc(cols * rows), shown: balloc(cols * rows) };
+    fg: fg % 4294967296, esc: 0, held: false, text: balloc(cols * rows), shown: balloc(cols * rows) };
   let mut o = 0;
   while o + 4 <= size
     invariant o % 4 == 0 && o <= size && fb_ok(f) && f.size == size
@@ -249,6 +253,61 @@ fn fb_new(regs: Mmio, size: u64, pitch: u64, width: u64, height: u64, rgb: u64) 
   }
   fb_draw(&mut f, 0, 0, 32, true);
   return f;
+}
+
+/// A program takes the screen (the pixels it writes are not the console's):
+/// the console goes on filling its text, but stops drawing it.
+fn fb_hold(f: &mut Fb)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  f.held = true;
+}
+
+/// The console has the screen back: blank, then every cell drawn again.
+fn fb_release(f: &mut Fb)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  f.held = false;
+  let mut o = 0;
+  while o + 4 <= f.size
+    invariant o % 4 == 0 && o <= f.size && fb_ok(f)
+  {
+    mmio_write32(&mut f.regs, o, 0);
+    o = o + 4;
+  }
+  let mut i = 0;
+  while i < blen(f.shown)
+    invariant fb_ok(f)
+  {
+    bset(&mut f.shown, i, 0);              // no cell shows its character
+    i = i + 1;
+  }
+  fb_refresh(&mut f);
+  fb_draw(&mut f, f.cx, f.cy, fb_at(f, f.cx, f.cy), true);
+}
+
+/// Stores the n bytes of src from index `from` at byte `off` of the
+/// framebuffer, as far as they fit (a pixel is 4 bytes; a write that
+/// starts or ends inside one is rounded down to whole pixels).
+fn fb_blit(f: &mut Fb, off: u64, src: &Bytes, from: u64, n: u64)
+  requires fb_ok(f) && from <= blen(src) && n <= blen(src) - from && off <= 281474976710656 && n <= 65536
+  ensures fb_ok(f)
+{
+  let mut i = 0;
+  while i + 4 <= n && off + i + 4 <= f.size
+    invariant i <= n && n <= 65536 && off <= 281474976710656 && fb_ok(f) && n <= blen(src) - from && from <= blen(src)
+  {
+    if (off + i) % 4 == 0 {
+      let px = cast[u64](bget(src, from + i)) + 256 * cast[u64](bget(src, from + i + 1))
+        + 65536 * cast[u64](bget(src, from + i + 2)) + 16777216 * cast[u64](bget(src, from + i + 3));
+      mmio_write32(&mut f.regs, off + i, cast[u32](px));
+      i = i + 4;
+    } else {
+      i = i + 1;                           // up to the next pixel boundary
+    }
+  }
 }
 
 /// Gives the block back (at power off).
@@ -292,6 +351,46 @@ fn screen_put(s: &mut Screen, b: u8)
     Screen::None => { s = Screen::None; },
     Screen::Fb(mut f) => {
       fb_put(&mut f, cast[u64](b));
+      s = Screen::Fb(f);
+    },
+  }
+}
+
+/// The console stops drawing, or draws again, or a program's pixels go on the screen (src/lxfb.bastio).
+fn screen_hold(s: &mut Screen)
+  requires screen_ok(s)
+  ensures screen_ok(s)
+{
+  match s {
+    Screen::None => { s = Screen::None; },
+    Screen::Fb(mut f) => {
+      fb_hold(&mut f);
+      s = Screen::Fb(f);
+    },
+  }
+}
+
+fn screen_release(s: &mut Screen)
+  requires screen_ok(s)
+  ensures screen_ok(s)
+{
+  match s {
+    Screen::None => { s = Screen::None; },
+    Screen::Fb(mut f) => {
+      fb_release(&mut f);
+      s = Screen::Fb(f);
+    },
+  }
+}
+
+fn screen_blit(s: &mut Screen, off: u64, src: &Bytes, from: u64, n: u64)
+  requires screen_ok(s) && from <= blen(src) && n <= blen(src) - from && off <= 281474976710656 && n <= 65536
+  ensures screen_ok(s)
+{
+  match s {
+    Screen::None => { s = Screen::None; },
+    Screen::Fb(mut f) => {
+      fb_blit(&mut f, off, src, from, n);
       s = Screen::Fb(f);
     },
   }

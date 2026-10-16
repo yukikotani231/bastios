@@ -4,11 +4,11 @@ A small x86-64 kernel written in [Bastio](https://github.com/yukikotani231/basti
 
 > **Status: experimental.** Everything here has been tried in QEMU only; no real PC has booted it yet. The system call ABI and the disk format can still change.
 >
-> **Works today, in QEMU:** a Unix shell (BusyBox), users and passwords with `login` and `su`, files kept on a disk, DHCP, DNS, TCP/IP over IPv4 and IPv6, an SSH server (Dropbear), a web server, Alpine Linux's binaries and its package manager `apk` in a `chroot`, and programs such as Lua, Python, sqlite, git and a C compiler.
+> **Works today, in QEMU:** a Unix shell (BusyBox), users and passwords with `login` and `su`, files kept on a disk, DHCP, DNS, TCP/IP over IPv4 and IPv6, an SSH server (Dropbear), a web server, Alpine Linux's binaries and its package manager `apk` in a `chroot`, and programs such as Lua, Python, sqlite, git, Node.js, Go and a C compiler. Development tools run too: Neovim, gcc, make, cmake, `gdb`, `strace` and `tmux`, and so do the container runtimes `runc` and `crun`. It also builds for AArch64 and boots on QEMU's `virt` machine. [Development on BastiOS](docs/development.md) says what is tested and how.
 >
-> **Not yet:** a real PC, a login prompt at boot, users and SSH keys that survive a reboot, more than 31 processes or 1023 files on the disk, a graphical desktop.
+> **Not yet:** a real PC (images and drivers for real hardware exist but none has been tried: see [Real hardware](docs/real-hardware.md)), a login prompt by default (it is a boot option), users and SSH keys that survive a reboot, a graphical desktop.
 >
-> [Using BastiOS](docs/using.md) walks through all of it, from `make run` to logging in over SSH.
+> [Using BastiOS](docs/using.md) walks through all of it, from `make run` to logging in over SSH. The full list of documents is in [docs/README.md](docs/README.md).
 
 <!-- guide-test: session -->
 ```text
@@ -57,7 +57,7 @@ The first build proves every source file and fetches BusyBox, so it takes a whil
 - **Processors.** Every processor runs the scheduler. The kernel's state is under one lock (`Lock[Sys]`) and the console's devices under another, while user code runs in parallel, including the threads of one process, which share its address space.
 - **Programs.** BastiOS's own programs use its system call ABI (`int 0x80`). Linux x86-64 ELF executables use the Linux ABI (`syscall`): static or dynamic, against musl, or static against glibc. Much of the Linux system call interface is implemented: files, pipes, signals, threads and futexes, `poll` and `epoll`, timers, and sockets; [docs/linux.md](docs/linux.md) lists them. `make compat` runs a compatibility suite (`test/compat`).
 - **Files.** An in-memory file system, and one on the disk under `disk/` that keeps every write whole across a power cut (copy-on-write). The disk is a partition on a USB stick (the one it booted from, with `make usb`), an NVMe drive, a virtio disk (PCI, or MMIO on a microVM), a SATA disk on an AHCI controller or a legacy ATA disk; commands are queued behind a block cache and, except on ATA, finish by interrupt (MSI-X or MSI), so a process waiting for the disk sleeps.
-- **Network.** A virtio card, an Intel card of the e1000 families (8254x, 82574L, 82576 and the igb chips after it, the PCH's I217-I219 and the I225/I226, both untested) a Realtek RTL8111/8168 (never run against a card or a model) or an AWS ENA (tested against a model only: [docs/cloud.md](docs/cloud.md)); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), IPv6 (neighbor discovery, an address from the router's prefix, UDP and TCP), a name server for the C library's resolver, loopback, and Unix sockets.
+- **Network.** A virtio card, an Intel card of the e1000 families (8254x, 82574L, 82576, I350, I210 and I211, the PCH's I217-I219, and the I225/I226; the I350, I210, I211, I217-I219 and I225/I226 are untested on hardware), a Realtek RTL8111/8168 (never run against a card or a model) or an AWS ENA (tested against a model only: [docs/cloud.md](docs/cloud.md)); DHCP, ARP, IPv4, ICMP, UDP and TCP (retransmission, out-of-order data, zero windows), IPv6 (neighbor discovery, an address from the router's prefix, UDP and TCP), a name server for the C library's resolver, loopback, and Unix sockets.
 - **Console.** The first serial port, and from the ISO or USB image the screen (the framebuffer the boot loader sets up) with a PS/2 or USB keyboard (and mouse, for Linux programs).
 
 How the pieces fit together, and what is proved where, is in [docs/architecture.md](docs/architecture.md).
@@ -143,7 +143,10 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `user/*.c`, `user/*.S` | Test programs in C and assembly: musl programs for the Linux system calls, freestanding ELF and fault tests, the system call fuzzer |
 | `files/` | Files installed in memory at boot (built into the kernel image) |
 | `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
-| `docs/` | [Getting started](docs/getting-started.md), [using BastiOS](docs/using.md), [architecture](docs/architecture.md), [Linux programs](docs/linux.md), [trusted base](docs/trusted-base.md), [users and permissions](docs/security.md), [releasing](docs/releasing.md) |
+| `arch/aarch64/`, `src/aarch64/`, `boot/aarch64/` | The AArch64 port ([docs/aarch64.md](docs/aarch64.md)) |
+| `bench/` | The benchmarks against Linux ([docs/performance.md](docs/performance.md)) |
+| `tools/` | Helpers: `mkusb.py` (USB images), `ocipull.sh` (pull a container image), `qemu-ena` (a model of the AWS adapter for QEMU), `proof_coverage.py` (which kernel functions carry specifications) |
+| `docs/` | Everything else; the index is [docs/README.md](docs/README.md) |
 
 ## Contributing
 
