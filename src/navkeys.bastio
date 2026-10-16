@@ -190,3 +190,115 @@ fn evkey_ext(c: u64) -> u64
   }
   return 0;
 }
+
+/// The Linux key code of the modifier in bit b (0 to 7) of a HID boot
+/// report's first byte: Ctrl, Shift, Alt and the Meta key, left then right.
+fn evkey_mod(b: u64) -> u64
+  ensures result < 128
+{
+  if b == 0 {
+    return 29;                              // KEY_LEFTCTRL
+  } else if b == 1 {
+    return 42;                              // KEY_LEFTSHIFT
+  } else if b == 2 {
+    return 56;                              // KEY_LEFTALT
+  } else if b == 3 {
+    return 125;                             // KEY_LEFTMETA
+  } else if b == 4 {
+    return 97;                              // KEY_RIGHTCTRL
+  } else if b == 5 {
+    return 54;                              // KEY_RIGHTSHIFT
+  } else if b == 6 {
+    return 100;                             // KEY_RIGHTALT
+  }
+  return 126;                               // KEY_RIGHTMETA
+}
+
+/// The Linux key codes of HID usages 0x04 to 0x1D (a to z), each plus 32.
+fn evkey_letters() -> Str {
+  return ">PN@2ABC7DEFRQ8903?46O1M5L";
+}
+
+/// The Linux key code (input-event-codes.h) of HID usage u, or 0 for a key
+/// without one here.
+fn evkey_usb(u: u64) -> u64
+  ensures result < 128
+{
+  if u >= 0x04 && u <= 0x1D {
+    let m = evkey_letters();
+    if u - 4 < slen(m) {
+      let c = cast[u64](sget(m, u - 4));
+      if c >= 32 && c < 128 {
+        return c - 32;
+      }
+    }
+    return 0;
+  } else if u >= 0x1E && u <= 0x26 {
+    return u - 0x1E + 2;                    // KEY_1 to KEY_9
+  } else if u == 0x27 {
+    return 11;                              // KEY_0
+  } else if u == 0x28 {
+    return 28;                              // KEY_ENTER
+  } else if u == 0x29 {
+    return 1;                               // KEY_ESC
+  } else if u == 0x2A {
+    return 14;                              // KEY_BACKSPACE
+  } else if u == 0x2B {
+    return 15;                              // KEY_TAB
+  } else if u == 0x2C {
+    return 57;                              // KEY_SPACE
+  } else if u == 0x2D {
+    return 12;                              // KEY_MINUS
+  } else if u == 0x2E {
+    return 13;                              // KEY_EQUAL
+  } else if u == 0x2F {
+    return 26;                              // KEY_LEFTBRACE
+  } else if u == 0x30 {
+    return 27;                              // KEY_RIGHTBRACE
+  } else if u == 0x31 || u == 0x32 {
+    return 43;                              // KEY_BACKSLASH
+  } else if u == 0x33 {
+    return 39;                              // KEY_SEMICOLON
+  } else if u == 0x34 {
+    return 40;                              // KEY_APOSTROPHE
+  } else if u == 0x35 {
+    return 41;                              // KEY_GRAVE
+  } else if u == 0x36 {
+    return 51;                              // KEY_COMMA
+  } else if u == 0x37 {
+    return 52;                              // KEY_DOT
+  } else if u == 0x38 {
+    return 53;                              // KEY_SLASH
+  } else if u == 0x39 {
+    return 58;                              // KEY_CAPSLOCK
+  } else if u >= 0x3A && u <= 0x43 {
+    return u - 0x3A + 59;                   // KEY_F1 to KEY_F10
+  } else if u == 0x44 {
+    return 87;                              // KEY_F11
+  } else if u == 0x45 {
+    return 88;                              // KEY_F12
+  } else if u == 0x49 {
+    return 110;                             // KEY_INSERT
+  } else if u == 0x4A {
+    return 102;                             // KEY_HOME
+  } else if u == 0x4B {
+    return 104;                             // KEY_PAGEUP
+  } else if u == 0x4C {
+    return 111;                             // KEY_DELETE
+  } else if u == 0x4D {
+    return 107;                             // KEY_END
+  } else if u == 0x4E {
+    return 109;                             // KEY_PAGEDOWN
+  } else if u == 0x4F {
+    return 106;                             // KEY_RIGHT
+  } else if u == 0x50 {
+    return 105;                             // KEY_LEFT
+  } else if u == 0x51 {
+    return 108;                             // KEY_DOWN
+  } else if u == 0x52 {
+    return 103;                             // KEY_UP
+  } else if u == 0x58 {
+    return 96;                              // KEY_KPENTER
+  }
+  return 0;
+}
