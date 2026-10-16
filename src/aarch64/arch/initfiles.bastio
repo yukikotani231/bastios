@@ -5,7 +5,7 @@
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
 // /etc/shells lists the login shells (getusershell; an SSH server refuses
 // a user whose shell is not there).
-const NINIT: u64 = 7;
+const NINIT: u64 = 8;
 
 fn init_name(i: u64) -> Str
   ensures slen(result) <= 16
@@ -28,7 +28,10 @@ fn init_name(i: u64) -> Str
   if i == 5 {
     return "etc/shadow";
   }
-  return "etc/shells";
+  if i == 6 {
+    return "etc/shells";
+  }
+  return "etc/profile";
 }
 
 fn init_data(i: u64) -> Str {
@@ -50,7 +53,10 @@ fn init_data(i: u64) -> Str {
   if i == 5 {
     return include_bytes("../../../files/shadow");
   }
-  return include_bytes("../../../files/shells");
+  if i == 6 {
+    return include_bytes("../../../files/shells");
+  }
+  return include_bytes("../../../files/profile");
 }
 
 /// The permission bits of init file i.

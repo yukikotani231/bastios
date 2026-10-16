@@ -39,3 +39,32 @@ t.bastio:2:3: error[E-TYPE]: the returned value must be u64, found bool
  2 |   return true;
    |   ^^^^^^
 status 1
+
+== bastiofmt: lays a line out
+$ printf 'fn main()->u64{ return 1 ; }\n' | /disk/bastiofmt -
+fn main() -> u64 { return 1; }
+
+== bastiofmt: --check names an unformatted file
+$ printf 'fn main()->u64{ return 1 ; }\n' > /u.bastio; /disk/bastiofmt --check /u.bastio; echo status $?; rm /u.bastio
+/u.bastio
+status 1
+
+== bastiofmt: formats the compiler's parser, and the result is formatted
+$ /disk/bastiofmt /disk/s/parser.bastio > /f1 && /disk/bastiofmt --check /f1 && echo stable; rm -f /f1
+stable
+
+== bastio-lsp: hover shows the signature and the doc comment
+$ sh /disk/lsp_session.sh hover
+ok hover
+
+== bastio-lsp: go to definition
+$ sh /disk/lsp_session.sh definition
+ok definition
+
+== bastio-lsp: formatting
+$ sh /disk/lsp_session.sh format
+ok format
+
+== bastio-lsp: a type error from bastioc1 becomes a diagnostic
+$ sh /disk/lsp_session.sh diagnostic
+ok diagnostic
