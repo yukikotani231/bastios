@@ -168,7 +168,7 @@ struct DiskFs {
   hint: u64,            // where the next allocation starts looking
   ix: Bytes,            // the index of names (below), IX_BYTES once built, else empty
   ixn: u64,             // its cells in use
-  free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); 0 after one is freed
+  free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); lowered to a freed one
   foreign: bool,        // the disk holds something else, and is left alone
   links: bool,          // a hard link entry may exist: false lets disk_links skip counting them
 }
@@ -1460,7 +1460,9 @@ fn disk_take_name(d: &mut DiskFs, i: u64, l: u64) -> bool
     j = j + 1;
   }
   let shared = i / 2 == l / 2;       // two entries to a sector
-  d.free0 = 0;
+  if l < d.free0 {
+    d.free0 = l;
+  }
   if shared {
     dent_setb(&mut d, l, E_KIND, 0);
   }
@@ -1660,7 +1662,9 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   let r = dent_tree(d, i);
   let file = dent_byte(d, i, E_KIND) == 1 || cast[u64](dent_byte(d, i, E_KIND)) == K_ORPHAN;
   dent_setb(&mut d, i, E_KIND, 0);
-  d.free0 = 0;
+  if i < d.free0 {
+    d.free0 = i;
+  }
   if !ent_flush(&mut d, i) {
     return false;
   }
