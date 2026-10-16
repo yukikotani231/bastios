@@ -329,9 +329,10 @@ jobs:
   # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
   # suite's C programs and a BusyBox against glibc, and Alpine, on QEMU's virt
   # machine. Every guest is emulated (TCG), so the lanes (test/compat/run.py)
-  # are spread over three runners, each building only the disks of its
-  # lanes. The last part runs every lane the first two do not name, so a lane
-  # added later runs there (its disk must be added to that part's list, or
+  # are spread over four runners, each building only the disks of its
+  # lanes (the two Alpine parts build the same disk and share its caches).
+  # The last part runs every lane the others do not name, so a lane added
+  # later runs there (its disk must be added to that part's list, or
   # run.py stops for want of it). Each part holds to the baseline every
   # check of the groups its lanes hold.
   compat-aarch64:
@@ -350,8 +351,13 @@ jobs:
           - part: alpine
             lanes: alpine,alpine2
             disks: alpine.img
+            cache: alpine
+          - part: alpine-tools
+            lanes: alpine3,alpine4
+            disks: alpine.img
+            cache: alpine
           - part: rest
-            skip: main1,bastio,alpine,alpine2
+            skip: main1,bastio,alpine,alpine2,alpine3,alpine4
             disks: debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
@@ -386,7 +392,7 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-arm64-${{ matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -398,8 +404,8 @@ jobs:
         id: al
         uses: actions/cache/restore@v4
         with:
-          key: compat-alpine-arm64-${{ matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
-          restore-keys: compat-alpine-arm64-${{ matrix.part }}-
+          key: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
@@ -409,7 +415,7 @@ jobs:
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-arm64-${{ matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -422,7 +428,7 @@ jobs:
         if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-alpine-arm64-${{ matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          key: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
