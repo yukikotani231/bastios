@@ -1,0 +1,93 @@
+// The editing keys as a terminal sends them: ESC [ A for Up and so on. A
+// key gives ESC at once and the rest of its bytes packed into one number
+// (first byte lowest, none zero), so a keyboard driver that hands over one
+// byte at a time can feed them out afterwards.
+
+const NAV_UP: u64 = 0;
+const NAV_DOWN: u64 = 1;
+const NAV_RIGHT: u64 = 2;
+const NAV_LEFT: u64 = 3;
+const NAV_HOME: u64 = 4;
+const NAV_END: u64 = 5;
+const NAV_DELETE: u64 = 6;
+const NAV_PGUP: u64 = 7;
+const NAV_PGDN: u64 = 8;
+
+/// The bytes after ESC for navigation key n (NAV_*): `[` and a letter, or
+/// `[`, a digit and `~`. At most three bytes.
+fn nav_rest(n: u64) -> u64
+  ensures result < 16777216
+{
+  if n == NAV_UP {
+    return 91 + 65 * 256;
+  } else if n == NAV_DOWN {
+    return 91 + 66 * 256;
+  } else if n == NAV_RIGHT {
+    return 91 + 67 * 256;
+  } else if n == NAV_LEFT {
+    return 91 + 68 * 256;
+  } else if n == NAV_HOME {
+    return 91 + 72 * 256;
+  } else if n == NAV_END {
+    return 91 + 70 * 256;
+  } else if n == NAV_DELETE {
+    return 91 + 51 * 256 + 126 * 65536;
+  } else if n == NAV_PGUP {
+    return 91 + 53 * 256 + 126 * 65536;
+  } else if n == NAV_PGDN {
+    return 91 + 54 * 256 + 126 * 65536;
+  }
+  return 0;
+}
+
+/// The key for PS/2 extended scan code c (after 0xE0), or 9 for none.
+fn nav_ps2(c: u64) -> u64
+  ensures result <= 9
+{
+  if c == 0x48 {
+    return NAV_UP;
+  } else if c == 0x50 {
+    return NAV_DOWN;
+  } else if c == 0x4D {
+    return NAV_RIGHT;
+  } else if c == 0x4B {
+    return NAV_LEFT;
+  } else if c == 0x47 {
+    return NAV_HOME;
+  } else if c == 0x4F {
+    return NAV_END;
+  } else if c == 0x53 {
+    return NAV_DELETE;
+  } else if c == 0x49 {
+    return NAV_PGUP;
+  } else if c == 0x51 {
+    return NAV_PGDN;
+  }
+  return 9;
+}
+
+/// The key for HID usage u, or 9 for none.
+fn nav_usb(u: u64) -> u64
+  ensures result <= 9
+{
+  if u == 0x52 {
+    return NAV_UP;
+  } else if u == 0x51 {
+    return NAV_DOWN;
+  } else if u == 0x4F {
+    return NAV_RIGHT;
+  } else if u == 0x50 {
+    return NAV_LEFT;
+  } else if u == 0x4A {
+    return NAV_HOME;
+  } else if u == 0x4D {
+    return NAV_END;
+  } else if u == 0x4C {
+    return NAV_DELETE;
+  } else if u == 0x4B {
+    return NAV_PGUP;
+  } else if u == 0x4E {
+    return NAV_PGDN;
+  }
+  return 9;
+}

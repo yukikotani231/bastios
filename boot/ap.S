@@ -41,9 +41,9 @@ ap32:
         mov     %eax, %cr4
         mov     $bst_kernel_pml4, %eax
         mov     %eax, %cr3
-        mov     $0xC0000080, %ecx        /* EFER: LME | SCE, as on the BSP */
+        mov     $0xC0000080, %ecx        /* EFER: LME | SCE | NXE, as on the BSP */
         rdmsr
-        or      $0x101, %eax
+        or      $0x901, %eax             /* and NXE */
         wrmsr
         mov     %cr0, %eax
         and     $0xFFFFFFFB, %eax        /* clear EM */
