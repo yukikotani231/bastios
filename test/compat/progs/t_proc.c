@@ -1,6 +1,7 @@
 /* Processes: fork, exec, wait, exit status, process groups and sessions,
  * identity, limits, system information. */
 #include "compat.h"
+#include <sys/auxv.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
@@ -189,6 +190,7 @@ int main(int argc, char **argv) {
         EXPECT("sysctl ip_local_port_range has two numbers", slurp("/proc/sys/net/ipv4/ip_local_port_range", b, sizeof b) > 0 && strcmp(b, "32768\t60999\n") == 0);
         EXPECT("writing a sysctl number reads back", put("/proc/sys/vm/swappiness", "10\n") && slurp("/proc/sys/vm/swappiness", b, sizeof b) > 0 && strcmp(b, "10\n") == 0);
         EXPECT("a sysctl number rejects text", ({ int fd = open("/proc/sys/vm/swappiness", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "x\n", 2) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
+        EXPECT("keys root_maxkeys reads 200 and a larger value reads back", slurp("/proc/sys/kernel/keys/root_maxkeys", b, sizeof b) > 0 && strcmp(b, "200\n") == 0 && put("/proc/sys/kernel/keys/root_maxkeys", "300\n") && slurp("/proc/sys/kernel/keys/root_maxkeys", b, sizeof b) > 0 && strcmp(b, "300\n") == 0 && put("/proc/sys/kernel/keys/root_maxkeys", "200\n"));
         EXPECT("a read-only sysctl is not opened for writing", open("/proc/sys/fs/file-nr", O_WRONLY) == -1);
         EXPECT("a sysctl file is a regular file", ({ struct stat sb; stat("/proc/sys/vm/swappiness", &sb) == 0 && S_ISREG(sb.st_mode) && (sb.st_mode & 0777) == 0644; }));
     }
@@ -266,6 +268,17 @@ int main(int argc, char **argv) {
         EXPECT("maps has [stack] and [vdso]", strstr(mb, "[stack]\n") != NULL && strstr(mb, "[vdso]\n") != NULL);
         EXPECT("maps lines end at column 74 for names", ({ char *q = strstr(mb, "[stack]"); q && q[-1] == ' ' && ({ char *l = q; while (l > mb && l[-1] != '\n') l--; (size_t)(q - l) == 73; }); }));
     }
+    EXPECT("auxv carries AT_HWCAP and AT_HWCAP2 (a C library's ifuncs read them before it has a thread pointer), AT_PAGESZ, and ends in AT_NULL", ({
+           unsigned long av[64]; ssize_t n = slurp("/proc/self/auxv", (char *)av, sizeof av);
+           int hw = 0, hw2 = 0, pg = 0, end = 0;
+           for (int i = 0; n >= 16 && i + 1 < (int)(n / 8); i += 2) {
+               if (av[i] == AT_HWCAP) hw = 1;
+               if (av[i] == AT_HWCAP2) hw2 = 1;
+               if (av[i] == AT_PAGESZ && av[i + 1] == 4096) pg = 1;
+               if (av[i] == AT_NULL) { end = 1; break; }
+           }
+           hw && hw2 && pg && end; }));
+    EXPECT("getauxval finds AT_HWCAP without setting errno", ({ errno = 0; getauxval(AT_HWCAP); errno == 0; }));
     EXPECT("readlink of /proc/self is the caller's id", ({ char lb[32], want[32]; ssize_t r = readlink("/proc/self", lb, sizeof lb - 1);
            snprintf(want, sizeof want, "%d", (int)getpid()); r > 0 && (lb[r] = 0, strcmp(lb, want) == 0); }));
     return done();

@@ -126,7 +126,7 @@ class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
     /repo.git, a git repository for the dumb HTTP protocol, and
-    /lsp-server.lua, /lsp-client.lua and /lsp-real-client.lua, the files of the Neovim LSP cases."""
+    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
 
     def __init__(self):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
@@ -155,7 +155,7 @@ class WebServer:
             subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)
             subprocess.run(git + ["update-server-info"], cwd=bare, capture_output=True)
             shutil.rmtree(work)
-        for name in ("server.lua", "client.lua", "real-client.lua"):
+        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "termdebug.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
         handler = functools.partial(Quiet, directory=self.dir)
@@ -696,15 +696,29 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
                     help="the guest's processor; aarch64 runs the groups named by --groups, against baseline-aarch64.txt")
     ap.add_argument("--groups", help="comma-separated groups of the first disk to run (programs and busybox, by default all)")
+    ap.add_argument("--lanes", help="comma-separated lanes to run (by default all), so that CI can spread them over machines; "
+                    "every check of a group these lanes hold is held to the baseline, and no other")
+    ap.add_argument("--skip-lanes", help="comma-separated lanes not to run: every other lane runs (a lane added later too)")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
+    # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "debian", "node", "go", "java", "rust"]
+    pick = args.lanes.split(",") if args.lanes else lane_names
+    skip = args.skip_lanes.split(",") if args.skip_lanes else []
+    unknown = [n for n in pick + skip if n not in lane_names]
+    if unknown or ((args.lanes or args.skip_lanes) and args.update_baseline):
+        print(f"compat: {'no such lane: ' + ', '.join(unknown) if unknown else 'a part of the lanes cannot rewrite the baseline'}"
+              f" (lanes: {', '.join(lane_names)})")
+        return 2
+    lane_chosen = lambda name: name in pick and name not in skip
 
     global ARCH
     ARCH = args.arch
@@ -718,13 +732,14 @@ def main():
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
+    java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     web = WebServer()
-    if args.registry_image:
+    if args.registry_image and lane_chosen("alpine"):
         web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None
     bb = os.path.join(os.path.abspath(args.host), "busybox") if args.host else BB
@@ -746,11 +761,12 @@ def main():
             g = [x for x in g if x[0] in keep or (x[0] in args.programs and "progs" in keep)]
         return g
 
-    def lane(disk, groups, mem="256M"):
+    def lane(name, disk, groups, mem="256M"):
         """Boots a guest from disk and runs groups on it, one after another.
         Returns their results and the guest's serial output."""
         out = io.BytesIO()
         g = Guest(args.kernel, disk, out, web, arch=args.arch, mem=mem)
+        t_lane = time.time()
         try:
             g.boot()
             res = {}
@@ -760,6 +776,7 @@ def main():
             return res, out.getvalue()
         finally:
             g.stop()
+            print(f"compat: lane {name} took {time.time() - t_lane:.0f} s", flush=True)
 
     def applets_lane(cases, timeout):
         return lambda e: [run_applet(e, n, c, x, timeout, bb) for n, c, x in cases]
@@ -792,15 +809,16 @@ def main():
     if jobs > 1:
         cut = order.index("apps") + 1 if "ssh" in order else len(order)
         copy = os.path.join(scratch, "disk.img")
-        shutil.copyfile(args.disk, copy)
-        lanes = [(args.disk, main_groups[:cut]), (copy, main_groups[cut:])]
+        if lane_chosen("main2") and main_groups[cut:]:
+            shutil.copyfile(args.disk, copy)
+        lanes = [("main1", args.disk, main_groups[:cut]), ("main2", copy, main_groups[cut:])]
     else:
-        lanes = [(args.disk, main_groups)]
-    if args.dev_disk:
-        lanes.append((args.dev_disk, [("dev", "building C (tcc, make)", applets_lane(dev, 60))]))
-    if args.bastio_disk:
-        lanes.append((args.bastio_disk, [("bastio", "the Bastio compiler (bastioc1, z3, tcc)", applets_lane(bastio, 900))]))
-    if args.alpine_disk:
+        lanes = [("main1", args.disk, main_groups)]
+    if args.dev_disk and lane_chosen("dev"):
+        lanes.append(("dev", args.dev_disk, [("dev", "building C (tcc, make)", applets_lane(dev, 60))]))
+    if args.bastio_disk and lane_chosen("bastio"):
+        lanes.append(("bastio", args.bastio_disk, [("bastio", "the Bastio compiler (bastioc1, z3, tcc)", applets_lane(bastio, 900))]))
+    if args.alpine_disk and lane_chosen("alpine"):
         # Alpine's root and its packages. The cases change the disk (they
         # unpack and install), so they get a copy and every run starts from
         # the same disk.
@@ -809,33 +827,48 @@ def main():
         if args.alpine_repo:
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
-        lanes.append((disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
+        # 384M: a runc started inside a runc container is two Go runtimes
+        # and two roots unpacked on the disk; at 256M a thread of one of
+        # them now and then could not be made.
+        lanes.append(("alpine", disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
                              ("alpine-tty", "programs on the terminal in Alpine",
-                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])]))
-    if args.debian_disk:
+                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])], "384M"))
+    if args.debian_disk and lane_chosen("debian"):
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
         shutil.copyfile(args.debian_disk, disk)
-        lanes.append((disk, [("debian", "Debian (glibc)", applets_lane(debian, 300))]))
-    if args.node_disk:
+        lanes.append(("debian", disk, [("debian", "Debian (glibc)", applets_lane(debian, 300))]))
+    if args.node_disk and lane_chosen("node"):
         # V8 reserves a large range of address space and wants more memory
         # than the other lanes; the cases write the disk, so on a copy.
         disk = os.path.join(args.out, "node-run.img")
         shutil.copyfile(args.node_disk, disk)
-        lanes.append((disk, [("node", "Node.js (V8)", applets_lane(node, 300))], "1G"))
-    if args.go_disk:
+        lanes.append(("node", disk, [("node", "Node.js (V8)", applets_lane(node, 300))], "1G"))
+    if args.go_disk and lane_chosen("go"):
         # The compiler and the linker are large static programs and the
         # runtime maps address space freely; the cases write the disk.
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
-        lanes.append((disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
-    if args.rust_disk:
+        lanes.append(("go", disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
+    if args.jdk_disk and lane_chosen("java"):
+        # The cases unpack a root of about 400 MB onto the disk: a copy.
+        disk = os.path.join(args.out, "jdk-run.img")
+        shutil.copyfile(args.jdk_disk, disk)
+        lanes.append(("java", disk, [("java", "JDK", applets_lane(java, 900))], "2G"))
+    if args.rust_disk and lane_chosen("rust"):
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.
         disk = os.path.join(args.out, "rust-run.img")
         shutil.copyfile(args.rust_disk, disk)
-        lanes.append((disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
-    lanes = [l for l in lanes if l[1]]
+        lanes.append(("rust", disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
+    lanes = [l for l in lanes if l[2] and lane_chosen(l[0])]
+    # The groups the chosen lanes hold, whatever becomes of them: a lane that
+    # dies part way loses its checks, it does not drop them.
+    held = {k for l in lanes for k, _, _ in l[2]}
+    if not lanes:
+        print("compat: no lane to run (is each chosen lane's disk given?)")
+        return 2
+    print(f"compat: lanes {', '.join(l[0] for l in lanes)}", flush=True)
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
     # than the kernel waits (DQ_TICKS), which it takes for a dead disk, and
@@ -851,7 +884,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "rust"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
@@ -867,7 +900,7 @@ def main():
         return 0
     if os.path.exists(base):
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
-        lost = sorted(set(want) - set(ids))
+        lost = sorted(i for i in set(want) - set(ids) if not (args.lanes or args.skip_lanes) or i.split(": ", 1)[0] in held)
         if lost:
             print("compat: REGRESSION, these checks passed before:")
             for i in lost:

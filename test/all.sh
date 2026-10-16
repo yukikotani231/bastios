@@ -54,6 +54,7 @@ tests=(
   "nmi|c|test/nmi_test.sh"
   "stackguard|c|test/stackguard_test.sh"
   "memory|c|test/memory_test.sh"
+  "rng|c|test/rng_test.sh"
   "stackdepth|c|test/stackdepth.py"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
   "soak|c|test/soak.py --rounds 150 --smp 2 --warmup 10 --leak-kb 128"

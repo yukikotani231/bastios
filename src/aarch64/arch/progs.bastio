@@ -36,6 +36,19 @@ fn vdso_is_elf() -> bool {
   return true;
 }
 
+/// AT_HWCAP: what every processor the kernel runs on has (HWCAP_FP, HWCAP_ASIMD
+/// and HWCAP_CPUID, whose ID register reads boot.S emulates). A C library picks
+/// its string routines from it before it has a thread pointer, and aborts if the
+/// entry is missing; the optional features (crypto, atomics) are left unsaid.
+fn hwcap() -> u64 {
+  return 0x803;
+}
+
+/// AT_HWCAP2: none of its features are claimed.
+fn hwcap2() -> u64 {
+  return 0;
+}
+
 /// Fills the vDSO page: the image (user/vdso-aarch64.c, which fits below
 /// the trampoline), the signal return trampoline (`mov x8, #139; svc #0`)
 /// the kernel's own frames return through, and the clock words.

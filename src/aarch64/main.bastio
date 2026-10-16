@@ -83,6 +83,7 @@ import "oom.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
+import "lxfb.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
 import "lxnum.bastio";
@@ -657,7 +658,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   let dev = blk_find(&mut m, &mut win, vm_where, ecam);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
-  let disk = disk_mount(dev);
+  let disk = disk_mount(dev, NC_STD);
   let tsc = tsc_from_hz(cpu, boot_info(cpu, INFO_CNTFRQ, 0));   // 0 Hz: the clock follows the timer ticks (set_clock)
   if blk_is_virtio(disk.dev) {
     puts(&mut console, "disk: virtio\r\n");
@@ -741,6 +742,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.ptys);
   bfree(s.k.ptyb);
   bfree(s.k.mice);
+  bfree(s.k.gfx);
   free(s.k.ipc);
   bfree(s.k.ipcb);
   free(s.k.sys);
