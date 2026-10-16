@@ -596,6 +596,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       sig_reset(&mut k.sigact, r, true);
     }
     pt_fork_event(&mut k, pid, r, 2);
+    pt_vfork_stop(&mut k, pid);
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {

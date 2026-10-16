@@ -205,7 +205,11 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
     pset(&mut k.procs, c, F_SIGPEND, pget(k.procs, c, F_SIGPEND) | sbit(sig));
   }
   if state(k.procs, c) == STOPPED {
-    pset(&mut k.procs, c, F_STATE, READY);
+    if vfork_lent(&mut k, c) {
+      pset(&mut k.procs, c, F_STATE, LXVFORK);   // it still waits for its vfork child
+    } else {
+      pset(&mut k.procs, c, F_STATE, READY);
+    }
   }
 }
 
@@ -399,6 +403,42 @@ fn pt_vfork_copied(k: &mut Kernel, p: u64)
   let t = tr2_get(k, p);
   if w % 65536 != 0 && tr_opt(w) / 32 % 2 == 1 && t / TS_EV % 16 == 2 {
     tr2_put(&mut k, p, sat_add(t, TS_VFDONE * (1 - t / TS_VFDONE % 2)));
+  }
+}
+
+/// Process p made a vfork child that borrows its address space (clone with
+/// CLONE_VM | CLONE_VFORK, which lx_vfork_vm waits for) and its tracer asked
+/// for the vfork event: p stops with the event now, before it waits for the
+/// child, as on Linux. When the tracer resumes it, p waits (pt_resume) unless
+/// the child has let go by then (vfork_give_back).
+fn pt_vfork_stop(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let t = tr2_get(k, p);
+  let pend = pget(k.procs, p, F_SIGPEND);
+  if tr_get(k, p) % 65536 != 0 && t / TS_EV % 16 == 2 && state(k.procs, p) == LXVFORK && has_sig(pend, 5) {
+    pset(&mut k.procs, p, F_SIGPEND, wrap_sub(pend, sbit(5)));   // the stop below is the SIGTRAP's
+    tr_stop(&mut k, p, 5);
+  }
+}
+
+/// Whether process p has lent its address space to its vfork child and not
+/// had it back (p's F_WAIT names the child, which holds the space).
+fn vfork_lent(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let c = pget(k.procs, p, F_WAIT);
+  if c == 0 || c >= NPROC || pget(k.procs, c, F_PARENT) != p {
+    return false;
+  }
+  match take_space(&mut k.spaces, p) {
+    Space::Empty => { return true; },
+    Space::Mapped(t) => {
+      put_space(&mut k.spaces, p, Space::Mapped(t));
+      return false;
+    },
   }
 }
 

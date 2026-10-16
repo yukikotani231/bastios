@@ -1112,7 +1112,13 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   } else if n == LX_RT_SIGPROCMASK {
     r = lx_sigprocmask(&mut k, pid, a, b, c);
   } else if n == LX_KILL {
-    r = lx_kill(&mut k, pid, a, b);
+    // The pid is an int: a negative one (a process group) reaches a system
+    // call from AArch64 as a 32-bit value with the upper half zero.
+    let mut who = a;
+    if a >= 0x80000000 && a <= 0xFFFFFFFF {
+      who = wrap_add(a, 0xFFFFFFFF00000000);
+    }
+    r = lx_kill(&mut k, pid, who, b);
   } else if n == LX_TKILL {
     r = lx_tgkill(&mut k, pid, 0, a, b);
   } else if n == LX_TGKILL {

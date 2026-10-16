@@ -408,10 +408,26 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   let addr = pget(s.k.procs, p, reg_word(R_FAULT));
   // The siginfo's si_code: ILL_ILLOPN (2) for a bad opcode, else the address
-  // is unmapped (SEGV_MAPERR, BUS_ADRALN and TRAP_BRKPT are all 1).
+  // is unmapped (SEGV_MAPERR, BUS_ADRALN and TRAP_BRKPT are all 1), except
+  // as set below for a protection fault.
   let mut code = 1;
   if sig == SIGILL {
     code = 2;
+  } else if sig == SIGSEGV {
+    // SEGV_ACCERR (2) for a page the access is not allowed on: a data or
+    // instruction abort whose status is a permission fault (0x0d to 0x0f),
+    // or an address inside the mmap area that nothing maps (a PROT_NONE
+    // reservation maps no pages).
+    let esr = pget(s.k.procs, p, reg_word(34));
+    let st = esr % 64;
+    let ec = esr >> 26;
+    let off = addr - smaller(addr, USER_BASE);
+    let low = pget(s.k.procs, p, F_MMAP);
+    if (ec == 0x24 || ec == 0x20) && st >= 0x0d && st <= 0x0f {
+      code = 2;
+    } else if addr >= USER_BASE && low <= STACK_FIRST * 4096 && off >= low && off < STACK_FIRST * 4096 && !hole_within(s.k, p, off / 4096, off / 4096 + 1) {
+      code = 2;
+    }
   }
   if fault_caught(&mut s.k, p, sig, addr, code) {
     return (p + 1) % NPROC;
