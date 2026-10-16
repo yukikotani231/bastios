@@ -185,9 +185,9 @@ static int setns_own_kinds(void) {
  * is already in (LTP setns01 relies on it). */
 static int setns_unprivileged(void) {
     if (!as_nobody()) return 0;
-    const char *names[] = {"mnt", "uts", "ipc", "net"};
-    int types[] = {CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWNET};
-    for (int i = 0; i < 4; i++) {
+    const char *names[] = {"mnt", "uts", "ipc", "net", "pid"};
+    int types[] = {CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWPID};
+    for (int i = 0; i < 5; i++) {
         char path[32];
         snprintf(path, sizeof path, "/proc/self/ns/%s", names[i]);
         int f = open(path, O_RDONLY);
@@ -229,6 +229,53 @@ static int setns_child_mntns(void) {
     waitpid(c, &st, 0);
     errno = err;
     return ok;
+}
+
+/* The root of a user namespace joins a PID namespace it made, so that its
+ * children start there (crun exec's way into a container); a user outside
+ * is refused. */
+static int pidns_join_by_owner(void) {
+    int up[2], down[2], gdown[2];
+    if (pipe(up) || pipe(down) || pipe(gdown)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        if (!as_nobody() || unshare(CLONE_NEWUSER) != 0) _exit(10);
+        char map[32];
+        int n = snprintf(map, sizeof map, "0 %d 1\n", NOBODY);
+        if (write_trunc("/proc/self/setgroups", "deny", 4) != 4 || write_trunc("/proc/self/uid_map", map, n) != n
+            || write_trunc("/proc/self/gid_map", map, n) != n) _exit(11);
+        if (unshare(CLONE_NEWPID) != 0) _exit(12);
+        int rd[2];
+        if (pipe(rd)) _exit(13);
+        pid_t g = fork();
+        if (g == 0) {
+            if (getpid() != 1) _exit(1);
+            if (write(rd[1], "x", 1) != 1 || read(gdown[0], &b, 1) != 1) _exit(2);
+            _exit(0);
+        }
+        if (g < 0 || read(rd[0], &b, 1) != 1) _exit(14);
+        if (write(up[1], &g, sizeof g) != sizeof g || read(down[0], &b, 1) != 1) _exit(15);
+        char path[64];
+        snprintf(path, sizeof path, "/proc/%d/ns/pid", (int)g);
+        int f = open(path, O_RDONLY);
+        if (f < 0 || setns(f, CLONE_NEWPID) != 0) _exit(16);
+        pid_t h = fork();
+        if (h == 0) _exit(getpid() == 2 ? 0 : 1);
+        int st;
+        if (h < 0 || waitpid(h, &st, 0) != h || !WIFEXITED(st) || WEXITSTATUS(st) != 0) _exit(17);
+        if (write(gdown[1], "z", 1) != 1) _exit(18);
+        _exit(0);
+    }
+    pid_t g;
+    char path[64];
+    int ok = as_nobody() && read(up[0], &g, sizeof g) == sizeof g;
+    snprintf(path, sizeof path, "/proc/%d/ns/pid", (int)g);
+    int f = ok ? open(path, O_RDONLY) : -1;
+    ok = ok && f >= 0 && setns(f, CLONE_NEWPID) == -1 && errno == EPERM;
+    ok = ok && write(down[1], "y", 1) == 1;
+    int st;
+    return waitpid(c, &st, 0) == c && ok && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
 /* The user who made a user namespace joins it again with setns (rootless
@@ -415,6 +462,7 @@ int main(void) {
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
     EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
     EXPECT("whoever made a user namespace joins it with setns, and not the first one", in_child(join_userns));
+    EXPECT("the root of a user namespace joins a PID namespace it made and its children start there, an outsider cannot", in_child(pidns_join_by_owner));
     EXPECT("an unprivileged user cannot setns, not even into the namespaces it is in", in_child(setns_unprivileged));
     EXPECT("root of a user namespace joins the mount, UTS, IPC and network namespaces it made, not the first mount or IPC one", in_userns(setns_own_kinds, 1));
     EXPECT("and the mount namespace of a process in a user namespace it made", in_userns(setns_child_mntns, 0));

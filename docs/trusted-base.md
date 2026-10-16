@@ -28,6 +28,7 @@ BastiOS also trusts everything bastiolang trusts: Z3, the Bastio compiler, the C
 | `boot/libc.c` | `memset`, `memcpy`, `memmove` and `memcmp`, which the C compiler may emit calls to | Also linked into each user program |
 | `boot/linker.ld` | Load address, and `_end`, where the page pool starts | |
 | `boot/limine.conf` | The Limine menu for the ISO and the USB image only, loading the kernel with Multiboot 2 (`make run` and most tests use QEMU's Multiboot 1 loader) | |
+| `boot/limine-installer.conf` | The Limine menu of the installer image (`make installer`, docs/install.md): it starts the installer by default, or the live system | |
 
 ### AArch64
 

@@ -51,6 +51,7 @@ tests=(
   "dhcp virtio|b|test/dhcp_test.sh"
   "dhcp e1000|c|NIC=e1000 test/dhcp_test.sh"
   "iso|c|test/iso_test.sh"
+  "install|c|test/install_test.sh"
   "nmi|c|test/nmi_test.sh"
   "stackguard|c|test/stackguard_test.sh"
   "memory|c|test/memory_test.sh"
