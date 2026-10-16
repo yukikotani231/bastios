@@ -28,7 +28,15 @@ int main(void) {
 
     int fd = fanotify_init(FAN_CLASS_NOTIF | FAN_NONBLOCK | FAN_CLOEXEC, O_RDONLY);
     EXPECT("fanotify_init makes a descriptor", fd >= 0);
-    EXPECT("a class other than notification is refused", fanotify_init(FAN_CLASS_CONTENT, O_RDONLY) < 0 && errno == EINVAL);
+    EXPECT("the content classes are accepted, both at once are refused, and a permission mask is refused", ({
+           int c = fanotify_init(FAN_CLASS_CONTENT, O_RDONLY), p = fanotify_init(FAN_CLASS_PRE_CONTENT, O_RDONLY);
+           int both = fanotify_init(FAN_CLASS_CONTENT | FAN_CLASS_PRE_CONTENT, O_RDONLY);
+           int eb = errno;
+           int perm = c >= 0 ? fanotify_mark(c, FAN_MARK_ADD, FAN_OPEN_PERM, AT_FDCWD, ".") : 0;
+           int ep = errno;
+           if (c >= 0) close(c);
+           if (p >= 0) close(p);
+           c >= 0 && p >= 0 && both < 0 && eb == EINVAL && perm < 0 && ep == EINVAL; }));
     EXPECT("a mark with no operation is EINVAL", fan_mark(fd, 0, FAN_OPEN, "fa_f") < 0 && errno == EINVAL);
     EXPECT("a mark on a missing file is ENOENT", fan_mark(fd, FAN_MARK_ADD, FAN_OPEN, "fa_none") < 0 && errno == ENOENT);
     EXPECT("an empty queue is EAGAIN", ({ char b[64]; read(fd, b, sizeof b) < 0 && errno == EAGAIN; }));
