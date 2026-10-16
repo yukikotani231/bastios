@@ -851,6 +851,18 @@ t_nsioctl: the first user namespace has no owner and no parent
 t_nsioctl: the first user namespace is owned by uid 0
 t_nsioctl: the first user namespace owns the first UTS namespace
 t_nsioctl: the owner of a user namespace its creator has no map for is 65534
+t_nx: a fork child's copy-on-write stack stays no-execute
+t_nx: a mapping moved by mremap and made executable runs
+t_nx: code in a data array does not run
+t_nx: code in a read-write mapping does not run
+t_nx: code in a shared read-write mapping does not run
+t_nx: code on the heap does not run
+t_nx: code on the stack does not run
+t_nx: code runs from a read-write-execute mapping
+t_nx: mprotect back to read-write stops the code
+t_nx: mprotect to read-write-execute keeps the code running
+t_nx: mprotect(PROT_EXEC) after writing makes the code run
+t_nx: mprotect(PROT_EXEC) on a shared mapping makes the code run
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
@@ -1391,6 +1403,7 @@ alpine: container: crun and runc: a profile that denies mount, module, ptrace an
 alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
+alpine: container: rootless runc runs a rootless runc inside its container (docker-in-docker)
 alpine: container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
