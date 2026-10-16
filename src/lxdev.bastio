@@ -46,6 +46,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/input/mice") || xfer_is(x, 0, n, "dev/psaux") {
     return DEV_MICE;                        // src/lxmouse.bastio
   }
+  if xfer_is(x, 0, n, "dev/fb0") {
+    return DEV_FB;                          // src/lxfb.bastio
+  }
   if xfer_is(x, 0, n, "dev/ptmx") {
     return DEV_PTMX;
   }
@@ -85,6 +88,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_LOOPCTL {
     return 0xAED;                           // 10:237
   }
+  if d == DEV_FB {
+    return 0x1D00;                          // 29:0, /dev/fb0
+  }
   if d == DEV_MICE {
     return 0xD3F;                           // 13:63, /dev/input/mice
   }
@@ -116,6 +122,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   }
   if rdev == 0xAED {
     return DEV_LOOPCTL;
+  }
+  if rdev == 0x1D00 {
+    return DEV_FB;
   }
   if rdev == 0xD3F || rdev == 0xA01 {
     return DEV_MICE;                        // /dev/input/mice, /dev/psaux (10:1)
