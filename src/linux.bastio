@@ -820,10 +820,14 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   if is_procfs_call(n) {
     let r = lx_procfs_call(&mut k, pid, n, a, b, c);
-    if r == ENOENT {
-      puts(&mut con, "[dbg readlink ENOENT by ");
+    if r == ENOENT && k.perr >= 1000000 && k.perr < 2000000 {
+      puts(&mut con, "[dbg fd readlink ENOENT by ");
       put_num(&mut con, pid);
-      puts(&mut con, ", states");
+      puts(&mut con, " target ");
+      put_num(&mut con, (k.perr - 1000000) / 1000);
+      puts(&mut con, " fd ");
+      put_num(&mut con, (k.perr - 1000000) % 1000);
+      puts(&mut con, " states");
       let mut q = 1;
       while q < 24
         invariant q <= 24 && kok(k) && con_ok(con)
@@ -837,6 +841,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
         q = q + 1;
       }
       puts(&mut con, "]\r\n");
+      k.perr = 0;
     }
     ret(&mut k.procs, pid, r);
     return KEEP;

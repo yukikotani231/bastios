@@ -3355,6 +3355,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     let ln = fd_link(&mut k, pfd / LXNFD, pfd % LXNFD, &mut lo);
     if ln == NO_RESULT {
       bfree(lo);
+      k.perr = 1000000 + (pfd / LXNFD) * 1000 + pfd % LXNFD;
       return ENOENT;
     }
     let m = smaller(ln, smaller(size, XFER));
