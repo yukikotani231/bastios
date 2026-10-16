@@ -1,0 +1,831 @@
+// Reading ext4 (docs/design/ext4-readonly.md). An ext4 image in an
+// in-memory file is read once, at mount: its directories, files, symbolic
+// links, hard links and device nodes become ordinary in-memory nodes below
+// the mount point (ex_import), and the mount is read-only. Nothing is
+// written back and the image is not kept open.
+//
+// What is proved: every read from the image goes through the bounds of
+// `Bytes`, every offset and block number is bounded before it is multiplied
+// (a block number is below 2^48, a block size at most 4096), and every
+// loop over a count the image holds (extent entries, tree depth, directory
+// entries, directory depth) has a bound that the code checks. What is not:
+// that the tree shown is the one Linux would show.
+import "elf.bastio";
+import "fs.bastio";
+
+const EX_OK: u64 = 0;
+const EX_BAD: u64 = 1;                // not ext4, or damaged
+const EX_UNSUP: u64 = 2;              // a feature it does not read
+const EX_FULL: u64 = 3;               // no free node, or a name taken twice
+const EX_LONG: u64 = 4;               // a path over FNAME_MAX bytes
+const EX_BIG: u64 = 5;                // a file over FILE_MAX bytes
+const EX_MEM: u64 = 6;
+
+const EX_BLK_MAX: u64 = 281474976710656;     // 2^48: no image has more blocks
+const EX_U32: u64 = 4294967296;
+const EX_DEPTH: u64 = 100;            // directories open at once (a path has at most FNAME_MAX / 2 parts)
+const EX_FR: u64 = 6;                 // words of a directory frame: inode, position, path length, size, flags, block
+const EX_HL: u64 = 4096;              // slots of the hard-link table
+const EX_DIR_MAX: u64 = 268435456;    // the largest directory read
+const EX_ITER: u64 = 16777216;        // directory entries one mount reads, at most
+const EX_INCOMPAT: u64 = 25538;       // filetype, extents, 64bit, mmp, flex_bg, csum_seed, largedir
+const EX_FL_EXTENTS: u64 = 524288;    // EXT4_EXTENTS_FL
+const EX_FL_BAD: u64 = 268437504;     // inline data, encrypted: not read
+const EX_FL_EAINODE: u64 = 2097152;
+
+const EX_T_DIR: u64 = 16384;          // the type bits of a mode
+const EX_T_REG: u64 = 32768;
+const EX_T_LNK: u64 = 40960;
+const EX_T_CHR: u64 = 8192;
+const EX_T_BLK: u64 = 24576;
+const EX_T_FIFO: u64 = 4096;
+const EX_T_SOCK: u64 = 49152;
+
+/// What the superblock says, once checked.
+struct Ext {
+  err: u64,       // EX_OK, or why the image is refused
+  f: u64,         // the in-memory file holding the image
+  size: u64,      // its size
+  bs: u64,        // block size: 1024, 2048 or 4096
+  blocks: u64,    // blocks in the file system
+  ipg: u64,       // inodes per group
+  isz: u64,       // bytes per inode
+  inodes: u64,
+  groups: u64,
+  gd: u64,        // block of the group descriptors
+  gsz: u64,       // bytes per group descriptor
+  wide: bool,     // 64-bit block numbers
+}
+
+spec fn ext_ok(e: Ext) -> bool {
+  e.err == 0 ==> ((e.bs == 1024 || e.bs == 2048 || e.bs == 4096) && e.blocks >= 1 && e.blocks <= EX_BLK_MAX
+    && e.ipg >= 1 && e.ipg <= 131072 && e.isz >= 128 && e.isz <= 1024
+    && e.inodes >= 2 && e.inodes <= 4294967295 && e.groups >= 1 && e.groups <= 1048576
+    && e.gd >= 1 && e.gd < e.blocks && (e.gsz == 32 || (e.wide && e.gsz >= 64 && e.gsz <= 256)))
+}
+
+fn ex_none() -> Ext
+  ensures ext_ok(result) && result.err != 0
+{
+  return Ext { err: EX_BAD, f: 0, size: 0, bs: 0, blocks: 0, ipg: 0, isz: 0, inodes: 0, groups: 0, gd: 0, gsz: 0, wide: false };
+}
+
+/// Copies n bytes of the image at byte `off` to the start of the transfer
+/// buffer. False if they are not all in the image.
+fn ex_rd(v: &mut Vfs, e: Ext, off: u64, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  if off > e.size || n > e.size - off {
+    return false;
+  }
+  return vfs_read_at(&mut v, e.f, off, n) == n;
+}
+
+/// Reads and checks the superblock of the image in file f.
+fn ex_open(v: &mut Vfs, f: u64) -> Ext
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && ext_ok(result)
+{
+  let size = vfs_size(&mut v, f);
+  if size == NO_FILE || size < 4096 {
+    return ex_none();
+  }
+  let probe = Ext { err: EX_OK, f: f, size: size, bs: 0, blocks: 0, ipg: 0, isz: 0, inodes: 0, groups: 0, gd: 0, gsz: 0, wide: false };
+  if !ex_rd(&mut v, probe, 1024, 512) {
+    return ex_none();
+  }
+  if rd16(v.xfer, 56) != 61267 {                    // 0xEF53
+    return ex_none();
+  }
+  let inodes = rd32(v.xfer, 0);
+  let blocks_lo = rd32(v.xfer, 4);
+  let first = rd32(v.xfer, 20);
+  let lg = rd32(v.xfer, 24);
+  let ipg = rd32(v.xfer, 40);
+  let rev = rd32(v.xfer, 76);
+  let incompat = rd32(v.xfer, 96);
+  let mut isz = 128;
+  if rev >= 1 {
+    isz = rd16(v.xfer, 88);
+  }
+  let wide = (incompat & 128) != 0;
+  let mut gsz = 32;
+  let mut blocks = blocks_lo;
+  if wide {
+    gsz = rd16(v.xfer, 254);
+    let hi = rd32(v.xfer, 336);
+    if hi >= 65536 {
+      return ex_none();
+    }
+    blocks = blocks_lo + hi * EX_U32;
+  }
+  if (incompat & EX_INCOMPAT) != incompat {
+    return Ext { err: EX_UNSUP, f: 0, size: 0, bs: 0, blocks: 0, ipg: 0, isz: 0, inodes: 0, groups: 0, gd: 0, gsz: 0, wide: false };
+  }
+  let mut bs = 0;
+  if lg == 0 {
+    bs = 1024;
+  }
+  if lg == 1 {
+    bs = 2048;
+  }
+  if lg == 2 {
+    bs = 4096;
+  }
+  if bs == 0 || ipg == 0 || ipg > 131072 || isz < 128 || isz > 1024 || inodes < 2 || inodes > 4294967295 {
+    return ex_none();
+  }
+  if blocks == 0 || blocks > EX_BLK_MAX || (wide && (gsz < 64 || gsz > 256)) {
+    return ex_none();
+  }
+  if bs == 1024 && first != 1 {
+    return ex_none();
+  }
+  if bs != 1024 && first != 0 {
+    return ex_none();
+  }
+  let groups = (inodes + ipg - 1) / ipg;
+  if groups > 1048576 || first + 1 >= blocks {
+    return ex_none();
+  }
+  return Ext { err: EX_OK, f: f, size: size, bs: bs, blocks: blocks, ipg: ipg, isz: isz, inodes: inodes, groups: groups, gd: first + 1, gsz: gsz, wide: wide };
+}
+
+// ---------------------------------------------------------------- inodes
+
+struct Ino {
+  ok: bool,
+  mode: u64,
+  uid: u64,
+  gid: u64,
+  size: u64,
+  mtime: u64,
+  links: u64,
+  flags: u64,
+  blocks: u64,    // i_blocks: 512-byte units, low 32 bits
+}
+
+spec fn ino_ok(i: Ino) -> bool {
+  i.ok ==> (i.mode < 65536 && i.uid < 4294967296 && i.gid < 4294967296 && i.size < EX_BLK_MAX && i.mtime < 4294967296
+    && i.links < 65536 && i.flags < 4294967296 && i.blocks < 4294967296)
+}
+
+fn ex_no_ino() -> Ino
+  ensures ino_ok(result)
+{
+  return Ino { ok: false, mode: 0, uid: 0, gid: 0, size: 0, mtime: 0, links: 0, flags: 0, blocks: 0 };
+}
+
+/// Reads inode `ino`; its 60 bytes of block map go to ib[ibo..ibo + 64].
+fn ex_inode(v: &mut Vfs, e: Ext, ino: u64, ib: &mut Bytes, ibo: u64) -> Ino
+  requires vfs_ok(v) && ext_ok(e) && e.err == 0 && ibo + 64 <= blen(ib)
+  ensures vfs_ok(v) && blen(ib) == old(blen(ib)) && ino_ok(result)
+{
+  if ino == 0 || ino > e.inodes {
+    return ex_no_ino();
+  }
+  let g = (ino - 1) / e.ipg;
+  let idx = (ino - 1) % e.ipg;
+  if g >= e.groups {
+    return ex_no_ino();
+  }
+  let mut gn = 32;
+  if e.wide {
+    gn = 64;
+  }
+  if !ex_rd(&mut v, e, e.gd * e.bs + g * e.gsz, gn) {
+    return ex_no_ino();
+  }
+  let mut itable = rd32(v.xfer, 8);
+  if e.wide {
+    let hi = rd32(v.xfer, 40);
+    if hi >= 65536 {
+      return ex_no_ino();
+    }
+    itable = itable + hi * EX_U32;
+  }
+  if itable == 0 || itable >= e.blocks {
+    return ex_no_ino();
+  }
+  if !ex_rd(&mut v, e, itable * e.bs + idx * e.isz, 128) {
+    return ex_no_ino();
+  }
+  let size_hi = rd32(v.xfer, 108);
+  if size_hi >= 65536 {
+    return ex_no_ino();
+  }
+  bcopy(&mut ib, ibo, v.xfer, 40, 60);
+  return Ino { ok: true, mode: rd16(v.xfer, 0), uid: rd16(v.xfer, 2) + rd16(v.xfer, 120) * 65536,
+    gid: rd16(v.xfer, 24) + rd16(v.xfer, 122) * 65536, size: rd32(v.xfer, 4) + size_hi * EX_U32,
+    mtime: rd32(v.xfer, 16), links: rd16(v.xfer, 26), flags: rd32(v.xfer, 32), blocks: rd32(v.xfer, 28) };
+}
+
+// ---------------------------------------------------------------- block maps
+
+/// What block `lblk` of a file maps to: `n` blocks from here on are the
+/// image's blocks phys, phys + 1, ... or, when phys is 0, a hole.
+struct Run { ok: bool, phys: u64, n: u64 }
+
+spec fn run_ok(r: Run, e: Ext) -> bool {
+  r.ok ==> (r.n >= 1 && r.n <= 4294967296 && r.phys < EX_BLK_MAX && (r.phys == 0 || r.phys + r.n <= e.blocks))
+}
+
+fn ex_bad_run() -> Run
+  ensures result.ok == false
+{
+  return Run { ok: false, phys: 0, n: 1 };
+}
+
+/// The run of the block map's single block p (a hole when p is 0).
+fn ex_one(e: Ext, p: u64) -> Run
+  requires ext_ok(e) && e.err == 0
+  ensures run_ok(result, e)
+{
+  if p == 0 {
+    return Run { ok: true, phys: 0, n: 1 };
+  }
+  if p >= e.blocks {
+    return ex_bad_run();
+  }
+  return Run { ok: true, phys: p, n: 1 };
+}
+
+/// ex_map for a file with an extent tree. The tree's root is in ib[ibo..ibo + 60].
+fn ex_extent(v: &mut Vfs, e: Ext, ib: &Bytes, ibo: u64, nb: &mut Bytes, lblk: u64) -> Run
+  requires vfs_ok(v) && ext_ok(e) && e.err == 0 && ibo + 64 <= blen(ib) && blen(nb) == 4096 && lblk < EX_U32
+  ensures vfs_ok(v) && blen(nb) == 4096 && run_ok(result, e)
+{
+  bcopy(&mut nb, 0, ib, ibo, 60);
+  let mut nlen = 60;
+  let mut limit = EX_U32;                 // the end of the range this node covers
+  let mut want = 6;                       // the depth the node must declare; 6: any (up to 5)
+  let mut lvl = 0;
+  while lvl < 8
+    invariant lvl <= 8 && vfs_ok(v) && blen(nb) == 4096 && nlen >= 60 && nlen <= 4096 && lblk < limit && limit <= EX_U32 && want <= 6
+  {
+    if rd16(nb, 0) != 62218 {             // 0xF30A
+      return ex_bad_run();
+    }
+    let ents = rd16(nb, 2);
+    let depth = rd16(nb, 6);
+    if ents > (nlen - 12) / 12 || depth > 5 || (want != 6 && depth != want) {
+      return ex_bad_run();
+    }
+    if depth == 0 {
+      // A leaf: extents of (first block, length, start).
+      let mut hole = limit - lblk;
+      let mut i = 0;
+      while i < ents
+        invariant i <= ents && ents <= (nlen - 12) / 12 && nlen <= 4096 && blen(nb) == 4096 && hole >= 1 && hole <= limit - lblk && lblk < limit && limit <= EX_U32
+      {
+        let b = rd32(nb, 12 + 12 * i);
+        let raw = rd16(nb, 16 + 12 * i);
+        let mut len = raw;
+        let mut init = true;
+        if raw > 32768 {
+          len = raw - 32768;
+          init = false;
+        }
+        if len > 0 && b <= lblk && lblk - b < len {
+          let start = rd32(nb, 20 + 12 * i) + rd16(nb, 18 + 12 * i) * EX_U32;
+          if start >= e.blocks || e.blocks - start < len {
+            return ex_bad_run();
+          }
+          let k = lblk - b;
+          if !init {
+            return Run { ok: true, phys: 0, n: len - k };
+          }
+          return Run { ok: true, phys: start + k, n: len - k };
+        }
+        if b > lblk && b - lblk < hole {
+          hole = b - lblk;
+        }
+        i = i + 1;
+      }
+      return Run { ok: true, phys: 0, n: hole };
+    }
+    // An index: the last entry whose first block is at most lblk; the
+    // next entry's first block ends the range.
+    let mut pick = ents;
+    let mut best = 0;
+    let mut i = 0;
+    while i < ents
+      invariant i <= ents && ents <= (nlen - 12) / 12 && nlen <= 4096 && blen(nb) == 4096 && pick <= ents && lblk < limit && limit <= EX_U32
+    {
+      let b = rd32(nb, 12 + 12 * i);
+      if b <= lblk {
+        if pick == ents || b >= best {
+          pick = i;
+          best = b;
+        }
+      } else {
+        if b < limit {
+          limit = b;
+        }
+      }
+      i = i + 1;
+    }
+    if pick == ents {
+      return Run { ok: true, phys: 0, n: limit - lblk };
+    }
+    let leaf = rd32(nb, 16 + 12 * pick) + rd16(nb, 20 + 12 * pick) * EX_U32;
+    if leaf == 0 || leaf >= e.blocks || !ex_rd(&mut v, e, leaf * e.bs, e.bs) {
+      return ex_bad_run();
+    }
+    bcopy(&mut nb, 0, v.xfer, 0, e.bs);
+    nlen = e.bs;
+    want = depth - 1;
+    lvl = lvl + 1;
+  }
+  return ex_bad_run();
+}
+
+/// ex_map for a file with a block map (direct blocks and three levels of
+/// indirect ones). The map is in ib[ibo..ibo + 60].
+fn ex_indirect(v: &mut Vfs, e: Ext, ib: &Bytes, ibo: u64, lblk: u64) -> Run
+  requires vfs_ok(v) && ext_ok(e) && e.err == 0 && ibo + 64 <= blen(ib) && lblk < EX_U32
+  ensures vfs_ok(v) && run_ok(result, e)
+{
+  if lblk < 12 {
+    return ex_one(e, rd32(ib, ibo + 4 * lblk));
+  }
+  let ppb = e.bs / 4;
+  let mut rem = lblk - 12;
+  let mut slot = 12;
+  let mut levels = 1;
+  let mut div = 1;
+  if rem >= ppb {
+    rem = rem - ppb;
+    slot = 13;
+    levels = 2;
+    div = ppb;
+    if rem >= ppb * ppb {
+      rem = rem - ppb * ppb;
+      slot = 14;
+      levels = 3;
+      div = ppb * ppb;
+    }
+  }
+  let mut blk = rd32(ib, ibo + 4 * slot);
+  let mut j = 0;
+  while j < levels
+    invariant j <= levels && levels <= 3 && vfs_ok(v) && div >= 1 && div <= ppb * ppb && ppb <= 1024 && ppb >= 256
+  {
+    if blk == 0 {
+      return Run { ok: true, phys: 0, n: 1 };
+    }
+    let idx = rem / div;
+    rem = rem % div;
+    if blk >= e.blocks || idx >= ppb || !ex_rd(&mut v, e, blk * e.bs + 4 * idx, 4) {
+      return ex_bad_run();
+    }
+    blk = rd32(v.xfer, 0);
+    div = div / ppb;
+    if div == 0 {
+      div = 1;
+    }
+    j = j + 1;
+  }
+  return ex_one(e, blk);
+}
+
+/// Block lblk of the file whose block map or extent tree is in
+/// ib[ibo..ibo + 60] (flags are its inode's): see Run. nb is scratch.
+fn ex_map(v: &mut Vfs, e: Ext, ib: &Bytes, ibo: u64, flags: u64, nb: &mut Bytes, lblk: u64) -> Run
+  requires vfs_ok(v) && ext_ok(e) && e.err == 0 && ibo + 64 <= blen(ib) && blen(nb) == 4096
+  ensures vfs_ok(v) && blen(nb) == 4096 && run_ok(result, e)
+{
+  if lblk >= EX_U32 {
+    return ex_bad_run();
+  }
+  if (flags & EX_FL_EXTENTS) != 0 {
+    return ex_extent(&mut v, e, ib, ibo, &mut nb, lblk);
+  }
+  return ex_indirect(&mut v, e, ib, ibo, lblk);
+}
+
+// ---------------------------------------------------------------- the walk
+
+/// Loads the path pb[0..n] into the transfer buffer.
+fn ex_load(v: &mut Vfs, pb: &Bytes, n: u64)
+  requires vfs_ok(v) && n <= blen(pb) && n <= XFER
+  ensures vfs_ok(v)
+{
+  bcopy(&mut v.xfer, 0, pb, 0, n);
+}
+
+/// Gives the in-memory node named by the path in the transfer buffer its
+/// permission bits (when perm is below 65536), time and owner.
+fn ex_stamp(v: &mut Vfs, n: u64, perm: u64, ino: Ino)
+  requires vfs_ok(v) && n <= XFER && ino_ok(ino) && ino.ok
+  ensures vfs_ok(v)
+{
+  let i = ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, n);
+  if i < NFILES {
+    ram_set_meta(&mut v.ram, i, perm, ino.mtime);
+    ram_set_owner(&mut v.ram, i, ino.uid + ino.gid * 4294967296);
+  }
+}
+
+/// Takes node i for a moment to run `file_write` of the first m bytes of
+/// the transfer buffer at offset `at`. False if it is not there or the
+/// write is short.
+fn ex_put(v: &mut Vfs, mem: &mut Mem, i: u64, at: u64, m: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && i < NFILES && m <= XFER
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let mut ok = false;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      ok = file_write(&mut g, &mut mem, at, v.xfer, m) == m;
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  return ok;
+}
+
+/// Sets the size of in-memory node i (growing reads as zeros).
+fn ex_size(v: &mut Vfs, mem: &mut Mem, i: u64, size: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem) && i < NFILES
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let mut ok = false;
+  match take_node(&mut v.ram, i) {
+    Node::Free => {},
+    Node::File(f) => {
+      let mut g = f;
+      ok = file_resize(&mut g, &mut mem, size);
+      put_node(&mut v.ram, i, Node::File(g));
+    },
+  }
+  return ok;
+}
+
+/// Copies the contents of regular file `ino` (whose map is in ib[ibo..])
+/// into in-memory node i, which is empty. Holes stay holes.
+fn ex_fill(v: &mut Vfs, mem: &mut Mem, e: Ext, ino: Ino, ib: &Bytes, ibo: u64, nb: &mut Bytes, i: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && ino_ok(ino) && ino.ok && ibo + 64 <= blen(ib) && blen(nb) == 4096 && i < NFILES
+  ensures vfs_ok(v) && mem_ok(mem) && blen(nb) == 4096
+{
+  if ino.size > FILE_MAX || !ex_size(&mut v, &mut mem, i, ino.size) {
+    return EX_BIG;
+  }
+  let mut err = EX_OK;
+  let bs = e.bs;
+  let nblk = (ino.size + bs - 1) / bs;
+  let mut lblk = 0;
+  while err == EX_OK && lblk < nblk
+    invariant lblk <= nblk && nblk <= EX_U32 && vfs_ok(v) && mem_ok(mem) && blen(nb) == 4096 && ino.size <= FILE_MAX && nblk * bs < ino.size + bs
+  {
+    let r = ex_map(&mut v, e, ib, ibo, ino.flags, &mut nb, lblk);
+    if !r.ok {
+      err = EX_BAD;
+    } else {
+      let mut k = r.n;
+      if k > nblk - lblk {
+        k = nblk - lblk;
+      }
+      if r.phys != 0 {
+        // k blocks, from byte lblk * bs of the file; the last one may
+        // stop at the file's end.
+        let from = lblk * bs;
+        let mut end = (lblk + k) * bs;
+        if end > ino.size {
+          end = ino.size;
+        }
+        let mut at = from;
+        while err == EX_OK && at < end
+          invariant from <= at && at <= end && end <= ino.size && ino.size <= FILE_MAX && vfs_ok(v) && mem_ok(mem)
+            && r.phys + r.n <= e.blocks && k <= r.n && k >= 1 && r.phys < EX_BLK_MAX && from == lblk * bs && lblk < nblk
+            && lblk + k <= nblk && nblk <= EX_U32 && (at - from) <= k * bs
+        {
+          let mut m = end - at;
+          if m > 4096 {
+            m = 4096;
+          }
+          if !ex_rd(&mut v, e, r.phys * bs + (at - from), m) {
+            err = EX_BAD;
+          } else {
+            if !ex_put(&mut v, &mut mem, i, at, m) {
+              err = EX_MEM;
+            }
+            at = at + m;
+          }
+        }
+      }
+      lblk = lblk + k;
+    }
+  }
+  return err;
+}
+
+/// The hard-link table: slot ino % EX_HL holds the inode, then the node + 1.
+fn ex_hl_find(hl: &Buf, ino: u64) -> u64
+  requires len(hl) == 2 * EX_HL
+{
+  let mut s = ino % EX_HL;
+  let mut k = 0;
+  while k < EX_HL
+    invariant k <= EX_HL && s < EX_HL && len(hl) == 2 * EX_HL
+  {
+    if get(hl, 2 * s) == ino && get(hl, 2 * s + 1) != 0 {
+      return get(hl, 2 * s + 1) - 1;
+    }
+    if get(hl, 2 * s + 1) == 0 {
+      return NFILES;
+    }
+    s = (s + 1) % EX_HL;
+    k = k + 1;
+  }
+  return NFILES;
+}
+
+fn ex_hl_add(hl: &mut Buf, ino: u64, node: u64)
+  requires len(hl) == 2 * EX_HL && node < NFILES
+  ensures len(hl) == 2 * EX_HL
+{
+  let mut s = ino % EX_HL;
+  let mut k = 0;
+  while k < EX_HL
+    invariant k <= EX_HL && s < EX_HL && len(hl) == 2 * EX_HL
+  {
+    if get(hl, 2 * s + 1) == 0 {
+      hl = set(hl, 2 * s, ino);
+      hl = set(hl, 2 * s + 1, node + 1);
+      return;
+    }
+    s = (s + 1) % EX_HL;
+    k = k + 1;
+  }
+}
+
+/// Makes the node for child `ino` (a non-directory) at the path pb[0..clen]:
+/// a file, link, device node or pipe. The transfer buffer is used.
+fn ex_make(v: &mut Vfs, mem: &mut Mem, e: Ext, ino: Ino, num: u64, pb: &Bytes, clen: u64, fib: &Bytes, nb: &mut Bytes, hl: &mut Buf) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && ino_ok(ino) && ino.ok && clen >= 1 && clen <= FNAME_MAX && clen <= blen(pb)
+    && blen(fib) == 64 && blen(nb) == 4096 && len(hl) == 2 * EX_HL
+  ensures vfs_ok(v) && mem_ok(mem) && blen(nb) == 4096 && len(hl) == 2 * EX_HL
+{
+  let kind = ino.mode / 4096 * 4096;
+  let perm = ino.mode % 4096;
+  ex_load(&mut v, pb, clen);
+  if ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, clen) < NFILES {
+    return EX_FULL;                                 // a name twice
+  }
+  if kind == EX_T_REG {
+    if ino.links > 1 {
+      let t = ex_hl_find(hl, num);
+      if t < NFILES {
+        if vfs_ram_link(&mut v, clen, t) >= NFILES {
+          return EX_FULL;
+        }
+        return EX_OK;
+      }
+    }
+    let i = vfs_ram_create(&mut v, clen, false);
+    if i >= NFILES {
+      return EX_FULL;
+    }
+    ex_stamp(&mut v, clen, perm, ino);
+    if ino.links > 1 {
+      ex_hl_add(&mut hl, num, i);
+    }
+    return ex_fill(&mut v, &mut mem, e, ino, fib, 0, &mut nb, i);
+  }
+  if kind == EX_T_LNK {
+    // The target is in the map's own bytes (a "fast" link, under 60 bytes
+    // and with no blocks), or in the file's first block.
+    let m = ino.size;
+    if m == 0 || m > FNAME_MAX {
+      return EX_BAD;
+    }
+    if m < 60 && ino.blocks == 0 {
+      bcopy(&mut nb, 0, fib, 0, 60);
+    } else {
+      let r = ex_map(&mut v, e, fib, 0, ino.flags, &mut nb, 0);
+      if !r.ok || r.phys == 0 || !ex_rd(&mut v, e, r.phys * e.bs, m) {
+        return EX_BAD;
+      }
+      bcopy(&mut nb, 0, v.xfer, 0, m);
+    }
+    ex_load(&mut v, pb, clen);
+    bcopy(&mut v.xfer, clen, nb, 0, m);
+    if !vfs_mkdata(&mut v, &mut mem, clen, m, LINK_MODE) {
+      return EX_FULL;
+    }
+    ex_load(&mut v, pb, clen);
+    ex_stamp(&mut v, clen, 65536, ino);
+    return EX_OK;
+  }
+  if kind == EX_T_CHR || kind == EX_T_BLK {
+    let mut dev = rd32(fib, 0);
+    if dev == 0 {
+      dev = rd32(fib, 4);
+    }
+    store_le32(&mut v.xfer, clen, cast[u32](dev));
+    if !vfs_mkdata(&mut v, &mut mem, clen, 4, kind + perm) {
+      return EX_FULL;
+    }
+    ex_load(&mut v, pb, clen);
+    ex_stamp(&mut v, clen, 65536, ino);
+    return EX_OK;
+  }
+  if kind == EX_T_FIFO || kind == EX_T_SOCK {
+    if !vfs_mknode(&mut v, &mut mem, clen, kind + perm) {
+      return EX_FULL;
+    }
+    ex_load(&mut v, pb, clen);
+    ex_stamp(&mut v, clen, 65536, ino);
+    return EX_OK;
+  }
+  return EX_UNSUP;
+}
+
+/// Where the walk stands: how it went and how many directories are open.
+struct Step { err: u64, sp: u64 }
+
+/// The entry just read into the transfer buffer (its name nl bytes at byte
+/// 8, inode number num) of the directory whose path is pb[0..plen], the
+/// sp-th open one: makes its node, and for a directory opens it.
+fn ex_child(v: &mut Vfs, mem: &mut Mem, e: Ext, pb: &mut Bytes, plen: u64, nl: u64, num: u64, sp: u64, st: &mut Buf, ibs: &mut Bytes, nb: &mut Bytes, fib: &mut Bytes, hl: &mut Buf) -> Step
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && blen(pb) == 512 && plen <= FNAME_MAX && nl < 256 && nl + 8 <= XFER
+    && sp >= 1 && sp <= EX_DEPTH && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
+    && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL && result.sp >= 1 && result.sp <= EX_DEPTH
+{
+  if nl == 0 {
+    return Step { err: EX_BAD, sp: sp };
+  }
+  if plen + 1 + nl > FNAME_MAX {
+    return Step { err: EX_LONG, sp: sp };
+  }
+  // The child's path: this directory's, a slash, its name.
+  bset(&mut pb, plen, 47);
+  let mut j = 0;
+  while j < nl
+    invariant j <= nl && nl < 256 && plen + 1 + nl <= FNAME_MAX && blen(pb) == 512 && nl + 8 <= XFER && blen(v.xfer) == XFER
+  {
+    let c = bget(v.xfer, 8 + j);
+    if c == 0 || c == 47 {
+      return Step { err: EX_BAD, sp: sp };
+    }
+    bset(&mut pb, plen + 1 + j, c);
+    j = j + 1;
+  }
+  let clen = plen + 1 + nl;
+  let ino = ex_inode(&mut v, e, num, &mut fib, 0);
+  if !ino.ok || (ino.flags & EX_FL_BAD) != 0 || (ino.flags & EX_FL_EAINODE) != 0 {
+    return Step { err: EX_BAD, sp: sp };
+  }
+  if ino.mode / 4096 * 4096 != EX_T_DIR {
+    return Step { err: ex_make(&mut v, &mut mem, e, ino, num, pb, clen, fib, &mut nb, &mut hl), sp: sp };
+  }
+  if sp >= EX_DEPTH || ino.size > EX_DIR_MAX {
+    return Step { err: EX_LONG, sp: sp };
+  }
+  ex_load(&mut v, pb, clen);
+  if ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, clen) < NFILES || !vfs_mkdir(&mut v, clen) {
+    return Step { err: EX_FULL, sp: sp };
+  }
+  ex_stamp(&mut v, clen, ino.mode % 4096, ino);
+  let nf = sp * EX_FR;
+  st = set(st, nf, num);
+  st = set(st, nf + 1, 0);
+  st = set(st, nf + 2, clen);
+  st = set(st, nf + 3, ino.size);
+  st = set(st, nf + 4, ino.flags);
+  st = set(st, nf + 5, 0);
+  bcopy(&mut ibs, sp * 64, fib, 0, 60);
+  return Step { err: EX_OK, sp: sp + 1 };
+}
+
+/// One step of the walk: reads the next entry of the innermost open
+/// directory (the sp-th) and handles it, or closes the directory at its end.
+fn ex_step(v: &mut Vfs, mem: &mut Mem, e: Ext, sp: u64, st: &mut Buf, pb: &mut Bytes, ibs: &mut Bytes, nb: &mut Bytes, fib: &mut Bytes, hl: &mut Buf) -> Step
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && blen(pb) == 512
+    && sp >= 1 && sp <= EX_DEPTH && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
+    && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL && result.sp <= EX_DEPTH
+{
+  let fr = (sp - 1) * EX_FR;
+  let pos = get(st, fr + 1);
+  let plen = get(st, fr + 2);
+  let size = get(st, fr + 3);
+  let flags = get(st, fr + 4);
+  let bs = e.bs;
+  if pos >= size {
+    return Step { err: EX_OK, sp: sp - 1 };
+  }
+  if size > EX_DIR_MAX || plen > FNAME_MAX {
+    return Step { err: EX_BAD, sp: sp };
+  }
+  // The block of the directory the position is in.
+  let mut phys = get(st, fr + 5);
+  if pos % bs == 0 || phys == 0 {
+    let r = ex_map(&mut v, e, ibs, (sp - 1) * 64, flags, &mut nb, pos / bs);
+    if !r.ok {
+      return Step { err: EX_BAD, sp: sp };
+    }
+    phys = r.phys;
+  }
+  if phys == 0 {
+    // A hole in a directory: nothing in it.
+    st = set(st, fr + 1, pos - pos % bs + bs);
+    st = set(st, fr + 5, 0);
+    return Step { err: EX_OK, sp: sp };
+  }
+  if phys >= e.blocks {
+    return Step { err: EX_BAD, sp: sp };
+  }
+  st = set(st, fr + 5, phys);
+  let inb = pos % bs;
+  let mut want = bs - inb;
+  if want > 264 {
+    want = 264;
+  }
+  if want < 8 || !ex_rd(&mut v, e, phys * bs + inb, want) {
+    return Step { err: EX_BAD, sp: sp };
+  }
+  let num = rd32(v.xfer, 0);
+  let rec = rd16(v.xfer, 4);
+  let nl = rd16(v.xfer, 6) % 256;
+  if rec < 8 || rec % 4 != 0 || inb + rec > bs || nl + 8 > rec || nl + 8 > want {
+    return Step { err: EX_BAD, sp: sp };
+  }
+  st = set(st, fr + 1, pos + rec);
+  let dot = nl == 1 && bget(v.xfer, 8) == 46;
+  let dotdot = nl == 2 && bget(v.xfer, 8) == 46 && bget(v.xfer, 9) == 46;
+  if num == 0 || dot || dotdot {
+    return Step { err: EX_OK, sp: sp };
+  }
+  return ex_child(&mut v, &mut mem, e, &mut pb, plen, nl, num, sp, &mut st, &mut ibs, &mut nb, &mut fib, &mut hl);
+}
+
+/// Walks the tree below the mount directory (path pb[0..rl]) and makes a
+/// node for everything in it. st, ibs, nb, fib, hl are scratch.
+fn ex_walk(v: &mut Vfs, mem: &mut Mem, e: Ext, pb: &mut Bytes, rl: u64, st: &mut Buf, ibs: &mut Bytes, nb: &mut Bytes, fib: &mut Bytes, hl: &mut Buf) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && rl >= 1 && rl <= FNAME_MAX && blen(pb) == 512
+    && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
+    && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
+{
+  let root = ex_inode(&mut v, e, 2, &mut ibs, 0);
+  if !root.ok || root.mode / 4096 * 4096 != EX_T_DIR || (root.flags & EX_FL_BAD) != 0 || root.size > EX_DIR_MAX {
+    return EX_BAD;
+  }
+  st = set(st, 0, 2);
+  st = set(st, 1, 0);
+  st = set(st, 2, rl);
+  st = set(st, 3, root.size);
+  st = set(st, 4, root.flags);
+  st = set(st, 5, 0);
+  let mut sp = 1;
+  let mut iter = 0;
+  let mut err = EX_OK;
+  while err == EX_OK && sp > 0 && iter <= EX_ITER
+    invariant sp <= EX_DEPTH && iter <= EX_ITER + 1 && vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH
+      && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
+  {
+    iter = iter + 1;
+    let r = ex_step(&mut v, &mut mem, e, sp, &mut st, &mut pb, &mut ibs, &mut nb, &mut fib, &mut hl);
+    err = r.err;
+    sp = r.sp;
+  }
+  if err == EX_OK && sp > 0 {
+    return EX_BAD;                                  // too many entries
+  }
+  return err;
+}
+
+/// Mounts the ext4 image in in-memory file f below the in-memory directory
+/// named by the first n bytes of the transfer buffer, which must be empty:
+/// everything in the image is copied there. Returns EX_OK, or why not; on
+/// an error what was made stays (the caller unmounts to remove it).
+fn ex_import(v: &mut Vfs, mem: &mut Mem, f: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && n >= 1 && n <= FNAME_MAX
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  let mut pb = balloc(512);
+  bcopy(&mut pb, 0, v.xfer, 0, n);                   // the open below uses the transfer buffer
+  let e = ex_open(&mut v, f);
+  if e.err != EX_OK {
+    bfree(pb);
+    return e.err;
+  }
+  let mut st = alloc(EX_FR * EX_DEPTH);
+  let mut ibs = balloc(64 * EX_DEPTH);
+  let mut nb = balloc(4096);
+  let mut fib = balloc(64);
+  let mut hl = alloc(2 * EX_HL);
+  let err = ex_walk(&mut v, &mut mem, e, &mut pb, n, &mut st, &mut ibs, &mut nb, &mut fib, &mut hl);
+  bfree(pb);
+  free(st);
+  bfree(ibs);
+  bfree(nb);
+  bfree(fib);
+  free(hl);
+  return err;
+}
