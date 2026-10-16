@@ -857,11 +857,11 @@ COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_S
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
 compat: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS)
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS)
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)

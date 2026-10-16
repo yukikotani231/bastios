@@ -1445,6 +1445,14 @@ alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
 alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+alpine: abuild: install it with fakeroot and the build tools
+alpine: abuild-keygen: a builder user makes a signing key and trusts it
+alpine: symlink: a new symlink belongs to the user who made it, who can set its times
+alpine: abuild: libgreet: a patch, a test suite, and -dev and -doc packages
+alpine: abuild: greeter: build-time dependencies come from the repository just made, and the runtime one is traced
+alpine: apk: install the built packages from the signed repository, with their scripts
+alpine: apk: a repository signed with a key that is not trusted is refused
+alpine: abuild: tinycc: a C compiler built from its source, which then compiles a program
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1

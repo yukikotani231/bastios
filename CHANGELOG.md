@@ -218,6 +218,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- A symbolic link or a device node made by `symlink` or `mknod` now belongs to the user who made it (it always belonged to root), so its owner can set its times (`touch -h`), and a device node takes the umask. `abuild` builds Alpine packages as an unprivileged user under `fakeroot`, signs them and installs them with `apk` (libraries with `-dev` and `-doc` subpackages, patches, `check()`, install scripts, tinycc from its source; `docs/using.md`, `test/compat/alpine.txt`).
 - A `bwm` client can give its window's pixels as shared memory: `BWM_CREATE_SHM` carries a `memfd` over the socket with `SCM_RIGHTS`, the client writes into it and a `BWM_DRAW` with no pixels names the rectangle that changed (`bwm_create_shm` and `bwm_damage` in `user/bwmlib.h`). `bterm` uses it and `bhello -s` shows it; `test/iso_test.sh` checks the pixels on the screendump.
 - `bterm` (`user/bterm.c`), a terminal window for `bwm`: an 80 x 24 grid drawn with the console font, with BusyBox's `ash` on a pseudo-terminal behind it. It reads a VT100 subset (CR, LF, backspace, tab, cursor moves, erase, insert and delete of characters and lines, scroll regions, the alternate screen, colours) and sends keys to the shell. `test/iso_test.sh` types a command into it and reads the output back cell by cell from the screendump.
 
