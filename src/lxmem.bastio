@@ -643,6 +643,25 @@ fn hole_within(k: &Kernel, pid: u64, first: u64, end: u64) -> bool
   return false;
 }
 
+/// Whether any of pages first .. end lies in a hole of process pid: memory
+/// munmap took away, which is not a reservation (those leave no record).
+fn hole_touch(k: &Kernel, pid: u64, first: u64, end: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let mut i = 0;
+  while i < HOLE_N
+    invariant i <= HOLE_N
+  {
+    let a = get(k.holes, hl_at(pid, i, 0));
+    let b = get(k.holes, hl_at(pid, i, 1));
+    if b != 0 && a < end && first < b {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 /// mmap's address hint: where `pages` pages from user address addr are,
 /// as window pages, if nothing is there, or STACK_FIRST to place the
 /// mapping as usual. Space is handed out top down from F_MMAP, and what
@@ -1714,6 +1733,9 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   // mapped are reservations, as lx_mprotect takes them.
   if from > to || (from < pget(k.procs, pid, F_MMAP) / 4096 && anon_count(&mut k, pid, from, to) != to - from) {
     return ENOMEM;
+  }
+  if hole_touch(k, pid, from, to) {
+    return ENOMEM;                          // part of the range was unmapped
   }
   if advice == MADV_REMOVE || advice == MADV_WIPEONFORK {
     return EINVAL;                          // not supported: no hole punching; a child would see the pages

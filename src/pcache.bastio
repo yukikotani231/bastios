@@ -44,15 +44,15 @@
 
 import "pages.bastio";
 
-const PC_T: u64 = 8;                  // level-1 tables
-const PC_N: u64 = 4096;               // PC_T * 512 pages the cache can hold
-const PCK_LEN: u64 = 12291;           // 3 words a slot, the clock hand, 1 once the table is made, slots in use
-const PC_HAND: u64 = 12288;           // 3 * PC_N
-const PC_ONW: u64 = 12289;
-const PC_USED: u64 = 12290;
+const PC_T: u64 = 16;                 // level-1 tables
+const PC_N: u64 = 8192;               // PC_T * 512 pages the cache can hold
+const PCK_LEN: u64 = 24579;           // 3 words a slot, the clock hand, 1 once the table is made, slots in use
+const PC_HAND: u64 = 24576;           // 3 * PC_N
+const PC_ONW: u64 = 24577;
+const PC_USED: u64 = 24578;
 const PC_NONE: u64 = 18446744073709551615;
 const PC_B: u64 = 8192;               // index buckets
-const PC_LK: u64 = 12288;             // PC_B bucket heads, then PC_N chain links
+const PC_LK: u64 = 16384;             // PC_B bucket heads, then PC_N chain links
 const PC_HN: u64 = 131072;            // handles below this have a mark in `has` (the RAM files, then the first disk entries)
 
 enum PcTab { Off, On(PageTable) }

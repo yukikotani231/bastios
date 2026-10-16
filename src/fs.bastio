@@ -122,7 +122,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), zeros: balloc(ZEROS), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), mnt_hi: 0, now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0)), NC_STD), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(KBASE + KB), rhi: 0, pool_hi: 0, nat_hi: 0 };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0)), DM_WHOLE, NC_STD), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(KBASE + KB), rhi: 0, pool_hi: 0, nat_hi: 0 };
 }
 
 /// ram_create of the name in the transfer buffer, noting the node in `rhi`
@@ -197,11 +197,21 @@ fn lo_swap(v: &mut Vfs, pages: Vec[Slot], size: u64) -> Vec[Slot]
   ensures vfs_ok(v)
 {
   let s = blk_loop_swap(disk_unmount(v.lo), pages, size);
-  v.lo = disk_mount(s.dev, NC_STD);
+  v.lo = disk_mount(s.dev, DM_WHOLE, NC_STD);
   if s.swapped {
     v.lo_size = size;
   }
   return s.pages;
+}
+
+/// Mounts the disk afresh as the BastiOS partition of its GPT (what boot
+/// does without the option `install`): the installer, which has just made
+/// the partition, then fills it through the file system.
+fn vfs_mount_target(v: &mut Vfs)
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  v.disk = disk_mount(disk_unmount(v.disk), DM_GPT, NC_STD);
 }
 
 /// Is the name in the first n bytes of the transfer buffer on the disk
