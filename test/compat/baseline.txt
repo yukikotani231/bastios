@@ -476,6 +476,7 @@ t_ipc: socketpair AF_UNIX
 t_ipc: socketpair both ways, EOF after close
 t_ipc: timerfd
 t_ipc: ttyname(0)
+t_ipc: splice from an empty pipe into a read-only, O_PATH or non-writable descriptor fails at once
 t_isol: a loop-mounted image is nosuid
 t_isol: /dev/console is root's
 t_isol: SHM_LOCK needs RLIMIT_MEMLOCK or root
@@ -963,6 +964,7 @@ t_proc: wait with no children is ECHILD
 t_proc: waitid
 t_proc: waitpid WNOHANG
 t_proc: sysctl somaxconn reads 4096
+t_proc: keys root_maxkeys reads 200 and a larger value reads back
 t_proc: sysctl overcommit_memory reads 0
 t_proc: sysctl max_map_count reads 65530
 t_proc: sysctl cap_last_cap reads 40
@@ -1362,6 +1364,7 @@ alpine: strace: traces a program's system calls with ptrace, following the child
 alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
 alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
 alpine: gdb: a core file of a crashed program shows where it died, its call chain and its arguments
+alpine: nvim: Termdebug drives gdb over MI in terminal windows: a breakpoint in add, the stop, the signs on the source line and an expression
 alpine: gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
 alpine: gdb: attach to a program with three threads, and every thread is listed
 alpine: nvim: LuaJIT loads a shared object that gcc built
@@ -1385,6 +1388,7 @@ alpine: container: crun and runc: a profile that denies mount, module, ptrace an
 alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
 alpine: container: the root file system is read-only, and the exit status comes back
 alpine: container: rootless: runc runs Alpine as an unprivileged user in a user namespace of its own
+alpine: container: rootless runc runs a rootless runc inside its container (docker-in-docker)
 alpine: container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
 alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
 alpine: container: the image's command, environment and working directory run rootless from the bundle
@@ -1404,6 +1408,7 @@ alpine: nvim: the edit-build-run loop on a C project: :make with make and gcc re
 alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
+alpine: nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
 alpine: apk: free the disk, then install python3 over HTTP
 alpine: python3: asyncio talks over a socketpair
