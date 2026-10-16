@@ -1016,8 +1016,8 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
 {
   let fh = vfs_lookup(&mut k.fs, n);
   let fm = vfs_meta(&mut k.fs, fh);
-  if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 {
-    return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio)
+  if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 && flags & LO_PATH == 0 {
+    return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio); O_PATH holds it, and connect follows /proc/self/fd/N to it
   }
   if fh != NO_FILE && flags & LO_PATH == 0 && vfs_is_fifo(&mut k.fs, fh) {   // O_PATH holds the name, not an end
     if flags & LO_CREAT != 0 && flags & LO_EXCL != 0 {

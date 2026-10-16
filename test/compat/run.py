@@ -709,6 +709,7 @@ def main():
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
+    ap.add_argument("--podman-disk", help="the Podman disk (the root of the podman image) for podman.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -721,7 +722,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "debian", "node", "go", "java", "rust"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "debian", "node", "go", "java", "rust", "podman"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -745,6 +746,7 @@ def main():
     go = load_applets(os.path.join(HERE, "go.txt"))
     java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
+    podman = load_applets(os.path.join(HERE, "podman.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
@@ -872,6 +874,11 @@ def main():
         disk = os.path.join(args.out, "rust-run.img")
         shutil.copyfile(args.rust_disk, disk)
         lanes.append(("rust", disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
+    if args.podman_disk and lane_chosen("podman"):
+        # The cases unpack a root of about a hundred megabytes: a copy.
+        disk = os.path.join(args.out, "podman-run.img")
+        shutil.copyfile(args.podman_disk, disk)
+        lanes.append(("podman", disk, [("podman", "Podman", applets_lane(podman, 600))], "2G"))
     lanes = [l for l in lanes if l[2] and lane_chosen(l[0])]
     # The groups the chosen lanes hold, whatever becomes of them: a lane that
     # dies part way loses its checks, it does not drop them.
@@ -895,7 +902,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "podman"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
