@@ -88,6 +88,7 @@ busybox: diff
 busybox: du
 busybox: echo
 busybox: env
+busybox: lang
 busybox: expr
 busybox: find
 busybox: free
