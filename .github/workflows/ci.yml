@@ -346,10 +346,10 @@ jobs:
             lanes: main1,bastio
             disks: disk.img bastio.img
           - part: alpine
-            lanes: alpine
+            lanes: alpine,alpine2
             disks: alpine.img
           - part: rest
-            skip: main1,bastio,alpine
+            skip: main1,bastio,alpine,alpine2
             disks: debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
