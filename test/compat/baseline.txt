@@ -1362,6 +1362,13 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a compile error is reported
+podman: podman: unpack the image root and set it up
+podman: podman: version
+podman: podman: import a root and run a container as root
+podman: podman: a container has its own hostname
+podman: podman: rootless, the unprivileged user maps to root in its user namespace
+podman: podman: rootless, import an image (chroot, mkdir and lchown as the namespace's root)
+podman: podman: rootless, run a container in a user namespace
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
