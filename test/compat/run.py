@@ -863,7 +863,17 @@ def main():
     os.sync()
     try:
         with concurrent.futures.ThreadPoolExecutor(len(lanes) if jobs > 1 else 1) as pool:
-            done = list(pool.map(lambda l: lane(*l), lanes))
+            # The scripting-language lanes are long and use a host core each
+            # while they run: two at a time, so the lanes that wait on a
+            # network round trip (apk over HTTP) are not starved on a small runner.
+            script_gate = threading.Semaphore(2)
+
+            def run_lane(l):
+                if l[1][0][0] in ("perl", "ruby", "lua"):
+                    with script_gate:
+                        return lane(*l)
+                return lane(*l)
+            done = list(pool.map(run_lane, lanes))
         for res, out in done:
             results.update(res)
             log.write(out)
