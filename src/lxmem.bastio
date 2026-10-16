@@ -989,7 +989,7 @@ fn map_whole(k: &Kernel, pid: u64, first: u64, pages: u64) -> u64
   {
     let h = wget(k.maps, mp_at(pid, i, 2));
     if wget(k.maps, mp_at(pid, i, 0)) == first + 1 && wget(k.maps, mp_at(pid, i, 1)) == pages
-      && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE && wget(k.maps, mp_at(pid, i, 3)) % 4096 == 0 {
+      && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE {
       let row = of_get(k.ofd, h, 2);
       if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 && row_file(k.fs, row) != NO_FILE {
         return i;
@@ -1012,8 +1012,8 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
 {
   let have = oend - from;
   let h = wget(k.maps, mp_at(pid, ri, 2));
-  let off = wget(k.maps, mp_at(pid, ri, 3));
-  if h >= OFD_N || off % 4096 != 0 || off > 0xFFFFFFFFFFFF {
+  let off = mp_off(k, pid, ri);
+  if h >= OFD_N || off > 0xFFFFFFFFFFFF {
     return EINVAL;
   }
   let row = of_get(k.ofd, h, 2);
@@ -1213,6 +1213,133 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
   wset(&mut k.maps, mp_at(pid, i, 3), off);
 }
 
+/// The file offset of mapping record i of process pid. The word keeps
+/// bit 0 set once bus_mark has protected pages of the mapping that lie
+/// past the end of the file.
+fn mp_off(k: &Kernel, pid: u64, i: u64) -> u64
+  requires kok(k) && pid < NPROC && i < MAP_N
+  ensures result % 4096 == 0
+{
+  return wget(k.maps, mp_at(pid, i, 3)) / 4096 * 4096;
+}
+
+/// The record of process pid that covers window page p, or MAP_N.
+fn map_find(k: &Kernel, pid: u64, p: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= MAP_N
+{
+  let mut i = 0;
+  while i < MAP_N
+    invariant i <= MAP_N
+  {
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < wget(k.maps, mp_at(pid, i, 1)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return MAP_N;
+}
+
+/// The size of the file that record i of process pid maps, or NO_FILE if
+/// it is not a mapping of a plain file.
+fn map_file_size(k: &mut Kernel, pid: u64, i: u64) -> u64
+  requires kok(k) && pid < NPROC && i < MAP_N
+  ensures kok(k)
+{
+  let h = wget(k.maps, mp_at(pid, i, 2));
+  if h >= OFD_N || of_get(k.ofd, h, 0) != OF_FILE {
+    return NO_FILE;
+  }
+  let row = of_get(k.ofd, h, 2);
+  if row >= FD_ROWS || row_file(k.fs, row) == NO_FILE {
+    return NO_FILE;
+  }
+  return vfs_size(&mut k.fs, row_file(k.fs, row));
+}
+
+/// Window pages first .. first + pages of process pid were just mapped as
+/// a shared mapping that map_record recorded: the pages that lie wholly
+/// past the end of the file become inaccessible, so that touching one is a
+/// page fault that bus_fault turns into SIGBUS, as on Linux. Mappings that
+/// found no record keep their zero pages there.
+fn bus_mark(k: &mut Kernel, pid: u64, first: u64, pages: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if first >= WPAGES || pages > WPAGES - first {
+    return;
+  }
+  let i = map_find(k, pid, first);
+  if i >= MAP_N || wget(k.maps, mp_at(pid, i, 0)) != first + 1 || wget(k.maps, mp_at(pid, i, 1)) != pages {
+    return;
+  }
+  let size = map_file_size(&mut k, pid, i);
+  if size == NO_FILE {
+    return;
+  }
+  let off = mp_off(k, pid, i);
+  let mut skip = 0;                         // the pages of the mapping that hold file bytes
+  if size > off {
+    skip = (size - off) / 4096;
+    if (size - off) % 4096 != 0 {
+      skip = skip + 1;
+    }
+  }
+  if skip < pages {
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, first + skip, first + pages, 0);
+    wset(&mut k.maps, mp_at(pid, i, 3), off + 1);
+  }
+}
+
+/// A page fault of process p on a page that bus_mark made inaccessible:
+/// 0 if it is not such a page, 1 if the file has grown to cover it (it is
+/// accessible again: run the instruction again), 2 if it still lies past
+/// the end of the file (SIGBUS).
+fn bus_fault(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+  ensures result <= 2
+{
+  let va = pget(k.procs, p, reg_word(R_FAULT));
+  if va < USER_BASE || va - USER_BASE >= USER_SIZE {
+    return 0;
+  }
+  let q = (va - USER_BASE) / 4096;
+  if q >= WPAGES {
+    return 0;
+  }
+  let i = map_find(k, p, q);
+  if i >= MAP_N || wget(k.maps, mp_at(p, i, 3)) % 4096 != 1 {
+    return 0;
+  }
+  let size = map_file_size(&mut k, p, i);
+  if size == NO_FILE {
+    return 0;
+  }
+  let first1 = wget(k.maps, mp_at(p, i, 0));
+  if first1 == 0 || q < first1 - 1 || q - (first1 - 1) > WPAGES {
+    return 0;
+  }
+  let foff = sat_add(mp_off(k, p, i), (q - (first1 - 1)) * 4096);
+  if foff >= size {
+    return 2;
+  }
+  // The file has grown since: the page is file memory now, read-write if
+  // the file was opened for writing (the mapping's own protection is not
+  // kept).
+  let h = wget(k.maps, mp_at(p, i, 2));
+  let mut acc = 1;
+  if h < OFD_N {
+    let row = of_get(k.ofd, h, 2);
+    if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 {
+      acc = 2;
+    }
+  }
+  win_op(&mut k.mem, &mut k.spaces, p, WOP_PROTECT, q, q + 1, acc);
+  return 1;
+}
+
 /// Writes the pages of record i of process pid that lie in window pages
 /// from .. to back to its file, up to the file's end. 0, or DISK_RETRY if
 /// the disk has not cached blocks it needs (the pages before are queued;
@@ -1236,7 +1363,7 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
   }
   let first = first1 - 1;
   let end = sat_add(first, wget(k.maps, mp_at(pid, i, 1)));
-  let off = wget(k.maps, mp_at(pid, i, 3));
+  let off = mp_off(k, pid, i);
   let last = smaller(smaller(end, to), WPAGES);
   let mut p = first;
   if p < from {
