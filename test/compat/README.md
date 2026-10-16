@@ -84,7 +84,11 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   - `make ARCH=aarch64 compat` runs this group, `debian.txt` and `node.txt` on
     the AArch64 kernel from the images' arm64 layers (`COMPAT_ARCH=aarch64`;
     the pins are in `images.mk`). The Bastio toolchain and Dropbear are built
-    for x86-64 only, so the checks that use them do not pass there.
+    for x86-64 only, so the checks that use them do not pass there. Two
+    packages come from elsewhere for lack of an arm64 image: gdb is the
+    arm64 layers of the same Alpaquita image (`arch/aarch64/Makefile`), and
+    cmake is made from the `cmake` wheel on PyPI (`--cmake-wheel`, pinned by
+    SHA-256), which bundles its C++ runtime.
 - `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
   case unpacks Debian's root file system (the `debian:stable-slim` image,
   `DEBIAN_IMAGE`, without `/usr/share`, dpkg's file lists, gconv and Perl's
