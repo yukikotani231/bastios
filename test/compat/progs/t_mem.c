@@ -341,12 +341,8 @@ int main(void) {
            if (sf >= 0) close(sf);
            unlink("mem_shared");
            ok; }));
-    EXPECT("mprotect makes 300 MiB of a PROT_NONE reservation writable (and executable where writable pages can run code: AArch64), more than the machine has: only touched pages count", ({
-#ifdef __x86_64__
-           int rwx = PROT_READ | PROT_WRITE;   /* x86-64 maps an executable range at once (NX) */
-#else
-           int rwx = PROT_READ | PROT_WRITE | PROT_EXEC;
-#endif
+    EXPECT("mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the machine has: only touched pages count", ({
+           int rwx = PROT_READ | PROT_WRITE;   /* an executable range is mapped at once (NX) */
            size_t sz = 300u << 20;
            char *r = mmap(0, 512u << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
            int ok = r != MAP_FAILED && mprotect(r, sz, rwx) == 0;
