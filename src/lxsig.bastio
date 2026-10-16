@@ -46,6 +46,7 @@ const SIGWINCH: u64 = 28;
 // A sender word (k.sigsave) at or above this says the signal came from a
 // processor exception at the address it holds less FAULT_MARK.
 const FAULT_MARK: u64 = 0x8000000000000000;
+const FAULT_BUS: u64 = 0x4000000000000000;   // in a fault word: the exception is a SIGBUS (si_code BUS_ADRERR)
 // The sender word of a pending signal (k.sigsave): the sender's pid in the low 10 bits (below 1024, past
 // NPROC), SW_QUEUE when sigqueue carried a value (kept in value_at).
 const SW_PID: u64 = 1024;
@@ -397,9 +398,10 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
   ensures blen(b) == old(blen(b))
 {
   if word >= FAULT_MARK {
-    // A processor exception (fault_caught): si_code SEGV_MAPERR, si_addr.
-    bset(&mut b, at + 8, cast[u8](1));
-    xfer_u64(&mut b, at + 16, word - FAULT_MARK);
+    // A processor exception (fault_caught): si_code SEGV_MAPERR (BUS_ADRERR
+    // for a SIGBUS), si_addr.
+    bset(&mut b, at + 8, cast[u8](1 + (word - FAULT_MARK) / FAULT_BUS % 2));
+    xfer_u64(&mut b, at + 16, (word - FAULT_MARK) % FAULT_BUS);
     return;
   }
   bset(&mut b, at + 16, cast[u8](word % 256));          // si_pid
@@ -1069,7 +1071,11 @@ fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64) -> bool
     return false;
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
-  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + addr % FAULT_MARK);
+  let mut bus = 0;
+  if s == SIGBUS {
+    bus = FAULT_BUS;
+  }
+  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + bus + addr % FAULT_BUS);
   return true;
 }
 
