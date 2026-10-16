@@ -232,7 +232,7 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -253,7 +253,15 @@ jobs:
             build/compat/python
             build/compat/tcc
             build/compat/make
+            build/compat/rg
             build/compat/z3
+      # A restored program is older than the sources the checkout just
+      # wrote, so make would build it again (CPython, from test/compat/
+      # pyzip.py; tcc, from its patch). The key covers those inputs, so a
+      # hit is up to date.
+      - name: Mark the restored programs up to date
+        if: steps.tp.outputs.cache-hit == 'true'
+        run: find build/busybox build/compat -exec touch -h {} +
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
@@ -281,7 +289,7 @@ jobs:
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -302,6 +310,7 @@ jobs:
             build/compat/python
             build/compat/tcc
             build/compat/make
+            build/compat/rg
             build/compat/z3
         continue-on-error: true
       - name: Save Alpine's images
@@ -407,6 +416,11 @@ jobs:
             build/aarch64/compat/musl
             build/aarch64/compat/dropbear
             build/aarch64/compat/runc
+      # As in the compat job: a hit is up to date, though older than the
+      # checkout's sources.
+      - name: Mark the restored programs up to date
+        if: steps.tp.outputs.cache-hit == 'true'
+        run: find build/aarch64/compat -exec touch -h {} +
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
