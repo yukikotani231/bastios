@@ -9,12 +9,41 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  # A change that only touches text nobody builds or runs (docs, the
+  # changelog, templates) starts none of the jobs below: they are skipped,
+  # which counts as passing. The README and the two guides test/guide_test.py
+  # follows are code for this purpose.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.sha }}
+        run: |
+          # A push of a new branch or a forced one has no usable base: run everything.
+          if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE" "$HEAD")
+          echo "$files"
+          code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
+          guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
+          if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
   # test/all.sh in two parts that run on runners of their own (LANES, see
   # test/all.sh): the x86-64 boots, whose longest is the shell test, and the
   # AArch64 kernel's. Each part keeps a proof cache of its own, since the
   # caches are saved and restored whole.
   test:
     name: test (${{ matrix.part }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -68,6 +97,8 @@ jobs:
   # native x86-64 backend, so no C compiler sees any proved code (the C
   # compiler still builds boot/, the C library and the musl test programs).
   native:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -95,6 +126,8 @@ jobs:
   # the model's sources). The `test` job skips these boots; here they run
   # DHCP, TCP and IPv6 through the ENA queues.
   ena:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -156,6 +189,8 @@ jobs:
   # cached. The caches are saved only after the build step succeeded, so a
   # build that failed halfway is never kept.
   compat:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
@@ -291,6 +326,8 @@ jobs:
   # suite's C programs and a BusyBox against glibc, and Alpine, on QEMU's virt
   # machine.
   compat-aarch64:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     env:
@@ -383,6 +420,8 @@ jobs:
   # results.json is kept too: ltp.py uses its timings to put the tests that
   # only wait out a timeout on machines of their own.
   compat-ltp:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:
