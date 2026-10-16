@@ -9,7 +9,9 @@ fn utf8_cont(b: u64) -> bool {
 }
 
 /// How many bytes the sequence a lead byte starts has (0: b is no lead).
-fn utf8_len(b: u64) -> u64 {
+fn utf8_len(b: u64) -> u64
+  ensures result <= 4
+{
   if b < 0x80 { return 1; }
   if b < 0xC2 { return 0; }              // a continuation, or an overlong C0 / C1
   if b < 0xE0 { return 2; }
@@ -32,7 +34,9 @@ fn utf8_lead_bits(b: u64, n: u64) -> u64
 /// How many cells the character cp takes on a terminal: 0 for a combining
 /// mark or a zero width character, 2 for East Asian wide and fullwidth
 /// characters and emoji, else 1.
-fn cp_width(cp: u64) -> u64 {
+fn cp_width(cp: u64) -> u64
+  ensures result <= 2
+{
   if cp < 0x300 { return 1; }
   if cp < 0x370 { return 0; }            // combining diacritical marks
   if cp < 0x1100 { return 1; }
