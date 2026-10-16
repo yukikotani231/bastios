@@ -44,6 +44,7 @@ tests=(
   "shell|a|test/shell_test.sh"
   "guide|c|test/guide_test.py"
   "tcp virtio|b|test/tcp_test.sh"
+  "tcp behaviour virtio|b|test/tcpcc_test.sh"
   "tcp e1000|b|NIC=e1000 test/tcp_test.sh"
   "tcp igb|b|NIC=igb test/tcp_test.sh"
   "ipv6 virtio|b|test/ipv6_test.sh"

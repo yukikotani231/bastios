@@ -1849,7 +1849,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       let ns = net_ns(k, pid);
       let mut a = put_s(&mut o, 0, "IP address       HW type     Flags       HW address            Mask     Device\n");
       let mut e = 0;
-      while e < ARP_N && ns == 0 && a + 160 < PROC_OUT
+      while e < ARP_N && ns == 0 && a + 220 < PROC_OUT
         invariant e <= ARP_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {
         let ip = nic_arp(k.nic, e, 0) % 4294967296;
@@ -2296,7 +2296,30 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         a = put_hx(&mut o, a, tcp_row(k.nic, t, ns, 3), 4);
         a = put_c(&mut o, a, 32);
         a = put_hx(&mut o, a, st, 2);
-        a = put_s(&mut o, a, " 00000000:00000000 00:00000000 00000000     0        0 0 1 0000000000000000 100 0 0 10 0\n");
+        a = put_c(&mut o, a, 32);
+        a = put_hx(&mut o, a, tcp_row(k.nic, t, ns, 5), 8);
+        a = put_c(&mut o, a, 58);
+        a = put_hx(&mut o, a, tcp_row(k.nic, t, ns, 6), 8);
+        let left = tcp_row(k.nic, t, ns, 11);
+        if left > 0 {
+          a = put_s(&mut o, a, " 01:");
+          a = put_hx(&mut o, a, left, 8);
+        } else {
+          a = put_s(&mut o, a, " 00:00000000");
+        }
+        a = put_c(&mut o, a, 32);
+        a = put_hx(&mut o, a, tcp_row(k.nic, t, ns, 7), 8);
+        a = put_s(&mut o, a, "     0        0 0 1 0000000000000000 ");
+        a = put_n(&mut o, a, tcp_row(k.nic, t, ns, 8));
+        a = put_s(&mut o, a, " 0 0 ");
+        a = put_n(&mut o, a, tcp_row(k.nic, t, ns, 9));
+        a = put_c(&mut o, a, 32);
+        if tcp_row(k.nic, t, ns, 10) == 0 {
+          a = put_s(&mut o, a, "-1");
+        } else {
+          a = put_n(&mut o, a, tcp_row(k.nic, t, ns, 10));
+        }
+        a = put_c(&mut o, a, 10);
         row = row + 1;
       }
       t = t + 1;

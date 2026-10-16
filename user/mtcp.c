@@ -6,6 +6,11 @@
  *   mtcp get A.B.C.D PORT TEXT
  *                          connect, send TEXT and a newline, print what
  *                          comes back until the peer closes
+ *   mtcp send A.B.C.D PORT BYTES
+ *                          connect and send BYTES of a counting pattern,
+ *                          then close (test/tcpperf.sh)
+ *   mtcp sink PORT         accept one connection and read it to the end,
+ *                          checking the counting pattern (test/tcpperf.sh)
  *   mtcp loop BYTES        send BYTES of a counting pattern to ourselves over
  *                          127.0.0.1 (a forked child writes, we read and
  *                          check every byte): loopback segments are longer
@@ -252,8 +257,67 @@ static int many(int n)
     return 0;
 }
 
+static int send_bytes(const char *ip, int port, long bytes)
+{
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons(port) };
+    if (s < 0 || inet_aton(ip, &to.sin_addr) == 0)
+        return fail("socket");
+    if (connect(s, (struct sockaddr *)&to, sizeof to) != 0)
+        return fail("connect");
+    static char buf[16384];
+    long sent = 0;
+    while (sent < bytes) {
+        long k = bytes - sent < (long)sizeof buf ? bytes - sent : (long)sizeof buf;
+        for (long i = 0; i < k; i++)
+            buf[i] = (char)((sent + i) * 7 + 3);
+        for (long off = 0; off < k; ) {
+            ssize_t w = write(s, buf + off, k - off);
+            if (w <= 0)
+                return fail("write");
+            off += w;
+        }
+        sent += k;
+    }
+    close(s);
+    printf("mtcp: sent %ld bytes\n", sent);
+    return 0;
+}
+
+static int sink(int port)
+{
+    int one = 1;
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in me = { .sin_family = AF_INET, .sin_port = htons(port) };
+    if (s < 0 || setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one) != 0)
+        return fail("socket");
+    if (bind(s, (struct sockaddr *)&me, sizeof me) != 0 || listen(s, 1) != 0)
+        return fail("bind and listen");
+    printf("mtcp: listening on tcp port %d\n", port);
+    fflush(stdout);
+    int c = accept(s, 0, 0);
+    if (c < 0)
+        return fail("accept");
+    static char buf[16384];
+    long total = 0, bad = 0;
+    ssize_t r;
+    while ((r = read(c, buf, sizeof buf)) > 0) {
+        for (ssize_t i = 0; i < r; i++)
+            bad += buf[i] != (char)((total + i) * 7 + 3);
+        total += r;
+    }
+    close(c);
+    close(s);
+    printf("mtcp: sunk %ld bytes, %ld wrong\n", total, bad);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
+    if (argc == 5 && strcmp(argv[1], "send") == 0)
+        return send_bytes(argv[2], atoi(argv[3]), atol(argv[4]));
+    if (argc == 3 && strcmp(argv[1], "sink") == 0)
+        return sink(atoi(argv[2]));
     if (argc == 3 && strcmp(argv[1], "many") == 0)
         return many(atoi(argv[2]));
     if (argc == 3 && strcmp(argv[1], "loop") == 0)
@@ -269,6 +333,6 @@ int main(int argc, char **argv)
     }
     if (argc == 5 && strcmp(argv[1], "get") == 0)
         return get(argv[2], atoi(argv[3]), argv[4]);
-    printf("usage: mtcp serve PORT | mtcp echo PORT | mtcp loop BYTES | mtcp many N | mtcp get A.B.C.D PORT TEXT\n");
+    printf("usage: mtcp serve PORT | mtcp echo PORT | mtcp send A.B.C.D PORT BYTES | mtcp sink PORT | mtcp loop BYTES | mtcp many N | mtcp get A.B.C.D PORT TEXT\n");
     return 2;
 }

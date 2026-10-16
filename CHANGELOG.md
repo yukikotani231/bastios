@@ -57,6 +57,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- TCP sends like a modern stack: a congestion window (initial window of ten segments, slow start, congestion avoidance), a resend timer taken from measured round trips (RFC 6298), fast retransmit, SACK-based recovery (RFC 6675) with NewReno for peers without SACK, an adaptive reordering threshold with D-SACK undo of spurious reductions, and a 16-buffer virtio receive ring. As a receiver it holds up to four out-of-order stretches, reports repeats with D-SACK, names several stretches in one ACK, and delays the ACK of a single full segment by up to 40 ms. `/proc/net/tcp` shows the real queues, timer, window and slow-start threshold. `test/tcpcc_test.sh` checks each rule on a scripted wire and `test/tcpperf.sh` measures throughput on delayed, lossy, reordering and bandwidth-limited paths. Loopback is not window-limited.
+
 - A driver for the AWS Elastic Network Adapter (`src/ena.bastio`, PCI
   `1d0f:ec20` and relatives), polled, one queue pair in host memory. It has
   been run only against a model of the device for QEMU
