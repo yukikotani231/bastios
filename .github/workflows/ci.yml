@@ -368,12 +368,16 @@ jobs:
             lanes: alpine,alpine2
             disks: alpine.img
             cache: alpine
+          - part: alpine-dev
+            lanes: alpine5
+            disks: alpine.img
+            cache: alpine
           - part: alpine-tools
             lanes: alpine3,alpine4
             disks: alpine.img
             cache: alpine
           - part: rest
-            skip: main1,bastio,alpine,alpine2,alpine3,alpine4
+            skip: main1,bastio,alpine,alpine2,alpine3,alpine4,alpine5
             disks: debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
