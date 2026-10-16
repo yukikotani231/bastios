@@ -50,6 +50,9 @@ jobs:
             proof-${{ matrix.part }}-
             proof-
           path: build/proof-cache
+      - name: Run the x86-64 guests under KVM
+        if: matrix.part == 'x86-64'
+        run: tools/ci-kvm.sh
       - run: make test BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
         env:
           AARCH64_REQUIRED: 1
@@ -84,6 +87,8 @@ jobs:
             proof-x86-64-
             proof-
           path: build/proof-cache
+      - name: Run the x86-64 guests under KVM
+        run: tools/ci-kvm.sh
       - run: make test NATIVE=1 LANES='a b c' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
@@ -138,13 +143,18 @@ jobs:
   # The Linux compatibility suite (test/compat). Most of its time on a fresh
   # runner goes to building third-party programs from source (Z3, CPython,
   # Perl, git, ...) and to fetching Alpine's images from Docker Hub, so both
-  # are cached. A cache entry is used only when every input it was built
-  # from is unchanged: the pinned versions (every `?=` setting in the
-  # Makefile), the BusyBox configuration, the patches, pyzip.py and
-  # alpinedisk.py. A change to a recipe alone is not seen: bump CACHE_V to
-  # rebuild. Disk images and everything built from this repository are
-  # never cached. The caches are saved only after the build step succeeded,
-  # so a build that failed halfway is never kept.
+  # are cached. The third-party programs are used only when every input
+  # they were built from is unchanged: the pinned versions (every `?=`
+  # setting in the Makefile), the BusyBox configuration, the patches and
+  # pyzip.py. A change to a recipe alone is not seen: bump CACHE_V to
+  # rebuild. Alpine's images are kept by digest and alpinedisk.py checks
+  # each layer against its digest when it reads it from the cache, so an
+  # older entry is restored when there is no exact one, and only the images
+  # it lacks are fetched; they are saved from main only (an entry saved by a
+  # pull request serves no other branch and fills the repository's cache
+  # space). Disk images and everything built from this repository are never
+  # cached. The caches are saved only after the build step succeeded, so a
+  # build that failed halfway is never kept.
   compat:
     runs-on: ubuntu-24.04
     timeout-minutes: 150
@@ -169,7 +179,8 @@ jobs:
       - name: Cache keys
         id: keys
         run: |
-          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "images=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Restore the third-party programs
         id: tp
         uses: actions/cache/restore@v4
@@ -200,7 +211,8 @@ jobs:
         id: al
         uses: actions/cache/restore@v4
         with:
-          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-${{ env.CACHE_V }}-
           path: |
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
@@ -218,8 +230,7 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           df -h /
       - name: Build the disks
-        run: make -j4 build/bastios.elf
-          build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
+        run: make -j4 compat-disks
       - name: Save the third-party programs
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
@@ -248,14 +259,16 @@ jobs:
             build/compat/z3
         continue-on-error: true
       - name: Save Alpine's images
-        if: steps.al.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}
           path: |
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
         continue-on-error: true
+      - name: Run the x86-64 guests under KVM
+        run: tools/ci-kvm.sh
       - run: make compat
       - name: What failed
         if: failure()
@@ -306,7 +319,7 @@ jobs:
       - name: Cache keys
         id: keys
         run: |
-          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' arch/aarch64/Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' arch/aarch64/Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Restore the third-party programs
         id: tp
         uses: actions/cache/restore@v4
@@ -324,6 +337,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-arm64-
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
@@ -342,12 +356,8 @@ jobs:
             build/aarch64/compat/dropbear
             build/aarch64/compat/runc
         continue-on-error: true
-      - run: make ARCH=aarch64 compat
-      - name: Checks that did not pass
-        if: always()
-        run: grep -E '^\| ' build/aarch64/compat/report.md | grep -v -E '\| pass \||\| ---' | head -80 || true
       - name: Save Alpine's images
-        if: always() && steps.al.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
           key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
@@ -355,6 +365,10 @@ jobs:
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
         continue-on-error: true
+      - run: make ARCH=aarch64 compat
+      - name: Checks that did not pass
+        if: always()
+        run: grep -E '^\| ' build/aarch64/compat/report.md | grep -v -E '\| pass \||\| ---' | head -80 || true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -416,6 +430,8 @@ jobs:
           key: ltp-${{ steps.keys.outputs.ltp }}
           path: build/ltp
         continue-on-error: true
+      - name: Run the x86-64 guests under KVM
+        run: tools/ci-kvm.sh
       - run: make compat-ltp
       - name: Save this run's timings
         if: always()
