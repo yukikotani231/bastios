@@ -12,13 +12,13 @@
 # the features the tests name), the memory and the devices are the same, and
 # the kernel, the disks and the checks are the same files.
 #
-# The compat job uses it. The test and native jobs do not: under KVM the
-# stack guard test (it moves the guest's stack pointer from outside) saw no
-# fault, and the e1000 TCP test, which times the guest's DHCP and resends,
-# failed three of its checks. Nor does compat-ltp: it took no less time
-# (its tests mostly wait), and LTP inotify11 failed twice under KVM, where
-# the two processors really run at once. Those boots stay emulated until
-# the tests hold under both.
+# Only the compat job uses it. The test and native jobs do not yet: under
+# KVM the stack guard test (it moves the guest's stack pointer from
+# outside) saw no fault, and the e1000 TCP test, which times the guest's
+# DHCP and resends, failed three of its checks. Nor does compat-ltp: it
+# took no less time (its tests mostly wait), and LTP inotify11 failed twice
+# under KVM, where the two processors really run at once. Those boots stay
+# emulated until the tests hold under both.
 set -eu
 if [ ! -e /dev/kvm ]; then
     echo "ci-kvm: no /dev/kvm, the guests run under TCG"
