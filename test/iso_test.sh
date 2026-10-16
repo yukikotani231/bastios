@@ -360,6 +360,28 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm again")
             fails += not good
+        # The same client with its pixels in memory shared with bwm
+        # (bhello -s: a memfd sent over the socket with SCM_RIGHTS).
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bhello -s\r"); q.stdin.flush()
+        good = until(b"bhello: shared window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a client opens a window whose pixels are shared memory")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = at(80, 100) == (255, 0, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) bwm shows what the client wrote into the shared pixels")
+            fails += not good
+            monitor("sendkey y")
+            good = until(b"bhello: key y", mark)
+            w, h, px = screendump()
+            good = good and at(80, 100) == (255, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a change in the shared pixels shows after the client says where")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"# ", mark)
+            fails += not good
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
