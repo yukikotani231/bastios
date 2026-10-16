@@ -33,6 +33,12 @@ const SOCK_SEQPACKET: u64 = 5;
 const IPPROTO_UDP: u64 = 17;
 const SOCK_RAW: u64 = 3;
 const IPPROTO_ICMP: u64 = 1;
+const IPPROTO_ICMPV6: u64 = 58;
+const SOL_RAW: u64 = 255;
+const IPV6_V6ONLY: u64 = 26;
+const IPV6_2292HOPLIMIT: u64 = 8;
+const IPV6_RECVHOPLIMIT: u64 = 51;
+const IPV6_HOPLIMIT: u64 = 52;
 const SOCK_NONBLOCK: u64 = 0x800;
 const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
@@ -140,7 +146,7 @@ fn sin_in(k: &mut Kernel, pid: u64, va: u64, alen: u64) -> Sin
 /// Whether open file description h is an AF_INET6 socket that was
 /// connected to a ::ffff:a.b.c.d address.
 fn ofd_mapped(k: &Kernel, h: u64) -> bool {
-  return h < len(k.inet6) && get(k.inet6, h) == 2;
+  return h < len(k.inet6) && get(k.inet6, h) % 8 == 2;
 }
 
 /// Whether the (already validated) address at va is a ::ffff:a.b.c.d
@@ -161,9 +167,41 @@ fn sin_mapped(k: &mut Kernel, pid: u64, va: u64) -> bool
   return get_u64(k.fs.xfer, 0) == 0 && get_u64(k.fs.xfer, 8) % 0x100000000 == 0xFFFF0000;
 }
 
+/// Which hop limit control message the AF_INET6 socket of open file
+/// description h wants with each datagram: 0 none, 1 the one IPV6_HOPLIMIT
+/// (2292) asks for (cmsg type 8), 2 the one IPV6_RECVHOPLIMIT asks for (type
+/// 52). It rides in the eights of the word k.inet6 keeps (0: not AF_INET6,
+/// 1: AF_INET6, 2: connected to a ::ffff:a.b.c.d address, 3: IPV6_V6ONLY).
+fn ofd_hlim(k: &Kernel, h: u64) -> u64
+  ensures result <= 3
+{
+  if h < len(k.inet6) {
+    return get(k.inet6, h) / 8 % 4;
+  }
+  return 0;
+}
+
+/// Whether open file description h is an AF_INET6 socket with
+/// IPV6_V6ONLY set: it takes no IPv4 peers.
+fn ofd_v6only(k: &Kernel, h: u64) -> bool {
+  return h < len(k.inet6) && get(k.inet6, h) % 8 == 3;
+}
+
+/// The address family (FAM_*) the stack gives the socket of open file
+/// description h.
+fn ofd_fam(k: &Kernel, h: u64) -> u64 {
+  if ofd_v6only(k, h) {
+    return FAM_V6;
+  }
+  if ofd_v6(k, h) {
+    return FAM_BOTH;
+  }
+  return FAM_V4;
+}
+
 /// Whether open file description h is an AF_INET6 socket.
 fn ofd_v6(k: &Kernel, h: u64) -> bool {
-  return h < len(k.inet6) && get(k.inet6, h) != 0;
+  return h < len(k.inet6) && get(k.inet6, h) % 8 != 0;
 }
 
 /// Whether descriptor fd of process pid is an AF_INET6 socket.
@@ -210,6 +248,9 @@ fn sin_out_m(k: &mut Kernel, pid: u64, va: u64, lenp: u64, ip: u64, port: u64, v
     } else if is_v6tok(ip) {
       put64(&mut k.fs.xfer, 8, nic_v6_addr(k.nic, ip, 0));   // an IPv6 peer
       put64(&mut k.fs.xfer, 16, nic_v6_addr(k.nic, ip, 1));
+    } else if ip == V6_SELF {
+      put64(&mut k.fs.xfer, 8, nic_v6_addr(k.nic, ip, 2));   // our own IPv6 address
+      put64(&mut k.fs.xfer, 16, nic_v6_addr(k.nic, ip, 3));
     } else if ip != 0 {
       bset(&mut k.fs.xfer, 18, 255);        // ::ffff:a.b.c.d
       bset(&mut k.fs.xfer, 19, 255);
@@ -264,11 +305,22 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   if domain != AF_INET && domain != AF_INET6 {
     return EAFNOSUPPORT;
   }
-  let fd = lx_inet_socket(&mut k, pid, kind, proto);
+  // A raw ICMPv6 socket (ping6) is a raw ICMP one that carries ICMPv6.
+  let icmp6 = domain == AF_INET6 && kind % 16 == SOCK_RAW && proto == IPPROTO_ICMPV6;
+  let mut p = proto;
+  if icmp6 {
+    p = IPPROTO_ICMP;
+  }
+  let fd = lx_inet_socket(&mut k, pid, kind, p);
   if domain == AF_INET6 {
     let h = fd_ofd(k, pid, fd);
     if h < OFD_N {
       k.inet6 = set(k.inet6, h, 1);
+      if icmp6 {
+        sock_make_raw6(&mut k.nic, of_get(k.ofd, h, 2));
+      } else if kind % 16 != SOCK_STREAM {
+        sock_set_fam(&mut k.nic, of_get(k.ofd, h, 2), FAM_BOTH);   // a dual-stack UDP socket
+      }
     }
   }
   return fd;
@@ -387,7 +439,7 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     let nb0 = of_get(k.ofd, sk.h, 3) % 2;
     of_set(&mut k.ofd, sk.h, 3, nb0);       // AF_UNSPEC: no peer any more
     if ofd_v6(k, sk.h) {
-      k.inet6 = set(k.inet6, sk.h, 1);
+      k.inet6 = set(k.inet6, sk.h, 1 + 8 * ofd_hlim(k, sk.h));
     }
     return 0;
   }
@@ -405,7 +457,7 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     if sin_mapped(&mut k, pid, addr) {
       mark = 2;
     }
-    k.inet6 = set(k.inet6, sk.h, mark);
+    k.inet6 = set(k.inet6, sk.h, mark + 8 * ofd_hlim(k, sk.h));
   }
   return 0;
 }
@@ -650,6 +702,9 @@ fn sockname_of(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     let mut me = 0;
     if p / 65536 != 0 && p / 65536 <= 4294967295 {
       me = local_for(k.nic, p / 65536);
+      if is_v6tok(p / 65536) && ofd_v6(k, sk.h) {
+        me = V6_SELF;
+      }
     }
     return sin_out_m(&mut k, pid, addr, lenp, me, sock_port(k.nic, sk.s), ofd_v6(k, sk.h), ofd_mapped(k, sk.h));
   }
@@ -713,7 +768,46 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     }
     return 0;
   }
-  let inet = !unix && (lv == 0 || lv == 41 || (tcp && lv == SOL_TCP) || (!tcp && lv == IPPROTO_UDP));
+  if lv == 41 && name % 0x100000000 == IPV6_V6ONLY && !unix {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && ofd_v6(k, h) && !ofd_mapped(k, h) {
+      if ln < 4 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
+        return EINVAL;
+      }
+      let only = get_u64(k.fs.xfer, 0) % 0x100000000 != 0;
+      let mut mark = 1;
+      if only {
+        mark = 3;
+      }
+      k.inet6 = set(k.inet6, h, mark + 8 * ofd_hlim(k, h));
+      if !tcp {
+        let sk = sk_look(k, pid, fd);
+        if sk.err == 0 {
+          sock_set_fam(&mut k.nic, sk.s, ofd_fam(k, h));
+        }
+      }
+      return 0;
+    }
+    return ENOPROTOOPT;                     // an AF_INET socket has no such option
+  }
+  if lv == 41 && (name % 0x100000000 == IPV6_2292HOPLIMIT || name % 0x100000000 == IPV6_RECVHOPLIMIT) && !unix && !tcp {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && ofd_v6(k, h) {
+      if ln < 4 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
+        return EINVAL;
+      }
+      let mut mode = 0;
+      if get_u64(k.fs.xfer, 0) % 0x100000000 != 0 {
+        mode = 1;
+        if name % 0x100000000 == IPV6_RECVHOPLIMIT {
+          mode = 2;
+        }
+      }
+      k.inet6 = set(k.inet6, h, get(k.inet6, h) % 8 + 8 * mode);
+      return 0;
+    }
+  }
+  let inet = !unix && (lv == 0 || lv == 41 || (tcp && lv == SOL_TCP) || (!tcp && (lv == IPPROTO_UDP || lv == IPPROTO_ICMPV6 || lv == SOL_RAW)));
   if !inet || name % 0x100000000 >= 0x80000000 {
     return ENOPROTOOPT;
   }
@@ -736,10 +830,11 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
       return sk.err;
     }
   }
-  if level != SOL_SOCKET && !(tcp && level == SOL_TCP) {
+  let v6only_opt = level == 41 && name % 0x100000000 == IPV6_V6ONLY && !is_unix(k, pid, fd) && ofd_v6(k, fd_ofd(k, pid, fd));
+  if level != SOL_SOCKET && !(tcp && level == SOL_TCP) && !v6only_opt {
     // As Linux: an internet level this socket has, with an option it
     // does not know, is ENOPROTOOPT; any other level EOPNOTSUPP.
-    let inet = !is_unix(k, pid, fd) && (level == 0 || level == 41 || (!tcp && level == IPPROTO_UDP));
+    let inet = !is_unix(k, pid, fd) && (level == 0 || level == 41 || (!tcp && (level == IPPROTO_UDP || level == IPPROTO_ICMPV6 || level == SOL_RAW)));
     if inet || (tcp && level == SOL_TCP) {
       return ENOPROTOOPT;
     }
@@ -772,6 +867,15 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     v = 2;                                  // SOCK_DGRAM
     if tcp && !ux_dgram(k, pid, fd) {
       v = 1;                                // SOCK_STREAM
+    }
+  }
+  if level == 41 && name % 0x100000000 == IPV6_V6ONLY {
+    let h = fd_ofd(k, pid, fd);
+    if !ofd_v6(k, h) {
+      return ENOPROTOOPT;
+    }
+    if ofd_v6only(k, h) {
+      v = 1;
     }
   }
   if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {

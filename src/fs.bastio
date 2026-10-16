@@ -2101,8 +2101,38 @@ fn vfs_symlink(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64) -> bool
 }
 
 /// vfs_symlink for any mode: a node called xfer[0..n] holding the m bytes
-/// after the name (a link's target, a device node's number).
+/// after the name (a link's target, a device node's number). The name is
+/// still in xfer[0..n] afterwards, so the caller can look the node up to
+/// give it an owner.
 fn vfs_mkdata(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64, mode: u64) -> bool
+  requires vfs_ok(v) && mem_ok(mem)
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if n > FNAME_MAX {
+    return false;
+  }
+  let mut keep = balloc(FNAME_MAX);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && blen(keep) == FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut keep, i, bget(v.xfer, i));
+    i = i + 1;
+  }
+  let ok = vfs_mkdata_at(&mut v, &mut mem, n, m, mode);
+  i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && blen(keep) == FNAME_MAX && vfs_ok(v)
+  {
+    bset(&mut v.xfer, i, bget(keep, i));
+    i = i + 1;
+  }
+  bfree(keep);
+  return ok;
+}
+
+/// vfs_mkdata, which leaves the target (or number) over the name in xfer.
+fn vfs_mkdata_at(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64, mode: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem)
   ensures vfs_ok(v) && mem_ok(mem)
 {
