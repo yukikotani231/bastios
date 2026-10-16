@@ -52,6 +52,7 @@ import "lxptrace.bastio";
 import "lxsplice.bastio";
 import "lxmsg.bastio";
 import "acpi.bastio";
+import "uhci.bastio";
 import "info.bastio";
 import "lxcred.bastio";
 import "lxprio.bastio";
@@ -1288,6 +1289,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // with pages from USB_AT: a USB stick with a BastiOS partition on it
   // becomes the disk, and a USB keyboard and mouse the keyboard and mouse.
   let xn = usb_count(&mut pci);
+  // UHCI controllers are only looked at, to say in the boot log whether a
+  // keyboard may be out of reach behind one (no driver yet).
+  let uh = uhci_survey(&mut ports, &mut pci, acpi_lo, acpi_hi);
   let mut usb = usb_find(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, msi, V_DISK);
   let usb_lo = usb_base(usb);
   let usb_hi = usb_top(usb);
@@ -1309,7 +1313,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
-  let disk = disk_mount(dev);
+  let disk = disk_mount(dev, dq_slots_for(pool_pages));
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
   } else if blk_is_nvme(disk.dev) {
@@ -1337,6 +1341,15 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     Usb::Xhci(stale) => { mmio_release(&mut win, xhci_free(stale, &mut m)); },
   }
   term.usb = usb;
+  if uh % 16 > 0 {
+    puts(&mut con, "usb: ");
+    put_num(&mut con, uh % 16);
+    puts(&mut con, " UHCI controller(s), ");
+    put_num(&mut con, uh / 16 % 16);
+    puts(&mut con, " device(s) on their ports (");
+    put_num(&mut con, uh / 256);
+    puts(&mut con, " low-speed); no driver for them yet\r\n");
+  }
   if usb_on {
     puts(&mut con, "keyboard: USB (xHCI)\r\n");
   } else if xn > 0 {

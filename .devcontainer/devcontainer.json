@@ -1,0 +1,6 @@
+{
+  "name": "BastiOS",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
+  "postCreateCommand": "tools/setup-dev.sh",
+  "hostRequirements": { "cpus": 4, "memory": "8gb", "storage": "32gb" }
+}
