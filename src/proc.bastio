@@ -733,7 +733,7 @@ const UMW_PAR: u64 = 6 + 2 * UM_N * 3; // the id of the parent user namespace (0
 const UMW_MARK: u64 = UMW_PAR + 1;    // scratch of usr_gc: 1 if a process is in this namespace or a descendant of it
 const USR_W: u64 = UMW_MARK + 1;      // id + 1 (0: free), owner uid, owner gid, setgroups denied, uid and gid extents, then the extents, the parent, the mark
 const PN_N: u64 = 64;                // PID namespaces besides the first
-const PN_W: u64 = 4;                  // id + 1 (0: free), the next id to give, 1 once its init has ended, the id of the namespace around it (0: the first)
+const PN_W: u64 = 5;                  // id + 1 (0: free), the next id to give, 1 once its init has ended, the id of the namespace around it (0: the first), the user namespace that made it
 const UTS_N: u64 = 32;                // UTS namespaces besides the first
 const UTS_W: u64 = 133;               // id + 1 (0: free), then the names as k.sys keeps them, then the id of the user namespace that owns it
 const UTS_OWN: u64 = UTS_W - 1;       // its word of the owner
@@ -780,7 +780,10 @@ const MNS_TM: u64 = MNS_MO + MO_N * 2;
 // Owners of IPC namespaces (src/lxnsk.bastio): IO_N pairs (namespace id, id of the user namespace that made it) from MNS_IO.
 const IO_N: u64 = 64;
 const MNS_IO: u64 = MNS_TM + TM_N * TM_W;
-const MNS_LEN: u64 = MNS_IO + IO_N * 2;
+// Owners of cgroup namespaces: CO_N pairs (namespace id, owner) from MNS_CO.
+const CO_N: u64 = 32;
+const MNS_CO: u64 = MNS_IO + IO_N * 2;
+const MNS_LEN: u64 = MNS_CO + CO_N * 2;
 const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the extended attributes: XA_N rows of XA_ROW bytes, the name then the value
 const KDB: u64 = XAB + 32 * 320;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
 const KPB: u64 = KDB + KEY_N * KDESC;              // then KP_N payload slots of KPAY bytes
