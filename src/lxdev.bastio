@@ -159,7 +159,10 @@ fn dev_meta(d: u64) -> Meta {
 // it as the next key ("fast key erasure"), so earlier output cannot be
 // recomputed from a later state. The counter's jitter is an estimate of
 // entropy, not a measured one. A virtio-rng, if the machine has one, adds
-// 64 bytes at boot (src/virtio_rng.bastio); there is no RDRAND source yet.
+// 64 bytes at boot (src/virtio_rng.bastio). A processor with RDSEED or
+// RDRAND gives 64 bytes at boot and one more word every RNG_HWEVERY
+// scheduler passes (rng_hw_boot, rng_stir). Neither source is trusted alone:
+// each word only goes into the pool, which the key absorbs with the rest.
 //
 // k.rng holds RNG_LEN words:
 const RNG_KEY: u64 = 0;             // 8 key words of 32 bits
@@ -168,6 +171,9 @@ const RNG_HAVE: u64 = 9;            // how many of the buffered words are left
 const RNG_OUT: u64 = 10;            // 4 buffered 64-bit words of output
 const RNG_POOL: u64 = 14;           // 4 pool words
 const RNG_AT: u64 = 18;             // the pool word the next sample goes into
+const RNG_PASSES: u64 = 19;         // scheduler passes since the last hardware word
+const RNG_HW: u64 = 20;             // the processor's generators (INFO_RAND 0), 0 for none
+const RNG_HWEVERY: u64 = 4096;
 // RNG_LEN is in src/proc.bastio, which kok needs it before this file.
 
 /// A new generator whose pool starts from `seed`.
@@ -200,12 +206,44 @@ fn rng_add(r: &mut Buf, x: u64)
   r = set(r, RNG_AT, (get(r, RNG_AT) % 4 + 1) % 4);
 }
 
-/// Adds the time-stamp counter now to the pool (each scheduler pass).
+/// Adds the time-stamp counter now to the pool (each scheduler pass), and
+/// every RNG_HWEVERY passes a word from the processor's generator, if it has one.
 fn rng_stir(k: &mut Kernel, cpu: &Cpu)
   requires kok(k)
   ensures kok(k)
 {
   rng_add(&mut k.rng, cpu_tsc(cpu));
+  if get(k.rng, RNG_HW) != 0 {
+    let n = smaller(get(k.rng, RNG_PASSES), RNG_HWEVERY) + 1;
+    if n >= RNG_HWEVERY {
+      k.rng = set(k.rng, RNG_PASSES, 0);
+      rng_add(&mut k.rng, boot_info(cpu, INFO_RAND, 1));
+    } else {
+      k.rng = set(k.rng, RNG_PASSES, n);
+    }
+  }
+}
+
+/// At boot: notes which generators the processor has, and if there is one,
+/// adds 8 words from it to the pool. Returns how many bytes that gave
+/// (0: the processor has none).
+fn rng_hw_boot(k: &mut Kernel, cpu: &Cpu) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= 64
+{
+  let have = boot_info(cpu, INFO_RAND, 0) % 4;
+  k.rng = set(k.rng, RNG_HW, have);
+  if have == 0 {
+    return 0;
+  }
+  let mut i = 0;
+  while i < 8
+    invariant i <= 8 && kok(k)
+  {
+    rng_add(&mut k.rng, boot_info(cpu, INFO_RAND, 1));
+    i = i + 1;
+  }
+  return 64;
 }
 
 /// Adds the 64-bit word x, from a source outside the kernel (a virtio-rng at

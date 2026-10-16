@@ -1042,6 +1042,7 @@ t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
 t_sig2: 24 processes at once
+t_sig2: sigqueue carries a 64-bit sigval whole
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once
 t_sig2: SA_RESTART does not restart epoll_wait
@@ -1194,3 +1195,9 @@ alpine-tty: nvim: :make runs make and the build succeeds
 alpine: container: crun runs the same container (own hostname, PID 1)
 alpine: container: crun: memory.max kills a process of a container that outgrows it
 alpine: container: crun loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+alpine: gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
+alpine: gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
+alpine: gdb: attach to a program with three threads, and every thread is listed
+alpine: gdb: a core file of a crashed program shows where it died, its call chain and its arguments
+alpine: apk: install tmux, cmake and lua-language-server over HTTP
+alpine: cmake: configure, build and run a C project
