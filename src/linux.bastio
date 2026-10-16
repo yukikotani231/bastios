@@ -326,12 +326,12 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
   }
-  if r >= 0x100000 && r < 0x8000000000000000 {
-    // A read of a megabyte or more faulted its buffer in from the kernel
+  if r >= READ_MAX / 2 && r <= READ_MAX {
+    // A read this large may have faulted its buffer in from the kernel
     // (copy_to_user), which anon_fault's look at every 256th page never
     // sees, and it can finish before a timer tick does (under KVM, 120 MiB
     // from /dev/zero in a quarter of a second): memory.max is looked at
-    // here too.
+    // here too. Outside a group with a limit the look ends at once.
     cg_oom_tick(&mut k, pid);
   }
   ret(&mut k.procs, pid, r);
