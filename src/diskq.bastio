@@ -34,7 +34,7 @@ const NQ: u64 = 128;                  // queued operations
 const QW: u64 = 3;                    // words per operation: kind, slot, block
 const DQ_NONE: u64 = 18446744073709551615;
 const NOTAG: u64 = 18446744073709551615;   // a slot no lookup finds (a directory snapshot)
-const DQ_SPINS: u64 = 200000000;      // dq_drain's patience
+const DQ_SPINS: u64 = 3200000000;     // dq_drain's patience (each poll a few dozen instructions: minutes of a slow disk; see VQ_WAIT_SPINS)
 const DQ_TICKS: u64 = 1000;           // a command running 10 s means the disk is gone
 
 const CS_FREE: u64 = 0;

@@ -41,10 +41,12 @@ jobs:
           code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
           guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
           if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
-  # test/all.sh in two parts that run on runners of their own (LANES, see
-  # test/all.sh): the x86-64 boots, whose longest is the shell test, and the
-  # AArch64 kernel's. Each part keeps a proof cache of its own, since the
-  # caches are saved and restored whole.
+  # test/all.sh in three parts that run on runners of their own (LANES, see
+  # test/all.sh): the x86-64 boots in two halves, the shell and network
+  # tests (a b) and the rest (c e), each about as long as the shell test,
+  # and the AArch64 kernel's. The two x86-64 halves build the same kernel,
+  # so they share one proof cache; the AArch64 part keeps its own, since
+  # the caches are saved and restored whole.
   test:
     name: test (${{ matrix.part }})
     needs: changes
@@ -56,9 +58,14 @@ jobs:
       matrix:
         include:
           - part: x86-64
-            lanes: a b c
+            lanes: a b
+            cache: x86-64
+          - part: x86-64 rest
+            lanes: c e
+            cache: x86-64
           - part: aarch64
             lanes: d
+            cache: aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -79,9 +86,9 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-${{ matrix.part }}-none
+          key: proof-${{ matrix.cache }}-none
           restore-keys: |
-            proof-${{ matrix.part }}-
+            proof-${{ matrix.cache }}-
             proof-
           path: build/proof-cache
       - run: make test BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
@@ -92,7 +99,7 @@ jobs:
         if: always() && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          key: proof-${{ matrix.part }}-${{ hashFiles('build/proof-cache/**') }}
+          key: proof-${{ matrix.cache }}-${{ hashFiles('build/proof-cache/**') }}
           path: build/proof-cache
         continue-on-error: true
   # The same suite with the kernel and the Bastio user programs built by the
@@ -120,7 +127,7 @@ jobs:
             proof-x86-64-
             proof-
           path: build/proof-cache
-      - run: make test NATIVE=1 LANES='a b c' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - run: make test NATIVE=1 LANES='a b ce' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
   # the model's sources). The `test` job skips these boots; here they run
@@ -225,7 +232,7 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -246,7 +253,15 @@ jobs:
             build/compat/python
             build/compat/tcc
             build/compat/make
+            build/compat/rg
             build/compat/z3
+      # A restored program is older than the sources the checkout just
+      # wrote, so make would build it again (CPython, from test/compat/
+      # pyzip.py; tcc, from its patch). The key covers those inputs, so a
+      # hit is up to date.
+      - name: Mark the restored programs up to date
+        if: steps.tp.outputs.cache-hit == 'true'
+        run: find build/busybox build/compat -exec touch -h {} +
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
@@ -274,7 +289,7 @@ jobs:
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -295,6 +310,7 @@ jobs:
             build/compat/python
             build/compat/tcc
             build/compat/make
+            build/compat/rg
             build/compat/z3
         continue-on-error: true
       - name: Save Alpine's images
@@ -306,6 +322,8 @@ jobs:
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
         continue-on-error: true
+      - name: Run the x86-64 guests under KVM
+        run: tools/ci-kvm.sh
       - run: make compat
       - name: What failed
         if: failure()
@@ -327,9 +345,10 @@ jobs:
   # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
   # suite's C programs and a BusyBox against glibc, and Alpine, on QEMU's virt
   # machine. Every guest is emulated (TCG), so the lanes (test/compat/run.py)
-  # are spread over three runners, each building only the disks of its
-  # lanes. The last part runs every lane the first two do not name, so a lane
-  # added later runs there (its disk must be added to that part's list, or
+  # are spread over four runners, each building only the disks of its
+  # lanes (the two Alpine parts build the same disk and share its caches).
+  # The last part runs every lane the others do not name, so a lane added
+  # later runs there (its disk must be added to that part's list, or
   # run.py stops for want of it). Each part holds to the baseline every
   # check of the groups its lanes hold.
   compat-aarch64:
@@ -348,8 +367,13 @@ jobs:
           - part: alpine
             lanes: alpine,alpine2
             disks: alpine.img
+            cache: alpine
+          - part: alpine-tools
+            lanes: alpine3,alpine4
+            disks: alpine.img
+            cache: alpine
           - part: rest
-            skip: main1,bastio,alpine,alpine2
+            skip: main1,bastio,alpine,alpine2,alpine3,alpine4
             disks: debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
@@ -384,7 +408,7 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-arm64-${{ matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -392,12 +416,17 @@ jobs:
             build/aarch64/compat/musl
             build/aarch64/compat/dropbear
             build/aarch64/compat/runc
+      # As in the compat job: a hit is up to date, though older than the
+      # checkout's sources.
+      - name: Mark the restored programs up to date
+        if: steps.tp.outputs.cache-hit == 'true'
+        run: find build/aarch64/compat -exec touch -h {} +
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
         with:
-          key: compat-alpine-arm64-${{ matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
-          restore-keys: compat-alpine-arm64-${{ matrix.part }}-
+          key: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
@@ -407,7 +436,7 @@ jobs:
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-arm64-${{ matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -420,7 +449,7 @@ jobs:
         if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-alpine-arm64-${{ matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          key: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
