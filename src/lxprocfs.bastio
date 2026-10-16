@@ -151,11 +151,18 @@ fn comp_end(x: &Bytes, from: u64, n: u64) -> u64
   return e;
 }
 
-/// Writes pid p (below 1000) in decimal at x[at..]; how many digits.
+/// Writes pid p (below 10000) in decimal at x[at..]; how many digits.
 fn dec_out(x: &mut Bytes, at: u64, p: u64) -> u64
-  requires p < 1000 && at + 3 <= blen(x)
-  ensures blen(x) == old(blen(x)) && 1 <= result && result <= 3
+  requires p < 10000 && at + 4 <= blen(x)
+  ensures blen(x) == old(blen(x)) && 1 <= result && result <= 4
 {
+  if p >= 1000 {
+    bset(&mut x, at, cast[u8](48 + p / 1000));
+    bset(&mut x, at + 1, cast[u8](48 + p / 100 % 10));
+    bset(&mut x, at + 2, cast[u8](48 + p / 10 % 10));
+    bset(&mut x, at + 3, cast[u8](48 + p % 10));
+    return 4;
+  }
   if p >= 100 {
     bset(&mut x, at, cast[u8](48 + p / 100));
     bset(&mut x, at + 1, cast[u8](48 + p / 10 % 10));
@@ -211,7 +218,7 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
   if n < 9 || !xfer_is(x, 0, 5, "proc/") || comp_end(x, 5, n) != 9 || !is_self(x, 5, 9) {
     return n;
   }
-  // "self" (4 bytes) becomes 1 to 3 digits: move the rest left.
+  // "self" (4 bytes) becomes 1 to 4 digits: move the rest left.
   let d = dec_out(&mut x, 5, pid);
   let l = blen(x);
   let mut i = 9;
@@ -310,7 +317,9 @@ fn proc_vpid(k: &mut Kernel, n: u64, pid: u64) -> u64
   }
   let l = e - 5;
   let mut d = 1;
-  if row >= 100 {
+  if row >= 1000 {
+    d = 4;
+  } else if row >= 100 {
     d = 3;
   } else if row >= 10 {
     d = 2;
@@ -332,7 +341,7 @@ fn proc_vpid(k: &mut Kernel, n: u64, pid: u64) -> u64
   }
   let mut j = n;
   while j > e
-    invariant e <= j && j <= n && n + d - l <= FNAME_MAX && l < d && d <= 3 && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
+    invariant e <= j && j <= n && n + d - l <= FNAME_MAX && l < d && d <= 4 && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
   {
     bset(&mut k.fs.xfer, j - 1 + d - l, bget(k.fs.xfer, j - 1));
     j = j - 1;
@@ -347,20 +356,20 @@ fn proc_pid(procs: &Buf, x: &Bytes, from: u64, to: u64) -> u64
   requires ptab_ok(procs) && from <= to && to <= blen(x)
   ensures result <= NPROC
 {
-  if to == from || to - from > 3 || bget(x, from) == 48 {
+  if to == from || to - from > 4 || bget(x, from) == 48 {
     return NPROC;
   }
   let mut p = 0;
   let mut i = from;
   while i < to
-    invariant from <= i && i <= to && p < 1000
+    invariant from <= i && i <= to && p < 10000
   {
     let c = cast[u64](bget(x, i));
     if c < 48 || c > 57 {
       return NPROC;
     }
     p = p * 10 + (c - 48);
-    if p >= 1000 {
+    if p >= 10000 {
       return NPROC;
     }
     i = i + 1;
@@ -2535,12 +2544,12 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     // debugger asks for AT_ENTRY to find where a PIE program was loaded.
     let w = pget(k.procs, p, F_ARGS);
     let top = w % 1099511627776;
-    if w / 1099511627776 != 0 && top >= 288 {
-      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 288, &mut k.fs.xfer, 288) == 288 {
+    if w / 1099511627776 != 0 && top >= 320 {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 320, &mut k.fs.xfer, 320) == 320 {
         let mut j = 0;
         let mut found = false;
-        while j < 28 && !found
-          invariant j <= 28 && blen(k.fs.xfer) == XFER
+        while j < 8 && !found
+          invariant j <= 8 && blen(k.fs.xfer) == XFER
         {
           if rd64(k.fs.xfer, 8 * j) == 3 && rd64(k.fs.xfer, 8 * (j + 2)) == 4 && rd64(k.fs.xfer, 8 * (j + 3)) == PH_SIZE && rd64(k.fs.xfer, 8 * (j + 4)) == 5 {
             found = true;
@@ -2550,20 +2559,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         }
         if found {
           let mut e = j;
-          while e < 34 && rd64(k.fs.xfer, 8 * e) != 0
-            invariant j <= e && e <= 35 && blen(k.fs.xfer) == XFER
+          while e < 38 && rd64(k.fs.xfer, 8 * e) != 0
+            invariant j <= e && e <= 39 && blen(k.fs.xfer) == XFER
           {
             e = e + 2;
           }
           let n = 8 * (e + 2 - j);
           let mut i = 0;
-          while i < n && i < 288
-            invariant i <= 288 && 8 * j + i <= 8 * 34 + 288 && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+          while i < n && i < 320
+            invariant i <= 320 && 8 * j + i <= 8 * 7 + 320 && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
           {
             bset(&mut o, i, bget(k.fs.xfer, 8 * j + i));
             i = i + 1;
           }
-          return smaller(n, 288);
+          return smaller(n, 320);
         }
       }
     }
