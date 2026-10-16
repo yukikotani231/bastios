@@ -575,9 +575,11 @@ t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
+t_ltp2: mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt
 t_ltp2: SIGBUS: a mapped page past the end of the file is a bus error
 t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
 t_ltp2: SIGBUS: a forked child gets it too
+t_ltp2: rename: a directory moved from under the working directory leaves it in the moved directory
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
