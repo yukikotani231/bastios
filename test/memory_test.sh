@@ -73,6 +73,9 @@ def meminfo(key):
 if not read_until(b"bastios> "):
     print("FAIL no prompt"); sys.exit(1)
 run("ash")
+# Sizes follow the memory the machine has (the kernel's own use differs between backends).
+F = meminfo("MemFree") // 1024
+BIG, SMALL, TOUCH_BIG, TOUCH_ADJ = F * 11 // 20, F // 5, F * 2 // 5, F * 7 // 20
 
 # A hog that fits is left alone.
 t = run("/disk/mhog touch 16; echo rc=$?")
@@ -108,27 +111,30 @@ check("the system carries on", "alive" in run("echo alive"))
 check("the kill is counted", vm("oom_kill") == 1)
 
 # The biggest holder dies, not the one that asked last.
-run("/disk/mhog hold 18 & big=$!; sleep 1; /disk/mhog hold 6 & small=$!; sleep 1")
-t = run("/disk/mhog touch 12; echo rc=$?")
-check("the biggest process is the victim", re.search(r"Killed process \d+ \(mhog\) oom_score \d+, 1[78]\d{3} kB", t) and "touched 12 MiB" in t, t)
+run(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1")
+t = run(f"/disk/mhog touch {TOUCH_BIG}; echo rc=$?")
+m = re.search(r"Killed process \d+ \(mhog\) oom_score \d+, (\d+) kB", t)
+check("the biggest process is the victim", m and 0.9 * BIG * 1024 <= int(m.group(1)) <= 1.1 * BIG * 1024 and f"touched {TOUCH_BIG} MiB" in t, t)
 t = run("kill -0 $big 2>/dev/null && echo bigalive || echo bigdead; kill -0 $small && echo smallalive")
 check("the others live", "bigdead" in t and "smallalive" in t, t)
 run("kill -9 $small; sleep 1")
 
 # oom_score_adj: +1000 makes a small process the first choice, -1000 exempts.
-run("/disk/mhog hold 18 & big=$!; sleep 1; /disk/mhog hold 6 & small=$!; sleep 1")
+run(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1")
 t = run("echo 1000 > /proc/$small/oom_score_adj; echo -1000 > /proc/$big/oom_score_adj; cat /proc/$small/oom_score_adj /proc/$big/oom_score_adj")
 check("oom_score_adj is kept", "1000\n-1000" in t, t)
 s_small = int(run("cat /proc/$small/oom_score").split()[-2]) if True else 0
 s_big = run("cat /proc/$big/oom_score")
 check("oom_score follows the adjustment", s_small > 500 and re.search(r"\n0\n", s_big) is not None, f"{s_small} {s_big}")
-t = run("/disk/mhog touch 8; echo rc=$?")
+t = run(f"/disk/mhog touch {TOUCH_ADJ}; echo rc=$?")
 t2 = run("kill -0 $big && echo bigalive; kill -0 $small 2>/dev/null || echo smalldead")
-check("the process with the high adjustment is killed, the exempt one lives", "bigalive" in t2 and "smalldead" in t2 and "touched 8 MiB" in t, t + t2)
+check("the process with the high adjustment is killed, the exempt one lives", "bigalive" in t2 and "smalldead" in t2 and f"touched {TOUCH_ADJ} MiB" in t, t + t2)
 run("kill -9 $big; sleep 1")
 
 check("/proc/self/oom_score reads", re.search(r"\n\d+\n", run("cat /proc/self/oom_score")) is not None)
-check("/proc/vmstat counts the kills", vm("oom_kill") == 3)
+n_kill = vm("oom_kill")
+announced = len(re.findall(r"Out of memory: Killed process", out.decode(errors="replace")))
+check("/proc/vmstat counts the kills", n_kill >= 3 and n_kill == announced, f"vmstat {n_kill}, console {announced}")
 qemu.kill(); qemu.wait()
 print("memory: %d failed" % fails)
 sys.exit(1 if fails else 0)
