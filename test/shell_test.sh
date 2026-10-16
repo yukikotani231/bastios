@@ -2708,6 +2708,46 @@ for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33
     print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
     fails += not good
 
+# An internal disk with a GPT that has a BastiOS partition (tools/mkusb.py
+# --blank, the layout the installer writes, docs/install.md): the partition
+# is the disk, files persist across boots, and every byte outside it (the
+# tables, the other partitions) stays as it was. The same GPT with another
+# type on that partition is someone else's disk and is left alone.
+gptdisk = os.path.join(disk_dir.name, "gpt.img")
+subprocess.run(["tools/mkusb.py", gptdisk, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
+pf, pn = map(int, subprocess.check_output(["tools/mkusb.py", "--find", gptdisk]).split())
+before = open(gptdisk, "rb").read()
+def gpt_cmd(line, want):
+    def run():
+        global fails
+        mark = len(out)
+        qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+        good = read_until(b"bastios> ", mark) and want in out[mark:]
+        print(("ok  " if good else "FAIL"), "(GPT disk)", repr(line))
+        fails += not good
+    return run
+gpt_args = ["-m", "64M", "-drive", f"file={gptdisk},format=raw,if=none,id=gd", "-device", "virtio-blk-pci,drive=gd"]
+ok, code = report_boot(gpt_args, "GPT disk", 0, between=gpt_cmd("echo gpt > disk/g", b""))
+good = ok and b"disk: the BastiOS partition at sector %d" % pf in out
+print(("ok  " if good else "FAIL"), "(GPT disk) the kernel finds the BastiOS partition")
+fails += not good
+ok, code = report_boot(gpt_args, "GPT disk again", 0, between=gpt_cmd("cat disk/g", b"gpt\r\n"))
+after = open(gptdisk, "rb").read()
+good = after[:pf * 512] == before[:pf * 512] and after[(pf + pn) * 512:] == before[(pf + pn) * 512:]
+print(("ok  " if good else "FAIL"), "(GPT disk) not a byte outside the partition changed")
+fails += not good
+# Another type GUID on the partition: left alone.
+other = bytearray(before)
+other[1024:1040] = bytes(range(1, 17))
+open(gptdisk, "wb").write(other)
+ok, code = report_boot(gpt_args, "GPT disk of someone else", 0)
+good = ok and b"disk: it holds a partition table or other data; left alone" in out
+print(("ok  " if good else "FAIL"), "(GPT disk) a GPT without a BastiOS partition is left alone")
+fails += not good
+good = open(gptdisk, "rb").read() == bytes(other)
+print(("ok  " if good else "FAIL"), "(GPT disk) not a byte of it changed")
+fails += not good
+
 # With the boot option `login`, the console is BusyBox's login instead of
 # the native shell, and a new login starts whenever the last one ends
 # (relogin, src/main.bastio). Root has no password here (passwd -d above).
