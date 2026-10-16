@@ -2669,6 +2669,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     }
     map_record(&mut k, pid, fd, at / 4096, pages, off);
     read_only(&mut k, pid, at / 4096, pages, prot);
+    bus_mark(&mut k, pid, at / 4096, pages);     // pages past the file's end: SIGBUS
     return USER_BASE + at;
   }
   let total = pages * 4096;
@@ -2700,6 +2701,9 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     map_record(&mut k, pid, fd, at / 4096, pages, off);
   }
   read_only(&mut k, pid, at / 4096, pages, prot);
+  if sh {
+    bus_mark(&mut k, pid, at / 4096, pages);     // pages past the file's end: SIGBUS
+  }
   return USER_BASE + at;
 }
 
