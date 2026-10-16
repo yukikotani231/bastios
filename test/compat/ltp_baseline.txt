@@ -1099,3 +1099,4 @@ writev02
 writev05
 writev06
 writev07
+futex_wake05

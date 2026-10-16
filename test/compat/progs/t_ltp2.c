@@ -724,6 +724,18 @@ int main(void) {
            int st = 0; if (c > 0) waitpid(c, &st, 0);
            signal(SIGBUS, SIG_DFL); close(f); unlink("/tmp/sigbus.tmp");
            c > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("SIGBUS: a file cut under a mapping takes the pages past the new end", ({
+           signal(SIGBUS, busplain);
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 8192);
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+           m[4096 + 1] = 5;
+           ftruncate(f, 4096);
+           int hit = 0;
+           if (sigsetjmp(back, 1) == 0) { m[4096 + 1] = 6; } else hit = 1;
+           int first = m[1] == 0;
+           signal(SIGBUS, SIG_DFL); munmap(m, 8192); close(f); unlink("/tmp/sigbus.tmp");
+           m != MAP_FAILED && hit && first; }));
     EXPECT("rename: a directory moved from under the working directory leaves it in the moved directory", ({
            char cwd[256];
            mkdir("/tmp/rn_a", 0700); mkdir("/tmp/rn_a/sub", 0700);
