@@ -45,8 +45,7 @@ the real programs, and `script` (util-linux, only for `compat-host`).
 - `dev.txt`: building C on BastiOS, in the same format. tcc and GNU make
   run from a second disk (`devdisk.sh`, booted after everything else)
   with the headers `dev_headers.c` pulls in, the C runtime objects and
-  musl's `libc.so`, on a disk of its own (split out when the disk's
-  directory held only 64 entries; it now holds 1023). tcc (pinned by `TCC_REV`) is configured to find
+  musl's `libc.so`, on a disk of its own. tcc (pinned by `TCC_REV`) is configured to find
   them under `/disk/c` and builds dynamic PIEs, which the kernel runs
   with its built-in musl dynamic linker. Building make needs autoconf,
   automake, autopoint and texinfo for its bootstrap.
@@ -71,9 +70,10 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   git, curl, less, openssh-keygen, bash, make, jq, rsync, openssl, file
   and xmllint (`ALPINE_DISK_PKGS`, with what they depend on). These cases
   need no network.
-  - One case installs tig over HTTP from the host (`ALPINEURL`). The host
-    serves every package of the images, including gcc, python3 and vim,
-    which do not fit on the disk yet.
+  - Other cases install packages over HTTP from the host (`ALPINEURL`):
+    tig, neovim, gcc and musl-dev, ripgrep, fzf, tmux, cmake, python3. The
+    host serves every package of the images; these are the ones the cases
+    ask for.
   - The `bt-*` packages, made by `alpinedisk.py`, test apk itself:
     dependency resolution, a missing dependency, `apk upgrade` with a
     version constraint (version 2 is in a second repository, `/repo2`), the
@@ -89,7 +89,11 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   - `make ARCH=aarch64 compat` runs this group, `debian.txt` and `node.txt` on
     the AArch64 kernel from the images' arm64 layers (`COMPAT_ARCH=aarch64`;
     the pins are in `images.mk`). The Bastio toolchain and Dropbear are built
-    for x86-64 only, so the checks that use them do not pass there.
+    for x86-64 only, so the checks that use them do not pass there. Two
+    packages come from elsewhere for lack of an arm64 image: gdb is the
+    arm64 layers of the same Alpaquita image (`arch/aarch64/Makefile`), and
+    cmake is made from the `cmake` wheel on PyPI (`--cmake-wheel`, pinned by
+    SHA-256), which bundles its C++ runtime.
 - `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
   case unpacks Debian's root file system (the `debian:stable-slim` image,
   `DEBIAN_IMAGE`, without `/usr/share`, dpkg's file lists, gconv and Perl's
@@ -105,6 +109,15 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts threads and writes machine code at run time, so this lane boots the
   guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
   them on a copy.
+- `go.txt`: the Go toolchain of the official `golang` image (`GO_IMAGE`), from
+  a seventh disk (`godisk.py`), entered with `chroot`: Go programs are
+  static, so the root holds only `/usr/local/go`. x86-64 only.
+- `ssh.txt`: Dropbear in the guest, with the host's Dropbear client logging
+  in over QEMU's port forward. `alpine_tty.txt`: programs driven by
+  keystrokes inside the Alpine root (tmux, Neovim, editing and building C).
+- The container cases (`runc` and `crun`) are in `alpine.txt`; the
+  per-area summary of what they check is in
+  [docs/linux.md](../../docs/linux.md#container-runtimes).
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel
@@ -134,7 +147,7 @@ for that reason alone; the report shows them as ordinary failures.
 
 ## Pass or fail
 
-Most checks fail today, and that is the point: the suite is a measurement.
+The suite is a measurement: it counts what passes and ranks what is missing.
 `make compat` fails only when a check listed in `baseline.txt` (the checks
 that passed when it was last recorded) stops passing. After a change that
 makes more checks pass, run `make compat-baseline` and commit the new list.
