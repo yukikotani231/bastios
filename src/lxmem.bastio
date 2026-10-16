@@ -1334,7 +1334,7 @@ fn bus_shrink(k: &mut Kernel, f: u64)
   requires kok(k)
   ensures kok(k)
 {
-  if f == NO_FILE {
+  if SIGBUS_PAGES == 0 || f == NO_FILE {
     return;
   }
   let mut pid = 1;
