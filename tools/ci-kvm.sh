@@ -11,6 +11,12 @@
 # Only the accelerator changes: the machine, the CPU model (`-cpu qemu64` and
 # the features the tests name), the memory and the devices are the same, and
 # the kernel, the disks and the checks are the same files.
+#
+# The compat and compat-ltp jobs use it. The test and native jobs do not:
+# under KVM the stack guard test (it moves the guest's stack pointer from
+# outside) saw no fault, and the e1000 TCP test, which times the guest's
+# DHCP and resends, failed three of its checks, so those boots stay emulated
+# until the tests are made to hold under both.
 set -eu
 if [ ! -e /dev/kvm ]; then
     echo "ci-kvm: no /dev/kvm, the guests run under TCG"

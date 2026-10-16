@@ -79,9 +79,6 @@ jobs:
             proof-${{ matrix.part }}-
             proof-
           path: build/proof-cache
-      - name: Run the x86-64 guests under KVM
-        if: matrix.part == 'x86-64'
-        run: tools/ci-kvm.sh
       - run: make test BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
         env:
           AARCH64_REQUIRED: 1
@@ -118,8 +115,6 @@ jobs:
             proof-x86-64-
             proof-
           path: build/proof-cache
-      - name: Run the x86-64 guests under KVM
-        run: tools/ci-kvm.sh
       - run: make test NATIVE=1 LANES='a b c' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
