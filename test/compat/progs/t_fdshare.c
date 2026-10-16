@@ -126,6 +126,22 @@ int main(int argc, char **argv)
         if (ok) pass(); else fail("kcmp");
     }
 
+    if (begin("/proc/PID/fd/N of a process that shares the table reads the shared descriptors")) {
+        /* The descriptors sit in the row of whichever sharer made the last call; the
+         * parent reads the child's links after a call of its own. */
+        a.mode = 4;
+        char *stack = malloc(STACK), b, link[64], path[64];
+        pid_t c = clone(child, stack + STACK, CLONE_FILES | SIGCHLD, &a);
+        int ok = c > 0 && read(up[0], &b, 1) == 1;
+        snprintf(path, sizeof path, "/proc/%d/fd/%d", (int)c, go[0]);
+        ssize_t n = ok ? readlink(path, link, sizeof link - 1) : -1;
+        ok = ok && n > 5 && !strncmp(link, "pipe:[", 6);
+        write(go[1], "g", 1);
+        int st;
+        ok = c > 0 && waitpid(c, &st, 0) == c && ok;
+        if (ok) pass(); else fail("proc fd of a sharer");
+    }
+
     a.mode = 5;
     int x = open("/etc/passwd", O_RDONLY | O_CLOEXEC);
     close(x);
