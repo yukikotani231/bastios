@@ -408,7 +408,7 @@ if card == "ena":
 link = Link()
 net = Net(link)
 qemu = subprocess.Popen(
-    [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", "2",
+    [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", os.environ.get("SMP", "2"),
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-serial", "stdio", "-monitor", "none",
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
@@ -493,6 +493,9 @@ def echo_run(name, data, setup, secs=60):
           f"{name}: {len(data)} bytes echoed intact")
     if not finished:
         print(f"     state {p.state}, got {len(p.got)} of {len(data)}, una {p.una} max {p.max}")
+        t0 = p.log[0][0] if p.log else 0
+        for tt, s in p.log[-60:]:
+            print("DEBUG  %.3f fl=%d seq=%d ack=%d len=%d wnd=%d" % (tt - t0, s["flags"], s["seq"], s["ack"], len(s["data"]), s["wnd"]))
         until(lambda: b"bastios> " in out[mark:], 20)
     net.peer = None
     return p
