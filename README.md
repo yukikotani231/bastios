@@ -134,7 +134,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `src/fs.bastio`, `ramfs.bastio`, `diskfs.bastio`, `diskq.bastio`, `bio.bastio` | Open files, the in-memory and disk file systems, the disk queue and block cache |
 | `src/blk.bastio`, `nvme.bastio`, `virtio_blk.bastio`, `virtq.bastio`, `virtio_mmio.bastio`, `ahci.bastio`, `ata.bastio` | Disk drivers (USB sticks: `xhci.bastio`) |
 | `src/net.bastio`, `tcp.bastio`, `card.bastio`, `virtio_net.bastio`, `e1000.bastio`, `rtl8169.bastio`, `ena.bastio` | The network stack and card drivers |
-| `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards and mice; `xhci.bastio` also drives USB sticks |
+| `src/console.bastio`, `uart.bastio`, `fb.bastio`, `kbd.bastio`, `xhci.bastio` | The console: serial port, screen, PS/2 and USB keyboards and mice; `xhci.bastio` also drives USB sticks and USB serial ports (`lxserial.bastio`) |
 | `src/pic.bastio`, `pit.bastio`, `lapic.bastio`, `hpet.bastio`, `rtc.bastio`, `pci.bastio`, `virtq.bastio` | Interrupt controllers, clocks, PCI, virtqueues |
 | `src/acpi.bastio` | ACPI: power off (S5), restart, the power button, the PM timer clock; the FADT and the DSDT's `\_S5` parsed in Bastio |
 | `src/info.bastio` | The hardware report (boot option `diag`): processor, memory map, ACPI tables and registers, PCI devices; see [docs/real-hardware.md](docs/real-hardware.md) |
