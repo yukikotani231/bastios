@@ -379,6 +379,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # The alternate screen (what vi uses): alt is drawn over a blank
+            # screen, and leaving it brings the shell's screen back.
+            keys = {" ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
+            def typed(text):
+                monitor(*[f"sendkey {keys.get(c, c)}" for c in text], "sendkey ret")
+            typed("printf '\\033[?1049halt\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.startswith("alt") for l in lines) and not any("echo term" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal's alternate screen replaces the shell's screen")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            typed("printf '\\033[?1049l'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "term" for l in lines) and not any(l.startswith("alt") for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) leaving the alternate screen brings the shell's screen back")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)

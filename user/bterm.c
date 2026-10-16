@@ -2,8 +2,10 @@
  * 8 x 16 cells drawn with the console's font, with BusyBox's ash on a
  * pseudo-terminal behind it. What bwm sends as keys goes to the shell;
  * what the shell writes is read as a VT100 subset: CR, LF, backspace, tab,
- * the cursor moves (CSI A B C D H f), erase (J K), insert and delete of
- * characters (@ P) and colours (m). Says "bterm: window ID" when the
+ * the cursor moves (CSI A B C D G H d f, ESC 7 8), erase (J K X), insert and
+ * delete of characters (@ P) and of lines (L M), scrolling (S T, ESC M D E)
+ * inside a scroll region (r), the alternate screen (CSI ? 1049 h and l) and
+ * colours (m): enough for vi and other full-screen programs. Says "bterm: window ID" when the
  * window is open and "bterm: shell exited" when the shell ends. */
 #define _GNU_SOURCE
 #include <fcntl.h>
@@ -34,6 +36,11 @@ static uint32_t pix[WIDTH * HEIGHT];
 static unsigned char dirty[ROWS];
 static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
+static int priv;                          /* the CSI had a '?' prefix */
+static int top, bot = ROWS - 1;           /* the scroll region, inclusive */
+static int saved_cx, saved_cy;
+static struct cell main_grid[ROWS][COLS];
+static int main_cx, main_cy, alt;
 
 static void put_cell(int r, int c, unsigned char ch)
 {
@@ -53,19 +60,58 @@ static void clear_cells(int r, int c0, int c1)
     dirty[r] = 1;
 }
 
-static void scroll(void)
+/* Scrolls the lines top..bot up by n (down when n < 0). */
+static void scroll_region(int n)
 {
-    memmove(grid[0], grid[1], sizeof grid[0] * (ROWS - 1));
-    clear_cells(ROWS - 1, 0, COLS);
-    memset(dirty, 1, sizeof dirty);
+    int h = bot - top + 1;
+    int k = n < 0 ? -n : n;
+    if (k > h)
+        k = h;
+    if (n > 0)
+        memmove(grid[top], grid[top + k], sizeof grid[0] * (h - k));
+    else
+        memmove(grid[top + k], grid[top], sizeof grid[0] * (h - k));
+    for (int i = 0; i < k; i++)
+        clear_cells(n > 0 ? bot - i : top + i, 0, COLS);
+    for (int r = top; r <= bot; r++)
+        dirty[r] = 1;
 }
 
 static void linefeed(void)
 {
-    if (++cy >= ROWS) {
-        cy = ROWS - 1;
-        scroll();
+    if (cy == bot)
+        scroll_region(1);
+    else if (cy < ROWS - 1)
+        cy++;
+}
+
+static void reverse_index(void)
+{
+    if (cy == top)
+        scroll_region(-1);
+    else if (cy > 0)
+        cy--;
+}
+
+static void set_alt(int on)
+{
+    if (on == alt)
+        return;
+    alt = on;
+    if (on) {
+        memcpy(main_grid, grid, sizeof grid);
+        main_cx = cx;
+        main_cy = cy;
+        for (int r = 0; r < ROWS; r++)
+            clear_cells(r, 0, COLS);
+    } else {
+        memcpy(grid, main_grid, sizeof grid);
+        cx = main_cx;
+        cy = main_cy;
     }
+    top = 0;
+    bot = ROWS - 1;
+    memset(dirty, 1, sizeof dirty);
 }
 
 static void draw_cell(int r, int c, int cursor)
@@ -96,7 +142,42 @@ static int param(int i, int dflt)
 static void csi(int final)
 {
     int n = param(0, 1);
+    if (priv) {
+        if (final == 'h' || final == 'l')
+            for (int i = 0; i < nparam; i++)
+                if (params[i] == 1049 || params[i] == 1047 || params[i] == 47)
+                    set_alt(final == 'h');
+        return;
+    }
     switch (final) {
+    case 'G': cx = n - 1 < 0 ? 0 : n - 1 >= COLS ? COLS - 1 : n - 1; break;
+    case 'd': cy = n - 1 < 0 ? 0 : n - 1 >= ROWS ? ROWS - 1 : n - 1; break;
+    case 'X':
+        clear_cells(cy, cx, cx + n > COLS ? COLS : cx + n);
+        break;
+    case 'S': scroll_region(n); break;
+    case 'T': scroll_region(-n); break;
+    case 'L':
+    case 'M':
+        if (cy >= top && cy <= bot) {
+            int t = top;
+            top = cy;
+            scroll_region(final == 'M' ? n : -n);
+            top = t;
+        }
+        break;
+    case 'r': {
+        int t = param(0, 1) - 1, b = param(1, ROWS) - 1;
+        if (t < 0) t = 0;
+        if (b >= ROWS) b = ROWS - 1;
+        if (t < b) {
+            top = t;
+            bot = b;
+            cx = 0;
+            cy = 0;
+        }
+        break;
+    }
     case 'A': cy = cy - n < 0 ? 0 : cy - n; break;
     case 'B': cy = cy + n >= ROWS ? ROWS - 1 : cy + n; break;
     case 'C': cx = cx + n >= COLS ? COLS - 1 : cx + n; break;
@@ -167,14 +248,26 @@ static void csi(int final)
 static void feed(unsigned char b)
 {
     if (state == 1) {
+        state = 0;
         if (b == '[') {
             state = 2;
             nparam = 0;
+            priv = 0;
             memset(params, 0, sizeof params);
-            params[0] = 0;
-            return;
+        } else if (b == 'M') {
+            reverse_index();
+        } else if (b == 'D') {
+            linefeed();
+        } else if (b == 'E') {
+            cx = 0;
+            linefeed();
+        } else if (b == '7') {
+            saved_cx = cx;
+            saved_cy = cy;
+        } else if (b == '8') {
+            cx = saved_cx;
+            cy = saved_cy;
         }
-        state = 0;
         return;
     }
     if (state == 2) {
@@ -187,8 +280,10 @@ static void feed(unsigned char b)
                 nparam = 1;
             if (nparam < 8)
                 nparam++;
-        } else if (b == '?' || b == '>' || b == '=') {
-            /* a private-mode prefix: the sequence is ignored at its final byte */
+        } else if (b == '?') {
+            priv = 1;
+        } else if (b == '>' || b == '=') {
+            priv = 1;                             /* ignored at its final byte */
         } else if (b >= 0x40 && b <= 0x7E) {
             csi(b);
             state = 0;
