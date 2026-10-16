@@ -200,6 +200,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- `bwm` (`user/bwm.c`), a window manager for `/dev/fb0` and `/dev/input/mice`: a wallpaper, three windows with title bars, a pointer, click to raise and focus, drag a title bar to move a window, typing into the focused window, Ctrl-Q to leave. Frames are composed in memory and only the changed rectangles are written. `test/iso_test.sh` drives it through QEMU's monitor (mouse and keys) and reads the screen back. The windows are its own; there is no protocol for other programs yet.
+
 - `/dev/fb0`: the screen for programs that draw their own pixels (`src/lxfb.bastio`). `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` give the 32-bit mode; `write` and `lseek` store pixels. The text console stops drawing while a description is open and is drawn again when the last one closes. `user/mfb.c` draws a pattern, and `test/iso_test.sh` reads it back from a QEMU screendump under BIOS and UEFI. The framebuffer stays inside the proved device window; the pixels reach it through a ring the console pump empties. There is no `mmap` of it yet.
 
 - A read of a regular file on the disk is no longer cut short when some of its blocks are not cached yet: `read`, `pread64` and the calls built on them wait for the disk and return the whole count (they returned the cached part first, and a program that takes the count for granted, such as the JVM reading its modules file, got zeros for the rest). The JDK of the eclipse-temurin image (`java`, `javac`, `jar`; records, streams, threads, files, exit status) now runs in the compatibility suite; the lane unpacks the image's root (about 400 MB) from a tar file on its disk.
