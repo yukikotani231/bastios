@@ -280,18 +280,19 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if not good:
             print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
         fails += not good
-        # Editing keys: the arrows send ESC [ A to ESC [ D, Delete ESC [ 3 ~;
+        # Editing keys: the arrows send ESC [ A to ESC [ D, Delete ESC [ 3 ~,
+        # Insert ESC [ 2 ~, F1 ESC O P, F5 ESC [ 1 5 ~ and F12 ESC [ 2 4 ~;
         # the line editor drops the ESC, so the rest shows in the line.
         mark = len(out)
-        keys = ["e", "c", "h", "o", "spc", "up", "down", "right", "left", "delete"]
+        keys = ["e", "c", "h", "o", "spc", "up", "down", "right", "left", "delete", "insert", "f1", "f5", "f12"]
         if usb:
             usbkeys(qmp_path, keys)
         else:
             sendkeys(mon, keys)
         time.sleep(1)
         text = grab()
-        good = any(l.endswith("bastios> echo [A[B[C[D[3~") for l in text)
-        print(("ok  " if good else "FAIL"), f"({name}) arrow and Delete keys send escape sequences")
+        good = any(l.endswith("bastios> echo [A[B[C[D[3~[2~OP[15~[24~") for l in text)
+        print(("ok  " if good else "FAIL"), f"({name}) arrow, Delete, Insert and function keys send escape sequences")
         if not good:
             print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
         fails += not good
@@ -454,6 +455,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
+        # A terminal in line mode keeps ESC in the line (and Tab), so the
+        # escape sequences of the special keys reach a program that reads
+        # it: cat takes them into a file, whose size is then counted (the
+        # console drops ESC when it prints one). ESC [ A, ESC [ 1 5 ~,
+        # ESC [ 3 ~, ESC [ D and ESC [ H are 18 bytes, and the line's end 1.
+        mark = len(out)
+        q.stdin.write(b"cat > /tmp/keys\r"); q.stdin.flush()
+        time.sleep(1)
+        monitor("sendkey up", "sendkey f5", "sendkey delete", "sendkey left", "sendkey home", "sendkey ret", "sendkey ctrl-d")
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"ls -l /tmp/keys\r"); q.stdin.flush()
+        good = until(b" 19 ", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a line-mode terminal keeps the escape sequences of the special keys")
+        fails += not good
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
