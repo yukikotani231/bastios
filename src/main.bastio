@@ -1486,6 +1486,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     hi = hi + 1;
   }
   free(hw);
+  let hr = rng_hw_boot(&mut k, cpu);
+  if hr > 0 {
+    puts(&mut con, "rng: the processor's RDSEED/RDRAND, ");
+    put_num(&mut con, hr);
+    puts(&mut con, " bytes of entropy\r\n");
+  }
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {
