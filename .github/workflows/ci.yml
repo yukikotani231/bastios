@@ -346,10 +346,10 @@ jobs:
             lanes: main1,bastio
             disks: disk.img bastio.img
           - part: alpine
-            lanes: alpine
+            lanes: alpine,alpine2
             disks: alpine.img
           - part: rest
-            skip: main1,bastio,alpine
+            skip: main1,bastio,alpine,alpine2
             disks: debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
@@ -402,7 +402,7 @@ jobs:
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
       - name: Build the disks
-        run: make ARCH=aarch64 compat-disks COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
+        run: make -j4 ARCH=aarch64 compat-disks COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
       - name: Save the third-party programs
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4

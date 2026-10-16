@@ -582,6 +582,13 @@ def arch_words(text):
     return text
 
 def run_applet(env, name, cmd, expected, timeout, bb):
+    t = time.time()
+    r = run_applet_once(env, name, cmd, expected, timeout, bb)
+    r["secs"] = round(time.time() - t, 1)
+    return r
+
+
+def run_applet_once(env, name, cmd, expected, timeout, bb):
     cmd = arch_words(cmd)
     expected = [arch_words(l) for l in expected]
     cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
@@ -712,6 +719,10 @@ def report(results, names, out_dir, elapsed):
     print("compat: missing system calls, by checks blocked:")
     for n, who in ranked[:15]:
         print(f"  {names.get(n, '?'):20} {n:4} {len(who)}")
+    slow = sorted(((c.get("secs", 0), g, c["name"]) for g, c in rows), reverse=True)[:10]
+    print("compat: slowest checks:")
+    for secs, g, n in slow:
+        print(f"  {secs:6.0f} s  {g}: {n}")
     print(f"compat: full report in {os.path.join(out_dir, 'report.md')}")
 
 
@@ -748,7 +759,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "debian", "node", "go", "java", "rust", "podman"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "debian", "node", "go", "java", "rust", "podman"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -778,7 +789,19 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     web = WebServer(args.tcc_src)
-    if args.registry_image and lane_chosen("alpine"):
+    # Alpine's container cases go to a lane of their own (alpine2), on a
+    # copy of the disk of their own, after the cases that unpack the root and
+    # install curl (ocipull.sh's) run there too: they need nothing else the
+    # other cases install, and a lane runs its cases one after another. The
+    # group stays alpine. The bridged-network cases stay: the package they
+    # install brings libraries the other cases already put on the disk, and
+    # without them its download through the container's network outlasts
+    # the case's timeout.
+    alpine_setup = alpine[:3]
+    alpine2 = alpine_setup + [c for c in alpine[3:] if c[0].startswith("container:")
+                              and "joins a network namespace" not in c[0]]
+    alpine1 = [c for c in alpine if c not in alpine2[len(alpine_setup):]]
+    if args.registry_image and (lane_chosen("alpine") or lane_chosen("alpine2")):
         web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None
     bb = os.path.join(os.path.abspath(args.host), "busybox") if args.host else BB
@@ -857,21 +880,26 @@ def main():
         lanes.append(("dev", args.dev_disk, [("dev", "building C (tcc, make)", applets_lane(dev, 60))]))
     if args.bastio_disk and lane_chosen("bastio"):
         lanes.append(("bastio", args.bastio_disk, [("bastio", "the Bastio compiler (bastioc1, z3, tcc)", applets_lane(bastio, 900))]))
-    if args.alpine_disk and lane_chosen("alpine"):
+    if args.alpine_disk and (lane_chosen("alpine") or lane_chosen("alpine2")):
         # Alpine's root and its packages. The cases change the disk (they
         # unpack and install), so they get a copy and every run starts from
         # the same disk.
-        disk = os.path.join(args.out, "alpine-run.img")
-        shutil.copyfile(args.alpine_disk, disk)
         if args.alpine_repo:
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
         # 384M: a runc started inside a runc container is two Go runtimes
         # and two roots unpacked on the disk; at 256M a thread of one of
         # them now and then could not be made.
-        lanes.append(("alpine", disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine, 300)),
-                             ("alpine-tty", "programs on the terminal in Alpine",
-                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])], "384M"))
+        if lane_chosen("alpine"):
+            disk = os.path.join(args.out, "alpine-run.img")
+            shutil.copyfile(args.alpine_disk, disk)
+            lanes.append(("alpine", disk, [("alpine", "Alpine Linux (apk)", applets_lane(alpine1, 300)),
+                                 ("alpine-tty", "programs on the terminal in Alpine",
+                                  lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])], "384M"))
+        if lane_chosen("alpine2"):
+            disk = os.path.join(args.out, "alpine-run2.img")
+            shutil.copyfile(args.alpine_disk, disk)
+            lanes.append(("alpine2", disk, [("alpine#2", "containers in Alpine", applets_lane(alpine2, 300))], "384M"))
     if args.debian_disk and lane_chosen("debian"):
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
@@ -909,6 +937,15 @@ def main():
     # The groups the chosen lanes hold, whatever becomes of them: a lane that
     # dies part way loses its checks, it does not drop them.
     held = {k for l in lanes for k, _, _ in l[2]}
+    # With one of the two Alpine lanes left out, the cases of the other are
+    # not held to the baseline.
+    alpine_left = set()
+    if "alpine#2" in held:
+        held.add("alpine")
+        if not lane_chosen("alpine"):
+            alpine_left = {"alpine: " + c[0] for c in alpine1[len(alpine_setup):]}
+    elif "alpine" in held:
+        alpine_left = {"alpine: " + c[0] for c in alpine2[len(alpine_setup):]}
     if not lanes:
         print("compat: no lane to run (is each chosen lane's disk given?)")
         return 2
@@ -928,6 +965,14 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
+    if "alpine#2" in results:
+        # One group again, in the order of alpine.txt; the cases both lanes
+        # run first are counted once.
+        part2 = results.pop("alpine#2")
+        if "alpine" in results:
+            part2 = part2[len(alpine_setup):]
+        at = {c[0]: i for i, c in enumerate(alpine)}
+        results["alpine"] = sorted(results.get("alpine", []) + part2, key=lambda c: at.get(c["name"], len(at)))
     results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "podman"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
@@ -944,7 +989,8 @@ def main():
         return 0
     if os.path.exists(base):
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
-        lost = sorted(i for i in set(want) - set(ids) if not (args.lanes or args.skip_lanes) or i.split(": ", 1)[0] in held)
+        lost = sorted(i for i in set(want) - set(ids) - alpine_left
+                      if not (args.lanes or args.skip_lanes) or i.split(": ", 1)[0] in held)
         if lost:
             print("compat: REGRESSION, these checks passed before:")
             for i in lost:
