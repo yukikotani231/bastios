@@ -31,9 +31,13 @@ jobs:
           path: build/proof-cache
       - run: make build/bastios.elf
       - run: tools/ci-kvm.sh
-      - run: NIC=e1000 test/dhcp_test.sh
-        continue-on-error: true
       - run: NIC=e1000 test/tcp_test.sh
         continue-on-error: true
-      - run: NIC=igb test/dhcp_test.sh
+      - run: NIC=e1000e test/tcp_test.sh
+        continue-on-error: true
+      - run: NIC=igb test/tcp_test.sh
+        continue-on-error: true
+      - run: NIC=virtio-net-pci test/tcp_test.sh
+        continue-on-error: true
+      - run: NIC=e1000 test/tcp_test.sh
         continue-on-error: true
