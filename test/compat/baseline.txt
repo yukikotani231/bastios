@@ -68,10 +68,17 @@ apps: wget: HTTPS from the host (BusyBox's own TLS)
 apps: wget: a file from the host
 apps: wget: a missing file is an error
 apps: wget: an IPv6 loopback server
+bastio: bastio-lsp: a type error from bastioc1 becomes a diagnostic
+bastio: bastio-lsp: formatting
+bastio: bastio-lsp: go to definition
+bastio: bastio-lsp: hover shows the signature and the doc comment
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
 bastio: bastioc1: prove, build with tcc, run
+bastio: bastiofmt: --check names an unformatted file
+bastio: bastiofmt: formats the compiler's parser, and the result is formatted
+bastio: bastiofmt: lays a line out
 bastio: z3: a query
 busybox: awk
 busybox: base64
@@ -89,6 +96,7 @@ busybox: diff
 busybox: du
 busybox: echo
 busybox: env
+busybox: lang
 busybox: expr
 busybox: find
 busybox: free
@@ -759,6 +767,8 @@ t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
+t_net: IPV6_V6ONLY reads back
+t_net: IPV6_V6ONLY: an IPv6-only listener and an IPv4 one share a port
 t_net: SO_REUSEADDR
 t_net: TCP bind/listen
 t_net: TCP loopback connect/accept
@@ -767,10 +777,13 @@ t_net: TCP_NODELAY
 t_net: UDP bind port 0
 t_net: UDP loopback
 t_net: UDP socket
+t_net: a dual-stack listener cannot take it
 t_net: getaddrinfo localhost
+t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_net: ping6 ::1 (raw ICMPv6 socket)
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
 t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
@@ -999,7 +1012,7 @@ t_proc: /proc/sys/net/core is a directory
 t_proc: a directory under /proc/sys that is not there is ENOENT
 t_proc: every file listed under /proc/sys opens
 t_proc: /proc/sys/vm lists swappiness
-t_proc: oom_score reads 0
+t_proc: oom_score reads a number
 t_proc: oom_score_adj starts at 0
 t_proc: loginuid is unset
 t_proc: coredump_filter reads its default
@@ -1368,6 +1381,13 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a compile error is reported
+podman: podman: unpack the image root and set it up
+podman: podman: version
+podman: podman: import a root and run a container as root
+podman: podman: a container has its own hostname
+podman: podman: rootless, the unprivileged user maps to root in its user namespace
+podman: podman: rootless, import an image (chroot, mkdir and lchown as the namespace's root)
+podman: podman: rootless, run a container in a user namespace
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key
@@ -1444,7 +1464,29 @@ alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
 alpine: python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
+alpine: abuild: install it with fakeroot and the build tools
+alpine: abuild-keygen: a builder user makes a signing key and trusts it
+alpine: symlink: a new symlink belongs to the user who made it, who can set its times
+alpine: abuild: libgreet: a patch, a test suite, and -dev and -doc packages
+alpine: abuild: greeter: build-time dependencies come from the repository just made, and the runtime one is traced
+alpine: apk: install the built packages from the signed repository, with their scripts
+alpine: apk: a repository signed with a key that is not trusted is refused
+alpine: abuild: tinycc: a C compiler built from its source, which then compiles a program
 t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+t_pty: IUTF8 can be set
+t_pty: erasing a wide character echoes whole erasures
+t_pty: erasing a two-byte character takes back one cell
+t_pty: with IUTF8 erase takes whole characters
+t_pty: IUTF8 can be cleared
+t_pty: without IUTF8 erase takes one byte
+tty: utf-8: erase takes back a whole character on the console
+alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
+alpine-tty: nvim: it counts characters and cells of Japanese text
+t_time: TZ=JST-9 is nine hours ahead
+t_time: TZ with a DST rule
+t_time: and outside the DST period
+t_time: a zone file is written
+t_time: TZ naming a zone file reads it

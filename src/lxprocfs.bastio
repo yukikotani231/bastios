@@ -103,7 +103,11 @@ const SY_NETARP: u64 = 28;             // /proc/net/arp
 const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern ("core": a dump goes to a file of that name, src/lxcore.bastio)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
+const SY_NETIF6: u64 = 80;             // /proc/net/if_inet6 (SY_SC's 32 .. 72 end before)
+const SY_NETV6RT: u64 = 81;            // /proc/net/ipv6_route
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
+const SY_VMSTAT: u64 = 99;             // /proc/vmstat (src/oom.bastio's counters)
+const SY_SWAPS: u64 = 100;             // /proc/swaps
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 10;
@@ -498,6 +502,12 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     if xfer_is(x, 5, n, "diskstats") {
       return PROC_DEV + PF_DISKSTATS;
     }
+    if xfer_is(x, 5, n, "vmstat") {
+      return PROC_DEV + PSYS + SY_VMSTAT;
+    }
+    if xfer_is(x, 5, n, "swaps") {
+      return PROC_DEV + PSYS + SY_SWAPS;
+    }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
     }
@@ -523,6 +533,12 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 5, n, "net/unix") {
     return PROC_DEV + PSYS + SY_NETUNIX;
+  }
+  if xfer_is(x, 5, n, "net/if_inet6") {
+    return PROC_DEV + PSYS + SY_NETIF6;
+  }
+  if xfer_is(x, 5, n, "net/ipv6_route") {
+    return PROC_DEV + PSYS + SY_NETV6RT;
   }
   if xfer_is(x, 5, n, "net/udp6") {
     return PROC_DEV + PSYS + SY_NETUDP6;
@@ -908,6 +924,12 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i == 8 {
       return Ent { len: name_out(&mut k.fs.xfer, "arp"), dir: false, end: false };
     }
+    if i == 9 {
+      return Ent { len: name_out(&mut k.fs.xfer, "if_inet6"), dir: false, end: false };
+    }
+    if i == 10 {
+      return Ent { len: name_out(&mut k.fs.xfer, "ipv6_route"), dir: false, end: false };
+    }
     return end;
   }
   if dir >= DIR_PROC + FDI_DIRS && dir < DIR_PROC + FDI_DIRS + NPROC {
@@ -1060,7 +1082,13 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 13 {
     return Ent { len: name_out(&mut k.fs.xfer, "sys"), dir: true, end: false };
   }
-  let p = i - 13;
+  if i == 14 {
+    return Ent { len: name_out(&mut k.fs.xfer, "vmstat"), dir: false, end: false };
+  }
+  if i == 15 {
+    return Ent { len: name_out(&mut k.fs.xfer, "swaps"), dir: false, end: false };
+  }
+  let p = i - 15;
   if p >= NPROC {
     return end;
   }
@@ -1399,6 +1427,23 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
 
 /// Appends v in decimal.
 /// v as exactly `digits` upper-case hex digits (the low ones if it is wider).
+/// The 16 lower-case hex digits of a 64-bit word (an IPv6 address half,
+/// as /proc/net/if_inet6 prints it).
+fn put_hx16(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  let mut sh = 8;
+  while sh > 0
+    invariant sh <= 8 && blen(o) == PROC_OUT && a <= PROC_OUT
+  {
+    sh = sh - 1;
+    a = put_hb(&mut o, a, (v >> (8 * sh)) & 255);
+  }
+  return a;
+}
+
 fn put_hx(o: &mut Bytes, at: u64, v: u64, digits: u64) -> u64
   requires blen(o) == PROC_OUT && at <= PROC_OUT && digits <= 8
   ensures blen(o) == PROC_OUT && result <= PROC_OUT
@@ -1677,7 +1722,12 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
     if i < NFILES {
       let l = ram_name(&mut k.fs.ram, i, &mut k.fs.name);
       if l != NO_FILE {
-        a = put_s(&mut o, a, "tmpfs /");
+        let ext = vfs_mount_ext(k.fs, s);
+        if ext {
+          a = put_s(&mut o, a, "ext4 /");
+        } else {
+          a = put_s(&mut o, a, "tmpfs /");
+        }
         let mut j = 0;
         while j < l
           invariant j <= l && l <= NAMEBUF && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
@@ -1685,7 +1735,9 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
           a = put_c(&mut o, a, bget(k.fs.name, j));
           j = j + 1;
         }
-        if vfs_mount_ro(k.fs, s) {
+        if ext {
+          a = put_s(&mut o, a, " ext4 ro 0 0\n");
+        } else if vfs_mount_ro(k.fs, s) {
           a = put_s(&mut o, a, " tmpfs ro 0 0\n");
         } else {
           a = put_s(&mut o, a, " tmpfs rw 0 0\n");
@@ -1843,6 +1895,18 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
     }
+    if what == SY_VMSTAT {
+      let mut a = put_s(&mut o, 0, "nr_free_pages ");
+      a = put_n(&mut o, a, count_free(k.mem.bm));
+      a = put_s(&mut o, a, "\nnr_file_pages ");
+      a = put_n(&mut o, a, pc_count(k.fs.pc));
+      a = put_s(&mut o, a, "\noom_kill ");
+      a = put_n(&mut o, a, get(k.sys, SYS_VM));
+      return put_s(&mut o, a, "\n");
+    }
+    if what == SY_SWAPS {
+      return put_s(&mut o, 0, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+    }
     if what == SY_NETARP {
       // The card's ARP cache; only the namespace the machine boots in
       // has one. The device is the card.
@@ -1877,6 +1941,52 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
           a = put_s(&mut o, a, "     *        eth0\n");
         }
         e = e + 1;
+      }
+      return a;
+    }
+    if what == SY_NETIF6 {
+      // The IPv6 addresses (src/net6.bastio): ::1 on lo, and on the card
+      // its global address once a router advertised a prefix, and its
+      // link-local one. Only the first network namespace has them.
+      let ns = net_ns(k, pid);
+      let mut a = 0;
+      if ns == 0 {
+        a = put_s(&mut o, a, "00000000000000000000000000000001 01 80 10 80       lo\n");
+        if nic_v6_state(k.nic, 3) == 1 {
+          let pfx = nic_v6_state(k.nic, 0);
+          let iid = nic_v6_state(k.nic, 1);
+          if pfx != 0 {
+            a = put_hx16(&mut o, a, pfx);
+            a = put_hx16(&mut o, a, iid);
+            a = put_s(&mut o, a, " 02 40 00 80     eth0\n");
+          }
+          a = put_s(&mut o, a, "fe80000000000000");
+          a = put_hx16(&mut o, a, iid);
+          a = put_s(&mut o, a, " 02 40 20 80     eth0\n");
+        }
+      }
+      return a;
+    }
+    if what == SY_NETV6RT {
+      // The IPv6 routes: lo, the card's prefixes and the default router.
+      let ns = net_ns(k, pid);
+      let mut a = 0;
+      if ns == 0 {
+        if nic_v6_state(k.nic, 3) == 1 {
+          let pfx = nic_v6_state(k.nic, 0);
+          let rtr = nic_v6_state(k.nic, 2);
+          if pfx != 0 {
+            a = put_hx16(&mut o, a, pfx);
+            a = put_s(&mut o, a, "0000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     eth0\n");
+          }
+          a = put_s(&mut o, a, "fe800000000000000000000000000000 40 00000000000000000000000000000000 00 00000000000000000000000000000000 00000100 00000001 00000000 00000001     eth0\n");
+          if rtr != 0 {
+            a = put_s(&mut o, a, "00000000000000000000000000000000 00 00000000000000000000000000000000 00 fe80000000000000");
+            a = put_hx16(&mut o, a, rtr);
+            a = put_s(&mut o, a, " 00000400 00000001 00000000 00000003     eth0\n");
+          }
+        }
+        a = put_s(&mut o, a, "00000000000000000000000000000001 80 00000000000000000000000000000000 00 00000000000000000000000000000000 00000000 00000001 00000000 80200001       lo\n");
       }
       return a;
     }
@@ -1941,18 +2051,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       // The address, reference count and inode are not kept.
       let mut a = put_s(&mut o, 0, "Num       RefCount Protocol Flags    Type St Inode Path\n");
       let mut l = 0;
-      while l < UX_LIS && a + 160 < PROC_OUT
+      while l < UX_LIS && a + 330 < PROC_OUT
         invariant l <= UX_LIS && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {
         let st = ul_row(k, l, 0, 0);
         if st != UL_FREE {
           a = put_s(&mut o, a, "0000000000000000: 00000002 00000000 ");
-          if st == UL_LISTEN {
+          if st == UL_LISTEN || st == UL_SEQ {
             a = put_s(&mut o, a, "00010000 ");
           } else {
             a = put_s(&mut o, a, "00000000 ");
           }
-          if st == UL_DGRAM {
+          if st == UL_SEQ {
+            a = put_s(&mut o, a, "0005 01 0");
+          } else if st == UL_DGRAM {
             a = put_s(&mut o, a, "0002 01 0");
           } else {
             a = put_s(&mut o, a, "0001 01 0");
@@ -2029,6 +2141,11 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         let a = put_c(&mut o, 0, 45);
         let b = put_n(&mut o, a, 1002 - s);
         return put_c(&mut o, b, 10);
+      }
+      if w == 0 {
+        let g = tgid(k.procs, smaller((what - SY_PX) / PXF_N, NPROC - 1));
+        let a = put_n(&mut o, 0, oom_score(&mut k, g));   // src/oom.bastio
+        return put_c(&mut o, a, 10);
       }
       if w == 10 {
         return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
@@ -2117,18 +2234,19 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_MEMINFO && p == 0 {
     let total = pool_size(k.mem.pool) * 4;   // the RAM the pool holds
-    let avail = count_free(k.mem.bm) * 4;
+    let free = count_free(k.mem.bm) * 4;
+    let cached = smaller(pc_count(k.fs.pc), PC_N) * 4;   // the kernel gives these back when memory runs short (src/oom.bastio)
     let mut a = put_s(&mut o, 0, "MemTotal: ");
     a = put_n(&mut o, a, total);
     a = put_s(&mut o, a, " kB\nMemFree: ");
-    a = put_n(&mut o, a, avail);
+    a = put_n(&mut o, a, free);
     a = put_s(&mut o, a, " kB\nMemAvailable: ");
-    a = put_n(&mut o, a, avail);
+    a = put_n(&mut o, a, free + cached);
     a = put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: ");
-    a = put_n(&mut o, a, smaller(pc_count(k.fs.pc), PC_N) * 4);
+    a = put_n(&mut o, a, cached);
     // The memory in use counts as active; psutil and free(1) read these.
     a = put_s(&mut o, a, " kB\nSwapCached: 0 kB\nActive: ");
-    a = put_n(&mut o, a, total - smaller(avail, total));
+    a = put_n(&mut o, a, total - smaller(free, total));
     return put_s(&mut o, a, " kB\nInactive: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\nDirty: 0 kB\nWriteback: 0 kB\nShmem: 0 kB\nSReclaimable: 0 kB\n");
   }
   if what == PF_CPUINFO && p == 0 {
@@ -3436,11 +3554,14 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   ensures result <= n || result > XFER
 {
   if f == PROC_DEV + PSYS + SY_DROP {
-    // 1, 2 or 3 drop the caches; there is nothing to drop that anyone could
-    // tell, so the write is accepted and forgotten.
+    // 1 and 3 drop the page cache (src/pcache.bastio); 2 (the slab) and 4
+    // have nothing to drop.
     let c = bget(k.fs.xfer, 0);
     if c < 49 || c > 52 || (n > 1 && bget(k.fs.xfer, 1) != 10) {
       return EINVAL;
+    }
+    if c == 49 || c == 51 {
+      pc_shrink(&mut k.fs.pc, &mut k.mem, PC_N);
     }
     return n;
   }

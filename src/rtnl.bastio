@@ -52,6 +52,8 @@ const IFA_ADDRESS: u64 = 1;
 const IFA_LOCAL: u64 = 2;
 const IFA_LABEL: u64 = 3;
 const IFA_BROADCAST: u64 = 4;
+const IFA_FLAGS: u64 = 8;
+const RTA_PRIORITY: u64 = 6;
 const RTA_DST: u64 = 1;
 const RTA_OIF: u64 = 4;
 const RTA_GATEWAY: u64 = 5;
@@ -587,6 +589,119 @@ fn nl_addr(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
   nl_end(&mut n);
 }
 
+/// A 64-bit word, most significant byte first.
+fn nl_be64(n: &mut Net, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_b(&mut n, v / 72057594037927936 % 256);
+  nl_b(&mut n, v / 281474976710656 % 256);
+  nl_b(&mut n, v / 1099511627776 % 256);
+  nl_b(&mut n, v / 4294967296 % 256);
+  nl_b(&mut n, v / 16777216 % 256);
+  nl_b(&mut n, v / 65536 % 256);
+  nl_b(&mut n, v / 256 % 256);
+  nl_b(&mut n, v % 256);
+}
+
+/// An IPv6 address of 16 bytes, in network order.
+fn nla_in6(n: &mut Net, t: u64, hi: u64, lo: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 16);
+  nl_be64(&mut n, hi);
+  nl_be64(&mut n, lo);
+}
+
+/// RTM_NEWADDR for one IPv6 address hi:lo/plen of interface i.
+fn nl_addr6_one(n: &mut Net, i: u64, hi: u64, lo: u64, plen: u64, scope: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, RTM_NEWADDR, flags, seq, port);
+  nl_b(&mut n, 10);                   // ifaddrmsg: AF_INET6
+  nl_b(&mut n, plen);
+  nl_b(&mut n, 0x80);                 // IFA_F_PERMANENT
+  nl_b(&mut n, scope);
+  nl_32(&mut n, if_index(n, i));
+  nla_in6(&mut n, IFA_ADDRESS, hi, lo);
+  nla_put32(&mut n, IFA_FLAGS, 0x80);
+  nl_end(&mut n);
+}
+
+/// The IPv6 addresses of the card and of lo in namespace 0: ::1 once lo is
+/// up, the card's link-local address and, once a router has advertised a
+/// prefix, its global one.
+fn nl_addrs6(n: &mut Net, seq: u64, port: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if n.ns != 0 {
+    return;
+  }
+  if if_up(n, 0) && iw(n, 0, IF_KIND) == IFK_LO {
+    nl_addr6_one(&mut n, 0, 0, 1, 128, 254, NLM_F_MULTI, seq, port);
+  }
+  if card_live(n.dev) {
+    if n.pfx != 0 {
+      nl_addr6_one(&mut n, IF_ETH, n.pfx, n.iid, 64, 0, NLM_F_MULTI, seq, port);
+    }
+    nl_addr6_one(&mut n, IF_ETH, 0xFE80000000000000, n.iid, 64, 253, NLM_F_MULTI, seq, port);
+  }
+}
+
+/// RTM_NEWROUTE for the IPv6 route hi::/plen out of the card, through gw
+/// (gwlo, in fe80::/64) unless gwlo is 0.
+fn nl_route6(n: &mut Net, hi: u64, plen: u64, gwlo: u64, seq: u64, port: u64)
+  requires net_ok(n) && plen <= 128
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, RTM_NEWROUTE, NLM_F_MULTI, seq, port);
+  nl_b(&mut n, 10);                   // rtmsg: AF_INET6
+  nl_b(&mut n, plen);
+  nl_b(&mut n, 0);
+  nl_b(&mut n, 0);
+  nl_b(&mut n, 254);                  // RT_TABLE_MAIN
+  if gwlo == 0 {
+    nl_b(&mut n, 2);                  // RTPROT_KERNEL
+    nl_b(&mut n, 0);                  // RT_SCOPE_UNIVERSE
+  } else {
+    nl_b(&mut n, 9);                  // RTPROT_RA
+    nl_b(&mut n, 0);
+  }
+  nl_b(&mut n, 1);                    // RTN_UNICAST
+  nl_32(&mut n, 0);
+  nla_put32(&mut n, RTA_TABLE, 254);
+  if plen > 0 {
+    nla_in6(&mut n, RTA_DST, hi, 0);
+  }
+  if gwlo != 0 {
+    nla_in6(&mut n, RTA_GATEWAY, 0xFE80000000000000, gwlo);
+  }
+  nla_put32(&mut n, RTA_OIF, if_index(n, IF_ETH));
+  nla_put32(&mut n, RTA_PRIORITY, 1024);
+  nl_end(&mut n);
+}
+
+/// The IPv6 routes of namespace 0: the default one through the router that
+/// advertised itself, then the link-local prefix and the advertised one.
+fn nl_routes6(n: &mut Net, seq: u64, port: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if n.ns != 0 || !card_live(n.dev) {
+    return;
+  }
+  if n.rtr_mac != 0 && n.rtr_lo != 0 {
+    nl_route6(&mut n, 0, 0, n.rtr_lo, seq, port);
+  }
+  if n.pfx != 0 {
+    nl_route6(&mut n, n.pfx, 64, 0, seq, port);
+  }
+  nl_route6(&mut n, 0xFE80000000000000, 64, 0, seq, port);
+}
+
 /// RTM_NEWROUTE: to dst/len through gw (0: on the link) out of interface
 /// i, from src (0: unsaid).
 fn nl_route(n: &mut Net, dst: u64, len: u64, gw: u64, i: u64, src: u64, flags: u64, seq: u64, port: u64)
@@ -1056,6 +1171,9 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
             i = i + 1;
           }
         }
+        if fam == 0 || fam == 10 {
+          nl_addrs6(&mut n, seq, port);
+        }
         nl_done(&mut n, seq, port);
       } else if kind == RTM_GETROUTE && dump {
         let mut fam = 0;
@@ -1064,6 +1182,9 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
         }
         if fam == 0 || fam == 2 {
           nl_routes(&mut n, seq, port);
+        }
+        if fam == 0 || fam == 10 {
+          nl_routes6(&mut n, seq, port);
         }
         nl_done(&mut n, seq, port);
       } else if (kind == RTM_NEWLINK || kind == RTM_SETLINK) && ml >= 32 {

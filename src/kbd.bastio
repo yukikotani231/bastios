@@ -18,6 +18,7 @@
 // (bit 3 clear) is dropped, so a lost byte costs a packet, not the stream.
 
 import "blkconst.bastio";
+import "navkeys.bastio";
 const KBD_DATA: u64 = 0x60;
 const KBD_STATUS: u64 = 0x64;
 const KST_FULL: u64 = 1;              // a byte is waiting
@@ -31,10 +32,11 @@ struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, alt: bool, e
   aux_irq: bool,      // ... and the controller raises IRQ 12 for its bytes (so no polling is needed to notice them)
   wheel: bool,        // ... with a wheel: 4-byte packets
   mb: u64,            // the bytes of the mouse packet so far, first in the high byte
-  mn: u64 }           // how many (0 .. 3)
+  mn: u64,            // how many (0 .. 3)
+  pend: u64 }         // the rest of an escape sequence still to hand out (navkeys.bastio)
 
 spec fn kbd_ok(k: &Kbd) -> bool {
-  port_count(k.data) == 1 && port_count(k.status) == 1 && k.mn < 4 && k.mb < 16777216
+  port_count(k.data) == 1 && port_count(k.status) == 1 && k.mn < 4 && k.mb < 16777216 && k.pend < 16777216
 }
 
 // Scan codes 0x00-0x39 to characters (0: none or special).
@@ -232,6 +234,11 @@ fn kbd_poll(k: &mut Kbd) -> u64
   if !k.present {
     return 256;
   }
+  if k.pend != 0 {
+    let c = k.pend % 256;
+    k.pend = k.pend / 256;
+    return c;
+  }
   let mut n = 0;
   while n < 16
     invariant n <= 16 && kbd_ok(k)
@@ -287,6 +294,9 @@ fn kbd_poll(k: &mut Kbd) -> u64
         }
       } else if !up && ext && code == 0x1C {
         return 13;                    // keypad Enter
+      } else if !up && ext && nav_ps2(code) <= NAV_PGDN {
+        k.pend = nav_rest(nav_ps2(code));     // arrows, Home, End, Delete, Page Up and Down
+        return 27;
       }
     }
   }

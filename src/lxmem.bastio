@@ -11,7 +11,9 @@
 // lease on the space (win_quiet), and every entry to user mode reloads CR3.
 //
 // A fresh private anonymous PROT_NONE mmap maps no pages until mprotect
-// makes them usable, so a large reservation costs nothing; touching it
+// makes them usable, and an mprotect that makes them writable records them to
+// be mapped when touched (src/lxanon.bastio), so a large reservation costs
+// nothing even then; touching it
 // faults (and a system call given it fails with -EFAULT) as on Linux.
 //
 // Not done: an mprotect that allows access maps fresh pages into any hole
@@ -838,15 +840,21 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   anon_reach(&mut k, pid, from, to);        // memory not touched yet: map it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
+  let mut lazy = false;
   if prot != 0 && from >= low {
-    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
+    // Writable: the pages are recorded and mapped when touched, as for a
+    // writable anonymous mmap, so a program can make a large reservation
+    // usable (a JIT's code range) and pay for what it touches.
+    if a == 2 && (LAZY_EXEC == 1 || prot / 4 % 2 == 0) && anon_add(&mut k, pid, from, to) {
+      lazy = true;
+    } else if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
       return ENOMEM;
     }
     hole_cut(&mut k, pid, from, to);        // mapped now: not a hole to hand out
   }
   // PROT_NONE leaves mmap's reserved pages unmapped, so they do not count.
   let got = win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, from, to, pa);
-  if got > to - from || (got != to - from && (a != 0 || from < low)) {
+  if got > to - from || (got != to - from && !lazy && (a != 0 || from < low)) {
     return ENOMEM;
   }
   return 0;
@@ -1267,7 +1275,7 @@ fn bus_mark(k: &mut Kernel, pid: u64, first: u64, pages: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if first >= WPAGES || pages > WPAGES - first {
+  if SIGBUS_PAGES == 0 || first >= WPAGES || pages > WPAGES - first {
     return;
   }
   let i = map_find(k, pid, first);
