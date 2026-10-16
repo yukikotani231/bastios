@@ -809,7 +809,7 @@ def main():
     if jobs > 1:
         cut = order.index("apps") + 1 if "ssh" in order else len(order)
         copy = os.path.join(scratch, "disk.img")
-        if lane_chosen("main2"):
+        if lane_chosen("main2") and main_groups[cut:]:
             shutil.copyfile(args.disk, copy)
         lanes = [("main1", args.disk, main_groups[:cut]), ("main2", copy, main_groups[cut:])]
     else:
