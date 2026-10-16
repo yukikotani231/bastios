@@ -820,24 +820,27 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   if is_procfs_call(n) {
     let r = lx_procfs_call(&mut k, pid, n, a, b, c);
-    if r == ENOENT && k.perr >= 1000000 && k.perr < 2000000 {
+    if r == ENOENT && k.perr >= 1000000 && k.perr < 1000000 + NPROC * 1000 {
       puts(&mut con, "[dbg fd readlink ENOENT by ");
       put_num(&mut con, pid);
       puts(&mut con, " target ");
       put_num(&mut con, (k.perr - 1000000) / 1000);
       puts(&mut con, " fd ");
       put_num(&mut con, (k.perr - 1000000) % 1000);
-      puts(&mut con, " states");
-      let mut q = 1;
-      while q < 24
-        invariant q <= 24 && kok(k) && con_ok(con)
+      let t = (k.perr - 1000000) / 1000;
+      puts(&mut con, " st=");
+      put_num(&mut con, state(k.procs, t));
+      puts(&mut con, " tg=");
+      put_num(&mut con, tgid(k.procs, t));
+      puts(&mut con, " nx=");
+      put_num(&mut con, fd_next(k.procs, t));
+      puts(&mut con, " raw");
+      let mut q = 0;
+      while q < 6
+        invariant q <= 6 && kok(k) && con_ok(con)
       {
         puts(&mut con, " ");
-        put_num(&mut con, q);
-        puts(&mut con, "=");
-        put_num(&mut con, state(k.procs, q));
-        puts(&mut con, "/");
-        put_num(&mut con, tgid(k.procs, q));
+        put_num(&mut con, fd_get(k.lxfd, t, q));
         q = q + 1;
       }
       puts(&mut con, "]\r\n");
