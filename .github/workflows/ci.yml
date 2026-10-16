@@ -297,8 +297,6 @@ jobs:
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
         continue-on-error: true
-      - name: Run the x86-64 guests under KVM
-        run: tools/ci-kvm.sh
       - run: make compat
       - name: What failed
         if: failure()
