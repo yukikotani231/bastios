@@ -5,6 +5,7 @@
 #   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
 #   make usb        build/bastios-usb.img: the ISO plus a partition for the files
 #   make run-usb    boot that image from a USB stick in QEMU
+#   make installer  build/bastios-installer.iso: installs BastiOS and Alpine on a disk (docs/install.md)
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
@@ -221,12 +222,12 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin src/font16.bin
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio src/x86_64/default/extra/*.bastio) src/font8x8.bin src/font16.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
 
 build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
 	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
@@ -235,7 +236,7 @@ build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
 build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native-ir --emit-asm -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel --backend native-ir --emit-asm -o $@ src/main.bastio
 
 # build/kernel.backend is defined with the user programs' rules (the kernel and
 # the user programs are built the same way).
@@ -327,6 +328,63 @@ build/bastios-usb.img: build/bastios-gpt.iso tools/mkusb.py
 	build/limine/limine bios-install --quiet --no-gpt-to-mbr-isohybrid-conversion $@
 
 usb: build/bastios-usb.img
+
+# The installer image (docs/install.md): the same kernel with the installer
+# and everything it installs built in as files (/install), booted by a menu
+# entry with the boot option `install`. It is written to a CD or a USB stick
+# like the live ISO. The payload (tools/mkinstall.py) holds Limine and the
+# plain kernel as they go on the new disk's EFI system partition; Alpine
+# Linux's root file system and a fuller BusyBox come from the compat suite's
+# sources. Needs mkfs.fat and mcopy (dosfstools, mtools) besides xorriso.
+INSTALL_DIR := build/installer
+INSTALL_FILES := $(INSTALL_DIR)/binstall.elf build/compat/busybox $(INSTALL_DIR)/pay $(INSTALL_DIR)/root.tgz installer/run.sh installer/profile
+ALPINE_BASE_IMAGE ?= $(ALPINE_BASE)
+
+$(INSTALL_DIR):
+	mkdir -p $@
+
+$(INSTALL_DIR)/binstall.elf: user/binstall.c | $(INSTALL_DIR)
+	$(MUSLCC) -static-pie -O2 -Wall -Wextra -Werror -o $@ $<
+
+$(INSTALL_DIR)/pay: tools/mkinstall.py tools/mkusb.py build/bastios.elf boot/limine.conf build/limine/limine | $(INSTALL_DIR)
+	tools/mkinstall.py $@ --kernel build/bastios.elf --limine build/limine --conf boot/limine.conf
+
+$(INSTALL_DIR)/root.tgz: tools/alpineroot.py test/compat/alpinedisk.py | $(INSTALL_DIR)
+	tools/alpineroot.py $@ $(ALPINE_BASE_IMAGE) $(ALPINE_CACHE)
+
+$(INSTALL_DIR)/lib/extra/initextra.bastio: tools/mkinitextra.py $(INSTALL_FILES) | $(INSTALL_DIR)
+	tools/mkinitextra.py $@ install/binstall=$(INSTALL_DIR)/binstall.elf:755 install/busybox=build/compat/busybox:755 \
+	  install/pay=$(INSTALL_DIR)/pay install/root.tgz=$(INSTALL_DIR)/root.tgz install/run=installer/run.sh:755 etc/profile=installer/profile
+
+# Proved and compiled again with the installer's files; the proof cache
+# makes that only the file table.
+$(INSTALL_DIR)/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) $(INSTALL_DIR)/lib/extra/initextra.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib $(INSTALL_DIR)/lib --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
+
+$(INSTALL_DIR)/kernel.o: $(INSTALL_DIR)/kernel.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(INSTALL_DIR)/bastios64.elf: $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS)) boot/linker.ld
+	$(CC) $(LDFLAGS) -o $@ $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS))
+
+$(INSTALL_DIR)/bastios.elf: $(INSTALL_DIR)/bastios64.elf
+	objcopy -O elf32-i386 $< $@
+
+build/bastios-installer.iso: $(INSTALL_DIR)/bastios.elf boot/limine-installer.conf build/limine/limine
+	rm -rf $(INSTALL_DIR)/iso
+	mkdir -p $(INSTALL_DIR)/iso/boot/limine $(INSTALL_DIR)/iso/EFI/BOOT
+	cp $(INSTALL_DIR)/bastios.elf $(INSTALL_DIR)/iso/boot/bastios.elf
+	cp boot/limine-installer.conf $(INSTALL_DIR)/iso/boot/limine/limine.conf
+	cp build/limine/limine-bios.sys build/limine/limine-bios-cd.bin build/limine/limine-uefi-cd.bin build/limine/LICENSE \
+	  $(INSTALL_DIR)/iso/boot/limine/
+	cp build/limine/BOOTX64.EFI $(INSTALL_DIR)/iso/EFI/BOOT/
+	xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin \
+	  -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus -apm-block-size 2048 \
+	  --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+	  --protective-msdos-label $(INSTALL_DIR)/iso -o $@ 2>/dev/null
+	build/limine/limine bios-install --quiet $@
+
+installer: build/bastios-installer.iso
 
 # The disk: a raw image, here as a virtio block device. BastiOS formats it
 # the first time it boots, and the files under disk/ live there across
@@ -981,6 +1039,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb installer run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

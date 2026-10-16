@@ -773,5 +773,13 @@ int main(void) {
              mq_unlink("/mqlim_a"); mq_unlink("/mqlim_b");
            }
            ok; }));
+    EXPECT("madvise: a range with a munmapped page in it is ENOMEM, one without is not", ({
+           char *m = mmap(0, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = m != MAP_FAILED && madvise(m, 3 * 4096, MADV_NORMAL) == 0;
+           ok = ok && munmap(m + 2 * 4096, 4096) == 0;
+           ok = ok && madvise(m, 2 * 4096, MADV_NORMAL) == 0;
+           ok = ok && madvise(m, 3 * 4096, MADV_NORMAL) == -1 && errno == ENOMEM;
+           munmap(m, 2 * 4096);
+           ok; }));
     return done();
 }

@@ -1371,7 +1371,19 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
-  let disk = disk_mount(dev, dq_slots_for(pool_pages));
+  // The BastiOS partition of a GPT on an internal disk is the file system
+  // (the installer makes one, docs/install.md); a USB stick's partition is
+  // the whole device already. With the boot option `install` nothing is
+  // mounted: the disk is for the installer's raw sector access.
+  let mut dmode = DM_GPT;
+  if blk_is_usb(dev) {
+    dmode = DM_WHOLE;
+  }
+  let installing = boot_word(cpu, "install");
+  if installing {
+    dmode = DM_RAW;
+  }
+  let disk = disk_mount(dev, dmode, dq_slots_for(pool_pages));
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
   } else if blk_is_nvme(disk.dev) {
@@ -1386,7 +1398,18 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   if usb_disk == MSD_UNUSED {
     puts(&mut con, "usb: a USB disk without a BastiOS partition; not used\r\n");
   }
-  if disk.foreign {
+  if disk.plo != 0 {
+    puts(&mut con, "disk: the BastiOS partition at sector ");
+    put_num(&mut con, disk.plo);
+    puts(&mut con, " (");
+    put_num(&mut con, disk.psz);
+    puts(&mut con, " sectors)\r\n");
+  }
+  if installing {
+    puts(&mut con, "disk: install mode, ");
+    put_num(&mut con, blk_sectors(disk.dev));
+    puts(&mut con, " sectors for the installer; no file system mounted\r\n");
+  } else if disk.foreign {
     puts(&mut con, "disk: it holds a partition table or other data; left alone\r\n");
   }
   if blk_irq(disk.dev) {
@@ -1539,6 +1562,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     login = spawn_as(&mut k, ASH_PROG, 0, "login");
     if login == 0 {
       puts(&mut con, "cannot start login\r\n");
+    }
+  } else if installing {
+    // The installer image (docs/install.md): BusyBox's ash as a login
+    // shell, which reads /etc/profile, and that runs the installer.
+    if spawn_as(&mut k, ASH_PROG, 0, "-sh") == 0 {
+      puts(&mut con, "cannot start the installer\r\n");
     }
   } else if spawn(&mut k, 0, 0) == 0 {
     puts(&mut con, "cannot start the shell\r\n");
