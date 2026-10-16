@@ -423,6 +423,9 @@ fn dv_num(d: u64) -> DvNum
   if d == DEV_MICE {
     return DvNum { ty: DVT_CHAR, major: 13, minor: 63 };
   }
+  if d == DEV_SER {
+    return DvNum { ty: DVT_CHAR, major: 188, minor: 0 };
+  }
   if d == DEV_LOOPCTL {
     return DvNum { ty: DVT_CHAR, major: 10, minor: 237 };
   }

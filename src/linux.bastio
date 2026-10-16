@@ -249,6 +249,87 @@ fn read_l3(l3: &mut PageTable, off: u64) -> Word
   return Word { ok: true, v: v };
 }
 
+/// read(2) and readv(2) (kept out of linux_syscall, whose proof is near the
+/// solver's limit).
+fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, was: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let early = rw_early(&mut k, pid, n, a, b, c);
+  if early != NO_RESULT {
+    ret(&mut k.procs, pid, early);
+    return KEEP;
+  }
+  let rv = fd_look(k, pid, a);
+  if n == LX_READV && rv.kind == K_FILE {
+    let got = file_readv(&mut k, pid, rv.x, b, c);
+    if got == DISK_RETRY {
+      return disk_retry(&mut k, pid, n);   // nothing read yet: wait for the disk
+    }
+    ret(&mut k.procs, pid, got);
+    return KEEP;
+  }
+  // readv on anything but a file reads into the first buffer that has
+  // room: a short read, as Linux allows (a later buffer could wait).
+  let mut va = b;
+  let mut cnt = c;
+  if n == LX_READV {
+    let v = first_iov(&mut k, pid, b, c);
+    if v.err != 0 {
+      ret(&mut k.procs, pid, v.err);
+      return KEEP;
+    }
+    va = v.base;
+    cnt = v.len;
+  }
+  let d = fd_look(k, pid, a);
+  if d.kind == K_CONSOLE {
+    return console_read(&mut k, pid, va, cnt, was);
+  }
+  if d.kind == K_DEV && (d.x | 4) == DEV_SER {   // DEV_MICE or DEV_SER
+    return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio; the serial port too
+  }
+  let mut r = EBADF;
+  if d.kind == K_FILE {
+    r = lx_file_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_PIPE_R {
+    r = pipe_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_EVENT || d.kind == K_TIMER {
+    r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
+  } else if d.kind == K_SIGFD {
+    r = sfd_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_INOTIFY && d.x < INO_N {
+    r = ino_read(&mut k, pid, d.x, va, cnt);   // src/lxinotify.bastio
+  } else if d.kind == K_DEV && d.x >= PROC_DEV {
+    r = proc_read(&mut k, pid, a, d.x, va, cnt);
+  } else if d.kind == K_DEV && is_loop(d.x) {
+    r = loop_io(&mut con, &mut k, pid, a, d.x, false, va, cnt);
+  } else if d.kind == K_DEV && is_pty_dev(d.x) {
+    r = pty_read(&mut k, pid, d.x, va, cnt);   // src/lxpty.bastio
+  } else if d.kind == K_DEV {
+    r = dev_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_SOCK {
+    r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
+    if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
+      return sock_retry(&mut k, pid, n);  // a network socket: sleep until a frame comes in
+    }
+    if r == SK_WAIT {
+      r = EAGAIN;                         // wait for a datagram, below
+    } else if r == EAGAIN {
+      ret(&mut k.procs, pid, r);          // nonblocking: say so
+      return KEEP;
+    }
+  }
+  if r == EAGAIN && !pipe_nonblock(k, pid, a) {
+    return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
+  }
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
 /// Handles the Linux system call process `pid` just made.
 fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
@@ -366,79 +447,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_READ || n == LX_READV {
-    let early = rw_early(&mut k, pid, n, a, b, c);
-    if early != NO_RESULT {
-      ret(&mut k.procs, pid, early);
-      return KEEP;
-    }
-    let rv = fd_look(k, pid, a);
-    if n == LX_READV && rv.kind == K_FILE {
-      let got = file_readv(&mut k, pid, rv.x, b, c);
-      if got == DISK_RETRY {
-        return disk_retry(&mut k, pid, n);   // nothing read yet: wait for the disk
-      }
-      ret(&mut k.procs, pid, got);
-      return KEEP;
-    }
-    // readv on anything but a file reads into the first buffer that has
-    // room: a short read, as Linux allows (a later buffer could wait).
-    let mut va = b;
-    let mut cnt = c;
-    if n == LX_READV {
-      let v = first_iov(&mut k, pid, b, c);
-      if v.err != 0 {
-        ret(&mut k.procs, pid, v.err);
-        return KEEP;
-      }
-      va = v.base;
-      cnt = v.len;
-    }
-    let d = fd_look(k, pid, a);
-    if d.kind == K_CONSOLE {
-      return console_read(&mut k, pid, va, cnt, was);
-    }
-    if d.kind == K_DEV && d.x == DEV_MICE {
-      return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio
-    }
-    let mut r = EBADF;
-    if d.kind == K_FILE {
-      r = lx_file_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_PIPE_R {
-      r = pipe_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_EVENT || d.kind == K_TIMER {
-      r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
-    } else if d.kind == K_SIGFD {
-      r = sfd_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_INOTIFY && d.x < INO_N {
-      r = ino_read(&mut k, pid, d.x, va, cnt);   // src/lxinotify.bastio
-    } else if d.kind == K_DEV && d.x >= PROC_DEV {
-      r = proc_read(&mut k, pid, a, d.x, va, cnt);
-    } else if d.kind == K_DEV && is_loop(d.x) {
-      r = loop_io(&mut con, &mut k, pid, a, d.x, false, va, cnt);
-    } else if d.kind == K_DEV && is_pty_dev(d.x) {
-      r = pty_read(&mut k, pid, d.x, va, cnt);   // src/lxpty.bastio
-    } else if d.kind == K_DEV {
-      r = dev_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_SOCK {
-      r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
-      if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
-        return sock_retry(&mut k, pid, n);  // a network socket: sleep until a frame comes in
-      }
-      if r == SK_WAIT {
-        r = EAGAIN;                         // wait for a datagram, below
-      } else if r == EAGAIN {
-        ret(&mut k.procs, pid, r);          // nonblocking: say so
-        return KEEP;
-      }
-    }
-    if r == EAGAIN && !pipe_nonblock(k, pid, a) {
-      return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
-    }
-    if r == DISK_RETRY {
-      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
-    }
-    ret(&mut k.procs, pid, r);
-    return KEEP;
+    return lx_read_call(&mut con, &mut k, pid, n, a, b, c, was);
   }
   if n == LX_WRITE || n == LX_WRITEV {
     return lx_write_call(&mut con, &mut k, pid, n, a, b, c);
@@ -1133,6 +1142,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_FB {
     return fb_ioctl(&mut k, pid, req % 0x100000000, arg);    // src/lxfb.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_SER {
+    return ser_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxserial.bastio
+  }
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
@@ -1749,6 +1761,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && d.x == DEV_MICE {
     return mice_write(&mut k, pid, va, n);  // mouse commands (src/lxmouse.bastio)
+  }
+  if d.kind == K_DEV && d.x == DEV_SER {
+    return ser_write(&mut k, pid, va, n);   // src/lxserial.bastio
   }
   if d.kind == K_DEV && is_mem_file(d.x) {
     return mem_io(&mut k, pid, fd, d.x, va, n, true);   // /proc/PID/mem (src/lxprocfs.bastio)

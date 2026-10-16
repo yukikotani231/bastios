@@ -84,6 +84,7 @@ import "lxcow.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";
+import "lxserial.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
 import "lxnum.bastio";
