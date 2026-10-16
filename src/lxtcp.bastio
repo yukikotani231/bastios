@@ -262,6 +262,26 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
   return SK_WAIT;
 }
 
+/// SO_ERROR of a stream socket: ECONNREFUSED (111) once when the connect it
+/// started has failed, after which it is unconnected again (as a connect
+/// that says -ECONNREFUSED leaves it); 0 otherwise.
+fn tcp_so_error(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= 111
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 || tk.mode != TM_CONN || tk.port != 0 || tk.t >= TCBS {
+    return 0;
+  }
+  if tcp_status(k.nic, tk.t) != 2 {
+    return 0;
+  }
+  tcp_close(&mut k.nic, tk.t);
+  of_set(&mut k.ofd, tk.h, 2, TCBS);
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, 0, TM_NEW));
+  return 111;
+}
+
 /// write / send on a connection: what the send buffer takes; SK_WAIT
 /// while it is full (-EAGAIN when nonblocking); -EPIPE once the
 /// connection cannot send. With `more` (MSG_MORE), a short segment waits

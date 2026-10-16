@@ -1,0 +1,203 @@
+# Perl on BastiOS, for the compatibility suite (test/compat): the perl of an
+# Alpine-based image (with the core modules), entered with chroot, and a
+# subset of the perl5 test suite (t/ of the release tarball, run with the
+# image's perl). The Perl disk (perldisk.py) holds the image's root as a tar
+# file (/disk/root.tar), a BusyBox at /disk/busybox and the tests under /work/p
+# in the root. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root. A test group prints "ran N" when none of its N tests fails
+# (perl-tests.txt lists the tests that pass on Linux and on BastiOS).
+
+== perl: unpack the root, make the device nodes
+$ bb mkdir -p /disk/s && cd /disk/s && bb tar -xf /disk/root.tar && bb mkdir -p proc tmp work && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/s/proc; bb ls /disk/s/dev | bb cat
+console
+null
+random
+tty
+urandom
+zero
+
+== perl: version and build
+$ bb chroot /disk/s /usr/bin/perl -e 'printf "%vd %s %s\n", $^V, $Config::Config{archname} // "", $^O' -MConfig 2>&1; bb chroot /disk/s /usr/bin/perl -MConfig -e 'print "$Config{archname} threads=", ($Config{useithreads} ? 1 : 0), " ptr=$Config{ptrsize}\n"'
+5.42.2 x86_64-linux-thread-multi linux
+x86_64-linux-thread-multi threads=1 ptr=8
+
+== perl: strings, regular expressions and formatting
+$ bb printf 'my $s = "The quick brown fox jumps over the lazy dog";\nmy @w = split '\'' '\'', $s; print scalar(@w), " words, longest ", (sort { length($b) <=> length($a) || $a cmp $b } @w)[0], "\\n";\n(my $t = $s) =~ s/(\\w+)/\\u$1/g; print "$t\\n";\nprint join(",", $s =~ /\\b(\\w)o/g), " ", scalar(() = $s =~ /o/g), "\\n";\nprintf "%%5.2f|%%-6s|%%06d|%%x|%%o|%%e|%%s\\n", 3.14159, "ab", 42, 255, 8, 12345.678, join "", map { chr(ord($_) + 1) } split //, "HAL";\nmy %%h = (apple => 3, banana => 5, cherry => 7);\nprint join(" ", map { "$_=$h{$_}" } sort keys %%h), " ", join(",", sort { $h{$b} <=> $h{$a} } keys %%h), "\\n";\nmy @a = (5, 3, 9, 1); my ($min) = sort { $a <=> $b } @a; print "min $min sum ", eval { my $x = 0; $x += $_ for @a; $x }, " rev ", join("", reverse @a), "\\n";\nprint "named: $+{y}-$+{m}\\n" if "2024-10" =~ /(?<y>\\d+)-(?<m>\\d+)/;\nmy $text = "a1b22c333"; my @n = $text =~ /(\\d+)/g; print "@n ", length(join "", @n), "\\n";\nprint lc("ÀB"), uc("straße"), " ", sprintf("%%vd", "1.22.333"), " ", "abc" x 3, " ", "10" + "20", " ", "3 apples" * 2, "\\n";\nlocal $, = "-"; local $\\ = "!\\n"; print 1, 2, 3;\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+9 words, longest brown
+The Quick Brown Fox Jumps Over The Lazy Dog
+f,d 4
+ 3.14|ab    |000042|ff|10|1.234568e+04|IBM
+apple=3 banana=5 cherry=7 cherry,banana,apple
+min 1 sum 18 rev 1935
+named: 2024-10
+1 22 333 6
+ÀbSTRAßE 49.46.50.50.46.51.51.51 abcabcabc 30 6
+1-2-3!
+
+== perl: numbers, lists, hashes and references
+$ bb printf 'use strict; use warnings;\nprint 7 / 2, " ", int(7 / 2), " ", 7 %% 3, " ", -7 %% 3, " ", 2 ** 40, " ", 10 ** -2, " ", 0.1 + 0.2, " ", 1e21, " ", 9**20, "\\n";\nprint 18446744073709551615, " ", 18446744073709551615 + 1, " ", 9223372036854775807 + 1, " ", int(-3.7), " ", abs(-4), " ", sqrt(2), "\\n";\nmy @m = map { [ $_, $_ ** 2 ] } 1 .. 5; print join(";", map { "@$_" } @m), "\\n";\nmy %%tree = (a => { b => [1, 2, { c => '\''deep'\'' }] }); print $tree{a}{b}[2]{c}, " ", scalar @{ $tree{a}{b} }, " ", ref($tree{a}), " ", ref(\\&main::foo), " ", ref(\\1), "\\n";\nmy @sorted = sort { $a->[1] <=> $b->[1] } map { [$_, length $_] } qw(pear fig banana kiwi); print join(",", map { $_->[0] } @sorted), "\\n";\nmy ($x, $y) = (10, 20); ($x, $y) = ($y, $x); print "$x $y ", wantarray() ? "list" : defined(wantarray()) ? "scalar" : "void", "\\n";\nmy @arr = (1 .. 10); print "@arr[2 .. 4] $#arr ", scalar(@arr), " @{[ splice(@arr, 2, 3) ]} @arr\\n";\nmy $str = join ",", map { sprintf "%%02d", $_ } grep { $_ %% 2 } 1 .. 9; print "$str\\n";\nprint "exists\\n" if exists $tree{a}{b}; delete $tree{a}; print scalar(keys %%tree), "\\n";\nsub fact { my $n = shift; $n <= 1 ? 1 : $n * fact($n - 1) } print fact(20), " ", fact(25), "\\n";\nmy $closure = do { my $c = 0; sub { ++$c } }; $closure->() for 1 .. 4; print $closure->(), "\\n";\nprint "chained: ", join(",", (1 .. 3) x 2), " ", "@{[ '\''a'\'' .. '\''e'\'' ]}", " ", "zz" x 0, "|\\n";\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+3.5 3 1 2 1099511627776 0.01 0.3 1e+21 1.21576654590569e+19
+18446744073709551615 1.84467440737096e+19 9223372036854775808 -3 4 1.4142135623731
+1 1;2 4;3 9;4 16;5 25
+deep 3 HASH CODE SCALAR
+fig,pear,kiwi,banana
+20 10 void
+3 4 5 9 10 3 4 5 1 2 6 7 8 9 10
+01,03,05,07,09
+exists
+0
+2432902008176640000 1.5511210043331e+25
+5
+chained: 1,2,3,1,2,3 a b c d e |
+
+== perl: files, directories and the file system
+$ bb printf 'use strict; use warnings; use Fcntl qw(:flock :seek); use File::Temp qw(tempdir); use File::Path qw(make_path remove_tree); use File::Basename; use File::Spec; use Cwd;\nmy $d = tempdir(CLEANUP => 1); chdir $d or die; make_path("a/b/c", "x");\nopen(my $f, '\''>'\'', "a/b/f.txt") or die; print $f "line1\\nline2\\nline3\\n"; close $f;\nopen($f, '\''<'\'', "a/b/f.txt") or die; my @l = <$f>; close $f; print scalar(@l), " lines, size ", -s "a/b/f.txt", ", -f ", (-f "a/b/f.txt" ? 1 : 0), ", -d ", (-d "a/b" ? 1 : 0), ", -e missing ", (-e "nope" ? 1 : 0), "\\n";\nopen($f, '\''+<'\'', "a/b/f.txt") or die; seek($f, 6, SEEK_SET); read($f, my $buf, 5); print "$buf ", tell($f), " "; seek($f, 0, SEEK_END); print tell($f), "\\n"; print $f "tail\\n"; seek($f, -5, SEEK_END); print scalar(<$f>); close $f;\nrename "a/b/f.txt", "x/g.txt" or die; print join(",", sort map { basename $_ } glob("x/* a/b/*")), "\\n";\nsymlink "g.txt", "x/link" or die; link "x/g.txt", "x/hard" or die; my @st = stat "x/g.txt"; print "nlink $st[3] readlink ", readlink("x/link"), " lstat-size ", (lstat "x/link")[7], " mode ", sprintf("%%04o", $st[2] & 07777), "\\n";\nchmod 0600, "x/g.txt"; printf "%%04o %%s\\n", (stat "x/g.txt")[2] & 07777, (-r "x/g.txt" && -w _ && !-x _) ? "rw-" : "other";\nopendir(my $dh, "x") or die; my @e = sort grep { !/^\\./ } readdir $dh; closedir $dh; print "@e\\n";\nutime 1000000000, 1000000000, "x/g.txt"; print +(stat "x/g.txt")[9], "\\n";\nopen($f, '\''>'\'', "lock") or die; print flock($f, LOCK_EX | LOCK_NB) ? "locked" : "busy", "\\n"; close $f;\ntruncate "x/g.txt", 4; print -s "x/g.txt", "\\n"; unlink "x/g.txt", "x/hard", "x/link"; rmdir "x" and print "rmdir ok\\n";\nprint basename(File::Spec->catfile("p", "q", "r.txt")), " ", dirname("/a/b/c.txt"), " ", (fileparse("/x/y.tar.gz", qr/\\.[^.]*/))[1], "\\n";\nremove_tree("a"); print -d "a" ? "still" : "gone", "\\n";\nmy $big = "x" x 3_000_000; open($f, '\''>'\'', "big") or die; print $f $big; close $f; print -s "big", " "; open($f, '\''<'\'', "big") or die; local $/; my $back = <$f>; print length($back), " ", ($back eq $big ? "same" : "differs"), "\\n";\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+3 lines, size 18, -f 1, -d 1, -e missing 0
+line2 11 18
+tail
+c,g.txt
+nlink 2 readlink g.txt lstat-size 5 mode 0644
+0600 rw-
+g.txt hard link
+1000000000
+locked
+4
+rmdir ok
+r.txt /a/b /x/
+gone
+3000000 3000000 same
+
+== perl: processes, pipes, signals and exit status
+$ bb printf 'use strict; use warnings; use POSIX qw(:sys_wait_h);\n$| = 1;\nmy $pid = fork(); die unless defined $pid;\nif ($pid == 0) { print "child\\n"; exit 7 } waitpid($pid, 0); print "status ", $? >> 8, "\\n";\nmy $out = `echo from-backticks; exit 3`; print $out, "exit ", $? >> 8, "\\n";\nprint "system ", system("sh", "-c", "exit 5") >> 8, " ", system("true"), "\\n";\npipe(my $r, my $w) or die; if (my $k = fork) { close $w; my @got = <$r>; waitpid $k, 0; print "pipe: ", scalar(@got), " lines, last ", $got[-1] } else { close $r; print $w "msg $_\\n" for 1 .. 100; exit 0 }\nopen(my $p, '\''-|'\'', '\''echo'\'', '\''piped'\'', '\''open'\'') or die; print scalar <$p>; close $p; print "close status $?\\n";\nopen($p, '\''|-'\'', '\''cat'\'') or die; print $p "to cat\\n"; close $p;\nlocal $SIG{USR1} = sub { print "got USR1\\n" }; kill '\''USR1'\'', $$; select(undef, undef, undef, 0.1);\nmy $n = 0; local $SIG{ALRM} = sub { $n++ }; alarm 1; select(undef, undef, undef, 1.5); print "alarm $n\\n";\nmy $kid = fork; if (!$kid) { sleep 30; exit 0 } kill '\''TERM'\'', $kid; waitpid $kid, 0; print "killed by ", $? & 127, "\\n";\n$SIG{CHLD} = '\''IGNORE'\''; my @kids = map { fork || exit($_) } 1 .. 3; select(undef, undef, undef, 0.3); print "ignored children\\n"; $SIG{CHLD} = '\''DEFAULT'\'';\nprint "pid ok\\n" if $$ > 1 && getppid() >= 1; my @t = times; print scalar(@t), " times\\n";\nexec("echo", "exec'\''d") or die;\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+child
+status 7
+from-backticks
+exit 3
+system 5 0
+pipe: 100 lines, last msg 100
+piped open
+close status 0
+to cat
+got USR1
+alarm 1
+killed by 15
+ignored children
+pid ok
+4 times
+exec'd
+
+== perl: sockets on the loopback
+$ bb printf 'use strict; use warnings; use IO::Socket::INET; use IO::Select; $| = 1;\nmy $srv = IO::Socket::INET->new(Listen => 5, LocalAddr => '\''127.0.0.1'\'', LocalPort => 0, Proto => '\''tcp'\'', ReuseAddr => 1) or die "listen: $@";\nmy $port = $srv->sockport; print "listening\\n";\nmy $pid = fork; if (!$pid) { my $c = IO::Socket::INET->new(PeerAddr => "127.0.0.1:$port") or die; print $c "hello server\\n"; my $reply = <$c>; print "client got: $reply"; print $c "x" x 100000, "\\n"; close $c; exit 0 }\nmy $conn = $srv->accept; my $line = <$conn>; print "server got: $line"; print $conn "hello client\\n"; my $big = <$conn>; print length($big), "\\n"; close $conn; waitpid $pid, 0;\nmy $u1 = IO::Socket::INET->new(LocalAddr => '\''127.0.0.1'\'', LocalPort => 0, Proto => '\''udp'\'') or die; my $u2 = IO::Socket::INET->new(PeerAddr => '\''127.0.0.1'\'', PeerPort => $u1->sockport, Proto => '\''udp'\'') or die;\n$u2->send("datagram"); my $sel = IO::Select->new($u1); my @ready = $sel->can_read(2); $u1->recv(my $d, 100); print scalar(@ready), " $d\\n";\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+listening
+server got: hello server
+client got: hello client
+100001
+1 datagram
+
+== perl: modules with C code and pure Perl
+$ bb printf 'use strict; use warnings;\nuse List::Util qw(sum max min first reduce shuffle uniq); use Scalar::Util qw(blessed reftype looks_like_number weaken dualvar); use Data::Dumper; use POSIX qw(floor ceil strftime fmod); use Storable qw(freeze thaw dclone);\nuse Digest::MD5 qw(md5_hex); use Digest::SHA qw(sha1_hex sha256_hex); use MIME::Base64; use Time::HiRes qw(time sleep); use Time::Local; use JSON::PP; use Encode qw(encode decode); use Getopt::Long; use Text::Wrap; use File::Find; use Sys::Hostname; use Socket; use Fcntl; use IO::Handle; use Cwd qw(getcwd abs_path); use constant PI => 3.14159;\n$Data::Dumper::Sortkeys = 1; $Data::Dumper::Indent = 1;\nprint sum(1 .. 100), " ", max(3, 9, 2), " ", min(3, 9, 2), " ", first { $_ > 3 } (1 .. 10); print " ", reduce { $a * $b } 1 .. 6; print " ", join(",", uniq(1, 1, 2, 3, 3)), "\\n";\nprint floor(-2.5), ceil(-2.5), " ", fmod(10, 3), " ", strftime("%%Y-%%m-%%d %%H:%%M:%%S", gmtime(86400 * 365.25 * 30)), " ", timegm(0, 0, 0, 1, 0, 100), "\\n";\nprint md5_hex("abc"), " ", sha1_hex("abc"), "\\n", sha256_hex("abc"), " ", encode_base64("Hello, BastiOS!", ""), " ", decode_base64("QmFzdGlPUw=="), "\\n";\nmy $d = { name => "x", list => [1, 2, [3]], h => { k => undef } }; print Dumper($d); my $c = dclone($d); $c->{list}[2][0] = 99; print "$d->{list}[2][0] $c->{list}[2][0] ", thaw(freeze($d))->{name}, "\\n";\nmy $json = JSON::PP->new->canonical->pretty; my $enc = $json->encode({ a => [1, 2.5, "three", JSON::PP::true], b => { c => undef } }); print $enc; print $json->decode('\''{"x":[1,{"y":"z"}]}'\'')->{x}[1]{y}, "\\n";\nprint length(encode("UTF-8", "\\x{263a}\\x{e9}")), " ", length(decode("UTF-8", "\\xe2\\x98\\xba")), " ", ord(decode("UTF-8", "\\xc3\\xa9")), "\\n";\n@ARGV = qw(--num 5 --name=Bob --flag extra); GetOptions("num=i" => \\my $num, "name=s" => \\my $name, "flag" => \\my $flag); print "$num $name $flag @ARGV\\n";\n$Text::Wrap::columns = 20; print wrap("", "  ", "the quick brown fox jumps over the lazy dog"), "\\n";\nmy $t0 = time; sleep(0.05); printf "slept %%s\\n", (time - $t0 >= 0.04 ? "ok" : "short"); print inet_ntoa(inet_aton("127.0.0.1")), " ", looks_like_number("1e5") ? 1 : 0, " ", PI, " ", length(hostname()) > 0 ? "host" : "nohost", "\\n";\nmy @found; find(sub { push @found, $_ if /^Fcntl\\.pm$/ }, grep { -d } @INC); print scalar(@found) > 0 ? "found Fcntl.pm\\n" : "not found\\n";\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+5050 9 2 4 720 1,2,3
+-3-2 1 2000-01-01 12:00:00 946684800
+900150983cd24fb0d6963f7d28e17f72 a9993e364706816aba3e25717850c26c9cd0d89d
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad SGVsbG8sIEJhc3RpT1Mh BastiOS
+$VAR1 = {
+  'h' => {
+    'k' => undef
+  },
+  'list' => [
+    1,
+    2,
+    [
+      3
+    ]
+  ],
+  'name' => 'x'
+};
+3 99 x
+{
+   "a" : [
+      1,
+      2.5,
+      "three",
+      true
+   ],
+   "b" : {
+      "c" : null
+   }
+}
+z
+5 1 233
+5 Bob 1 extra
+the quick brown fox
+  jumps over the
+  lazy dog
+slept ok
+127.0.0.1 1 3.14159 host
+found Fcntl.pm
+
+== perl: threads, local time and the clock
+$ bb printf 'use strict; use warnings; use threads; use threads::shared; use Thread::Queue;\nmy $total :shared = 0; my @t = map { my $n = $_; threads->create(sub { for (1 .. 200) { lock($total); $total += $n } return $n * 2 }) } 1 .. 4;\nmy @r = map { $_->join } @t; print "total $total results @r\\n";\nmy $q = Thread::Queue->new; my $w = threads->create(sub { my $s = 0; while (defined(my $i = $q->dequeue)) { $s += $i } $s }); $q->enqueue(1 .. 100); $q->end; print $w->join, "\\n";\nprint scalar(threads->list), " ", threads->tid, "\\n";\n{ local $ENV{TZ} = "UTC"; require POSIX; POSIX::tzset(); my @lt = localtime(0); print "$lt[5] $lt[4] $lt[3] $lt[2]\\n"; }\n{ local $ENV{TZ} = "Asia/Tokyo"; require POSIX; POSIX::tzset(); my @lt = localtime(0); print scalar(@lt), " ", (POSIX::tzname())[0] // "", "\\n"; }\nmy $t = time; print $t > 1_700_000_000 ? "clock ok\\n" : "clock behind\\n";\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+total 2000 results 2 4 6 8
+5050
+0 0
+70 0 1 0
+9 JST
+clock ok
+
+== perl: a larger workload (sorting, hashing, string building, regexes)
+$ bb printf 'use strict; use warnings;\nsrand(42); my @n = map { int(rand(1_000_000)) } 1 .. 300_000; my @s = sort { $a <=> $b } @n; my $ok = 1; for my $i (1 .. $#s) { $ok = 0 if $s[$i - 1] > $s[$i] } print $ok, " ", scalar(@s), "\\n";\nmy %%h; $h{$_ %% 10007}++ for @n; print scalar(keys %%h), " ", (sort { $h{$b} <=> $h{$a} || $a <=> $b } keys %%h)[0] > -1 ? "ok" : "bad", "\\n";\nmy $str = ""; $str .= "item$_," for 1 .. 100_000; print length($str), " ", scalar(() = $str =~ /item\\d*7,/g), "\\n";\nsub fib { my $n = shift; $n < 2 ? $n : fib($n - 1) + fib($n - 2) } print fib(24), "\\n";\nmy @words = map { join "", map { chr(97 + ($_ * 7 + $_ ** 2) %% 26) } 1 .. (3 + $_ %% 5) } 1 .. 20_000; my %%seen; $seen{$_}++ for @words; print scalar(keys %%seen), "\\n";\n' > /disk/s/work/t.pl; bb chroot /disk/s /usr/bin/perl /work/t.pl  2>&1
+1 300000
+10007 ok
+988895 10000
+46368
+5
+
+== perl: the perl5 test suite, t/base/ (9 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh base
+ran 9
+
+== perl: the perl5 test suite, t/class/ (12 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh class
+ran 12
+
+== perl: the perl5 test suite, t/cmd/ (5 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh cmd
+ran 5
+
+== perl: the perl5 test suite, t/comp/ (22 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh comp
+ran 22
+
+== perl: the perl5 test suite, t/io/ (37 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh io
+ran 37
+
+== perl: the perl5 test suite, t/mro/ (72 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh mro
+ran 72
+
+== perl: the perl5 test suite, t/op/ part 1 of 3 (60 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh op 0 3
+ran 60
+
+== perl: the perl5 test suite, t/op/ part 2 of 3 (61 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh op 1 3
+ran 61
+
+== perl: the perl5 test suite, t/op/ part 3 of 3 (61 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh op 2 3
+ran 61
+
+== perl: the perl5 test suite, t/opbasic/ (5 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh opbasic
+ran 5
+
+== perl: the perl5 test suite, t/re/ (4 tests)
+$ bb chroot /disk/s /bin/sh /work/p/run.sh re
+ran 4

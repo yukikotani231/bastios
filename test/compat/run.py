@@ -698,6 +698,9 @@ def main():
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
+    ap.add_argument("--perl-disk", help="the Perl disk (the root of a perl image) for perl.txt")
+    ap.add_argument("--ruby-disk", help="the Ruby disk (the root of the ruby image) for ruby.txt")
+    ap.add_argument("--lua-disk", help="the Lua disk (the root of a lua and luarocks image) for lua.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -721,6 +724,9 @@ def main():
     go = load_applets(os.path.join(HERE, "go.txt"))
     java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
+    perl = load_applets(os.path.join(HERE, "perl.txt"))
+    ruby = load_applets(os.path.join(HERE, "ruby.txt"))
+    lua = load_applets(os.path.join(HERE, "lua.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
@@ -845,6 +851,13 @@ def main():
         disk = os.path.join(args.out, "rust-run.img")
         shutil.copyfile(args.rust_disk, disk)
         lanes.append((disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
+    for name, what, cases, disk_arg in (("perl", "Perl", perl, args.perl_disk), ("ruby", "Ruby (gem, bundler)", ruby, args.ruby_disk),
+                                        ("lua", "Lua (LuaRocks)", lua, args.lua_disk)):
+        if disk_arg:
+            # The cases unpack the root and install packages, so on a copy.
+            disk = os.path.join(args.out, f"{name}-run.img")
+            shutil.copyfile(disk_arg, disk)
+            lanes.append((disk, [(name, what, applets_lane(cases, 600))], "1G"))
     lanes = [l for l in lanes if l[1]]
     # Write out the copies just made before any guest reads a disk: a host
     # still flushing hundreds of MiB can hold up a virtio request for longer
@@ -853,7 +866,17 @@ def main():
     os.sync()
     try:
         with concurrent.futures.ThreadPoolExecutor(len(lanes) if jobs > 1 else 1) as pool:
-            done = list(pool.map(lambda l: lane(*l), lanes))
+            # The scripting-language lanes are long and use a host core each
+            # while they run: two at a time, so the lanes that wait on a
+            # network round trip (apk over HTTP) are not starved on a small runner.
+            script_gate = threading.Semaphore(2)
+
+            def run_lane(l):
+                if l[1][0][0] in ("perl", "ruby", "lua"):
+                    with script_gate:
+                        return lane(*l)
+                return lane(*l)
+            done = list(pool.map(run_lane, lanes))
         for res, out in done:
             results.update(res)
             log.write(out)
@@ -861,7 +884,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "perl", "ruby", "lua"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

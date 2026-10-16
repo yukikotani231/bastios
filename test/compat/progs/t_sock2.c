@@ -125,6 +125,12 @@ int main(void) {
     EXPECT("connect to a closed port is ECONNREFUSED", (c = socket(AF_INET, SOCK_STREAM, 0)) >= 0 &&
            connect(c, (void *)&a, sizeof a) == -1 && errno == ECONNREFUSED);
     close(c);
+    EXPECT("a nonblocking connect to a closed port leaves ECONNREFUSED in SO_ERROR, once", (c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0)) >= 0 &&
+           connect(c, (void *)&a, sizeof a) == -1 && (errno == EINPROGRESS || errno == ECONNREFUSED) &&
+           ({ struct pollfd p = {c, POLLOUT, 0}; poll(&p, 1, 1000) == 1 && (p.revents & POLLERR); }) &&
+           ({ int v = -1; socklen_t vl = sizeof v; getsockopt(c, SOL_SOCKET, SO_ERROR, &v, &vl) == 0 && v == ECONNREFUSED; }) &&
+           ({ int v = -1; socklen_t vl = sizeof v; getsockopt(c, SOL_SOCKET, SO_ERROR, &v, &vl) == 0 && v == 0; }));
+    close(c);
     EXPECT("SCM_RIGHTS passes a descriptor", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
            int p[2]; pipe(p); char cb[CMSG_SPACE(sizeof(int))] = {0}; struct iovec v = {"f", 1};
            struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};

@@ -792,6 +792,11 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_GETPPID {
+    // An orphan's parent is init (process 1), as on Linux; pid 1 itself has none.
+    if pget(k.procs, tgid(k.procs, pid), F_PARENT) == 0 && tgid(k.procs, pid) != 1 && nsk_of(k, NSK_PID, pid) == 0 {
+      ret(&mut k.procs, pid, 1);
+      return KEEP;
+    }
     ret(&mut k.procs, pid, vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1))));
     return KEEP;
   }
@@ -1893,6 +1898,7 @@ fn file_readv(k: &mut Kernel, pid: u64, row: u64, iov: u64, cnt: u64) -> u64
   }
   let mut total = 0;
   let mut i = 0;
+  let off0 = vfs_offset(k.fs, row);
   while i < cnt
     invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE && kok(k) && total <= USER_SIZE
   {
@@ -1905,6 +1911,10 @@ fn file_readv(k: &mut Kernel, pid: u64, row: u64, iov: u64, cnt: u64) -> u64
       return EFAULT;
     }
     let r = lx_file_read(&mut k, pid, row, base.v, size.v);
+    if r == DISK_RETRY && total > 0 {
+      vfs_advance(&mut k.fs, row, off0, 0);  // the whole call starts again
+      return DISK_RETRY;
+    }
     if r > USER_SIZE {
       if total > 0 {
         return total;

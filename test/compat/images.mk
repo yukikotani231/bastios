@@ -20,6 +20,15 @@ DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa346626
 JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c1602330a80b5f2d2fcfa0aa97c4e
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
+# The scripting-language lanes (perl.txt, ruby.txt, lua.txt): Alpine-based images with the
+# language, and for Perl and Ruby the release tarballs whose test suites the cases run.
+PERL_IMAGE ?= minidocks/perl@sha256:d230b6761f2ff3e58131f031e7e8496352a480c346630bf6ac48b8cbb1b66fef
+PERL_SRC ?= perl-5.42.2.tar.gz
+PERL_SRC_SHA256 ?= 9384e8deb75b7b1695e5637971b752281aaecd025a3d5d4734d33c1d0adfee47
+RUBY_IMAGE ?= library/ruby@sha256:d9e5298c8c7dad54b40facac94be1baa10f593db7dec7a9afb47bd44a64c15a9
+RUBY_SRC ?= ruby3.3_3.3.8.orig.tar.xz
+RUBY_SRC_SHA256 ?= e2e1233ad275b7623a05edf23a01192626d1da454bdfe353a28a87acd8ef015c
+LUA_IMAGE ?= imolein/luarocks@sha256:f4b5388c6ec5e100a6a5b6545b61362b50587e927ef5d5d3dfbcd0c44116145f
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # The tree-sitter C parser for Neovim (npm package, pinned by version and SHA-256).
 TREESITTER_C_VER    := 0.24.1

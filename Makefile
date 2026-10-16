@@ -814,12 +814,28 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+# The scripting languages, one disk each (test/compat/scriptdisk.py): Perl with the
+# test suite of its own source (perldisk.py), Ruby with gem and bundler, Lua with
+# LuaRocks, gcc and musl for the rocks that build C modules. The root of each image
+# is a tar file the cases unpack. Pinned by digest, the layers kept in ALPINE_CACHE.
+build/compat/perl.img: test/compat/perldisk.py test/compat/scriptdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/perl-tests.txt build/compat/alpine.img
+	test/compat/perldisk.py $@ $(PERL_IMAGE) build/compat/alpine/disk/busybox $(PERL_SRC) $(PERL_SRC_SHA256) --cache $(ALPINE_CACHE)
+
+build/compat/ruby.img: test/compat/rubydisk.py test/compat/scriptdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/ruby-tests.txt build/compat/alpine.img
+	test/compat/rubydisk.py $@ $(RUBY_IMAGE) build/compat/alpine/disk/busybox $(RUBY_SRC) $(RUBY_SRC_SHA256) --cache $(ALPINE_CACHE)
+
+build/compat/lua.img: test/compat/scriptdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/scriptdisk.py $@ $(LUA_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --free 700
+
+SCRIPT_IMGS := build/compat/perl.img build/compat/ruby.img build/compat/lua.img
+SCRIPT_DISKS := --perl-disk build/compat/perl.img --ruby-disk build/compat/ruby.img --lua-disk build/compat/lua.img
+
+compat: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img $(SCRIPT_IMGS)
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img $(SCRIPT_DISKS) --out build/compat $(COMPAT_PROGS)
 
 # Records which checks pass now, so `make compat` catches regressions.
-compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --out build/compat $(COMPAT_PROGS)
+compat-baseline: build/bastios.elf build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img $(SCRIPT_IMGS)
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img $(SCRIPT_DISKS) --out build/compat $(COMPAT_PROGS)
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
