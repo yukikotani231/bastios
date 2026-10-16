@@ -130,6 +130,13 @@ instructions on both. Where BastiOS is behind:
   `perf` profile of the run puts 40% of the host's samples in the guest's
   submit and poll loops (`virtio_submit`, `blk_poll`). The time is the number
   of round trips to the emulated disk, not the kernel's work between them.
+  Most of a round trip is the host's `fsync`: the virtio-blk device does not
+  take the cache feature, so QEMU makes every write durable before it answers,
+  and the same run with `cache=unsafe` on the drive takes 0.71 s instead of
+  1.16 s. Accepting the feature and flushing only at the queue's barriers does
+  not help while the metadata sectors are written synchronously: each of those
+  writes must then be followed by its own flush, and the run got slower (1.33 s).
+  The gain needs those writes to go through the queue's group commit.
 - `scan` (2.4x in the table) was profiled on a different machine from the
   table's, where a warm run took 0.54 s: the guest's own time is mostly
   `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
