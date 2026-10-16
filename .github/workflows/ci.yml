@@ -324,16 +324,37 @@ jobs:
           if-no-files-found: ignore
   # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
   # suite's C programs and a BusyBox against glibc, and Alpine, on QEMU's virt
-  # machine.
+  # machine. Every guest is emulated (TCG), so the lanes (test/compat/run.py)
+  # are spread over three runners, each building only the disks of its
+  # lanes. The last part runs every lane the first two do not name, so a lane
+  # added later runs there (its disk must be added to that part's list, or
+  # run.py stops for want of it). Each part holds to the baseline every
+  # check of the groups its lanes hold.
   compat-aarch64:
+    name: compat-aarch64 (${{ matrix.part }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: programs
+            lanes: main1,bastio
+            disks: disk.img bastio.img
+          - part: alpine
+            lanes: alpine
+            disks: alpine.img
+          - part: rest
+            skip: main1,bastio,alpine
+            disks: debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
       # never replaced: a key that hits is not saved again).
       CACHE_V: 1
+      COMPAT_LANES: ${{ matrix.lanes }}
+      COMPAT_SKIP_LANES: ${{ matrix.skip }}
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
     steps:
@@ -361,7 +382,7 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-arm64-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -373,18 +394,18 @@ jobs:
         id: al
         uses: actions/cache/restore@v4
         with:
-          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
-          restore-keys: compat-alpine-arm64-
+          key: compat-alpine-arm64-${{ matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-arm64-${{ matrix.part }}-
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
       - name: Build the disks
-        run: make ARCH=aarch64 compat-disks
+        run: make ARCH=aarch64 compat-disks COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
       - name: Save the third-party programs
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-arm64-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -397,19 +418,19 @@ jobs:
         if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          key: compat-alpine-arm64-${{ matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
         continue-on-error: true
-      - run: make ARCH=aarch64 compat
+      - run: make ARCH=aarch64 compat COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
       - name: Checks that did not pass
         if: always()
         run: grep -E '^\| ' build/aarch64/compat/report.md | grep -v -E '\| pass \||\| ---' | head -80 || true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: compat-aarch64-report
+          name: compat-aarch64-report-${{ matrix.part }}
           path: |
             build/aarch64/compat/report.md
             build/aarch64/compat/results.json
