@@ -195,6 +195,11 @@ jobs:
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
     steps:
+      # The third-party programs, Alpine's layers and the disk images together
+      # fill much of the runner's disk. Deleting what the job does not use
+      # takes minutes, so it runs beside the steps up to the disk build.
+      - name: Make room
+        run: nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
@@ -254,10 +259,9 @@ jobs:
             proof-x86-64-
             proof-
           path: build/proof-cache
-      - name: Make room
+      - name: Wait for room
         run: |
-          # The third-party programs, Alpine's layers and the disk images together fill much of the runner's disk.
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 5; done
           df -h /
       - name: Build the disks
         run: make -j4 compat-disks
