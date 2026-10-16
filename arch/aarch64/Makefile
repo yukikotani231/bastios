@@ -238,10 +238,14 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # The shell commands of these disks run the suite's static BusyBox: the
 # AArch64 kernel has no built-in musl dynamic linker, so Alpine's own
 # (dynamic) BusyBox starts only inside the unpacked root.
+# ALPINE_PKGS pins the x86-64 manifest of heywoodlh/vim (tag 9.2); the same
+# tag's arm64 manifest is pinned here, so the AArch64 repository has vim and xxd too.
+VIM_ARM64 := heywoodlh/vim@sha256:7a8cdf7141a5e2ae30a603c7e6051b532fea39df819a9c29e9ee5e270dbb1e06
+
 $(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
     $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys \
     $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun $(B)/compat/gdb.tar $(B)/compat/cmake.whl | $(B)/compat
-	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) --cmake-wheel $(B)/compat/cmake.whl \
+	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(filter-out heywoodlh/vim@%,$(ALPINE_PKGS)) $(VIM_ARM64) --cmake-wheel $(B)/compat/cmake.whl \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
 	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun $(B)/compat/gdb.tar"
 
