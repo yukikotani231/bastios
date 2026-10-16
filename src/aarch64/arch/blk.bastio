@@ -609,6 +609,7 @@ fn virtio_blk_pci(m: &mut Mem, win: &mut MmioSpace, ecam: u64) -> Vblk
       assert forall x: u64 :: bar_space(x) && !(a.bar <= x && x < a.bar + a.end) ==> mmio_free(win, x);
       let b = virtio_blk_start(&mut m, io, false);
       assert forall x: u64 :: blk_claims(b, x) == (a.bar <= x && x < a.bar + a.end);
+      assert forall x: u64 :: bar_space(x) && !blk_claims(b, x) ==> mmio_free(win, x);
       return Vblk::Some(b);
     },
   }
