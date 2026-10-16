@@ -1,0 +1,37 @@
+name: labels
+
+# Keeps the repository's labels in line with .github/labels.yml.
+on:
+  push:
+    branches: [main]
+    paths: [.github/labels.yml, .github/workflows/labels.yml]
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Create or update the labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 - <<'PY'
+          import re, subprocess
+          labels, cur = [], None
+          for line in open(".github/labels.yml"):
+              m = re.match(r"- name: (.*)", line)
+              if m:
+                  cur = {"name": m.group(1).strip()}
+                  labels.append(cur)
+                  continue
+              m = re.match(r"\s+(color|description): (.*)", line)
+              if m:
+                  cur[m.group(1)] = m.group(2).strip()
+          for l in labels:
+              subprocess.run(["gh", "label", "create", l["name"], "--color", l["color"],
+                              "--description", l["description"], "--force"], check=True)
+          PY

@@ -6,7 +6,9 @@
 // mode, and uses the first port with a SATA disk on it. Each read or
 // write is one command in slot 0, for one 512-byte sector or one 4 KiB
 // block, whose data goes through a page lent to the controller; the driver
-// waits for it to finish before doing anything else. A write is followed
+// waits for it to finish before doing anything else. A background run of
+// consecutive blocks (ahci_begin_n) is one command with a PRD entry per
+// block, up to VIO_BATCH. A write is followed
 // by a cache flush, so the data is on the medium when the write returns.
 //
 // Disks with logical sectors longer than 512 bytes are left alone (QEMU
@@ -86,11 +88,14 @@ struct Ahci {
   sectors: u64,       // 0 when no disk could be started
   busy: bool,         // a command started by ahci_begin has not been polled to its end
   irq: bool,          // the port's completions raise an interrupt (ahci_irq_on)
+  extra: Vec[Extra],  // empty, or VIO_BATCH - 1 pages (ahci_install): the data pages of blocks 1 on of a batch
+  pages: u64,         // the first `pages` of them are there
 }
 
 spec fn ahci_ok(h: &Ahci) -> bool {
   mmio_base(h.regs) % 1024 == 0 && mmio_len(h.regs) <= AHCI_MAX_LEN
   && h.px % 128 == 0 && h.px + 128 <= mmio_len(h.regs)
+  && h.pages < VIO_BATCH
 }
 
 /// v with bit b (a power of two below 2^32) set, or cleared.
@@ -414,9 +419,10 @@ fn port_start(h: &mut Ahci) -> bool
 
 fn ahci_new(regs: Mmio, f0: Frame, f1: Frame, reset: bool) -> Ahci
   requires mmio_base(regs) % 1024 == 0 && mmio_len(regs) <= AHCI_MAX_LEN && mmio_len(regs) >= 0x180
-  ensures ahci_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
+  ensures ahci_ok(result) && mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs) && vlen(result.extra) == 0
 {
-  let mut h = Ahci { regs: regs, cmd: dma_lend(f0), buf: dma_lend(f1), px: 0x100, sectors: 0, busy: false, irq: false };
+  let mut h = Ahci { regs: regs, cmd: dma_lend(f0), buf: dma_lend(f1), px: 0x100, sectors: 0, busy: false, irq: false,
+    extra: vec_new[Extra](), pages: 0 };
   // Take the controller from the firmware if it supports the handoff,
   // then switch it to AHCI mode.
   if ar(&mut h, HBA_CAP2) % 2 == 1 {
@@ -494,6 +500,15 @@ fn ahci_free(h: Ahci, m: &mut Mem) -> Mmio
   port_stop(&mut d);
   give_page(&mut m, dma_take(d.cmd));
   give_page(&mut m, dma_take(d.buf));
+  while vec_len(d.extra) > 0
+    invariant mem_ok(m)
+  {
+    match vec_pop(&mut d.extra) {
+      Extra::None => {},
+      Extra::Page(x) => { give_page(&mut m, dma_take(x)); },
+    }
+  }
+  vec_free(d.extra);
   return d.regs;
 }
 
@@ -655,4 +670,165 @@ fn ahci_fetch(h: &mut Ahci, out: &mut Bytes, at: u64)
   ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy) && blen(out) == old(blen(out))
 {
   ahci_out(&mut h.buf, 0, 4096, &mut out, at);
+}
+
+/// Gives the port the pages of batched commands: `extra` holds VIO_BATCH - 1
+/// entries, data pages for blocks 1 on; `pages` of them (from the first) are
+/// there.
+fn ahci_install(h: &mut Ahci, extra: Vec[Extra], pages: u64)
+  requires ahci_ok(h) && vlen(extra) == VIO_BATCH - 1 && pages < VIO_BATCH && vlen(h.extra) == 0
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  vec_free(h.extra);
+  h.extra = extra;
+  h.pages = pages;
+}
+
+/// The address of extra data page i, or 0 if it is not there.
+fn ahci_extra_addr(h: &mut Ahci, i: u64) -> u64
+  requires ahci_ok(h) && i < VIO_BATCH - 1
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  if i >= vec_len(h.extra) {
+    return 0;
+  }
+  match vec_swap(&mut h.extra, i, Extra::None) {
+    Extra::None => { return 0; },
+    Extra::Page(x) => {
+      let a = dma_phys(x);
+      match vec_swap(&mut h.extra, i, Extra::Page(x)) {
+        Extra::None => {},
+        Extra::Page(_y) => { unreachable; },
+      }
+      return a;
+    },
+  }
+}
+
+/// How many consecutive blocks from sector `lba` one command can take (up
+/// to `want`): the pages there are, and the end of the disk.
+fn ahci_room(h: &Ahci, lba: u64, want: u64) -> u64
+  requires ahci_ok(h)
+  ensures result >= 1 && result <= VIO_BATCH
+{
+  if want <= 1 || h.pages == 0 || lba >= h.sectors || lba >= 0x1000000000000 {
+    return 1;
+  }
+  let mut c = want;
+  if c > h.pages + 1 {
+    c = h.pages + 1;
+  }
+  let left = (h.sectors - lba) / 8;
+  if c > left {
+    c = left;
+  }
+  if c < 1 {
+    return 1;
+  }
+  return c;
+}
+
+/// Starts reading `cnt` (from ahci_room) consecutive blocks from sector
+/// `lba` in one command: the first into the data page, the rest into the
+/// extra pages, one PRD entry each. With `wr`, writes the blocks ahci_stage
+/// put in place instead. False if a command is running or a page is missing.
+fn ahci_begin_n(h: &mut Ahci, lba: u64, cnt: u64, wr: bool) -> bool
+  requires ahci_ok(h) && cnt >= 1 && cnt <= VIO_BATCH
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && (result ==> h.busy)
+{
+  if h.busy || cnt > h.pages + 1 || lba % 8 != 0 || lba >= h.sectors || lba >= 0x1000000000000
+    || (h.sectors - lba) / 8 < cnt {
+    return false;
+  }
+  // Every page must be there before anything is set up.
+  let mut j = 1;
+  while j < cnt
+    invariant j >= 1 && j <= cnt && cnt <= VIO_BATCH && ahci_ok(h)
+  {
+    if ahci_extra_addr(&mut h, j - 1) == 0 {
+      return false;
+    }
+    j = j + 1;
+  }
+  if wr {
+    ahci_setup(&mut h, ATA_WRITE_EXT, lba, cnt * 8, 4096, true);
+  } else {
+    ahci_setup(&mut h, ATA_READ_EXT, lba, cnt * 8, 4096, false);
+  }
+  // The header counts cnt PRD entries (ahci_setup wrote one); the entries
+  // after the first follow it in the command table.
+  let mut flags = 5 + cnt * 65536;
+  if wr {
+    flags = flags + 64;
+  }
+  dma_write32(&mut h.cmd, 0, cast[u32](flags));
+  let mut k = 1;
+  while k < cnt
+    invariant k >= 1 && k <= cnt && cnt <= VIO_BATCH && ahci_ok(h)
+  {
+    let a = ahci_extra_addr(&mut h, k - 1);
+    dma_write64(&mut h.cmd, TBL_AT + 128 + k * 16, a);
+    dma_write32(&mut h.cmd, TBL_AT + 136 + k * 16, 0);
+    dma_write32(&mut h.cmd, TBL_AT + 140 + k * 16, 4095);
+    k = k + 1;
+  }
+  ahci_fire(&mut h);
+  h.busy = true;
+  return true;
+}
+
+/// Puts src[at ..] where block j of the next ahci_begin_n write is taken
+/// from. False where there is no such page.
+fn ahci_stage(h: &mut Ahci, j: u64, src: &Bytes, at: u64) -> bool
+  requires ahci_ok(h)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy)
+{
+  if h.busy || j >= VIO_BATCH || at > blen(src) || blen(src) - at < 4096 {
+    return false;
+  }
+  if j == 0 {
+    ahci_in(&mut h.buf, 0, 4096, src, at);
+    return true;
+  }
+  if h.pages == 0 || j > h.pages || j > vec_len(h.extra) {
+    return false;
+  }
+  match vec_swap(&mut h.extra, j - 1, Extra::None) {
+    Extra::None => { return false; },
+    Extra::Page(x) => {
+      let mut d = x;
+      ahci_in(&mut d, 0, 4096, src, at);
+      match vec_swap(&mut h.extra, j - 1, Extra::Page(d)) {
+        Extra::None => {},
+        Extra::Page(_y) => { unreachable; },
+      }
+      return true;
+    },
+  }
+}
+
+/// After a read started by ahci_begin_n has finished well: block j of it
+/// into out[at .. at + 4096].
+fn ahci_fetch_n(h: &mut Ahci, j: u64, out: &mut Bytes, at: u64)
+  requires ahci_ok(h) && at + 4096 <= blen(out)
+  ensures ahci_ok(h) && h.sectors == old(h.sectors) && h.busy == old(h.busy) && blen(out) == old(blen(out))
+{
+  if j == 0 {
+    ahci_out(&mut h.buf, 0, 4096, &mut out, at);
+    return;
+  }
+  if h.pages == 0 || j > h.pages || j > vec_len(h.extra) {
+    return;
+  }
+  match vec_swap(&mut h.extra, j - 1, Extra::None) {
+    Extra::None => {},
+    Extra::Page(x) => {
+      let mut d = x;
+      ahci_out(&mut d, 0, 4096, &mut out, at);
+      match vec_swap(&mut h.extra, j - 1, Extra::Page(d)) {
+        Extra::None => {},
+        Extra::Page(_y) => { unreachable; },
+      }
+    },
+  }
 }
