@@ -119,6 +119,15 @@ fn vdso_is_elf() -> bool {
   return true;
 }
 
+/// AT_HWCAP and AT_HWCAP2: empty on x86-64 (a C library reads CPUID itself).
+fn hwcap() -> u64 {
+  return 0;
+}
+
+fn hwcap2() -> u64 {
+  return 0;
+}
+
 /// Fills the vDSO page: the image, then the clock it reads.
 fn vdso_fill(f: &mut Frame, t: Tsc, epoch: u64) {
   copy_page(&mut f, include_bytes("../../../build/user/vdso.so"), 0);
