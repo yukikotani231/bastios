@@ -2257,6 +2257,37 @@ if len(sizes) == 2 and sizes[0] and sizes[1] and sizes[1][0] > sizes[0][0]:
     print(f"ok   a disk made larger since the last boot: {sizes[0][0]} blocks became {sizes[1][0]}, with its file")
 else:
     print("FAIL a grown disk:", sizes); fails += 1
+# A slow disk: once the shell is up, QEMU is told (through its monitor) to
+# let the guest write 64 bytes a second, so a sector takes 8 s and a block
+# a minute, as a write with a flush to the host's disk can take on a busy
+# host. Making a directory waits for its directory sector (QEMU lets the
+# first write through at once, so the second and third mkdir are the slow
+# ones). The kernel must wait for them, not give the disk up and call it
+# full, as it did when its wait was a count of looks that passed in a
+# second or two.
+slow = os.path.join(disk_dir.name, "slow.img")
+subprocess.run([sys.executable, "test/compat/mkdisk.py", slow], check=True)
+mon_path = os.path.join(disk_dir.name, "mon_slow.sock")
+qemu = boot(1, monitor=mon_path, extra=["-drive", f"file={slow},format=raw,if=none,id=sl",
+                                        "-device", "virtio-blk-pci,drive=sl"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+for line, want in [("ash", b"built-in shell (ash)"), ("mkdir /disk/d1 /disk/d2 /disk/d3 && echo made", b"\r\nmade\r\n")]:
+    if not ok:
+        break
+    if line != "ash":
+        mon = socket.socket(socket.AF_UNIX)
+        mon.connect(mon_path)
+        mon.sendall(b"block_set_io_throttle sl 0 0 64 0 0 0\n")
+        time.sleep(0.5)
+        mon.close()
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ", mark) and want in out[mark:]
+print(("ok  " if ok else "FAIL"), "a disk that takes 8 s a sector: directories are made on it, not refused as full"); ok or print(repr(out[-600:]))
+fails += not ok
+qemu.kill(); qemu.wait()
 if smp >= 4:   # (the fake service above is set up on the four-processor run)
     # The boot option `mcloud` runs the same setup at boot, with no
     # argument: against QEMU's address for the metadata service, which a

@@ -89,6 +89,7 @@ connect03
 fanotify01
 fanotify02
 fanotify04
+fanotify06
 fanotify08
 fanotify09
 fanotify11
