@@ -189,6 +189,13 @@ luajit
 libuv
 tree-sitter
 
+== vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL vim xxd 2>/dev/null; echo status $?; bb chroot /disk/a /usr/bin/vim -es -u NONE -c 'call setline(1, ["hi", "there"])' -c 'w! /root/v.txt' -c 'qa!' </dev/null >/dev/null 2>&1; bb cat /disk/a/root/v.txt; bb chroot /disk/a /usr/bin/xxd -p /root/v.txt; bb chroot /disk/a /sbin/apk del -q --no-progress vim xxd 2>/dev/null
+status 0
+hi
+there
+68690a74686572650a
+
 == nvim: a script run without a terminal
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one", "two"])' -c 'w! /root/n.txt' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/n.txt; bb chroot /disk/a /usr/bin/nvim --version | bb head -n 1
 one
@@ -573,6 +580,10 @@ $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; d
 [1, 2, 3, 4]
 [1, 2, 3, 4]
 status 0
+
+== node: Alpine's Node (V8 with its JIT) runs a script that gets hot
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL nodejs >/dev/null 2>&1; bb timeout -s KILL 120 bb chroot /disk/a /usr/bin/node -e 'let s=0;for(let i=0;i<3e6;i++)s+=i;console.log(s,[3,1,2].sort().join())' 2>&1 | bb tail -n 3; bb chroot /disk/a /sbin/apk del -q --no-progress nodejs 2>/dev/null
+4499998500000 1,2,3
 
 == container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
 $ B=/disk/busybox; export B; $B ip link add cn_br type bridge && $B ip addr add 10.0.4.1/24 dev cn_br && $B ip link set cn_br up && $B ip link add cn_v0 type veth && $B ip link set veth0 name cn_v1 && $B ip link set cn_v0 master cn_br && $B ip link set cn_v0 up && $B printf '%s\n' 'ip -4 addr show dev cn_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cn.sh && ($B unshare -n $B sh -c 'touch /disk/cn_nr; until $B ip link show cn_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cn_v1 && $B ip link set cn_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cn_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cn_nr ]; do sleep 1; done; $B ip link set cn_v1 netns $P; until [ -e /disk/cn_ok ]; do sleep 1; done; $B mkdir -p /disk/n /run/runc && cd /disk/n && /disk/runc spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cn.sh"#' config.json && /disk/runc --root /run/runc run cn < /dev/null; echo status $?; kill $P); $B rm -f /disk/cn_nr /disk/cn_ok /disk/a/cn.sh; $B ip link del cn_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
