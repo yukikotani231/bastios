@@ -368,38 +368,41 @@ int main(void) {
         unlink(nm);
     }
 
-    EXPECT("a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events", ({
-           int n = 3000, got = 0, over = 0;
-           int fd = inotify_init1(0);
-           mkdir("in_churn", 0755);
-           inotify_add_watch(fd, "in_churn", IN_DELETE);
-           pid_t c = fork();
-           if (c == 0) {
-             char path[64];
-             for (int i = 0; i < n; i++) {
-               snprintf(path, sizeof path, "in_churn/%d", i);
-               int f = open(path, O_CREAT | O_WRONLY, 0644);
-               if (f >= 0) close(f);
-               unlink(path);
-             }
-             _exit(0);
-           }
-           char buf[1024];
-           while (got < n) {
-             struct pollfd pf = {fd, POLLIN, 0};
-             if (poll(&pf, 1, 3000) <= 0) break;
-             int len = read(fd, buf, sizeof buf);
-             for (int j = 0; j < len;) {
-               struct inotify_event *ev = (struct inotify_event *)(buf + j);
-               if (ev->mask & IN_Q_OVERFLOW) over++;
-               if (ev->mask & IN_DELETE) got++;
-               j += sizeof *ev + ev->len;
-             }
-           }
-           int st; waitpid(c, &st, 0);
-           close(fd);
-           rmdir("in_churn");
-           got == n && !over; }));
+    if (begin("a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events")) {
+        int n = 3000, got = 0, over = 0, timedout = 0, e = 0;
+        int fd = inotify_init1(0);
+        mkdir("in_churn", 0755);
+        inotify_add_watch(fd, "in_churn", IN_DELETE);
+        pid_t c = fork();
+        if (c == 0) {
+          char path[64];
+          for (int i = 0; i < n; i++) {
+            snprintf(path, sizeof path, "in_churn/%d", i);
+            int f = open(path, O_CREAT | O_WRONLY, 0644);
+            if (f >= 0) close(f);
+            unlink(path);
+          }
+          _exit(0);
+        }
+        char buf[1024];
+        while (got < n) {
+          struct pollfd pf = {fd, POLLIN, 0};
+          if (poll(&pf, 1, 3000) <= 0) { timedout = 1; break; }
+          int len = read(fd, buf, sizeof buf);
+          if (len <= 0) { e = errno; break; }
+          for (int j = 0; j < len;) {
+            struct inotify_event *ev = (struct inotify_event *)(buf + j);
+            if (ev->mask & IN_Q_OVERFLOW) over++;
+            if (ev->mask & IN_DELETE) got++;
+            j += sizeof *ev + ev->len;
+          }
+        }
+        int st; waitpid(c, &st, 0);
+        close(fd);
+        rmdir("in_churn");
+        if (got == n && !over) pass();
+        else fail("got %d of %d events, %d overflows, poll timed out %d, read errno %d", got, n, over, timedout, e);
+    }
 
     unlink("in_late");
     unlink("in_f");
