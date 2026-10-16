@@ -245,7 +245,7 @@ build/kernel.o: build/kernel.s build/kernel.backend
 	$(CC) -c -o $@ $<
 else
 build/kernel.o: build/kernel.c build/kernel.backend
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) -ffunction-sections -c -o $@ $<
 endif
 
 build/libc.o: boot/libc.c | build
@@ -255,10 +255,10 @@ build/boot.o: boot/boot.S boot/core.h | build
 	$(CC) -c -o $@ $<
 
 build/platform.o: boot/platform.c | build
-	$(CC) $(TCFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -ffunction-sections -c -o $@ $<
 
 build/smp.o: boot/smp.c boot/core.h | build
-	$(CC) $(TCFLAGS) -c -o $@ $<
+	$(CC) $(TCFLAGS) -ffunction-sections -c -o $@ $<
 
 build/multiboot.o: boot/multiboot.c | build
 	$(CC) $(TCFLAGS) -c -o $@ $<
@@ -270,7 +270,11 @@ build/ap.o: boot/ap.S | build
 #    Multiboot loader only accepts 32-bit ELF images. The code is unchanged.
 KOBJS := build/boot.o build/ap.o build/platform.o build/smp.o build/multiboot.o build/kernel.o build/libc.o
 
-build/bastios64.elf: $(KOBJS) boot/linker.ld
+# The kernel functions the hot paths run, first in the text (bench/hot-functions.txt).
+build/hot.ld: bench/hot-functions.txt | build
+	grep -v '^#' $< | sed 's/.*/        *(.text.& .text.&.*)/' > $@
+
+build/bastios64.elf: $(KOBJS) boot/linker.ld build/hot.ld
 	$(CC) $(LDFLAGS) -o $@ $(KOBJS)
 
 build/bastios.elf: build/bastios64.elf
