@@ -1230,6 +1230,8 @@ session("virtio", True, [
     ("mproc", b"mproc: ok, 700 processes at once", b"\n# "),
     # /dev/fb0 without a screen (this machine has none): ENODEV (user/mfb.c; the drawing is tested in test/iso_test.sh).
     ("mfb", b"mfb: no screen (ENODEV)", b"\n# "),
+    # /dev/input/event0 tells what it is (user/mkeyev.c; the events themselves are tested in test/iso_test.sh).
+    ("mkeyev", b"mkeyev: ok", b"\n# "),
     ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
     ("bhello", b"bhello: no window server", b"\n# "),
     ("bterm", b"bterm: no window server", b"\n# "),
