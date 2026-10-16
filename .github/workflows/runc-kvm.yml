@@ -1,0 +1,54 @@
+name: runc-kvm
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  alpine2:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y z3 qemu-system-x86 musl-tools autoconf automake autopoint libtool bison flex texinfo pkg-config tcl gettext
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - id: keys
+        run: echo "images=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache/restore@v4
+        with:
+          key: compat-alpine-2-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-2-
+          path: |
+            build/compat/alpine/*.tar.gz
+            build/compat/alpine/*.json
+      - uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: |
+            proof-x86-64-
+            proof-
+          path: build/proof-cache
+      - run: make -j4 compat-disks COMPAT_DISKS=build/compat/alpine.img
+      - run: tools/ci-kvm.sh
+      - run: make compat COMPAT_DISKS=build/compat/alpine.img COMPAT_LANES=alpine2
+      - if: always()
+        run: |
+          grep -E '^\| ' build/compat/report.md | grep -v -E '\| pass \||\| ---' | head -40 || true
+          grep -a 'dbg' build/compat/serial.log | head -20 || true
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: report
+          path: |
+            build/compat/report.md
+            build/compat/serial.log
+          if-no-files-found: ignore

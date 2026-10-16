@@ -819,7 +819,26 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if is_procfs_call(n) {
-    ret(&mut k.procs, pid, lx_procfs_call(&mut k, pid, n, a, b, c));
+    let r = lx_procfs_call(&mut k, pid, n, a, b, c);
+    if r == ENOENT {
+      puts(&mut con, "[dbg readlink ENOENT by ");
+      put_num(&mut con, pid);
+      puts(&mut con, ", states");
+      let mut q = 1;
+      while q < 24
+        invariant q <= 24 && kok(k) && con_ok(con)
+      {
+        puts(&mut con, " ");
+        put_num(&mut con, q);
+        puts(&mut con, "=");
+        put_num(&mut con, state(k.procs, q));
+        puts(&mut con, "/");
+        put_num(&mut con, tgid(k.procs, q));
+        q = q + 1;
+      }
+      puts(&mut con, "]\r\n");
+    }
+    ret(&mut k.procs, pid, r);
     return KEEP;
   }
   if is_dir_call(n) {
