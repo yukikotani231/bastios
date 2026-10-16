@@ -28,6 +28,7 @@ const KBD_CAD: u64 = 255;             // kbd_poll's answer for Ctrl-Alt-Delete (
 
 struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, alt: bool, ext: bool, present: bool,
   aux: bool,          // a PS/2 mouse answered and reports
+  aux_irq: bool,      // ... and the controller raises IRQ 12 for its bytes (so no polling is needed to notice them)
   wheel: bool,        // ... with a wheel: 4-byte packets
   mb: u64,            // the bytes of the mouse packet so far, first in the high byte
   mn: u64 }           // how many (0 .. 3)
@@ -69,7 +70,36 @@ fn kbd_init(k: &mut Kbd)
   if kbd_ctl(&mut k, 0xA8) && aux_cmd(&mut k, 0xF6) {
     k.wheel = mouse_wheel(&mut k);
     k.aux = aux_cmd(&mut k, 0xF4);
+    if k.aux {
+      k.aux_irq = aux_irq_on(&mut k);
+    }
   }
+}
+
+/// Sets the controller configuration byte's bit 1, which lets the mouse
+/// raise IRQ 12. True if the byte was read and written back.
+fn aux_irq_on(k: &mut Kbd) -> bool
+  requires kbd_ok(k)
+  ensures kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+{
+  if !kbd_ctl(&mut k, 0x20) {
+    return false;
+  }
+  let mut i = 0;
+  while i < AUX_SPINS
+    invariant kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+  {
+    if cast[u64](pio_in8(&mut k.status, 0)) % 2 == KST_FULL {
+      let cfg = cast[u64](pio_in8(&mut k.data, 0));
+      if !kbd_ctl(&mut k, 0x60) || !kbd_idle(&mut k) {
+        return false;
+      }
+      pio_out8(&mut k.data, 0, cast[u8](cfg % 2 + cfg / 4 % 64 * 4 + 2));
+      return kbd_idle(&mut k);
+    }
+    i = i + 1;
+  }
+  return false;
 }
 
 /// The IntelliMouse sequence: sample rates 200, 100 and 80, after which a

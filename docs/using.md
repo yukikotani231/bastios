@@ -164,17 +164,20 @@ bastios:~# git --version
 
 What has been tested is this sequence with the mirror replaced by a copy served from the host over HTTP (`echo http://10.0.2.2:8000 > etc/apk/repositories` with the packages in `x86_64/`), since the test machines cannot reach Alpine's mirrors; `make compat` runs it with git, curl, bash, make, jq, rsync, openssl and more (`test/compat/alpine.txt`). Alpine's mirrors serve HTTPS, which has not been tried yet; if it fails, change `https://` to `http://` in `/etc/apk/repositories`: the signatures are checked either way.
 
-## 7. On a real PC
+## 7. A graphical session (early)
+
+From the ISO or USB image, where the screen is a framebuffer, `bwm` starts a small window manager on it: a wallpaper, three windows and a pointer. Click a window to raise and focus it, drag a title bar to move it, type to put text in the focused window, and press Ctrl-Q to leave; the text console comes back. It uses `/dev/fb0` for the screen and `/dev/input/mice` for the mouse (see [linux.md](linux.md)), so it is an ordinary Linux program (`user/bwm.c`). `bwm -n` starts it with no windows of its own, and `bwm -c bterm` also starts a terminal window: `bterm` is an 80 x 24 terminal with `ash` behind it on a pseudo-terminal (a VT100 subset: cursor moves, erase, colours), so commands can be typed and run in a window, and several `bterm` windows can be open. `bwm -c bhello` starts a client (`bhello` opens a window, shows what is typed and clicked, and ends with the close box). Programs open windows over a UNIX socket at `/tmp/bwm.sock`: `user/bwmproto.h` describes the messages (create a window of a given size, draw rectangles of 0x00RRGGBB pixels, and receive keys, pointer events and close requests), and `user/bwmlib.h` is a small client library. bwm keeps each window's pixels. The native shell passes no arguments to Linux programs, so run `ash` first to give `bwm` any.
+
+## 8. On a real PC
 
 [Getting started](getting-started.md#5-boot-from-a-usb-stick) builds a bootable ISO and a USB stick image, and lists the hardware BastiOS supports. The image boots through [Limine](https://github.com/limine-bootloader/limine), which the build fetches itself, so the only package it needs is `xorriso`. `make iso` and `make usb` build it, and `make run-iso` / `make run-uefi` try the image in QEMU first. No real PC has booted it yet; [real-hardware.md](real-hardware.md) says how to try and what to report.
 
 ## What does not work yet
 
-- It has only run in QEMU.
+- It has only run in QEMU. [real-hardware.md](real-hardware.md) says what is needed to try a real PC.
 - Users, passwords and SSH host keys are kept in memory and lost at power off; only `/disk` is kept.
-- The disk holds at most 1023 files and directories (an Alpine root with a few packages fits; a compiler toolchain does not yet) and is at most 256 MiB as `make disk` writes it.
-- At most 31 processes, 64 MiB of address space each, and 256 MiB of memory in `make run`.
-- There is no init system or login prompt at boot: you start as root in the native shell.
-- There is no graphical desktop; the screen is a text console when booted from the ISO.
+- There is no init system. The console starts in the native shell as root; the boot option `login` (the third entry of the ISO and USB boot menu) starts BusyBox's `login` instead.
+- At most 511 processes, a 512 GiB address window each, and 256 MiB of memory in `make run`. The disk holds up to 262143 files and directories; `make disk` writes an image of at most 1 TiB, 33 MiB or the size of the files plus `MKDISK_FREE_MB` (16 by default), whichever is larger. The other limits are listed in the README's Status section.
+- The graphical session is a start (section 7): windows can be opened by other programs over a socket, but a terminal window is a small VT100 subset (no scroll region, no alternate screen, so full-screen editors do not work in it), there is no shared memory for window contents, and keys come as characters (no key release or modifiers).
 - Some Linux system calls are missing; the kernel prints a note on the console when a program uses one (Dropbear's `execveat` does, harmlessly). [linux.md](linux.md) lists what is there, and `make compat` measures it.
 - The system call ABI and the disk format can still change between versions.
