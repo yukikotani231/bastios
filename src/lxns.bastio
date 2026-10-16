@@ -338,6 +338,7 @@ fn ovl_make_up(k: &mut Kernel, pid: u64, e: u64, p: &Bytes, rr: u64, c: u64, li:
     k.perr = ENOENT;
     return false;
   }
+  let sh = node_at(&mut k, sn);              // what watches name, file or directory
   let f = vfs_lookup(&mut k.fs, sn);
   let mut perm = 0x41ED;                    // a directory the file layer does not hold: rwxr-xr-x
   let mut own = 0;
@@ -440,6 +441,8 @@ fn ovl_make_up(k: &mut Kernel, pid: u64, e: u64, p: &Bytes, rr: u64, c: u64, li:
   // The copy keeps the original's mode, owner and time.
   let nn = ovl_name(&mut k, e, 0, p, rr, rr, c, 0);
   if nn != NO_RESULT {
+    let nh = node_at(&mut k, nn);
+    ino_retarget(&mut k, sh, nh);
     let nf = vfs_lookup(&mut k.fs, nn);
     if nf != NO_FILE {
       vfs_set_meta(&mut k.fs, nf, perm % 4096, mtime);

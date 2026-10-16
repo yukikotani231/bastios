@@ -187,7 +187,7 @@ fn lx_prlimit(k: &mut Kernel, pid: u64, target: u64, r: u64, new: u64, was: u64)
     if max > rl_max(k, t, r) && !cap_has(k, pid, CAP_SYS_RESOURCE) {
       return EPERM;
     }
-    if r == RLIMIT_NOFILE && max > NR_OPEN {
+    if r == RLIMIT_NOFILE && max > nr_open(k) {
       return EPERM;                         // past /proc/sys/fs/nr_open, even for root
     }
   }

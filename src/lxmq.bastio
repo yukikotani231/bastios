@@ -234,7 +234,30 @@ fn pq_create(k: &mut Kernel, pid: u64, n: u64, mode: u64, attr: u64) -> u64
     q = q + 1;
   }
   if q >= PQ_N {
-    return ENOSPC;                          // queues_max
+    return ENOSPC;                          // the table is full
+  }
+  // queues_max (fs/mqueue/queues_max, kept as the value + 1): a process
+  // without CAP_SYS_RESOURCE gets ENOSPC once its IPC namespace holds that many.
+  let w = get(k.sys, SYS_SCT + 40);
+  let mut lim = 256;
+  if w > 0 {
+    lim = w - 1;
+  }
+  if !cap_has(k, pid, CAP_SYS_RESOURCE) {
+    let ns = nsk_of(k, NSK_IPC, pid);
+    let mut held = 0;
+    let mut e = 0;
+    while e < PQ_N
+      invariant e <= PQ_N && held <= e && kok(k)
+    {
+      if pq_get(k, e, PW_LIVE) != 0 && pq_ns(k, e) == ns {
+        held = held + 1;
+      }
+      e = e + 1;
+    }
+    if held >= lim {
+      return ENOSPC;
+    }
   }
   bcopy(&mut k.ipcb, PQ_NAMES + q * PQ_NAME_ROOM, k.fs.xfer, 0, n);
   let mut max = PQ_DEF_MAX;

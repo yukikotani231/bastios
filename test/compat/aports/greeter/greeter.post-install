@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "greeter installed" > /var/lib/greeter-installed

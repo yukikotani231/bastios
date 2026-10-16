@@ -54,11 +54,15 @@ def main():
     ap.add_argument("--warm", type=float, default=3.0, help="seconds of host time before gdb attaches")
     ap.add_argument("--top", type=int, default=30)
     ap.add_argument("--break", dest="brk", default="", help="start the window when this kernel function is entered (counts every instruction of the window, not whole round trips)")
+    ap.add_argument("--prog", default="", help="run this C file (built as /disk/<name>) instead of osbench")
     ap.add_argument("--save", default="", help="also write the executed addresses to this JSON file")
     ap.add_argument("cmd", nargs="+")
     args = ap.parse_args()
     addrs, names = symbols(args.elf)
     osbench = bench.build_osbench()
+    if args.prog:
+        osbench = os.path.join(bench.B, os.path.splitext(os.path.basename(args.prog))[0])
+        bench.sh(os.environ.get("MUSLCC", "musl-gcc"), "-static-pie", "-O2", "-o", osbench, args.prog)
     ns = argparse.Namespace(accel="tcg", cpu="", mem=args.mem, smp=args.smp, kernel=args.kernel)
     line = " ".join(args.cmd)
     port = 20000 + os.getpid() % 20000
