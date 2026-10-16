@@ -235,7 +235,7 @@ build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
 build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native --emit-asm -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native-ir --emit-asm -o $@ src/main.bastio
 
 # build/kernel.backend is defined with the user programs' rules (the kernel and
 # the user programs are built the same way).

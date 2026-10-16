@@ -842,7 +842,7 @@ fn is_px_timens(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || f == PROC_DEV + PSYS + SY_PID_MAX || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_IPC + 5 || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || f == PROC_DEV + PSYS + SY_PID_MAX || f == PROC_DEV + PSYS + SY_NROPEN || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_IPC + 5 || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2189,7 +2189,8 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       return put_s(&mut o, 0, "core\n");
     }
     if what == SY_NROPEN {
-      return put_s(&mut o, 0, "1048576\n");
+      let a = put_n(&mut o, 0, nr_open(k));
+      return put_c(&mut o, a, 10);
     }
     if what == SY_DROP {
       return put_s(&mut o, 0, "0\n");
@@ -3629,6 +3630,13 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
       return EINVAL;                        // Linux's bounds: PIDS_MIN and PID_MAX_LIMIT
     }
     k.sys = set(k.sys, SYS_PIDMX, v + 1);
+    return n;
+  }
+  if f == PROC_DEV + PSYS + SY_NROPEN {
+    if v < 64 {
+      return EINVAL;                        // Linux's lower bound: a descriptor word
+    }
+    k.sys = set(k.sys, SYS_NROPEN, v + 1);
     return n;
   }
   if f >= PROC_DEV + PSYS + SY_INO && f < PROC_DEV + PSYS + SY_INO + 3 {

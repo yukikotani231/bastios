@@ -291,6 +291,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   let mut clear = false;                  // CLONE_CLEAR_SIGHAND (clone3)
+  let mut pfdp = c;                       // where CLONE_PIDFD stores the descriptor: clone3 has a word for it
   if n == LX_CLONE3 {
     let fw = user_u64(&mut k.spaces, pid, a);
     if fw.ok && fw.v / 0x200000000 % 2 == 1 {
@@ -319,6 +320,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     clear = c3.clear;
     b = c3.sp;
     c = c3.ptid;
+    pfdp = c3.pfd;
     ctid = c3.ctid;
     tls = c3.tls;
   }
@@ -602,19 +604,29 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_stat_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
-  return lx_proc_call(&mut con, &mut k, mmu, pid, n, was, a, b, c, ctid, tls, clear);
+  return lx_proc_call(&mut con, &mut k, mmu, pid, n, was, a, b, c, pfdp, ctid, tls, clear);
 }
 
 /// The process-creating and exec calls, apart from linux_syscall so that its proof stays small.
-fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64, ctid: u64, tls: u64, clear: bool) -> u64
+fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64, pfdp: u64, ctid: u64, tls: u64, clear: bool) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
 {
   if n == LX_CLONE && a & CLONE_VM != 0 && a & CLONE_VFORK != 0 && a & CLONE_THREAD == 0 {
+    if a / 0x1000 % 2 == 1 && fd_free(k, pid, 0) >= LXNFD {
+      ret(&mut k.procs, pid, EMFILE);
+      return KEEP;
+    }
     let r = lx_vfork_vm(&mut k, mmu, pid, b);
     if r >= NPROC {
       ret(&mut k.procs, pid, r);            // -errno: no child
       return KEEP;
+    }
+    if a / 0x1000 % 2 == 1 {                // CLONE_PIDFD
+      // Go's os/exec asks for a pidfd this way. The space is the child's
+      // while the parent waits, so the descriptor's number goes in through it.
+      let pfd = ev_install(&mut k, pid, OF_PIDFD, r, 0, true);
+      let w = put_user_u32(&mut k, r, pfdp, pfd % 0x100000000);
     }
     if clear {
       sig_reset(&mut k.sigact, r, true);
@@ -623,7 +635,7 @@ fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was:
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
-    let r = lx_thread_clone(&mut k, pid, a, b, c, ctid, tls);
+    let r = lx_thread_clone(&mut k, pid, a, b, c, pfdp, ctid, tls);
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC {
       pt_fork_event(&mut k, pid, r, 3);
@@ -635,7 +647,7 @@ fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was:
     return KEEP;
   }
   if n == LX_CLONE && clone_proc_flags(a) {
-    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, ctid, tls);
+    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pfdp, ctid, tls);
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC && clear {
       sig_reset(&mut k.sigact, r, true);
