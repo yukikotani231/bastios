@@ -265,6 +265,16 @@ Measured with `make iobench` (`test/iobench.sh`, `-smp 2`, NVMe, three runs, tic
 - `make smpbench`, which does no disk I/O, is unchanged within noise (8.7 s and 17.8 s against 8.5 s and 16.9 s).
 - `bench` is still three to four times slower beside a disk writer. Two causes remain: the idle processor polling the disk takes the kernel lock every few microseconds, and copying blocks in and out of the cache happens under that lock. Completion interrupts (MSI-X and MSI) remove the first cause. The second needs the disk state behind its own lock (stages 4 and 5 of the plan).
 
+Batched commands on NVMe and AHCI followed (2026-10-15). The queue already grouped reads and writes of consecutive blocks, but only virtio took them in one request. NVMe now takes up to 32 blocks in one read or write command, the first block in its data page and the others in 31 more pages named by a PRP list page (limited by the drive's MDTS, from Identify Controller); AHCI fills one PRD entry per block. The pages come from the top of the pool, as virtio's do, and go back at shutdown. Order is unchanged: the batch holds only blocks with no flush between them. Measured with `make diskbench` and `make iobench` on the same host (ticks at 100 Hz, `-smp 2` for iobench):
+
+| | before | after |
+|---|---|---|
+| `diskbench` write, NVMe / NVMe 4 KiB / AHCI | 8-10 / 7-9 / 6-7 | 3-5 / 3-5 / 3-4 |
+| `diskbench` read, same order | 3-4 / 3-4 / 3 | 2-4 / 2-3 / 3 |
+| `bench` getpid beside a `diskbench` (NVMe) | 18-19 | 14-16 |
+| `diskbench` write beside it | 10-16 | 3-5 |
+| two `diskbench` at once, write | 16-21 | 8-12 |
+
 Completion interrupts came next. Measured the same way, booting `main` before the change and the change itself alternately on the same host (2026-10-10):
 
 | | polled (before) | interrupts (after) |
@@ -371,7 +381,7 @@ Trusted, and listed in the README's "What is trusted" table and in [trusted-base
 
 These are current choices, not design limits; the README's "Status" lists them with the plan:
 - one lock for the whole kernel state (the console's devices have their own); the kernel runs with interrupts off and polls the UART and the keyboard, console and PIT interrupts reach only the bootstrap processor, and an idle processor notices new work only at its next timer tick (no wake-up interrupts between processors);
-- a 512 GiB user window per process (an 8 MiB stack at its top), at most `NPROC - 1` (511) processes;
+- a 512 GiB user window per process (an 8 MiB stack at its top), at most `NPROC - 1` (1023) processes;
 - files are simple (32768 in memory and 262143 on disk, paths up to 255 bytes, files up to 1 GiB in memory and 512 GiB on disk, 1024 Linux descriptors per process; every write is copy-on-write, so a block written costs four block writes);
 - user pages are mapped writable and executable;
 - the kernel's arena halts the machine when it runs out (the page pool does not: spawns fail cleanly).

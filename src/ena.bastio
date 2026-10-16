@@ -329,6 +329,7 @@ fn ena_resp(e: &mut Ena, k: u64) -> u64
 /// The address of receive buffer b (0 to 7).
 fn ena_rxbuf_addr(e: &Ena, b: u64) -> u64
   requires b < ENA_RX_BUFS
+  ensures result <= ADDR_LIMIT + RX_BUF
 {
   let mut a = dma_addr(e.rb3);
   if b < 2 {

@@ -151,11 +151,18 @@ fn comp_end(x: &Bytes, from: u64, n: u64) -> u64
   return e;
 }
 
-/// Writes pid p (below 1000) in decimal at x[at..]; how many digits.
+/// Writes pid p (below 10000) in decimal at x[at..]; how many digits.
 fn dec_out(x: &mut Bytes, at: u64, p: u64) -> u64
-  requires p < 1000 && at + 3 <= blen(x)
-  ensures blen(x) == old(blen(x)) && 1 <= result && result <= 3
+  requires p < 10000 && at + 4 <= blen(x)
+  ensures blen(x) == old(blen(x)) && 1 <= result && result <= 4
 {
+  if p >= 1000 {
+    bset(&mut x, at, cast[u8](48 + p / 1000));
+    bset(&mut x, at + 1, cast[u8](48 + p / 100 % 10));
+    bset(&mut x, at + 2, cast[u8](48 + p / 10 % 10));
+    bset(&mut x, at + 3, cast[u8](48 + p % 10));
+    return 4;
+  }
   if p >= 100 {
     bset(&mut x, at, cast[u8](48 + p / 100));
     bset(&mut x, at + 1, cast[u8](48 + p / 10 % 10));
@@ -211,7 +218,7 @@ fn proc_self(x: &mut Bytes, n: u64, pid: u64) -> u64
   if n < 9 || !xfer_is(x, 0, 5, "proc/") || comp_end(x, 5, n) != 9 || !is_self(x, 5, 9) {
     return n;
   }
-  // "self" (4 bytes) becomes 1 to 3 digits: move the rest left.
+  // "self" (4 bytes) becomes 1 to 4 digits: move the rest left.
   let d = dec_out(&mut x, 5, pid);
   let l = blen(x);
   let mut i = 9;
@@ -310,7 +317,9 @@ fn proc_vpid(k: &mut Kernel, n: u64, pid: u64) -> u64
   }
   let l = e - 5;
   let mut d = 1;
-  if row >= 100 {
+  if row >= 1000 {
+    d = 4;
+  } else if row >= 100 {
     d = 3;
   } else if row >= 10 {
     d = 2;
@@ -332,7 +341,7 @@ fn proc_vpid(k: &mut Kernel, n: u64, pid: u64) -> u64
   }
   let mut j = n;
   while j > e
-    invariant e <= j && j <= n && n + d - l <= FNAME_MAX && l < d && d <= 3 && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
+    invariant e <= j && j <= n && n + d - l <= FNAME_MAX && l < d && d <= 4 && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
   {
     bset(&mut k.fs.xfer, j - 1 + d - l, bget(k.fs.xfer, j - 1));
     j = j - 1;
@@ -347,20 +356,20 @@ fn proc_pid(procs: &Buf, x: &Bytes, from: u64, to: u64) -> u64
   requires ptab_ok(procs) && from <= to && to <= blen(x)
   ensures result <= NPROC
 {
-  if to == from || to - from > 3 || bget(x, from) == 48 {
+  if to == from || to - from > 4 || bget(x, from) == 48 {
     return NPROC;
   }
   let mut p = 0;
   let mut i = from;
   while i < to
-    invariant from <= i && i <= to && p < 1000
+    invariant from <= i && i <= to && p < 10000
   {
     let c = cast[u64](bget(x, i));
     if c < 48 || c > 57 {
       return NPROC;
     }
     p = p * 10 + (c - 48);
-    if p >= 1000 {
+    if p >= 10000 {
       return NPROC;
     }
     i = i + 1;
@@ -817,7 +826,7 @@ fn is_px_timens(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || f == PROC_DEV + PSYS + SY_PID_MAX || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || f == PROC_DEV + PSYS + SY_PID_MAX || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_IPC + 5 || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2218,7 +2227,49 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_s(&mut o, a, "\nprocs_blocked 0\n");
   }
   if what == PF_DISKSTATS && p == 0 {
-    return 0;                               // the disks keep no I/O counts
+    // One line for the disk (major 8, minor 0, "bastio0"): reads, merges
+    // (blocks beyond the first of a command), sectors and milliseconds
+    // (ticks of 10 ms) for reads and writes, none in flight, and after the
+    // discard fields the flushes. Then two fields of our own: how many
+    // times a process was woken from a disk wait, and the milliseconds
+    // all of them slept in total.
+    let rc = k.fs.disk.q.rd_cmd;
+    let rb = k.fs.disk.q.rd_blk;
+    let wc = k.fs.disk.q.wr_cmd;
+    let wb = k.fs.disk.q.wr_blk;
+    let mut rm = 0;
+    if rb > rc {
+      rm = rb - rc;
+    }
+    let mut wm = 0;
+    if wb > wc {
+      wm = wb - wc;
+    }
+    let mut a = put_s(&mut o, 0, "   8       0 bastio0 ");
+    a = put_n(&mut o, a, rc);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, rm);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, rb % 0x20000000000000 * 8);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.rd_tk % 0x20000000000000 * 10);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, wc);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, wm);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, wb % 0x20000000000000 * 8);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.wr_tk % 0x20000000000000 * 10);
+    a = put_s(&mut o, a, " 0 0 0 0 0 0 0 ");
+    a = put_n(&mut o, a, k.fs.disk.q.fl_cmd);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.fl_tk % 0x20000000000000 * 10);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.w_wakes);
+    a = put_c(&mut o, a, 32);
+    a = put_n(&mut o, a, k.fs.disk.q.w_tk % 0x20000000000000 * 10);
+    return put_s(&mut o, a, "\n");
   }
   if what == PF_MODULES && p == 0 {
     return 0;                               // no loadable modules
@@ -2398,11 +2449,19 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_s(&mut o, a, "\nPPid:\t");
     a = put_n(&mut o, a, vpid_of(k, pid, parent));
-    if nsk_of(k, NSK_PID, p) != 0 && nsk_of(k, NSK_PID, pid) == 0 {
-      a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in its own namespace
-      a = put_n(&mut o, a, p);
-      a = put_c(&mut o, a, 9);
-      a = put_n(&mut o, a, get(k.mns, nsk_at(NSK_VPID, p)));
+    let dp = pn_depth(k, nsk_of(k, NSK_PID, p));
+    let dobs = pn_depth(k, nsk_of(k, NSK_PID, pid));
+    if dp > dobs {
+      a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in each namespace inside, down to its own
+      a = put_n(&mut o, a, vpid_of(k, pid, p));
+      let mut j = smaller(dp - dobs, 3);
+      while j > 0 && j <= 3
+        invariant j <= 3 && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
+      {
+        j = j - 1;
+        a = put_c(&mut o, a, 9);
+        a = put_n(&mut o, a, get(k.mns, nsk_at(vp_kind(j), p)));
+      }
     }
     a = put_s(&mut o, a, "\nUid:");
     a = put_ids(&mut o, a, k, pid, p, 0, F_UID, F_SUID);
@@ -2492,12 +2551,12 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     // debugger asks for AT_ENTRY to find where a PIE program was loaded.
     let w = pget(k.procs, p, F_ARGS);
     let top = w % 1099511627776;
-    if w / 1099511627776 != 0 && top >= 288 {
-      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 288, &mut k.fs.xfer, 288) == 288 {
+    if w / 1099511627776 != 0 && top >= 320 {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 320, &mut k.fs.xfer, 320) == 320 {
         let mut j = 0;
         let mut found = false;
-        while j < 28 && !found
-          invariant j <= 28 && blen(k.fs.xfer) == XFER
+        while j < 8 && !found
+          invariant j <= 8 && blen(k.fs.xfer) == XFER
         {
           if rd64(k.fs.xfer, 8 * j) == 3 && rd64(k.fs.xfer, 8 * (j + 2)) == 4 && rd64(k.fs.xfer, 8 * (j + 3)) == PH_SIZE && rd64(k.fs.xfer, 8 * (j + 4)) == 5 {
             found = true;
@@ -2507,20 +2566,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         }
         if found {
           let mut e = j;
-          while e < 34 && rd64(k.fs.xfer, 8 * e) != 0
-            invariant j <= e && e <= 35 && blen(k.fs.xfer) == XFER
+          while e < 38 && rd64(k.fs.xfer, 8 * e) != 0
+            invariant j <= e && e <= 39 && blen(k.fs.xfer) == XFER
           {
             e = e + 2;
           }
           let n = 8 * (e + 2 - j);
           let mut i = 0;
-          while i < n && i < 288
-            invariant i <= 288 && 8 * j + i <= 8 * 34 + 288 && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+          while i < n && i < 320
+            invariant i <= 320 && 8 * j + i <= 8 * 7 + 320 && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
           {
             bset(&mut o, i, bget(k.fs.xfer, 8 * j + i));
             i = i + 1;
           }
-          return smaller(n, 288);
+          return smaller(n, 320);
         }
       }
     }
@@ -3047,6 +3106,26 @@ fn proc_peek(procs: &Buf, pid: u64, p: u64) -> bool
   return pid == p || cred_root(procs, pid) || same_ids(procs, pid, p);
 }
 
+/// Whether /proc file f is one of another process's whose content tells
+/// pid more than it may know: the memory map (/proc/PID/maps) and the
+/// auxiliary vector (/proc/PID/auxv) give away where its stack, libraries
+/// and code lie, /proc/PID/mem is its memory, and /proc/PID/io counts what
+/// it reads and writes. Linux hides them from anyone who could not ptrace
+/// the process (EACCES at open); so does this, by proc_peek.
+fn proc_secret(procs: &Buf, pid: u64, f: u64) -> bool
+  requires ptab_ok(procs) && pid < NPROC
+{
+  if f < PROC_DEV + 16 || f >= PROC_DEV + PSYS {
+    return false;
+  }
+  let p = (f - PROC_DEV) / 16;
+  let w = (f - PROC_DEV) % 16;
+  if p >= NPROC || (w != PF_MAPS && w != PF_AUXV && w != PF_MEM && w != PF_IO) {
+    return false;
+  }
+  return !proc_peek(procs, pid, p);
+}
+
 /// Whether the path at user address path ends in the component "self"
 /// (after "/" or alone): readlink of /proc/self, which the walk rewrites to
 /// the caller's /proc/PID.
@@ -3422,6 +3501,13 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
   let sbase = PROC_DEV + PSYS + SY_SC;
   if f >= sbase && f < sbase + SCT_NUM {
     k.sys = set(k.sys, SYS_SCT + (f - sbase), v + 1);
+    return n;
+  }
+  if f == PROC_DEV + PSYS + SY_IPC + 5 {
+    if v > 32768 {
+      return EINVAL;                        // IPCMNI
+    }
+    k.sys = set(k.sys, SYS_MSGMNI, v + 1);
     return n;
   }
   if f == PROC_DEV + PSYS + SY_PID_MAX {
