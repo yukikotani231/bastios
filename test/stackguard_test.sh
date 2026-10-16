@@ -93,6 +93,14 @@ class Gdb:
                 return m.group(1)
             self.buf += self.s.recv(4096)
 
+def rsp_of(g):
+    # Read the registers with `g`, not `p7`: under KVM QEMU takes a
+    # processor's registers from the kernel only for `g` (and the monitor),
+    # so `p7` on a processor nothing has read yet returned 0, and the
+    # write of rsp below was then lost as well.
+    regs = g.packet(b"g")
+    return int.from_bytes(bytes.fromhex(regs[7 * 16:8 * 16].decode()), "little")
+
 fails = 0
 if not read_until(b"bastios> "):
     print("FAIL: no prompt after boot"); fails += 1
@@ -112,7 +120,7 @@ else:
     if g.packet(b"Hg2") != b"OK":
         print("FAIL could not select the application processor"); fails += 1
     else:
-        ap = int.from_bytes(bytes.fromhex(g.packet(b"p7").decode()), "little")
+        ap = rsp_of(g)
         ap_guard = ap - ap % CORE_BLOCK + CORE_GUARD
         under, above = g.packet(b"m%x,8" % ap_guard), g.packet(b"m%x,8" % (ap_guard + PAGE))
         if under.startswith(b"E") and not above.startswith(b"E"):
@@ -120,7 +128,7 @@ else:
         else:
             print(f"FAIL application processor guard {ap_guard:#x}: {under!r}, above it {above!r}"); fails += 1
     g.packet(b"Hg1")
-    rsp = int.from_bytes(bytes.fromhex(g.packet(b"p7").decode()), "little")
+    rsp = rsp_of(g)
     block = rsp - rsp % CORE_BLOCK
     guard = block + CORE_GUARD
     new = guard + PAGE + 16

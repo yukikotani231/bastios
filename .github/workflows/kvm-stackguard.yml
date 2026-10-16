@@ -21,8 +21,10 @@ jobs:
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - run: tools/ci-kvm.sh
       - run: make build/bastios.elf NATIVE=1 BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
-      - name: stackguard under KVM, native kernel
-        run: STACKGUARD_DEBUG=1 test/stackguard_test.sh || true
+      - name: stackguard under KVM, native kernel, the test as it was (3 runs)
+        run: for i in 1 2 3; do test/stackguard_old.sh 2>&1 | grep -E "^(ok|FAIL|----)"; done || true
+      - name: stackguard under KVM, native kernel, the test with the fix (3 runs)
+        run: for i in 1 2 3; do test/stackguard_test.sh 2>&1 | grep -E "^(ok|FAIL|----)"; done || true
       - run: make build/bastios.elf BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
-      - name: stackguard under KVM, C kernel
-        run: STACKGUARD_DEBUG=1 test/stackguard_test.sh || true
+      - name: stackguard under KVM, C kernel, the test with the fix
+        run: test/stackguard_test.sh 2>&1 | grep -E "^(ok|FAIL|----)" || true
