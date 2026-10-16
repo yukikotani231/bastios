@@ -9,6 +9,7 @@
 import "pages.bastio";
 import "proc.bastio";
 import "console.bastio";
+import "utf8.bastio";
 import "space.bastio";
 import "syscall.bastio";
 import "oflags.bastio";
@@ -984,7 +985,7 @@ const VMIN_AT: u64 = 23;                  // c_cc[VMIN]
 /// Byte i of the terminal's settings until a program sets them: canonical
 /// mode with echo, as a Linux console starts.
 fn tt_default(i: u64) -> u64 {
-  if i == 1 { return 1; }                 // c_iflag: ICRNL (0x100)
+  if i == 1 { return 0x41; }              // c_iflag: ICRNL (0x100) | IUTF8 (0x4000)
   if i == 4 { return 5; }                 // c_oflag: OPOST | ONLCR
   if i == 8 { return 0xBF; }              // c_cflag: B38400 | CS8 | CREAD
   if i == 12 { return 0x3B; }             // c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK
@@ -1521,11 +1522,40 @@ fn tty_key(con: &mut Con, l: &mut Buf, c: u64, echo: bool)
     l = set(l, 1, 1);
   } else if c == 127 || c == 8 {
     if n > 0 {
-      l = set(l, 0, n - 1);
+      // With IUTF8 one erase takes the whole character, and takes back
+      // as many cells on the screen as it filled.
+      let mut cut = 1;
+      let mut cp = get(l, 2 + n - 1) % 256;
+      if tt_flags(l, 0) & IUTF8 != 0 {
+        let mut mul = 1;
+        let mut acc = 0;
+        while cut < 4 && cut < n && utf8_cont(get(l, 2 + n - cut) % 256)
+          invariant 1 <= cut && cut <= 4 && cut <= n && n <= LINE_MAX && lineok(l) && acc < mul
+          && (cut == 1 ==> mul == 1) && (cut == 2 ==> mul == 64) && (cut == 3 ==> mul == 4096) && (cut == 4 ==> mul == 262144)
+        {
+          acc = acc + (get(l, 2 + n - cut) % 64) * mul;
+          mul = mul * 64;
+          cut = cut + 1;
+        }
+        let lead = get(l, 2 + n - cut) % 256;
+        if cut > 1 && utf8_len(lead) == cut {
+          cp = acc + utf8_lead_bits(lead, cut) * mul;
+        } else if cut > 1 {
+          cut = 1;                              // stray continuation bytes: one at a time
+          cp = 0x80;
+        }
+      }
+      l = set(l, 0, n - cut);
       if echo {
-        con_write(&mut con, 8);
-        con_write(&mut con, 32);
-        con_write(&mut con, 8);
+        let mut w = cp_width(cp);
+        while w > 0
+          invariant con_ok(con)
+        {
+          con_write(&mut con, 8);
+          con_write(&mut con, 32);
+          con_write(&mut con, 8);
+          w = w - 1;
+        }
       }
     }
   } else if c >= 32 && c <= 255 && n + 1 < LINE_MAX {

@@ -74,6 +74,33 @@ int main(void) {
         EXPECT("Ctrl-D on an empty line reads as end of file", read(s, buf, sizeof buf) == 0);
         fcntl(s, F_SETFL, fl);
     }
+    {
+        struct termios t;
+        EXPECT("IUTF8 can be set", tcgetattr(s, &t) == 0 && (t.c_iflag |= IUTF8, tcsetattr(s, TCSANOW, &t)) == 0 &&
+               tcgetattr(s, &t) == 0 && (t.c_iflag & IUTF8));
+        /* "a", "e acute" (2 bytes, 1 cell), "nichi" (3 bytes, 2 cells), erase, erase, "b". */
+        if (write(m, "a\xc3\xa9\xe6\x97\xa5", 6) != 6) return 1;
+        drain(m, buf, sizeof buf);
+        if (write(m, "\x7f", 1) != 1) return 1;
+        int e1 = drain(m, buf, sizeof buf);
+        /* One back-space, space, back-space per cell; Linux counts a wide character as one cell, BastiOS as two. */
+        EXPECT("erasing a wide character echoes whole erasures", (e1 == 3 || e1 == 6) && memcmp(buf, "\b \b\b \b", e1) == 0);
+        if (write(m, "\x7f", 1) != 1) return 1;
+        int e2 = drain(m, buf, sizeof buf);
+        EXPECT("erasing a two-byte character takes back one cell", e2 == 3 && memcmp(buf, "\b \b", 3) == 0);
+        if (write(m, "b\n", 2) != 2) return 1;
+        drain(m, buf, sizeof buf);
+        ssize_t n = read(s, buf, sizeof buf);
+        EXPECT("with IUTF8 erase takes whole characters", n == 3 && memcmp(buf, "ab\n", 3) == 0);
+        t.c_iflag &= ~IUTF8;
+        EXPECT("IUTF8 can be cleared", tcsetattr(s, TCSANOW, &t) == 0);
+        if (write(m, "\xc3\xa9\x7f" "x\n", 5) != 5) return 1;
+        drain(m, buf, sizeof buf);
+        n = read(s, buf, sizeof buf);
+        EXPECT("without IUTF8 erase takes one byte", n == 3 && memcmp(buf, "\xc3x\n", 3) == 0);
+        t.c_iflag |= IUTF8;
+        tcsetattr(s, TCSANOW, &t);
+    }
     EXPECT("output LF goes out as CR LF",
            write(s, "out\n", 4) == 4 && drain(m, buf, sizeof buf) == 5 && strcmp(buf, "out\r\n") == 0);
 
