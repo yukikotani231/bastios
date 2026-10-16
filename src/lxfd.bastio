@@ -408,6 +408,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     ino_free(&mut k, x);
   } else if kind == OF_SECCOMP && x < SC_N {
     sc_listener_closed(&mut k, x);          // src/lxseccomp.bastio
+  } else if kind == OF_DEV && x == DEV_FB {
+    fb_closed(&mut k);                      // src/lxfb.bastio: the console is drawn again after the last one
   } else if kind == OF_BPF && x < DVP_N {
     bpf_release(&mut k, x, w);              // src/lxbpf.bastio
   } else if kind == OF_PIPE_R && x < NPIPES {
@@ -973,6 +975,9 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
 {
   if dev == DEV_MICE {
     return mice_open(&mut k, pid, flags);   // src/lxmouse.bastio
+  }
+  if dev == DEV_FB {
+    return fb_open(&mut k, pid, flags);     // src/lxfb.bastio
   }
   let hv = ofd_new(&mut k, OF_DEV, dev);
   if hv >= OFD_N {

@@ -16,6 +16,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- The ARP cache holds 64 neighbors (4 before): a machine on a network with more than four neighbors no longer asks again for the ones it just forgot.
+- The system runs 1023 processes and threads at once (511 before). `NPROC` is 1024; the per-process tables follow it, and `/proc/PID` names, `dec_out` and `proc_pid` take four-digit ids. `mproc` holds 700 children at once and checks ids past 511. A machine with a small kernel heap still stops sooner (about 250 at 256 MiB), because the per-process tables double at 257 rows.
 - The kernel looks at UHCI (USB 1.1) controllers and says in the boot log how many there are and how many devices are on their ports. There is no driver for them yet; this shows whether a USB keyboard on an older PC is out of reach.
 - The hardware report's `pci` lines say when a SATA controller is in RAID mode (Intel RST) or Intel VMD is on, which hide the disks from BastiOS, and what to change in the firmware.
 - On Intel 7-, 8- and 9-series chipsets the xHCI driver routes the USB 2 ports from the EHCI controller to the xHCI controller (and enables its SuperSpeed ports) before starting it, so keyboards and sticks behind those ports are found. Untested on hardware: QEMU's xHCI has no such registers.
@@ -51,6 +53,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
   console and PSCI power off, with the native-ABI programs (`sh`, `hello`,
   `spin`, `true`) running at EL0. `test/aarch64_test.sh` is part of `make test`.
   The Linux layer, the file system and the network are still x86-64 only.
+- Programs get AT_HWCAP and AT_HWCAP2 in their auxiliary vector (`HWCAP_FP | HWCAP_ASIMD | HWCAP_CPUID` on AArch64, 0 on x86-64). A musl built with optimised string routines reads them before it has a thread pointer and crashed without them. `/proc/PID/auxv` reads the longer vector, and core files carry an AArch64 `NT_PRSTATUS`, so gdb 16 debugs programs on AArch64 (breakpoints in a PIE program, attach, threads, a core file).
 
 ### Network
 
@@ -197,6 +200,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- `/dev/fb0`: the screen for programs that draw their own pixels (`src/lxfb.bastio`). `FBIOGET_VSCREENINFO` and `FBIOGET_FSCREENINFO` give the 32-bit mode; `write` and `lseek` store pixels. The text console stops drawing while a description is open and is drawn again when the last one closes. `user/mfb.c` draws a pattern, and `test/iso_test.sh` reads it back from a QEMU screendump under BIOS and UEFI. The framebuffer stays inside the proved device window; the pixels reach it through a ring the console pump empties. There is no `mmap` of it yet.
+
+- A read of a regular file on the disk is no longer cut short when some of its blocks are not cached yet: `read`, `pread64` and the calls built on them wait for the disk and return the whole count (they returned the cached part first, and a program that takes the count for granted, such as the JVM reading its modules file, got zeros for the rest). The JDK of the eclipse-temurin image (`java`, `javac`, `jar`; records, streams, threads, files, exit status) now runs in the compatibility suite; the lane unpacks the image's root (about 400 MB) from a tar file on its disk.
 - A writable `MAP_SHARED` mapping of a file is written back even after a program has mapped twenty files read-only (a writable mapping of a file takes the place of a read-only file's mapping when a process's 16 write-back records are all in use), and `munmap` or `msync` of a range of a disk file larger than the disk's write queue now finishes (it waited for the disk and started over from the first page, for ever). Go's linker does both; the Go toolchain of the golang image (`go run`, `go build`, `go test`, `gofmt`; goroutines and the collector) now runs in the compatibility suite.
 - The Rust toolchain of the rust:alpine image (`rustc`, `cargo build`, `cargo run`, `cargo test`, threads, files, panics) runs in the compatibility suite, with no kernel change; the lane unpacks the image's root (about 1 GB) from a tar file on its disk.
 - ptrace for debuggers: a tracer can write into the read-only code of a program it traces (a breakpoint), read code the program has not run yet, and read and write its x87/SSE registers (`PTRACE_GETFPREGS`, `SETFPREGS`); a breakpoint trap says `SI_KERNEL` and a single step `TRAP_TRACE` in `PTRACE_GETSIGINFO`; `strace -p` hears of the death of a process whose parent is elsewhere. `/proc/PID/auxv` exists (gdb finds where a PIE program was loaded), and lseek on it moves its offset (lseek on the other /proc files is still ignored). Tested: `strace -p`, and gdb 16 stops at a breakpoint of a dynamically linked PIE program, prints its arguments and backtrace and finishes the function, and attaches to a running one (`gdb -p`), stops it at a breakpoint and detaches (x86-64; it needs Alpaquita's musl loader for ifunc relocations and an x86-64-v2 CPU, which the compat lane's QEMU now asks for).
@@ -436,6 +442,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Build and test
 
+- For contributors: `tools/setup-dev.sh` sets up a Debian or Ubuntu machine in one command (and a dev container runs it), CONTRIBUTING.md explains the issue labels and where to find a first issue, and a feature-request issue template and `.github/labels.yml` (synced by a workflow) were added.
 - `test/stackdepth.py` checks that the deepest chain of kernel calls in a native kernel fits the kernel stack (it fails above 64 KiB of the 92 KiB; today 41 KiB). It was written after a native kernel built with an older compiler overflowed its stack in the UDP path under a loaded test run: its functions had frames up to 19 KiB where the current compiler's are under 4.5 KiB (the boot function aside).
 
 ### Files and disks
