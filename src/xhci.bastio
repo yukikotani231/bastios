@@ -63,6 +63,7 @@ import "pci.bastio";
 import "pages.bastio";
 import "bio.bastio";
 import "blkconst.bastio";
+import "navkeys.bastio";
 
 const XHCI_CLASS: u64 = 0x0C0330;      // serial bus controller, USB, xHCI
 const XHCI_PAGES: u64 = 11;
@@ -1767,6 +1768,20 @@ fn kbd_report(x: &mut Xhci)
     if k >= 4 && !was && b < 256 && x.qn < 16 {
       bset(&mut x.q, x.qn, cast[u8](b));
       x.qn = x.qn + 1;
+    } else if k >= 4 && !was && nav_usb(k) <= NAV_PGDN && x.qn <= 12 {
+      // An editing key is ESC and up to three bytes more.
+      let mut rest = nav_rest(nav_usb(k));
+      bset(&mut x.q, x.qn, 27);
+      x.qn = x.qn + 1;
+      let mut m = 0;
+      while m < 3 && rest != 0 && x.qn < 16
+        invariant m <= 3 && x.qn <= 16 && xhci_ok(x)
+      {
+        bset(&mut x.q, x.qn, cast[u8](rest % 256));
+        x.qn = x.qn + 1;
+        rest = rest / 256;
+        m = m + 1;
+      }
     }
     i = i + 1;
   }

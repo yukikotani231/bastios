@@ -96,6 +96,7 @@ busybox: diff
 busybox: du
 busybox: echo
 busybox: env
+busybox: lang
 busybox: expr
 busybox: find
 busybox: free
@@ -1441,3 +1442,17 @@ t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+t_pty: IUTF8 can be set
+t_pty: erasing a wide character echoes whole erasures
+t_pty: erasing a two-byte character takes back one cell
+t_pty: with IUTF8 erase takes whole characters
+t_pty: IUTF8 can be cleared
+t_pty: without IUTF8 erase takes one byte
+tty: utf-8: erase takes back a whole character on the console
+alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
+alpine-tty: nvim: it counts characters and cells of Japanese text
+t_time: TZ=JST-9 is nine hours ahead
+t_time: TZ with a DST rule
+t_time: and outside the DST period
+t_time: a zone file is written
+t_time: TZ naming a zone file reads it

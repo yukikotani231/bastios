@@ -32,7 +32,9 @@ static const uint32_t palette[16] = {
 
 struct cell { unsigned char ch, fg, bg; };
 static struct cell grid[ROWS][COLS];
-static uint32_t pix[WIDTH * HEIGHT];
+static uint32_t pixbuf[WIDTH * HEIGHT];
+static uint32_t *pix = pixbuf;            /* the window's pixels: bwm's shared memory when it gave some */
+static int shared;
 static unsigned char dirty[ROWS];
 static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
@@ -327,7 +329,7 @@ static int repaint(int fd, int id, int *old_cx, int *old_cy)
         for (int c = 0; c < COLS; c++)
             draw_cell(r, c, r == cy && c == ccx);
         dirty[r] = 0;
-        if (bwm_draw(fd, id, pix, WIDTH, 0, r * CH, WIDTH, CH) != 0)    /* a row: 640 pixels, 2560 bytes */
+        if ((shared ? bwm_damage(fd, id, 0, r * CH, WIDTH, CH) : bwm_draw(fd, id, pix, WIDTH, 0, r * CH, WIDTH, CH)) != 0)
             return -1;
     }
     *old_cx = ccx;
@@ -342,7 +344,15 @@ int main(void)
         puts("bterm: no window server");
         return 2;
     }
-    int id = bwm_create(fd, WIDTH, HEIGHT, "Terminal");
+    int id = bwm_create_shm(fd, WIDTH, HEIGHT, "Terminal", &pix);
+    if (id >= 0) {
+        shared = 1;
+    } else {
+        pix = pixbuf;
+        close(fd);                                /* a failed try may have cost the connection */
+        fd = bwm_connect();
+        id = fd < 0 ? -1 : bwm_create(fd, WIDTH, HEIGHT, "Terminal");
+    }
     if (id < 0) {
         puts("bterm: cannot open a window");
         return 1;

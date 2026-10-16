@@ -22,6 +22,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <termios.h>
@@ -71,6 +73,8 @@ struct win {
     int x, y, w, h;                      /* the frame, with its title bar */
     char title[24];
     uint32_t body;
+    uint32_t *shm;                       /* the client's memory file, mapped, when it gave one */
+    size_t shm_len;
     uint32_t *pix;                       /* a client's contents: (w - 2 * BORDER) * (h - TITLE_H - BORDER) */
     int cols, rows, cx, cy;
     char text[MAX_ROWS][MAX_COLS];
@@ -84,6 +88,7 @@ struct cli {
     int fd;                              /* -1 when free */
     size_t have;
     unsigned char *rx;
+    int pend_fd;                         /* a descriptor that came with the bytes read, or -1 */
 };
 static struct cli clis[MAXCLI];
 static char path[64];
@@ -169,6 +174,9 @@ static void win_free(struct win *w)
         nz--;
     }
     free(w->pix);
+    if (w->shm)
+        munmap(w->shm, w->shm_len);
+    w->shm = NULL;
     w->used = 0;
 }
 
@@ -340,6 +348,9 @@ static void drop_client(int i)
             win_free(&pool[j]);
         }
     close(clis[i].fd);
+    if (clis[i].pend_fd >= 0)
+        close(clis[i].pend_fd);
+    clis[i].pend_fd = -1;
     clis[i].fd = -1;
     clis[i].have = 0;
 }
@@ -355,24 +366,51 @@ static struct win *by_id(int cli, uint32_t id)
 /* One whole message from client i, `n` bytes at c->rx. */
 static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
 {
-    if (type == BWM_CREATE && len == sizeof(struct bwm_create)) {
+    if ((type == BWM_CREATE || type == BWM_CREATE_SHM) && len == sizeof(struct bwm_create)) {
         struct bwm_create c;
         memcpy(&c, p, sizeof c);
         c.title[sizeof c.title - 1] = 0;
+        int mf = type == BWM_CREATE_SHM ? clis[i].pend_fd : -1;
+        clis[i].pend_fd = -1;
+        if (type == BWM_CREATE_SHM && mf < 0) {
+            drop_client(i);                                /* a shared window needs its file */
+            return;
+        }
         if (c.w < 16 || c.h < 16 || c.w > W - 2 * BORDER || c.h > H - TITLE_H - BORDER) {
+            if (mf >= 0)
+                close(mf);
             drop_client(i);
             return;
         }
         struct win *w = win_new(40 + 30 * (next_id % 8), 40 + 30 * (next_id % 8), c.w, c.h, c.title, i);
         if (!w) {
+            if (mf >= 0)
+                close(mf);
             drop_client(i);
             return;
         }
         w->pix = calloc((size_t)c.w * c.h, 4);
         if (!w->pix) {
+            if (mf >= 0)
+                close(mf);
             win_free(w);
             drop_client(i);
             return;
+        }
+        if (mf >= 0) {
+            struct stat st;
+            size_t need = (size_t)c.w * c.h * 4;
+            void *m = MAP_FAILED;
+            if (fstat(mf, &st) == 0 && st.st_size >= 0 && (size_t)st.st_size >= need)
+                m = mmap(NULL, need, PROT_READ, MAP_SHARED, mf, 0);
+            close(mf);
+            if (m == MAP_FAILED) {
+                win_free(w);
+                drop_client(i);
+                return;
+            }
+            w->shm = m;
+            w->shm_len = need;
         }
         for (size_t k = 0; k < (size_t)c.w * c.h; k++)
             w->pix[k] = w->body;
@@ -385,16 +423,27 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         memcpy(&d, p, sizeof d);
         struct win *w = by_id(i, d.id);
         int cw = w ? cw_of(w) : 0, ch = w ? ch_of(w) : 0;
-        if (!w || d.x >= (uint32_t)cw || d.y >= (uint32_t)ch || d.w > (uint32_t)cw - d.x || d.h > (uint32_t)ch - d.y
-            || len != sizeof d + (size_t)d.w * d.h * 4)
+        if (!w || d.x >= (uint32_t)cw || d.y >= (uint32_t)ch || d.w > (uint32_t)cw - d.x || d.h > (uint32_t)ch - d.y)
             return;
-        const unsigned char *s = p + sizeof d;
-        for (uint32_t r = 0; r < d.h; r++)
-            for (uint32_t c = 0; c < d.w; c++) {
-                uint32_t px;
-                memcpy(&px, s + ((size_t)r * d.w + c) * 4, 4);
-                w->pix[(size_t)(d.y + r) * cw + d.x + c] = from_wire(px);
-            }
+        if (w->shm) {
+            if (len != sizeof d)
+                return;
+            for (uint32_t r = 0; r < d.h; r++)
+                for (uint32_t c = 0; c < d.w; c++) {
+                    size_t k = (size_t)(d.y + r) * cw + d.x + c;
+                    w->pix[k] = from_wire(w->shm[k]);
+                }
+        } else {
+            if (len != sizeof d + (size_t)d.w * d.h * 4)
+                return;
+            const unsigned char *s = p + sizeof d;
+            for (uint32_t r = 0; r < d.h; r++)
+                for (uint32_t c = 0; c < d.w; c++) {
+                    uint32_t px;
+                    memcpy(&px, s + ((size_t)r * d.w + c) * 4, 4);
+                    w->pix[(size_t)(d.y + r) * cw + d.x + c] = from_wire(px);
+                }
+        }
         touch(w->x + BORDER + d.x, w->y + TITLE_H + d.y, w->x + BORDER + d.x + d.w, w->y + TITLE_H + d.y + d.h);
     } else if (type == BWM_DESTROY && len == sizeof(struct bwm_destroy)) {
         struct bwm_destroy d;
@@ -421,7 +470,21 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
 static void client_input(int i)
 {
     struct cli *c = &clis[i];
-    ssize_t n = read(c->fd, c->rx + c->have, RXCAP - c->have);
+    struct iovec iov = { c->rx + c->have, RXCAP - c->have };
+    union { char b[CMSG_SPACE(sizeof(int))]; struct cmsghdr a; } u;
+    struct msghdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = u.b;
+    mh.msg_controllen = sizeof u.b;
+    ssize_t n = recvmsg(c->fd, &mh, MSG_CMSG_CLOEXEC);
+    for (struct cmsghdr *cm = n >= 0 ? CMSG_FIRSTHDR(&mh) : NULL; cm; cm = CMSG_NXTHDR(&mh, cm))
+        if (cm->cmsg_level == SOL_SOCKET && cm->cmsg_type == SCM_RIGHTS && cm->cmsg_len == CMSG_LEN(sizeof(int))) {
+            if (c->pend_fd >= 0)
+                close(c->pend_fd);
+            memcpy(&c->pend_fd, CMSG_DATA(cm), sizeof(int));
+        }
     if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
         drop_client(i);
         return;
@@ -496,6 +559,7 @@ int main(int argc, char **argv)
     }
     for (int i = 0; i < MAXCLI; i++) {
         clis[i].fd = -1;
+        clis[i].pend_fd = -1;
         clis[i].rx = malloc(RXCAP);
     }
     int ls = listen_socket();
