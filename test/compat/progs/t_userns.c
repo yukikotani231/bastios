@@ -112,6 +112,75 @@ static int nested_userns(void) {
     return getuid() == 7 && strstr(t, "         7          0          1") != NULL;
 }
 
+/* The root of a user namespace has the capabilities over the namespaces of
+ * the user namespaces made inside it: it joins the UTS and network
+ * namespaces a child user namespace made and sets the hostname there. */
+static int parent_over_child_namespaces(void) {
+    int up[2], down[2];
+    if (pipe(up) || pipe(down)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b, name[64];
+        if (unshare(CLONE_NEWUSER) != 0) _exit(10);
+        if (write_trunc("/proc/self/setgroups", "deny", 4) != 4) _exit(11);
+        if (write_trunc("/proc/self/uid_map", "0 0 1\n", 6) != 6) _exit(12);
+        if (write_trunc("/proc/self/gid_map", "0 0 1\n", 6) != 6) _exit(13);
+        if (unshare(CLONE_NEWUTS | CLONE_NEWNET) != 0) _exit(14);
+        if (sethostname("inner", 5) != 0) _exit(15);
+        if (write(up[1], "x", 1) != 1 || read(down[0], &b, 1) != 1) _exit(16);
+        _exit(0);
+    }
+    char b;
+    int ok = read(up[0], &b, 1) == 1;
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/ns/uts", (int)c);
+    int fu = open(path, O_RDONLY);
+    snprintf(path, sizeof path, "/proc/%d/ns/net", (int)c);
+    int fn = open(path, O_RDONLY);
+    ok = ok && fu >= 0 && fn >= 0;
+    pid_t j = ok ? fork() : -1;
+    if (j == 0) {
+        char name[64];
+        if (setns(fu, CLONE_NEWUTS) != 0) _exit(1);
+        if (gethostname(name, sizeof name) != 0 || strcmp(name, "inner") != 0) _exit(2);
+        if (sethostname("outer2", 6) != 0) _exit(3);
+        if (setns(fn, CLONE_NEWNET) != 0) _exit(4);
+        _exit(0);
+    }
+    int jst = 0;
+    ok = ok && j > 0 && waitpid(j, &jst, 0) == j && WIFEXITED(jst) && WEXITSTATUS(jst) == 0;
+    if (!ok && j > 0 && WIFEXITED(jst)) errno = 1000 + WEXITSTATUS(jst);
+    ok = write(down[1], "y", 1) == 1 && ok;
+    int st = 0;
+    ok = waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && ok;
+    if (fu >= 0) close(fu);
+    if (fn >= 0) close(fn);
+    return ok;
+}
+
+/* And the reverse: a user namespace made inside another has no capability
+ * over the UTS, mount and network namespaces of the one around it, even
+ * when its root is the only one there. */
+static int child_not_over_parent_namespaces(void) {
+    if (unshare(CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET) != 0) return 0;
+    mkdir("/tmp/ud_cm", 0755);
+    pid_t c = fork();
+    if (c == 0) {
+        if (unshare(CLONE_NEWUSER) != 0) _exit(10);
+        if (write_trunc("/proc/self/setgroups", "deny", 4) != 4) _exit(11);
+        if (write_trunc("/proc/self/uid_map", "0 0 1\n", 6) != 6) _exit(12);
+        if (write_trunc("/proc/self/gid_map", "0 0 1\n", 6) != 6) _exit(13);
+        if (sethostname("x", 1) != -1 || errno != EPERM) _exit(1);
+        if (mount("t", "/tmp/ud_cm", "tmpfs", 0, 0) != -1 || errno != EPERM) _exit(2);
+        _exit(0);
+    }
+    int st = 0;
+    int ok = waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!ok && WIFEXITED(st)) errno = 1000 + WEXITSTATUS(st);
+    rmdir("/tmp/ud_cm");
+    return ok;
+}
+
 /* After pivot_root, on a directory of the disk, runc's check that a directory descriptor reads back as
  * the path it opened (/proc/self/fd/N names the path from the new root). */
 static char pivot_dir[256];
@@ -466,6 +535,8 @@ int main(void) {
     EXPECT("an unprivileged user cannot setns, not even into the namespaces it is in", in_child(setns_unprivileged));
     EXPECT("root of a user namespace joins the mount, UTS, IPC and network namespaces it made, not the first mount or IPC one", in_userns(setns_own_kinds, 1));
     EXPECT("and the mount namespace of a process in a user namespace it made", in_userns(setns_child_mntns, 0));
+    EXPECT("the root of a user namespace joins the UTS and network namespaces a user namespace inside it made", in_userns(parent_over_child_namespaces, 0));
+    EXPECT("and a user namespace inside has none over the UTS and mount namespaces of the one around it", in_userns(child_not_over_parent_namespaces, 0));
     EXPECT("a directory descriptor reads back from the new root after pivot_root", in_userns(fdlink_after_pivot, 1));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
