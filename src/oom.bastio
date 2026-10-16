@@ -1,0 +1,201 @@
+// Running out of memory.
+//
+// A page fault that finds no free page used to end the process that
+// faulted with SIGSEGV, whoever held the memory. Now the kernel first gives
+// back what it can spare, the pages the page cache holds (oom_reclaim),
+// and tries the fault again. If that frees nothing the out-of-memory killer
+// ends the process with the highest oom_score: Linux's rule, the share of
+// the machine's pages the process holds in thousandths, moved by its
+// oom_score_adj (-1000 never kills it, 1000 makes it the first choice). The
+// kernel says whom it killed and why on the console, and /proc/vmstat
+// counts it (oom_kill).
+//
+// The faulting process waits (runs the fault again) while a victim that has
+// a SIGKILL pending is dying; the kill is not repeated for a fault the
+// victim's memory is about to satisfy. Process 1 is never the victim (as
+// on Linux); when only it is left, or the others hold nothing, the
+// faulting process gets its SIGSEGV as before.
+//
+// What this does not do: kill for memory the kernel itself holds (its heap
+// is separate and a shortage there still halts, src/proc.bastio), or for a
+// system call that finds no page (that call returns ENOMEM, as before).
+//
+// What is trusted: nothing new. The victim is ended by the signal path every
+// SIGKILL takes.
+
+import "lxcgroup.bastio";
+
+const OOM_NONE: u64 = 0;                // not out of memory: the fault is an ordinary one
+const OOM_RETRY: u64 = 1;               // memory came back (reclaim or a victim died): run the instruction again
+const OOM_WAIT: u64 = 2;                // a victim is dying: let others run, then try again
+const OOM_SELF: u64 = 3;                // the faulting process is the victim: it ends now
+
+/// Process g's oom_score_adj, -1000 .. 1000, as 1000 + adj (0 .. 2000).
+fn oom_adj1000(k: &Kernel, g: u64) -> u64
+  requires kok(k) && g < NPROC
+  ensures result <= 2000
+{
+  let w = get(k.sys, SYS_OOM + g);
+  if w == 0 {
+    return 1000;                            // never written: 0
+  }
+  if w < 2 {
+    return 0;
+  }
+  if w - 2 > 2000 {
+    return 2000;
+  }
+  return w - 2;
+}
+
+/// How bad a candidate process g (a thread group's leader) is, in thousandths
+/// of the machine's pages: the pages it holds plus its oom_score_adj taken
+/// as that many thousandths of all the pages. 0 if it holds none or its
+/// adj is -1000: it is never the victim. At least 1 otherwise.
+fn oom_score(k: &mut Kernel, g: u64) -> u64
+  requires kok(k) && g < NPROC
+  ensures kok(k) && result <= 2000
+{
+  let adj = oom_adj1000(k, g);
+  if adj == 0 {
+    return 0;
+  }
+  let total = smaller(pool_size(k.mem.pool), NPAGES);
+  if total == 0 || !has_space(&mut k.spaces, g) {
+    return 0;
+  }
+  let pages = cg_resident(&mut k, g);
+  if pages == 0 {
+    return 0;
+  }
+  let mut points = pages;
+  if adj > 1000 {
+    points = points + (adj - 1000) * total / 1000;
+  } else {
+    let cut = (1000 - adj) * total / 1000;
+    if cut >= points {
+      points = 1;
+    } else {
+      points = points - cut;
+    }
+  }
+  let mut s = points * 1000 / total;
+  if s == 0 {
+    s = 1;
+  }
+  return smaller(s, 2000);
+}
+
+/// Is a task already dying of a SIGKILL it has not yet acted on?
+fn oom_dying(k: &Kernel) -> bool
+  requires kok(k)
+{
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && kok(k)
+  {
+    if cg_live(k, q) && pget(k.procs, q, F_SIGPEND) & sbit(SIGKILL) != 0 {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// The thread group leader with the highest oom_score (not process 1), or
+/// 0 if no process can be killed. Ties go to the lower id.
+fn oom_victim(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  let mut v = 0;
+  let mut best = 0;
+  let mut q = 2;
+  while q < NPROC
+    invariant 2 <= q && q <= NPROC && v < NPROC && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q {
+      let s = oom_score(&mut k, q);
+      if s > best {
+        best = s;
+        v = q;
+      }
+    }
+    q = q + 1;
+  }
+  return v;
+}
+
+/// Says on the console whom the kernel kills for memory.
+fn oom_report(con: &mut Con, k: &mut Kernel, v: u64, score: u64)
+  requires con_ok(con) && kok(k) && v < NPROC
+  ensures con_ok(con) && kok(k)
+{
+  puts(&mut con, "\r\nOut of memory: Killed process ");
+  put_num(&mut con, v);
+  puts(&mut con, " (");
+  let n = pr_comm(&mut k, v);
+  let mut i = 0;
+  while i < n && i < 15
+    invariant i <= 15 && con_ok(con) && kok(k)
+  {
+    con_write(&mut con, bget(k.fs.xfer, i));
+    i = i + 1;
+  }
+  puts(&mut con, ") oom_score ");
+  put_num(&mut con, score);
+  puts(&mut con, ", ");
+  put_num(&mut con, cg_resident(&mut k, v) * 4);
+  puts(&mut con, " kB resident\r\n");
+}
+
+/// Sends SIGKILL to every task of the thread group led by v, and counts it.
+fn oom_kill(k: &mut Kernel, v: u64)
+  requires kok(k) && 1 <= v && v < NPROC
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_VM, sat_add(get(k.sys, SYS_VM), 1));
+  let mut r = 1;
+  while r < NPROC
+    invariant 1 <= r && r <= NPROC && kok(k)
+  {
+    if cg_live(k, r) && (r == v || in_group(k.procs, r, v)) {
+      post_sig(&mut k, r, SIGKILL);
+    }
+    r = r + 1;
+  }
+}
+
+/// Process p faulted and nothing could map the page. If that is because no
+/// page is free, gives back cached pages, or picks a victim; tells the
+/// caller what to do (OOM_*). It is the fault of a legitimate access only
+/// when `want`: the page is memory p has (a record covers it, or it is a
+/// copy-on-write page to break); otherwise this is an ordinary fault.
+fn oom_fault(k: &mut Kernel, con: &mut Con, p: u64, want: bool) -> u64
+  requires kok(k) && con_ok(con) && 1 <= p && p < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if !want {
+    return OOM_NONE;
+  }
+  if find_free(&mut k.mem) < NPAGES {
+    return OOM_NONE;                        // there is a page: the fault failed for another reason
+  }
+  if pc_shrink(&mut k.fs.pc, &mut k.mem, PC_N) > 0 && find_free(&mut k.mem) < NPAGES {
+    return OOM_RETRY;
+  }
+  if oom_dying(k) {
+    return OOM_WAIT;
+  }
+  let v = oom_victim(&mut k);
+  if v == 0 {
+    return OOM_NONE;                        // nobody to kill: the fault is fatal, as it was
+  }
+  let score = oom_score(&mut k, v);
+  oom_report(&mut con, &mut k, v, score);
+  oom_kill(&mut k, v);
+  if v == tgid(k.procs, p) {
+    return OOM_SELF;
+  }
+  return OOM_WAIT;
+}

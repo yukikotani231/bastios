@@ -1,0 +1,20 @@
+# Maintainer: Compat Suite <compat@example.org>
+pkgname=greeter
+pkgver=0.3
+pkgrel=1
+pkgdesc="Says hello with libgreet"
+url="https://example.org/greeter"
+arch="all"
+license="MIT"
+makedepends="libgreet-dev"
+install="$pkgname.post-install $pkgname.post-deinstall"
+source="greeter.c"
+builddir="$srcdir"
+
+build() {
+	cc $CFLAGS -o greeter greeter.c $(pkg-config --cflags --libs libgreet)
+}
+
+package() {
+	install -Dm755 greeter "$pkgdir"/usr/bin/greeter
+}

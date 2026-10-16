@@ -349,7 +349,7 @@ int main(void)
     /* tmpfs: mounted on an empty directory, listed in /proc/self/mounts,
      * busy while a file in it is open, emptied by umount2; read-only
      * with MS_RDONLY until a remount. */
-    if (mkdir("mt", 0755) != 0 || mount("none", "mt", "ext2", 0, 0) != -1 || errno != ENODEV)
+    if (mkdir("mt", 0755) != 0 || mount("none", "mt", "xfs", 0, 0) != -1 || errno != ENODEV)
         return fail("mount of a type BastiOS lacks");
     if (mount("none", "mt", "tmpfs", 0, 0) != 0 || mount("none", "mt", "tmpfs", 0, 0) != -1 || errno != EBUSY)
         return fail("mount of tmpfs");
