@@ -510,7 +510,9 @@ const DEV_PTMX: u64 = 7;               // OF_DEV path /dev/ptmx (opening it make
 const DEV_PTSDIR: u64 = 8;             // /dev/pts, a directory to stat
 const DEV_DSP: u64 = 9;                // OF_DEV device /dev/dsp, the sound card (src/lxsnd.bastio)
 const DEV_FULL: u64 = 11;               // OF_DEV device /dev/full: zeros to read, ENOSPC to write (src/lxdev.bastio)
+const DEV_FB: u64 = 12;                // OF_DEV device /dev/fb0, the screen (src/lxfb.bastio)
 const DEV_MICE: u64 = 10;               // OF_DEV device /dev/input/mice and /dev/psaux (src/lxmouse.bastio)
+const GFX_LEN: u64 = 131664;            // GFX_HDR + GFX_SLOTS * GFX_SLOT: /dev/fb0's queue (src/lxfb.bastio)
 const MICE_LEN: u64 = 824;              // its packets: a 56-byte header and 192 packets of 4 bytes
 const DEV_PTM: u64 = 128;              // an OF_PTY master is DEV_PTM + N
 const DEV_PTS: u64 = 192;              // and its slave, /dev/pts/N, DEV_PTS + N
@@ -525,7 +527,8 @@ const LK_WW: u64 = 4;
 const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is in an entry below this
 const LK_LEN: u64 = LK_HI + 1;
 const IPC_LEN: u64 = 9728 + NPROC * 96;            // System V IPC words: SA_BASE + NPROC * SA_N * SA_W (src/lxipc.bastio)
-const RNG_LEN: u64 = 19;              // the random generator's words (src/lxdev.bastio)
+const INFO_RAND: u64 = 12;            // boot_info: the processor's RDSEED / RDRAND (x86-64 only; AArch64 answers 0): 0 which there are (bit 0 RDSEED, bit 1 RDRAND), else a word (0: none given)
+const RNG_LEN: u64 = 21;              // the random generator's words (src/lxdev.bastio)
 const SYS_SHMMAX: u64 = 154;           // /proc/sys/kernel/shmmax as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_PQ: u64 = 160;
 const SYS_NEXTID: u64 = 151;           // 151 .. 153: the id /proc/sys/kernel/{msg,sem,shm}_next_id asks the next new queue, set or segment to get, + 1 (0: none; src/lxipc.bastio)
@@ -1038,6 +1041,7 @@ struct Kernel {
   sys: Buf,             // settings root may change: names, the clock discipline (src/lxsys.bastio)
   snd: Snd,             // the sound card, if any (src/hda.bastio)
   mice: Bytes,          // mouse packets for /dev/input/mice (src/lxmouse.bastio)
+  gfx: Bytes,           // the screen for /dev/fb0: its geometry and the pixels waiting for the console pump (src/lxfb.bastio)
   mns: Buf,             // mount namespaces: each process's, and their mounts (src/lxns.bastio)
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
@@ -1129,14 +1133,14 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 36;
+const NPROGS: u64 = 40;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1248,6 +1252,18 @@ fn prog_name(i: u64) -> Str {
   if i == 35 {
     return "mproc";
   }
+  if i == 36 {
+    return "mfb";
+  }
+  if i == 37 {
+    return "bwm";
+  }
+  if i == 38 {
+    return "bhello";
+  }
+  if i == 39 {
+    return "bterm";
+  }
   return "(file)";                    // a program loaded from a file
 }
 
@@ -1266,7 +1282,7 @@ fn read_u64(s: Str, at: u64) -> u64
 
 const MAGIC: u64 = 0x0A52455355545342;   // "BSTUSER\n"
 const ARGV0_MAX: u64 = 63;              // the most bytes of a program name in argv
-const START_ENV_LEN: u64 = 84;           // start_env_str()'s length
+const START_ENV_LEN: u64 = 97;           // start_env_str()'s length
 
 /// Starts program `prog` as a child of `parent` (0 for none), with just
 /// its name as argv. Returns the new process id, or 0 if the image is
@@ -1424,7 +1440,7 @@ fn new_pid(k: &mut Kernel) -> u64
   return new_pid_from(&mut k, false);
 }
 
-/// new_pid for a thread or a forked process: it searches on from the id
+/// new_pid for a thread: it searches on from the id
 /// handed out last, so one that just ended does not share its id with the
 /// next (Linux numbers ids round and round). Programs the kernel starts
 /// itself (spawn) keep the lowest free id, which the shell and the docs show.
@@ -1433,6 +1449,39 @@ fn new_tid(k: &mut Kernel) -> u64
   ensures kok(k) && result < NPROC
 {
   return new_pid_from(&mut k, true);
+}
+
+/// new_pid for a forked process. It takes the lowest free id, as the shell
+/// and the docs show, but never the id handed out last, so a child that just
+/// ended does not give its id to the next fork. Numbering round and round
+/// instead (as new_tid does) lets the ids spread over every row of the table,
+/// and every scan for a ready process then walks all of them, so it is done
+/// only while pid_max is set to something else than its default (LTP fork13).
+fn new_fork_pid(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result < NPROC
+{
+  let w = get(k.sys, SYS_PIDMX);
+  if w != 0 && w != NPROC + 1 {
+    return new_pid_from(&mut k, true);
+  }
+  let last = pget(k.procs, 0, F_START);
+  let pid = free_pid(k.procs, 1);
+  if pid != 0 && pid == last {
+    let other = free_pid(k.procs, pid + 1);
+    if other != 0 && other != pid {
+      if other >= k.pid_hi {
+        k.pid_hi = other + 1;
+      }
+      pset(&mut k.procs, 0, F_START, other);
+      return other;
+    }
+  }
+  let c = new_pid_from(&mut k, false);
+  if c != 0 {
+    pset(&mut k.procs, 0, F_START, c);
+  }
+  return c;
 }
 
 fn new_pid_from(k: &mut Kernel, round: bool) -> u64
@@ -1500,12 +1549,13 @@ fn name_arg(args: &mut Bytes, name: Str) -> u64
 
 /// The environment a program the kernel starts gets (the shell's ash, and
 /// what it runs): where programs are, a home, and a terminal type that
-/// curses programs know (Alpine's ncurses-terminfo-base has vt100). Each
+/// curses programs know (Alpine's ncurses-terminfo-base has vt100), and
+/// a UTF-8 locale (the only non-C one musl has). Each
 /// string ends at a ";", which start_env makes a NUL.
 fn start_env_str() -> Str
   ensures slen(result) == START_ENV_LEN
 {
-  return "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin;HOME=/;TERM=vt100;";
+  return "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin;HOME=/;TERM=vt100;LANG=C.UTF-8;";
 }
 
 /// Puts start_env_str() in args after the first `from` bytes. Returns where it ends.

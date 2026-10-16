@@ -68,10 +68,17 @@ apps: wget: HTTPS from the host (BusyBox's own TLS)
 apps: wget: a file from the host
 apps: wget: a missing file is an error
 apps: wget: an IPv6 loopback server
+bastio: bastio-lsp: a type error from bastioc1 becomes a diagnostic
+bastio: bastio-lsp: formatting
+bastio: bastio-lsp: go to definition
+bastio: bastio-lsp: hover shows the signature and the doc comment
 bastio: bastioc1: a failed proof builds nothing
 bastio: bastioc1: a type error
 bastio: bastioc1: prove a program
 bastio: bastioc1: prove, build with tcc, run
+bastio: bastiofmt: --check names an unformatted file
+bastio: bastiofmt: formats the compiler's parser, and the result is formatted
+bastio: bastiofmt: lays a line out
 bastio: z3: a query
 busybox: awk
 busybox: base64
@@ -89,6 +96,7 @@ busybox: diff
 busybox: du
 busybox: echo
 busybox: env
+busybox: lang
 busybox: expr
 busybox: find
 busybox: free
@@ -567,6 +575,9 @@ t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
+t_ltp2: SIGBUS: a mapped page past the end of the file is a bus error
+t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
+t_ltp2: SIGBUS: a forked child gets it too
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
@@ -848,6 +859,18 @@ t_nsioctl: the first user namespace has no owner and no parent
 t_nsioctl: the first user namespace is owned by uid 0
 t_nsioctl: the first user namespace owns the first UTS namespace
 t_nsioctl: the owner of a user namespace its creator has no map for is 65534
+t_nx: a fork child's copy-on-write stack stays no-execute
+t_nx: a mapping moved by mremap and made executable runs
+t_nx: code in a data array does not run
+t_nx: code in a read-write mapping does not run
+t_nx: code in a shared read-write mapping does not run
+t_nx: code on the heap does not run
+t_nx: code on the stack does not run
+t_nx: code runs from a read-write-execute mapping
+t_nx: mprotect back to read-write stops the code
+t_nx: mprotect to read-write-execute keeps the code running
+t_nx: mprotect(PROT_EXEC) after writing makes the code run
+t_nx: mprotect(PROT_EXEC) on a shared mapping makes the code run
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
@@ -1419,3 +1442,17 @@ t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+t_pty: IUTF8 can be set
+t_pty: erasing a wide character echoes whole erasures
+t_pty: erasing a two-byte character takes back one cell
+t_pty: with IUTF8 erase takes whole characters
+t_pty: IUTF8 can be cleared
+t_pty: without IUTF8 erase takes one byte
+tty: utf-8: erase takes back a whole character on the console
+alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
+alpine-tty: nvim: it counts characters and cells of Japanese text
+t_time: TZ=JST-9 is nine hours ahead
+t_time: TZ with a DST rule
+t_time: and outside the DST period
+t_time: a zone file is written
+t_time: TZ naming a zone file reads it

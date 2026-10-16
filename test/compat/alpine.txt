@@ -189,6 +189,13 @@ luajit
 libuv
 tree-sitter
 
+== vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL vim xxd 2>/dev/null; echo status $?; bb chroot /disk/a /usr/bin/vim -es -u NONE -c 'call setline(1, ["hi", "there"])' -c 'w! /root/v.txt' -c 'qa!' </dev/null >/dev/null 2>&1; bb cat /disk/a/root/v.txt; bb chroot /disk/a /usr/bin/xxd -p /root/v.txt; bb chroot /disk/a /sbin/apk del -q --no-progress vim xxd 2>/dev/null
+status 0
+hi
+there
+68690a74686572650a
+
 == nvim: a script run without a terminal
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one", "two"])' -c 'w! /root/n.txt' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/n.txt; bb chroot /disk/a /usr/bin/nvim --version | bb head -n 1
 one
@@ -244,22 +251,22 @@ $ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'sle
 1
 
 == gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
-$ if [ %MACHINE% = x86_64 ]; then bb tar xf /disk/gdb.tar -C /disk/a/opt; bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -pie -fPIE -o d d.c && PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'; bb umount /disk/a/proc; fi
+$ bb tar xf /disk/gdb.tar -C /disk/a/opt; bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -pie -fPIE -o d d.c && PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'; bb umount /disk/a/proc
 Breakpoint 1, add (a=40, b=2) at d.c:2
 $1 = 42
 Value returned is $2 = 42
 
 == gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "int g; int spin(int n) { g += n; return g; }\nint main(void) { for (;;) spin(1); }\n" > spin.c && gcc -g -O0 -pie -fPIE -o spin spin.c && (./spin & sleep 2; P=$(pidof spin); PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "print g > 0" -ex "break spin" -ex c -ex detach </dev/null 2>&1 | grep -e "^\$1 = " -e "^Breakpoint 1, spin (n=1)"; kill $P)'; bb umount /disk/a/proc; fi
+$ bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "int g; int spin(int n) { g += n; return g; }\nint main(void) { for (;;) spin(1); }\n" > spin.c && gcc -g -O0 -pie -fPIE -o spin spin.c && (./spin & sleep 2; P=$(pidof spin); PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "print g > 0" -ex "break spin" -ex c -ex detach </dev/null 2>&1 | grep -e "^\$1 = " -e "^Breakpoint 1, spin (n=1)"; kill $P)'; bb umount /disk/a/proc
 $1 = 1
 Breakpoint 1, spin (n=1) at spin.c:1
 
 == gdb: attach to a program with three threads, and every thread is listed
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "#include <pthread.h>\n#include <unistd.h>\nvoid *w(void *a) { for (;;) usleep(1000); return a; }\nint main(void) { pthread_t t[2]; pthread_create(&t[0], 0, w, 0); pthread_create(&t[1], 0, w, 0); for (;;) usleep(1000); }\n" > th.c && gcc -g -O0 -pthread -o th th.c && (./th & P=$!; sleep 3; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "info threads" -ex detach </dev/null 2>&1 | grep -c "^[ *] [0-9] *LWP"; kill $P)'; bb umount /disk/a/proc; fi
+$ bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "#include <pthread.h>\n#include <unistd.h>\nvoid *w(void *a) { for (;;) usleep(1000); return a; }\nint main(void) { pthread_t t[2]; pthread_create(&t[0], 0, w, 0); pthread_create(&t[1], 0, w, 0); for (;;) usleep(1000); }\n" > th.c && gcc -g -O0 -pthread -o th th.c && (./th & P=$!; sleep 3; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "info threads" -ex detach </dev/null 2>&1 | grep -c "^[ *] [0-9] *LWP"; kill $P)'; bb umount /disk/a/proc
 3
 
 == gdb: a core file of a crashed program shows where it died, its call chain and its arguments
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && rm -f core && printf "int depth(int n) { int *p = 0; if (n == 0) return *p; return depth(n - 1) + 1; }\nint main(void) { return depth(3); }\n" > crash.c && gcc -g -O0 -pie -fPIE -o crash crash.c && (ulimit -c unlimited; ./crash) 2>/dev/null; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" ./crash core -ex bt </dev/null 2>&1 | sed -n -e "s/^#0  0x[0-9a-f]* in \(depth (n=0) at crash.c:1\).*/\1/p" -e "s/^#3  0x[0-9a-f]* in \(depth (n=3)\) .*/\1/p" | uniq' 2>/dev/null; bb umount /disk/a/proc; fi
+$ bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && rm -f core && printf "int depth(int n) { int *p = 0; if (n == 0) return *p; return depth(n - 1) + 1; }\nint main(void) { return depth(3); }\n" > crash.c && gcc -g -O0 -pie -fPIE -o crash crash.c && (ulimit -c unlimited; ./crash) 2>/dev/null; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" ./crash core -ex bt </dev/null 2>&1 | sed -n -e "s/^#0  0x[0-9a-f]* in \(depth (n=0) at crash.c:1\).*/\1/p" -e "s/^#3  0x[0-9a-f]* in \(depth (n=3)\) .*/\1/p" | uniq' 2>/dev/null; bb umount /disk/a/proc
 depth (n=0) at crash.c:1
 depth (n=3)
 
@@ -536,7 +543,7 @@ $ test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount -
 k: 1 windows
 
 == cmake: configure, build and run a C project
-$ bb mkdir -p /disk/a/root/cm && bb printf 'cmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello main.c)\n' > /disk/a/root/cm/CMakeLists.txt && bb printf '#include <stdio.h>\nint main(void) { puts("built by cmake"); return 0; }\n' > /disk/a/root/cm/main.c && bb chroot /disk/a /bin/sh -c 'cd /root/cm && cmake -S . -B build >/root/cm/cfg.log 2>&1 && cmake --build build >/root/cm/build.log 2>&1 && ./build/hello'
+$ bb mkdir -p /disk/a/root/cm /disk/a/proc && { [ %MACHINE% != aarch64 ] || bb mount -t proc proc /disk/a/proc; } && bb printf 'cmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello main.c)\n' > /disk/a/root/cm/CMakeLists.txt && bb printf '#include <stdio.h>\nint main(void) { puts("built by cmake"); return 0; }\n' > /disk/a/root/cm/main.c && bb chroot /disk/a /bin/sh -c 'cd /root/cm && cmake -S . -B build >/root/cm/cfg.log 2>&1 && cmake --build build >/root/cm/build.log 2>&1 && ./build/hello'; if [ %MACHINE% = aarch64 ]; then bb umount /disk/a/proc; fi
 built by cmake
 
 == nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
@@ -573,6 +580,10 @@ $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; d
 [1, 2, 3, 4]
 [1, 2, 3, 4]
 status 0
+
+== node: Alpine's Node (V8 with its JIT) runs a script that gets hot
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL nodejs >/dev/null 2>&1; bb timeout -s KILL 120 bb chroot /disk/a /usr/bin/node -e 'let s=0;for(let i=0;i<3e6;i++)s+=i;console.log(s,[3,1,2].sort().join())' 2>&1 | bb tail -n 3; bb chroot /disk/a /sbin/apk del -q --no-progress nodejs 2>/dev/null
+4499998500000 1,2,3
 
 == container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
 $ B=/disk/busybox; export B; $B ip link add cn_br type bridge && $B ip addr add 10.0.4.1/24 dev cn_br && $B ip link set cn_br up && $B ip link add cn_v0 type veth && $B ip link set veth0 name cn_v1 && $B ip link set cn_v0 master cn_br && $B ip link set cn_v0 up && $B printf '%s\n' 'ip -4 addr show dev cn_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cn.sh && ($B unshare -n $B sh -c 'touch /disk/cn_nr; until $B ip link show cn_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cn_v1 && $B ip link set cn_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cn_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cn_nr ]; do sleep 1; done; $B ip link set cn_v1 netns $P; until [ -e /disk/cn_ok ]; do sleep 1; done; $B mkdir -p /disk/n /run/runc && cd /disk/n && /disk/runc spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cn.sh"#' config.json && /disk/runc --root /run/runc run cn < /dev/null; echo status $?; kill $P); $B rm -f /disk/cn_nr /disk/cn_ok /disk/a/cn.sh; $B ip link del cn_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null

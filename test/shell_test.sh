@@ -195,6 +195,7 @@ steps = [
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
+    ("echo a\\eb", b"a\x1bb"),
     ("add 2 40", b"42"),
     ("mul 3 7", b"21"),
     ("mul 4294967296 4294967296", b"overflow"),
@@ -262,6 +263,10 @@ steps = [
     ("mhello > lxout; read y < lxout; echo y=$y", b"y=hello from musl: mhello, argc 1, 6", b"\n# "),
     ("export GREETING=hey; ash", b"built-in shell (ash)", b"\n# "),
     ("echo env $GREETING", b"env hey", b"\n# "),
+    # The environment the kernel gives what it starts names a UTF-8 locale,
+    # and /etc/profile (read by login shells) says the same.
+    ("echo lang $LANG", b"lang C.UTF-8", b"\n# "),
+    ("while read l; do echo p:$l; done < /etc/profile", b"p:export LANG=C.UTF-8", b"\n# "),
     ("exit", b"", b"\n# "),
     ("elfpie a b", b"elfpie: ok", b"\n# "),
     # execve of a file: elfdemo is the elfpie program installed at boot.
@@ -1216,6 +1221,11 @@ session("virtio", True, [
     ("mfd", b"mfd: ok, 8 processes held 1856 descriptions", b"\n# "),
     # More processes at once than the 512 the process table once held (user/mproc.c).
     ("mproc", b"mproc: ok, 700 processes at once", b"\n# "),
+    # /dev/fb0 without a screen (this machine has none): ENODEV (user/mfb.c; the drawing is tested in test/iso_test.sh).
+    ("mfb", b"mfb: no screen (ENODEV)", b"\n# "),
+    ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
+    ("bhello", b"bhello: no window server", b"\n# "),
+    ("bterm", b"bterm: no window server", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
