@@ -1,0 +1,28 @@
+# Temporary diagnostics: runs test/stackguard_test.sh under KVM. It runs only
+# on pushes to the claude/kvm-stackguard branch and is not meant to be merged.
+name: kvm-stackguard
+on:
+  push:
+    branches: [claude/kvm-stackguard]
+permissions:
+  contents: read
+jobs:
+  stackguard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - run: tools/ci-kvm.sh
+      - run: make build/bastios.elf NATIVE=1 BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - name: stackguard under KVM, native kernel
+        run: STACKGUARD_DEBUG=1 test/stackguard_test.sh || true
+      - run: make build/bastios.elf BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - name: stackguard under KVM, C kernel
+        run: STACKGUARD_DEBUG=1 test/stackguard_test.sh || true
