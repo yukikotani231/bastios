@@ -114,7 +114,7 @@ const NF_N: u64 = 10;
 const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroups at P * 3 + 0, 1, 2 (src/lxuser.bastio)
 const UMF_N: u64 = 3;
 const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot * CGF_N + f (src/lxcgroup.bastio)
-const CGF_N: u64 = 18;
+const CGF_N: u64 = 24;
 const SY_LOOP: u64 = SY_CG + CG_N * CGF_N;   // after the cgroups: loop device n's attribute a at n * LOOP_SYS + a
 const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
@@ -972,7 +972,7 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if i >= LXNFD {
       return end;
     }
-    let d = fd_look(k, dir - DIR_PROC - FDI_DIRS, i);
+    let d = fd_look(k, fd_home(k, dir - DIR_PROC - FDI_DIRS), i);
     if d.kind == K_BAD {
       return Ent { len: 0, dir: false, end: false };
     }
@@ -1006,7 +1006,7 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
     if q >= NPROC {
       return end;
     }
-    let d = fd_look(k, q, i);
+    let d = fd_look(k, fd_home(k, q), i);
     if d.kind == K_BAD {
       return Ent { len: 0, dir: false, end: false };
     }
@@ -1360,7 +1360,7 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
   requires kok(k) && p < NPROC && fd < LXNFD && blen(o) == PROC_OUT
   ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
 {
-  let d = fd_look(k, p, fd);
+  let d = fd_look(k, fd_home(k, p), fd);
   if d.kind == K_BAD {
     return 0;
   }
@@ -1377,7 +1377,7 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
   if fl > 0xFFFFFFFF {
     fl = 0;
   }
-  if fd_get(k.lxfd, p, fd) / FD_CLOEXEC % 2 == 1 {
+  if fd_get(k.lxfd, fd_home(k, p), fd) / FD_CLOEXEC % 2 == 1 {
     fl = fl | LO_CLOEXEC;
   }
   let mut a = put_s(&mut o, 0, "pos:\t");
@@ -3023,7 +3023,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
   ensures kok(k) && blen(o) == PROC_OUT
   ensures result <= PROC_OUT || result == NO_RESULT
 {
-  let d = fd_look(k, p, fd);
+  let d = fd_look(k, fd_home(k, p), fd);
   if d.kind == K_BAD {
     return NO_RESULT;
   }
@@ -3081,7 +3081,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
   if d.kind == K_DIR || (d.kind == K_DEV && d.x == DEV_PTSDIR) {
     // An open directory: its name as it was opened (runc checks that its
     // descriptor for /sys/fs/cgroup reads back as that).
-    let v = fd_get(k.lxfd, p, fd) % FD_CLOEXEC;
+    let v = fd_get(k.lxfd, fd_home(k, p), fd) % FD_CLOEXEC;
     if v >= FD_OFD && v - FD_OFD < OFD_N {
       let h = v - FD_OFD;
       let n = base_len(k, p, h);
@@ -3204,7 +3204,7 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   }
   let t = pfd / LXNFD;
   let fd = pfd % LXNFD;
-  let d = fd_look(k, t, fd);
+  let d = fd_look(k, fd_home(k, t), fd);
   let mut fr = NO_FILE;
   if d.kind == K_FILE {
     fr = vfs_row_file(k.fs, d.x);
@@ -3214,7 +3214,7 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   // file only if it lies inside the process's root (a chroot, a container),
   // as outside it its name resolves to nothing; open and exec reopen a file
   // through the link.
-  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && (root_len(k, pid) == 0 || inroot) && !ofd_lacks(k, fd_ofd(k, t, fd), ACC_LINK)) {
+  if d.kind != K_DIR && !(d.kind == K_DEV && d.x == DEV_PTSDIR) && !(d.kind == K_FILE && (root_len(k, pid) == 0 || inroot) && !ofd_lacks(k, fd_ofd(k, fd_home(k, t), fd), ACC_LINK)) {
     return NO_RESULT;
   }
   if d.kind == K_FILE {
