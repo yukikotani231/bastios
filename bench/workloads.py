@@ -16,7 +16,8 @@ guest, entering the unpacked root with chroot, and prints "@begin" and "@end"
 lines that the host stamps as they arrive on the serial port (the same
 timing as bench/run.py). Phases that change the root (untar, apk) run once;
 the others run RUNS times and the median is reported. The first scan run is
-cold and the later ones are not, so its median is a warm one.
+cold and the later ones are not, so its median is a warm one; the table
+also lists the first run apart from the median of the later ones.
 """
 import argparse, json, os, re, shutil, statistics, subprocess, sys, tempfile, time
 
@@ -163,6 +164,21 @@ def table(results):
         if len(oses) == 2:
             row += f" {vals[0] / vals[1]:.2f}x |" if None not in vals else " |"
         lines.append(row)
+    # The first run starts with a cold cache; the later ones find what it read
+    # already cached, so a system whose cache holds the working set speeds up.
+    cold = []
+    for phase, desc in results["phases"].items():
+        runs = [results["os"][o].get(phase, {}).get("runs", []) for o in oses]
+        if all(len(r) > 1 for r in runs):
+            cells = [f"{r[0]:.2f} / {statistics.median(r[1:]):.2f}" for r in runs]
+            row = f"| {phase} | " + " | ".join(cells) + " |"
+            if len(oses) == 2:
+                row += f" {runs[0][0] / runs[1][0]:.2f}x / {statistics.median(runs[0][1:]) / statistics.median(runs[1][1:]):.2f}x |"
+            cold.append(row)
+    if cold:
+        lines += ["", "First run (cold cache) / median of the later runs (warm), in seconds:", "",
+                  "| Workload | " + " | ".join(oses) + (" | BastiOS / Linux |" if len(oses) == 2 else " |"),
+                  "|---|" + "---:|" * len(oses) + ("---:|" if len(oses) == 2 else "")] + cold
     return "\n".join(lines)
 
 
