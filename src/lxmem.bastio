@@ -1590,11 +1590,11 @@ fn map_fork(k: &mut Kernel, pid: u64, c: u64)
 /// msync(addr, n, flags): writes the shared file pages in the range back.
 /// -EINVAL for an unknown flag, a misaligned addr or MS_ASYNC with
 /// MS_SYNC; -ENOMEM if part of the range is not mapped (after the rest is
-/// written back), as on Linux.
+/// written back), as on Linux; -EBUSY for MS_INVALIDATE of locked pages.
 fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
-  ensures result == 0 || result == EINVAL || result == ENOMEM || result == DISK_RETRY
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == EBUSY || result == DISK_RETRY
 {
   // MS_ASYNC 1, MS_INVALIDATE 2, MS_SYNC 4
   if flags & !7 != 0 || addr % 4096 != 0 || flags & 1 != 0 && flags & 4 != 0 {
@@ -1620,6 +1620,9 @@ fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
   let to = r % 4294967296;
   if anon_count(&mut k, pid, from, to) != to - from {
     return ENOMEM;
+  }
+  if flags & 2 != 0 && lr_covered(k, pid, from, to) != 0 {
+    return EBUSY;                           // MS_INVALIDATE of locked pages
   }
   return 0;
 }
@@ -1739,6 +1742,9 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   }
   if advice == MADV_REMOVE || advice == MADV_WIPEONFORK {
     return EINVAL;                          // not supported: no hole punching; a child would see the pages
+  }
+  if (advice == MADV_DONTNEED || advice == MADV_FREE) && lr_covered(k, pid, from, to) != 0 {
+    return EINVAL;                          // locked pages are not given back
   }
   if advice == MADV_FREE || advice == MADV_KEEPONFORK {
     // Only for private anonymous memory: Linux checks the first mapping

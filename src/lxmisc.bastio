@@ -873,6 +873,30 @@ fn lx_misc_done(k: &mut Kernel, pid: u64, n: u64, r: u64) -> u64
   return KEEP;
 }
 
+/// mremap, and the locked pages follow the range (src/lxrlimit.bastio).
+fn lx_mremap_locked(k: &mut Kernel, pid: u64, a: u64, b: u64, c: u64, flags: u64, naddr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_mremap(&mut k, pid, a, b, c, flags, naddr);
+  if r < 0x8000000000000000 {
+    lock_remapped(&mut k, pid, a, b, c, r);
+  }
+  return r;
+}
+
+/// munmap, and what it unmaps is no longer locked.
+fn lx_munmap_locked(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_munmap(&mut k, pid, a, b);
+  if r == 0 {
+    lock_unmapped(&mut k, pid, a, b);
+  }
+  return r;
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -900,9 +924,9 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_UNAME {
     r = lx_uname(&mut k, pid, a);
   } else if n == LX_MREMAP {
-    r = lx_mremap(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
+    r = lx_mremap_locked(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
   } else if n == LX_MUNMAP {
-    r = lx_munmap(&mut k, pid, a, b);
+    r = lx_munmap_locked(&mut k, pid, a, b);
   } else if n == LX_MPROTECT {
     r = lx_mprotect(&mut k, pid, a, b, c);
   } else if n == LX_MADVISE {
