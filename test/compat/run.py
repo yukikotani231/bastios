@@ -557,6 +557,13 @@ def arch_words(text):
     return text
 
 def run_applet(env, name, cmd, expected, timeout, bb):
+    t = time.time()
+    r = run_applet_once(env, name, cmd, expected, timeout, bb)
+    r["secs"] = round(time.time() - t, 1)
+    return r
+
+
+def run_applet_once(env, name, cmd, expected, timeout, bb):
     cmd = arch_words(cmd)
     expected = [arch_words(l) for l in expected]
     cmd = cmd.replace("ALPINEURL", env.hosturl + "/alpine")
@@ -687,6 +694,10 @@ def report(results, names, out_dir, elapsed):
     print("compat: missing system calls, by checks blocked:")
     for n, who in ranked[:15]:
         print(f"  {names.get(n, '?'):20} {n:4} {len(who)}")
+    slow = sorted(((c.get("secs", 0), g, c["name"]) for g, c in rows), reverse=True)[:10]
+    print("compat: slowest checks:")
+    for secs, g, n in slow:
+        print(f"  {secs:6.0f} s  {g}: {n}")
     print(f"compat: full report in {os.path.join(out_dir, 'report.md')}")
 
 
