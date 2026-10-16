@@ -20,7 +20,7 @@ import "snd.bastio";
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 1024;
-const STRIDE: u64 = 72 + REGS_EXT;
+const STRIDE: u64 = 76 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
@@ -102,6 +102,17 @@ const F_FAULT_RIP: u64 = 67;         // the last page fault found its page mappe
 const F_FAULT_VA: u64 = 68;
 const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^40 (/proc/PID/cmdline)
 const F_WDONE: u64 = 71;             // Linux write(2) restarted for the disk: 2 * the bytes already written + 1 if the last pass stopped for the disk (src/linux.bastio)
+// The processes that share one descriptor table (threads, and clone with
+// CLONE_FILES) form a ring: F_FDNEXT is the next member's id, 0 for a
+// process with a table of its own. The table lives in the row of the member
+// that has F_FDHOLD set, and moves to the one whose call is being handled
+// (fd_take, src/lxfd.bastio).
+const F_FDNEXT: u64 = 72 + REGS_EXT;
+const F_FDHOLD: u64 = 73 + REGS_EXT;
+// The same for the working directory, root and umask (clone with CLONE_FS):
+// F_FSNEXT and F_FSHOLD (fs_take, src/lxfd.bastio).
+const F_FSNEXT: u64 = 74 + REGS_EXT;
+const F_FSHOLD: u64 = 75 + REGS_EXT;
 const F_XSIG: u64 = 70;              // Linux: the signal its parent gets when it ends, plus 1 (clone's exit_signal); 0 is SIGCHLD
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
@@ -572,7 +583,8 @@ const SYS_INOL: u64 = SYS_AIOSER + 1;          // /proc/sys/fs/inotify/{max_queu
 const SYS_PIDMX: u64 = SYS_INOL + 3;           // /proc/sys/kernel/pid_max as written, + 1 (0: never written; src/lxprocfs.bastio)
 const SYS_MSGMNI: u64 = SYS_PIDMX + 1;         // /proc/sys/kernel/msgmni as written, + 1 (0: never written; src/lxipc.bastio)
 const SYS_VM: u64 = SYS_MSGMNI + 1;            // memory pressure counters (src/oom.bastio): processes the out-of-memory killer ended
-const SYS_LEN: u64 = SYS_VM + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
+const SYS_NROPEN: u64 = SYS_VM + 1;        // /proc/sys/fs/nr_open as written, + 1 (0: never written; src/lxprocfs.bastio)
+const SYS_LEN: u64 = SYS_NROPEN + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 const AT_N: u64 = 32;
 const LR_N: u64 = 4;
@@ -1140,6 +1152,19 @@ spec fn kok(k: &Kernel) -> bool {
   mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
+}
+
+const NR_OPEN: u64 = 1048576;          // Linux's default /proc/sys/fs/nr_open
+
+/// /proc/sys/fs/nr_open: the most descriptors a table may have.
+fn nr_open(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let w = get(k.sys, SYS_NROPEN);
+  if w == 0 {
+    return NR_OPEN;
+  }
+  return w - 1;
 }
 
 // ---------------------------------------------------------------- programs
