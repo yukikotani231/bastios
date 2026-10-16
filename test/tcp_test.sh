@@ -695,6 +695,12 @@ link.in_rule = lambda f: 0
 syns = [s for _, s in srv.log if s["flags"] & SYN]
 check(finished and b"hello from the host" in out[mark:] and bytes(srv.got) == b"hi\n",
       f"connecting out: SYN sent again after a loss ({len(syns)} seen), reply read")
+if not (finished and len(syns) <= 2):
+    t0 = srv.log[0][0] if srv.log else 0
+    print("DEBUG connecting out: srv.log (t, flags, seq, ack, len)")
+    for tt, s in srv.log:
+        print("DEBUG  %.3f %s %s %s %d" % (tt - t0, s["flags"], s["seq"], s.get("ack"), len(s["data"])))
+    print("DEBUG out:", bytes(out[mark:])[-300:])
 check(syns and all(k in syns[0]["opts"] for k in (2, 3, 4)),
       "connecting out: the SYN offers an MSS, window scaling and SACK (and nothing is scaled when we do not)")
 net.peer = None
