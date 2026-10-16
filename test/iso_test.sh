@@ -247,14 +247,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(("echo " + "x" * 113 + "日\r").encode()); q.stdin.flush()
         until(b"bastios> ", mark)
         dump = os.path.join(tmp.name, "screen.ppm")
-        mon.sendall(f"screendump {dump}\n".encode())
-        text = []
-        for _ in range(50):
-            time.sleep(0.1)
-            if os.path.exists(dump) and os.path.getsize(dump) > 1024 * 768 * 3:
-                text = screen_text(open(dump, "rb").read())
-                break
-        mon.close()
+        def grab():
+            if os.path.exists(dump):
+                os.unlink(dump)
+            mon.sendall(f"screendump {dump}\n".encode())
+            for _ in range(50):
+                time.sleep(0.1)
+                if os.path.exists(dump) and os.path.getsize(dump) > 1024 * 768 * 3:
+                    time.sleep(0.2)
+                    return screen_text(open(dump, "rb").read())
+            return []
+        text = grab()
         want = ["screen: 1024x768 framebuffer", "bastios> echo On_screen", "On_screen",
                 "日本語かな café ─│ ｱｲｳ", "bastios> echo " + "x" * 113, "日", "x" * 113 + "日"]
         good = all(w in text for w in want)
@@ -262,6 +265,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if not good:
             print("\n".join(l for l in text if l))
         fails += not good
+        # Escape sequences: `echo` writes them (`\\e` is ESC) and the screen
+        # obeys them. Clear, move to row 5 column 10, write
+        # kanji, step back two cells and overwrite with a letter, delete a
+        # character, then draw on the alternate screen and come back.
+        mark = len(out)
+        q.stdin.write(b"echo \\e[2J\\e[5;10H\xe6\x97\xa5\xe6\x9c\xac\\e[2DAB\\e[1P\\e[8;3Hhere\\e[?1049hALT\\e[?1049l\r")
+        q.stdin.flush()
+        until(b"bastios> ", mark)
+        time.sleep(0.5)
+        text = grab()
+        good = len(text) > 8 and text[4] == " " * 9 + "日AB" and text[7].startswith("  here") and not any("ALT" in l for l in text)
+        print(("ok  " if good else "FAIL"), f"({name}) the framebuffer console obeys escape sequences")
+        if not good:
+            print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
+        fails += not good
+        mon.close()
     if ok and not diag and not usb and not nvme and not stick:
         # /dev/fb0 (user/mfb.c): a program draws on the screen, and the
         # console stops drawing while it holds the device and comes back
