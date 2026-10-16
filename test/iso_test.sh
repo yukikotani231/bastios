@@ -262,6 +262,50 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+        # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
+        # dragging and typing, driven through QEMU's monitor.
+        def monitor(*cmds):
+            m3 = socket.socket(socket.AF_UNIX)
+            m3.connect(mon_path)
+            for c in cmds:
+                m3.sendall(c.encode() + b"\n")
+                time.sleep(0.15)
+            time.sleep(0.4)
+            m3.close()
+        mark = len(out)
+        q.stdin.write(b"bwm\r"); q.stdin.flush()
+        good = until(b"bwm: ready 1024x768", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) bwm starts on /dev/fb0")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            def at(x, y):
+                i = (y * w + x) * 3
+                return tuple(px[i:i + 3])
+            blue, grey, wall = (40, 90, 200), (110, 110, 120), at(10, 10)
+            good = (at(400, 125) == blue and at(300, 70) == grey and at(400, 300) == (235, 235, 235)
+                    and wall[2] > 70 and wall != blue and at(650, 300) == (220, 235, 250))
+            print(("ok  " if good else "FAIL"), f"({name}) bwm draws the wallpaper and three windows, the top one focused")
+            fails += not good
+            # Click the title bar of the Notes window (under the others'
+            # corners), drag it 100 right and 100 down: it comes to the front.
+            monitor("mouse_move -212 -314", "mouse_button 1", "mouse_move 50 50", "mouse_move 50 50", "mouse_button 0")
+            w, h, px = screendump()
+            good = at(300, 170) == blue and at(300, 70) == at(10, 70) and at(300, 70) != grey
+            print(("ok  " if good else "FAIL"), f"({name}) dragging a title bar moves the window and focuses it")
+            fails += not good
+            # Typed text goes into the focused window, after "for BastiOS." on its second line.
+            monitor("sendkey h")
+            w, h, px = screendump()
+            cell = [at(x, y) for y in range(200, 216) for x in range(282, 290)]
+            good = (10, 10, 10) in cell
+            print(("ok  " if good else "FAIL"), f"({name}) a typed key appears in the focused window")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")
+            fails += not good
     steps = [("hello", b"hello from user mode"),
              ("echo from the iso > disk/iso", b""),
              ("cat disk/iso", b"from the iso"),
