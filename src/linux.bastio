@@ -2586,7 +2586,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // Private writable anonymous memory gets its pages when first touched
   // (src/lxanon.bastio), unless MAP_POPULATE or MAP_LOCKED asks for them
   // now.
-  let lazy = anon && !sh && prot / 2 % 2 == 1 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
+  let lazy = anon && !sh && prot / 2 % 2 == 1 && prot / 4 % 2 == 0 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {
@@ -2712,14 +2712,14 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
   return USER_BASE + at;
 }
 
-/// A new mapping without PROT_WRITE: its pages, from window page `first`
+/// A new mapping without PROT_WRITE, or with PROT_EXEC: its pages, from window page `first`
 /// on, become read-only, or inaccessible without PROT_READ too, so a write
 /// (or any touch) faults as on Linux.
 fn read_only(k: &mut Kernel, pid: u64, first: u64, pages: u64, prot: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let a = prot_access(prot);
+  let a = prot_arg(prot);
   if a == 2 || first > WPAGES || pages > WPAGES - first {
     return;
   }
