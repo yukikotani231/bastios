@@ -603,6 +603,7 @@ fn lx_ftruncate(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> u64
   if !vfs_truncate(&mut k.fs, &mut k.mem, d.x, size) {
     return EINVAL;                          // not open for writing, too long, or the disk failed
   }
+  bus_shrink(&mut k, row_file(k.fs, d.x));  // mappings of the cut-off part: SIGBUS
   return 0;
 }
 
@@ -646,6 +647,7 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   if !ok {
     return EINVAL;
   }
+  bus_shrink(&mut k, vfs_lookup(&mut k.fs, n));
   return 0;
 }
 

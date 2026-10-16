@@ -4,6 +4,7 @@
 #include "compat.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <sched.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
@@ -73,6 +74,52 @@ static int pid_parent_out_of_reach(void) {
     return c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
+/* Nested user namespaces: from the outer one, the inner one's parent is
+ * the outer one; from the inner one, the outer one's parent is out of reach. */
+static int user_nested(void) {
+    if (unshare(CLONE_NEWUSER) != 0) return 0;
+    int outer = open("/proc/self/ns/user", O_RDONLY);
+    int pp[2], qq[2];
+    if (outer < 0 || pipe(pp) != 0 || pipe(qq) != 0) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b = 0;
+        if (unshare(CLONE_NEWUSER) != 0) _exit(1);
+        int inner = open("/proc/self/ns/user", O_RDONLY);
+        if (inner < 0 || ino_of(inner) == ino_of(outer)) _exit(1);
+        if (!fails(inner, NS_GET_PARENT, EPERM)) _exit(1);
+        if (!fails(outer, NS_GET_PARENT, EPERM)) _exit(1);
+        if (write(pp[1], &b, 1) != 1 || read(qq[0], &b, 1) != 1) _exit(1);
+        _exit(0);
+    }
+    char b;
+    if (c < 0 || read(pp[0], &b, 1) != 1) return 0;
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/ns/user", (int)c);
+    int inner = open(path, O_RDONLY);
+    int par = inner >= 0 ? ioctl(inner, NS_GET_PARENT) : -1;
+    int ok = par >= 0 && ino_of(par) == ino_of(outer) && ino_of(inner) != ino_of(outer);
+    if (write(qq[1], &b, 1) != 1) return 0;
+    int st;
+    return ok && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
+/* Nested PID namespaces: a child in the first one makes a second, whose
+ * parent is the first. */
+static int pid_nested(void) {
+    if (unshare(CLONE_NEWPID) != 0) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        int mine = open("/proc/self/ns/pid", O_RDONLY);
+        if (mine < 0 || unshare(CLONE_NEWPID) != 0) _exit(1);
+        int kids = open("/proc/self/ns/pid_for_children", O_RDONLY);
+        int p = kids >= 0 ? ioctl(kids, NS_GET_PARENT) : -1;
+        _exit(p >= 0 && ino_of(p) == ino_of(mine) ? 0 : 1);
+    }
+    int st;
+    return c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+
 int main(void) {
     setup();
     int uts = open("/proc/self/ns/uts", O_RDONLY);
@@ -98,5 +145,7 @@ int main(void) {
     EXPECT("from inside a user namespace its parent is out of reach", in_child(own_parent_out_of_reach));
     EXPECT("the children's PID namespace has the first one as its parent", in_child(pid_parent));
     EXPECT("from inside a PID namespace its parent is out of reach", in_child(pid_parent_out_of_reach));
+    EXPECT("an inner user namespace's parent is the outer one, seen from outside only", in_child(user_nested));
+    EXPECT("a PID namespace made inside another has that one as its parent", in_child(pid_nested));
     return done();
 }

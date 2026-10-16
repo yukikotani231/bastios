@@ -305,9 +305,26 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
     j = j + 1;
   }
   bfree(tb);
+  let mut nb = balloc(FNAME_MAX);
+  let mut q = 0;
+  while q < n
+    invariant q <= n && n <= FNAME_MAX && blen(nb) == FNAME_MAX && kok(k)
+  {
+    bset(&mut nb, q, bget(k.fs.xfer, q));
+    q = q + 1;
+  }
   if !vfs_symlink(&mut k.fs, &mut k.mem, n, tl) {
+    bfree(nb);
     return ENOENT;                          // no such directory, or no room
   }
+  q = 0;
+  while q < n
+    invariant q <= n && n <= FNAME_MAX && blen(nb) == FNAME_MAX && kok(k)
+  {
+    bset(&mut k.fs.xfer, q, bget(nb, q));   // vfs_symlink left the target where the name was
+    q = q + 1;
+  }
+  bfree(nb);
   let f = vfs_lookup(&mut k.fs, n);
   if own != 0 && f < HFILES {
     vfs_set_owner(&mut k.fs, f, own % 0x100000000, own / 0x100000000 % 0x100000000);

@@ -1,0 +1,9 @@
+prefix=@PREFIX@
+libdir=${prefix}/lib
+includedir=${prefix}/include
+
+Name: libgreet
+Description: a greeting library
+Version: @VERSION@
+Libs: -L${libdir} -lgreet
+Cflags: -I${includedir}
