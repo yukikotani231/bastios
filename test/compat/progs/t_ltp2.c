@@ -724,6 +724,16 @@ int main(void) {
            int st = 0; if (c > 0) waitpid(c, &st, 0);
            signal(SIGBUS, SIG_DFL); close(f); unlink("/tmp/sigbus.tmp");
            c > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("rename: a directory moved from under the working directory leaves it in the moved directory", ({
+           char cwd[256];
+           mkdir("/tmp/rn_a", 0700); mkdir("/tmp/rn_a/sub", 0700);
+           chdir("/tmp/rn_a/sub");
+           int r = rename("/tmp/rn_a", "/tmp/rn_b");
+           int f = open("file", O_CREAT | O_WRONLY, 0600);
+           int e = f >= 0 && access("/tmp/rn_b/sub/file", F_OK) == 0 && getcwd(cwd, sizeof cwd) && !strcmp(cwd, "/tmp/rn_b/sub");
+           if (f >= 0) close(f);
+           unlink("/tmp/rn_b/sub/file"); chdir("/"); rmdir("/tmp/rn_b/sub"); rmdir("/tmp/rn_b");
+           r == 0 && e; }));
     EXPECT("clock_getres: the coarse clocks report their tick, at least 1 ms", ({
            struct timespec a, b;
            int x = clock_getres(CLOCK_REALTIME_COARSE, &a), y = clock_getres(CLOCK_MONOTONIC_COARSE, &b);
