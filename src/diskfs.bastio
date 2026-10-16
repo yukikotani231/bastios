@@ -1211,7 +1211,7 @@ fn disk_size(d: &DiskFs, i: u64) -> u64
 fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
 {
-  if i >= d.slots || !dent_live(d, i) || cast[u64](dent_byte(d, i, E_NLEN)) != n || n > DNAME_MAX {
+  if i >= d.slots || cast[u64](dent_byte(d, i, E_NLEN)) != n || n > DNAME_MAX || !dent_live(d, i) {
     return false;
   }
   return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, n);

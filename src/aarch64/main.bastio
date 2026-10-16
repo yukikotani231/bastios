@@ -79,6 +79,7 @@ import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "oom.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
@@ -389,6 +390,24 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) {
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
+    }
+    // Out of memory (src/oom.bastio), as src/main.bastio handles it.
+    let ova = pget(s.k.procs, p, reg_word(R_FAULT));
+    if ova >= USER_BASE && ova - USER_BASE < USER_SIZE {
+      let oq = (ova - USER_BASE) / 4096;
+      let want = anon_covers(s.k.anon, p, oq) || lazy_covers(s.k, p, oq)
+        || (user_present(&mut s.k.spaces, p, ova) && !user_page_writable(&mut s.k.spaces, p, ova));
+      let oo = oom_fault(&mut s.k, &mut s.con, p, want);
+      if oo == OOM_RETRY {
+        return p;
+      }
+      if oo == OOM_WAIT {
+        return (p + 1) % NPROC;
+      }
+      if oo == OOM_SELF {
+        terminate(&mut s.k, mmu, p, death_code(SIGKILL, false));
+        return (p + 1) % NPROC;
+      }
     }
   }
   if v == 6 && emulate_idreg(&mut s.k, p) {

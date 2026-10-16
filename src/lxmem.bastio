@@ -11,7 +11,9 @@
 // lease on the space (win_quiet), and every entry to user mode reloads CR3.
 //
 // A fresh private anonymous PROT_NONE mmap maps no pages until mprotect
-// makes them usable, so a large reservation costs nothing; touching it
+// makes them usable, and an mprotect that makes them writable records them to
+// be mapped when touched (src/lxanon.bastio), so a large reservation costs
+// nothing even then; touching it
 // faults (and a system call given it fails with -EFAULT) as on Linux.
 //
 // Not done: an mprotect that allows access maps fresh pages into any hole
@@ -838,15 +840,21 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   anon_reach(&mut k, pid, from, to);        // memory not touched yet: map it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
+  let mut lazy = false;
   if prot != 0 && from >= low {
-    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
+    // Writable: the pages are recorded and mapped when touched, as for a
+    // writable anonymous mmap, so a program can make a large reservation
+    // usable (a JIT's code range) and pay for what it touches.
+    if a == 2 && (LAZY_EXEC == 1 || prot / 4 % 2 == 0) && anon_add(&mut k, pid, from, to) {
+      lazy = true;
+    } else if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
       return ENOMEM;
     }
     hole_cut(&mut k, pid, from, to);        // mapped now: not a hole to hand out
   }
   // PROT_NONE leaves mmap's reserved pages unmapped, so they do not count.
   let got = win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, from, to, pa);
-  if got > to - from || (got != to - from && (a != 0 || from < low)) {
+  if got > to - from || (got != to - from && !lazy && (a != 0 || from < low)) {
     return ENOMEM;
   }
   return 0;
@@ -1241,21 +1249,33 @@ fn map_find(k: &Kernel, pid: u64, p: u64) -> u64
   return MAP_N;
 }
 
-/// The size of the file that record i of process pid maps, or NO_FILE if
-/// it is not a mapping of a plain file.
-fn map_file_size(k: &mut Kernel, pid: u64, i: u64) -> u64
+/// The file layer's handle of the file that record i of process pid maps,
+/// or NO_FILE if it is not a mapping of a plain file.
+fn map_file(k: &Kernel, pid: u64, i: u64) -> u64
   requires kok(k) && pid < NPROC && i < MAP_N
-  ensures kok(k)
 {
   let h = wget(k.maps, mp_at(pid, i, 2));
   if h >= OFD_N || of_get(k.ofd, h, 0) != OF_FILE {
     return NO_FILE;
   }
   let row = of_get(k.ofd, h, 2);
-  if row >= FD_ROWS || row_file(k.fs, row) == NO_FILE {
+  if row >= FD_ROWS {
     return NO_FILE;
   }
-  return vfs_size(&mut k.fs, row_file(k.fs, row));
+  return row_file(k.fs, row);
+}
+
+/// The size of the file that record i of process pid maps, or NO_FILE if
+/// it is not a mapping of a plain file.
+fn map_file_size(k: &mut Kernel, pid: u64, i: u64) -> u64
+  requires kok(k) && pid < NPROC && i < MAP_N
+  ensures kok(k)
+{
+  let f = map_file(k, pid, i);
+  if f == NO_FILE {
+    return NO_FILE;
+  }
+  return vfs_size(&mut k.fs, f);
 }
 
 /// Window pages first .. first + pages of process pid were just mapped as
@@ -1267,13 +1287,28 @@ fn bus_mark(k: &mut Kernel, pid: u64, first: u64, pages: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if first >= WPAGES || pages > WPAGES - first {
+  if SIGBUS_PAGES == 0 || first >= WPAGES || pages > WPAGES - first {
     return;
   }
   let i = map_find(k, pid, first);
   if i >= MAP_N || wget(k.maps, mp_at(pid, i, 0)) != first + 1 || wget(k.maps, mp_at(pid, i, 1)) != pages {
     return;
   }
+  bus_cover(&mut k, pid, i);
+}
+
+/// Makes the pages of record i of process pid that lie wholly past the end
+/// of its file inaccessible (and flags the record for bus_fault).
+fn bus_cover(k: &mut Kernel, pid: u64, i: u64)
+  requires kok(k) && pid < NPROC && i < MAP_N
+  ensures kok(k)
+{
+  let first1 = wget(k.maps, mp_at(pid, i, 0));
+  let pages = wget(k.maps, mp_at(pid, i, 1));
+  if first1 == 0 || first1 > WPAGES || pages > WPAGES - (first1 - 1) {
+    return;
+  }
+  let first = first1 - 1;
   let size = map_file_size(&mut k, pid, i);
   if size == NO_FILE {
     return;
@@ -1289,6 +1324,35 @@ fn bus_mark(k: &mut Kernel, pid: u64, first: u64, pages: u64)
   if skip < pages {
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, first + skip, first + pages, 0);
     wset(&mut k.maps, mp_at(pid, i, 3), off + 1);
+  }
+}
+
+/// The file f was cut: every mapping of it, in every process, loses access
+/// to the pages that now lie past its end (a process whose space a
+/// processor runs keeps them until its next mmap).
+fn bus_shrink(k: &mut Kernel, f: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if SIGBUS_PAGES == 0 || f == NO_FILE {
+    return;
+  }
+  let mut pid = 1;
+  while pid < NPROC
+    invariant 1 <= pid && pid <= NPROC && kok(k)
+  {
+    if state(k.procs, pid) != FREE {
+      let mut i = 0;
+      while i < MAP_N
+        invariant i <= MAP_N && kok(k) && pid < NPROC
+      {
+        if wget(k.maps, mp_at(pid, i, 0)) != 0 && map_file(k, pid, i) == f {
+          bus_cover(&mut k, pid, i);
+        }
+        i = i + 1;
+      }
+    }
+    pid = pid + 1;
   }
 }
 

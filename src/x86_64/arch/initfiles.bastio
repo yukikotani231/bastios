@@ -5,7 +5,8 @@
 // (root has none until `passwd` sets one; the others cannot log in)
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
 // /etc/shells lists the login shells (getusershell; an SSH server refuses
-// a user whose shell is not there).
+// a user whose shell is not there). /etc/profile, which login shells read,
+// sets LANG to a UTF-8 locale.
 //
 // The installer image (docs/install.md) carries more: extra/initextra.bastio
 // names NEXTRA further files, which the Makefile writes for that build (the
@@ -13,7 +14,7 @@
 // other build has none.
 import "extra/initextra.bastio";
 
-const NBASE: u64 = 8;
+const NBASE: u64 = 9;
 const NINIT: u64 = NBASE + NEXTRA;
 
 fn init_name(i: u64) -> Str
@@ -43,6 +44,9 @@ fn init_name(i: u64) -> Str
   if i == 6 {
     return "etc/shells";
   }
+  if i == 7 {
+    return "etc/profile";
+  }
   return "elfdemo";
 }
 
@@ -70,6 +74,9 @@ fn init_data(i: u64) -> Str {
   }
   if i == 6 {
     return include_bytes("../../../files/shells");
+  }
+  if i == 7 {
+    return include_bytes("../../../files/profile");
   }
   return include_bytes("../../../build/user/elfpie.elf");
 }
