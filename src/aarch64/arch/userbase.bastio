@@ -6,3 +6,7 @@
 // where it was linked.
 const USER_BASE: u64 = 0;
 const PIE_AT: u64 = 0x400000;
+// Pages the program may write can also run code here (no no-execute marks
+// yet), so mprotect may leave a writable, executable range to be mapped when
+// touched, like a writable one.
+const LAZY_EXEC: u64 = 1;

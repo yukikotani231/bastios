@@ -276,6 +276,7 @@ fn disk_wake(k: &mut Kernel) -> bool
 {
   let mut woke = false;
   disk_pump(&mut k.fs.disk, k.ticks);
+  let mut sleeping = 0;
   let moved = k.fs.disk.q.moved;
   let done = k.fs.disk.q.done;
   let dead = k.fs.disk.q.dead;
@@ -283,7 +284,7 @@ fn disk_wake(k: &mut Kernel) -> bool
   let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
   while p < cap
-    invariant 1 <= p && cap <= NPROC && kok(k)
+    invariant 1 <= p && cap <= NPROC && kok(k) && sleeping < p
   {
     if state(k.procs, p) == DISKWAIT {
       let w = pget(k.procs, p, F_WAIT);
@@ -294,10 +295,20 @@ fn disk_wake(k: &mut Kernel) -> bool
         }
         pset(&mut k.procs, p, F_STATE, READY);
         woke = true;
+        k.fs.disk.q.w_wakes = (k.fs.disk.q.w_wakes % 0x4000000000000000 + 1) % 0x4000000000000000;
+      } else {
+        sleeping = sleeping + 1;
       }
     }
     p = p + 1;
   }
+  // The sleepers' time: those that slept through the ticks since the last
+  // look (the ones just woken, not counted, slept through them too, but
+  // within one tick of it).
+  if k.ticks > k.fs.disk.q.w_last && sleeping <= NPROC {
+    k.fs.disk.q.w_tk = (k.fs.disk.q.w_tk % 0x4000000000000000 + (k.ticks - k.fs.disk.q.w_last) % 0x100000000 * sleeping) % 0x4000000000000000;
+  }
+  k.fs.disk.q.w_last = k.ticks;
   return woke;
 }
 
@@ -358,9 +369,10 @@ fn sock_wake(k: &mut Kernel) -> bool
   let mut woke = false;
   let mut left = false;
   let mut asleep = false;
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
   {
     if state(k.procs, p) == SOCKWAIT {
       let w = pget(k.procs, p, F_WAIT);

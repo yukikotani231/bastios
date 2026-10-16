@@ -24,6 +24,8 @@ JOBS=${JOBS:-$( [ "$(nproc 2>/dev/null || echo 1)" -ge 4 ] && echo 3 || echo 1 )
 # name|lane|command, in the order they are printed
 tests=(
   "trusted_base|c|test/trusted_base.sh"
+  "multiboot fuzz|c|test/multiboot_test.sh"
+  "acpi fuzz|c|test/acpi_test.sh"
   "sysfuzz_calls|c|test/sysfuzz_calls.sh"
   "aarch64|d|test/aarch64_test.sh --build"
   "aarch64 64 cpus|d|BOOT_ONLY=1 SMP=64 TIMEOUT=240 test/aarch64_test.sh"
@@ -51,8 +53,10 @@ tests=(
   "iso|c|test/iso_test.sh"
   "nmi|c|test/nmi_test.sh"
   "stackguard|c|test/stackguard_test.sh"
+  "rng|c|test/rng_test.sh"
   "stackdepth|c|test/stackdepth.py"
   "fuzz|c|test/fuzz_test.sh 1 2 2000"
+  "soak|c|test/soak.py --rounds 150 --smp 2 --warmup 10 --leak-kb 128"
 )
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT

@@ -269,6 +269,13 @@ fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u
   }
   let nb = flags / SPLICE_F_NONBLOCK % 2 == 1;
   if from_pipe {
+    if dout.kind == K_DIR || dout.kind == K_EVENT || dout.kind == K_TIMER || dout.kind == K_EPOLL || dout.kind == K_SIGFD
+       || dout.kind == K_PIDFD || dout.kind == K_INOTIFY || dout.kind == K_SECCOMP {
+      return EINVAL;                        // as Linux: no splice_write, so no wait for data first
+    }
+    if (dout.kind == K_FILE && fget(k.fs.ftab, dout.x, FD_MODE) / O_WRITE % 2 == 0) || (dout.kind == K_DEV && ofd_lacks(k, fd_ofd(k, pid, out), ACC_NOWRITE)) {
+      return EBADF;                         // opened read-only
+    }
     if dout.kind == K_SOCK {
       return EINVAL;                        // not done
     }
