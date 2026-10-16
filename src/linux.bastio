@@ -1108,6 +1108,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_FB {
+    return fb_ioctl(&mut k, pid, req % 0x100000000, arg);    // src/lxfb.bastio
+  }
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
@@ -1682,6 +1685,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_write(&mut k, pid, va, n);   // src/lxsnd.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_FB {
+    return fb_write(&mut k, pid, fd, va, n);   // src/lxfb.bastio
   }
   if d.kind == K_DEV && d.x == DEV_MICE {
     return mice_write(&mut k, pid, va, n);  // mouse commands (src/lxmouse.bastio)
@@ -2336,6 +2342,9 @@ fn lx_lseek(k: &mut Kernel, pid: u64, fd: u64, off: u64, whence: u64) -> u64
   // seek in the other /proc files have always been told 0 and left at the start.
   if d.kind == K_DEV && ((d.x >= PROC_DEV + 16 && (d.x - PROC_DEV) % 16 == 2) || is_mem_file(d.x)) {   // PF_AUXV, PF_MEM
     return proc_seek(&mut k, pid, fd, off, whence);   // src/lxprocfs.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_FB {
+    return fb_seek(&mut k, pid, fd, off, whence);   // src/lxfb.bastio
   }
   if d.kind == K_DEV {
     return 0;                               // other devices have no position

@@ -82,6 +82,7 @@ import "lxanon.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
+import "lxfb.bastio";
 import "kernel.bastio";
 import "initfiles.bastio";
 import "lxnum.bastio";
@@ -722,6 +723,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.ptys);
   bfree(s.k.ptyb);
   bfree(s.k.mice);
+  bfree(s.k.gfx);
   free(s.k.ipc);
   bfree(s.k.ipcb);
   free(s.k.sys);
