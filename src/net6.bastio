@@ -355,6 +355,13 @@ fn v6_in(n: &mut Net, flen: u64)
   if v6_sum_in(n.pkt, nh, plen) != 65535 || n.ip == 0 || n.ip > IP_MAX {
     return;
   }
+  if nh == NH_UDP {
+    let dport = be16(n.pkt, 56);
+    if dport != UDP_ECHO_PORT && dport != PORT_DHCP_CLIENT && sock_find_in(n, dport, true) >= SOCKS {
+      udp6_refuse(&mut n, plen, shi, slo, smac);
+      return;
+    }
+  }
   let tok = v6_token(&mut n, shi, slo, smac);
   // Rewrite it as the IPv4 packet it stands for, and take that in.
   let mut k = 0;
@@ -453,6 +460,23 @@ fn raw6_local(n: &mut Net, ip: u64, buf: &Bytes, size: u64) -> u64
     s = s + 1;
   }
   return size;
+}
+
+/// Tells the sender of the UDP datagram in the frame (plen bytes of UDP at
+/// 54, from shi:slo at MAC smac) that nothing listens on its port: an
+/// ICMPv6 destination unreachable (code 4) carrying the start of it.
+fn udp6_refuse(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
+  requires net_ok(n) && 8 <= plen && 54 + plen <= FRAME_MAX && smac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  let inv = smaller(40 + plen, 128);
+  bset(&mut n.out, 54, 1);            // destination unreachable
+  bset(&mut n.out, 55, 4);            // port unreachable
+  put32(&mut n.out, 56, 0);
+  put32(&mut n.out, 58, 0);
+  bcopy(&mut n.out, 62, n.pkt, 14, inv);
+  v6_header(&mut n, smac, NH_ICMP6, 8 + inv, be64(n.pkt, 38), be64(n.pkt, 46), shi, slo, 64);
+  net_send(&mut n, 62 + inv);
 }
 
 /// An ICMPv6 message (checked) of plen bytes at 54, from shi:slo at MAC
