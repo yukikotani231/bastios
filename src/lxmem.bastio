@@ -1275,7 +1275,7 @@ fn bus_mark(k: &mut Kernel, pid: u64, first: u64, pages: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if first >= WPAGES || pages > WPAGES - first {
+  if SIGBUS_PAGES == 0 || first >= WPAGES || pages > WPAGES - first {
     return;
   }
   let i = map_find(k, pid, first);
