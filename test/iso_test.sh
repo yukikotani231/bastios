@@ -262,6 +262,93 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+        # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
+        # dragging and typing, driven through QEMU's monitor.
+        def monitor(*cmds):
+            m3 = socket.socket(socket.AF_UNIX)
+            m3.connect(mon_path)
+            for c in cmds:
+                m3.sendall(c.encode() + b"\n")
+                time.sleep(0.15)
+            time.sleep(0.4)
+            m3.close()
+        mark = len(out)
+        q.stdin.write(b"bwm\r"); q.stdin.flush()
+        good = until(b"bwm: ready 1024x768", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) bwm starts on /dev/fb0")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            def at(x, y):
+                i = (y * w + x) * 3
+                return tuple(px[i:i + 3])
+            blue, grey, wall = (40, 90, 200), (110, 110, 120), at(10, 10)
+            good = (at(400, 125) == blue and at(300, 70) == grey and at(400, 300) == (235, 235, 235)
+                    and wall[2] > 70 and wall != blue and at(650, 300) == (220, 235, 250))
+            print(("ok  " if good else "FAIL"), f"({name}) bwm draws the wallpaper and three windows, the top one focused")
+            fails += not good
+            # Click the title bar of the Notes window (under the others'
+            # corners), drag it 100 right and 100 down: it comes to the front.
+            monitor("mouse_move -212 -314", "mouse_button 1", "mouse_move 50 50", "mouse_move 50 50", "mouse_button 0")
+            w, h, px = screendump()
+            good = at(300, 170) == blue and at(300, 70) == at(10, 70) and at(300, 70) != grey
+            print(("ok  " if good else "FAIL"), f"({name}) dragging a title bar moves the window and focuses it")
+            fails += not good
+            # Typed text goes into the focused window, after "for BastiOS." on its second line.
+            monitor("sendkey h")
+            w, h, px = screendump()
+            cell = [at(x, y) for y in range(200, 216) for x in range(282, 290)]
+            good = (10, 10, 10) in cell
+            print(("ok  " if good else "FAIL"), f"({name}) a typed key appears in the focused window")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")
+            fails += not good
+        # A client over the socket (user/bhello.c): a window of its own
+        # pixels, keys and clicks sent back to it, and its close box.
+        # The native shell passes no arguments, so this runs from BusyBox's ash.
+        mark = len(out)
+        q.stdin.write(b"ash\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bhello\r"); q.stdin.flush()
+        good = until(b"bhello: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a client opens a window on bwm over its socket")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            wall = lambda y: at(10, y)
+            good = (at(80, 100) == (255, 0, 0) and at(260, 100) == (0, 0, 255) and at(150, 75) == blue
+                    and at(10, 100) == wall(100) and at(80, 100) != wall(100))
+            print(("ok  " if good else "FAIL"), f"({name}) the client's pixels are in its window")
+            fails += not good
+            monitor("sendkey g")
+            good = until(b"bhello: key g", mark)
+            w, h, px = screendump()
+            good = good and at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a key typed goes to the client, which redraws")
+            fails += not good
+            monitor("mouse_move -362 -244", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: mouse 78 50 1", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a click inside the window reaches the client, in its own coordinates")
+            fails += not good
+            monitor("mouse_move 114 -60", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: closed", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(80, 100) == wall(100) and at(150, 75) == wall(75)
+            print(("ok  " if good else "FAIL"), f"({name}) the close box tells the client, whose window goes when it ends")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"# ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm again")
+            fails += not good
+        mark = len(out)
+        q.stdin.write(b"exit\r"); q.stdin.flush()
+        until(b"bastios> ", mark)
     steps = [("hello", b"hello from user mode"),
              ("echo from the iso > disk/iso", b""),
              ("cat disk/iso", b"from the iso"),
