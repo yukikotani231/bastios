@@ -1002,7 +1002,7 @@ t_proc: /proc/sys/net/core is a directory
 t_proc: a directory under /proc/sys that is not there is ENOENT
 t_proc: every file listed under /proc/sys opens
 t_proc: /proc/sys/vm lists swappiness
-t_proc: oom_score reads 0
+t_proc: oom_score reads a number
 t_proc: oom_score_adj starts at 0
 t_proc: loginuid is unset
 t_proc: coredump_filter reads its default
@@ -1362,6 +1362,13 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a compile error is reported
+podman: podman: unpack the image root and set it up
+podman: podman: version
+podman: podman: import a root and run a container as root
+podman: podman: a container has its own hostname
+podman: podman: rootless, the unprivileged user maps to root in its user namespace
+podman: podman: rootless, import an image (chroot, mkdir and lchown as the namespace's root)
+podman: podman: rootless, run a container in a user namespace
 t_sys: seccomp NOTIF_ADDFD installs a descriptor in the caller
 t_sys: keys: add_key, read, describe, update, request_key, link, search, unlink
 t_sys: keys: unknown type, bad payload, expiry, revocation, no such key

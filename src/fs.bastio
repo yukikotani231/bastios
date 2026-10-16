@@ -2398,7 +2398,23 @@ fn vfs_mount_node(v: &Vfs, s: u64) -> u64
 fn vfs_mount_ro(v: &Vfs, s: u64) -> bool
   requires vfs_ok(v) && s < MNT_N
 {
-  return get(v.mnt, 2 * s + 1) == 1;
+  return get(v.mnt, 2 * s + 1) != 0;
+}
+
+/// Is mount slot s an ext4 image (src/ext4.bastio)? Such a mount stays
+/// read-only.
+fn vfs_mount_ext(v: &Vfs, s: u64) -> bool
+  requires vfs_ok(v) && s < MNT_N
+{
+  return get(v.mnt, 2 * s + 1) == 2;
+}
+
+/// Marks mount slot s as a read-only ext4 image.
+fn vfs_set_ext(v: &mut Vfs, s: u64)
+  requires vfs_ok(v) && s < MNT_N
+  ensures vfs_ok(v)
+{
+  v.mnt = set(v.mnt, 2 * s + 1, 2);
 }
 
 /// Mounts on in-memory directory node i. False if every slot is taken.
