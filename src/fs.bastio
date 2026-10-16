@@ -29,7 +29,7 @@ import "pcache.bastio";
 
 const NFD: u64 = 64;                  // rows a process's native calls and the kernel's own opens use
 const FD_POOL: u64 = 4096;            // rows first in the table, for the files Linux descriptors name: any process may take any (OFD_N)
-const FD_ROWS: u64 = 36864;           // FD_POOL + NPROC * NFD
+const FD_ROWS: u64 = 69632;           // FD_POOL + NPROC * NFD
 const FD_STRIDE: u64 = 4;
 const HOLD_N: u64 = 512;              // holds (vfs_hold), in their own table
 const HOLD_LEN: u64 = 2048;           // HOLD_N * FD_STRIDE
@@ -40,7 +40,7 @@ const XFER: u64 = 4096;               // the most bytes one call moves
 
 /// The first row of process pid's native block.
 fn nbase(pid: u64) -> u64
-  requires pid < 512                  // NPROC (src/proc.bastio)
+  requires pid < 1024                 // NPROC (src/proc.bastio)
   ensures result + NFD <= FD_ROWS && result == FD_POOL + pid * NFD
 {
   return FD_POOL + pid * NFD;
@@ -109,12 +109,12 @@ struct Vfs {
   rhi: u64,             // every in-memory file is in a node below this (ram_find looks no further); only grows
   nopen: Buf,           // per file (nslot): how many rows and holds are open on it; node_open reads this instead of scanning ftab
   pool_hi: u64,         // every open row in the pool is below this (file_writing scans no further); only grows
-  nat_rows: bool,       // a row past the pool (a native process's) was ever opened: false lets file_writing skip them
+  nat_hi: u64,          // one past the highest row past the pool (a native process's) ever opened, 0 if none: every open one is below it (file_writing scans no further)
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
   nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
-    && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc)
+    && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc) && v.nat_hi <= FD_ROWS
 }
 
 fn vfs_new(disk: DiskFs) -> Vfs
@@ -122,7 +122,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   ensures vfs_ok(result)
 {
   return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), zeros: balloc(ZEROS), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), mnt_hi: 0, now: 0,
-    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0)), DM_WHOLE), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(KBASE + KB), rhi: 0, pool_hi: 0, nat_rows: false };
+    lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0)), DM_WHOLE, NC_STD), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(KBASE + KB), rhi: 0, pool_hi: 0, nat_rows: false };
 }
 
 /// ram_create of the name in the transfer buffer, noting the node in `rhi`
@@ -197,7 +197,7 @@ fn lo_swap(v: &mut Vfs, pages: Vec[Slot], size: u64) -> Vec[Slot]
   ensures vfs_ok(v)
 {
   let s = blk_loop_swap(disk_unmount(v.lo), pages, size);
-  v.lo = disk_mount(s.dev, DM_WHOLE);
+  v.lo = disk_mount(s.dev, DM_WHOLE, NC_STD);
   if s.swapped {
     v.lo_size = size;
   }
@@ -211,7 +211,7 @@ fn vfs_mount_target(v: &mut Vfs)
   requires vfs_ok(v)
   ensures vfs_ok(v)
 {
-  v.disk = disk_mount(disk_unmount(v.disk), DM_GPT);
+  v.disk = disk_mount(disk_unmount(v.disk), DM_GPT, NC_STD);
 }
 
 /// Is the name in the first n bytes of the transfer buffer on the disk
@@ -426,8 +426,8 @@ fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64
     if base + fd >= v.pool_hi {
       v.pool_hi = base + fd + 1;
     }
-  } else {
-    v.nat_rows = true;
+  } else if base + fd >= v.nat_hi {
+    v.nat_hi = base + fd + 1;
   }
   if on_disk(v, n) {
     let mk = path_ok(v, n) && parent_ok(&mut v, n);
@@ -514,8 +514,8 @@ fn vfs_open_node(v: &mut Vfs, base: u64, rows: u64, flags: u64, i: u64) -> u64
     if base + fd >= v.pool_hi {
       v.pool_hi = base + fd + 1;
     }
-  } else {
-    v.nat_rows = true;
+  } else if base + fd >= v.nat_hi {
+    v.nat_hi = base + fd + 1;
   }
   nopen_add(&mut v.nopen, FS_RAM, i);
   fset(&mut v.ftab, base + fd, FD_FS, FS_RAM);
@@ -1677,8 +1677,8 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
       bset(&mut v.xfer, 3, 107);
       return 4;
     }
-    if i >= NFILES {
-      return NO_FILE;
+    if i >= NFILES || (i >= v.rhi && d != VDIR_ROOT) {
+      return NO_FILE;                     // no node lives at or past rhi (the top directory goes on to "disk")
     }
     let n = ram_name(&mut v.ram, i, &mut v.xfer);
     if n > XFER {
@@ -1716,8 +1716,8 @@ fn dk_readdir(d: &DiskFs, x: &mut Bytes, p: u64, i: u64) -> u64
   ensures blen(x) == XFER
   ensures result <= XFER || result == NO_FILE
 {
-  if i >= DSLOTS {
-    return NO_FILE;
+  if i >= DSLOTS || i >= d.slots {
+    return NO_FILE;                       // past the directory's last block: no entry lives there
   }
   if !dent_used(d, i) || dent_parent(d, i) != p {
     return 0;

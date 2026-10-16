@@ -199,6 +199,8 @@ BastiOS has been run only in QEMU so far. To try it on a real machine and tell u
 
 ## Next
 
+- [Using BastiOS](using.md): users, the network, SSH, Alpine and `apk`; [Development on BastiOS](development.md): the editor, compilers and debuggers that run on it.
 - [docs/architecture.md](architecture.md): how the kernel fits together, and what is proved where.
+- [docs/README.md](README.md): the index of all documentation.
 - [docs/trusted-base.md](trusted-base.md): what is trusted instead of proved.
 - [The Bastio tutorial](https://github.com/yukikotani231/bastiolang/blob/main/docs/tutorial.md) and [language reference](https://github.com/yukikotani231/bastiolang/blob/main/docs/language.md).

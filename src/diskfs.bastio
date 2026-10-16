@@ -892,8 +892,8 @@ fn gpt_find(dev: &mut Blk, sec: &mut Bytes, total: u64) -> Part
 /// blank (else it is left alone: `foreign`), and works out which blocks
 /// are in use. Without a disk (or one too small) the file
 /// system has no entries and every operation on it fails.
-fn disk_mount(dev: Blk, mode: u64) -> DiskFs
-  requires blk_ok(dev)
+fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
+  requires blk_ok(dev) && cslots >= NC_MIN && cslots <= NC
   ensures disk_ok(result)
 {
   let total = blk_sectors(dev);
@@ -901,7 +901,7 @@ fn disk_mount(dev: Blk, mode: u64) -> DiskFs
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
   }
-  let mut nc = NC;
+  let mut nc = cslots;
   if n < DATA_B0 + 16 || mode == DM_RAW {
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
