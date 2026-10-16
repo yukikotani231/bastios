@@ -1,15 +1,26 @@
 // A text console on the linear framebuffer the boot loader set up (Limine
-// through VBE under BIOS, or UEFI's GOP), drawn with an 8x8 font doubled
-// vertically into 8x16 cells. The framebuffer is a block of the device
-// window claimed as an `Mmio`, so every pixel write is proved inside it.
+// through VBE under BIOS, or UEFI's GOP), drawn in 8x16 cells. ASCII uses an
+// 8x8 font doubled vertically; everything else comes from src/font16.bin: the
+// JIS X 0208 characters (kana, kanji, Japanese punctuation, fullwidth forms)
+// in two cells, and Latin-1, Greek, box drawing and half-width katakana in one.
+// A character with no glyph shows as a "?" in as many cells as it takes.
+// The framebuffer is a block of the device window claimed as an `Mmio`, so
+// every pixel write is proved inside it.
 //
-// The text on screen is kept in `text`, and `shown` records what each cell
-// last had drawn, so scrolling redraws only the cells that changed.
+// Bytes arrive as UTF-8 and are decoded here; a malformed sequence shows as
+// "?". The text on screen is kept in `text`, a code point to a cell (the
+// right cell of a two-cell character holds TAIL), and `shown` records what
+// each cell last had drawn, so scrolling redraws only the cells that changed.
 // Escape sequences (ESC [ ... letter) are swallowed, not interpreted.
 //
 // src/font8x8.bin: 128 glyphs of 8 bytes, a byte per row, bit 0 the
 // leftmost pixel. Public domain: font8x8_basic.h from
 // github.com/dhepper/font8x8 (after Marcel Sondaar and IBM's VGA fonts).
+// src/font16.bin: built by tools/mkfont.py (layout and sources in its
+// header) from the public domain Shinonome fonts and font8x8.
+
+import "utf8.bastio";
+import "smaller.bastio";
 
 const CELL_W: u64 = 8;
 const CELL_H: u64 = 16;
@@ -21,6 +32,9 @@ const FB_TOP: u64 = 0xFEC00000;       // below 4 GiB the framebuffer must end be
 const FB_HIGH: u64 = 0x100000000;     // or it lies in the window's part above 4 GiB
 const FB_HIGH_TOP: u64 = 0x400000000000;
 const FB_MAX_SIZE: u64 = 68718428160; // FB_MAX_PITCH * FB_MAX_SIDE
+const TAIL: u64 = 0x110000;           // in the right cell of a two-cell character
+const FFFD: u64 = 0xFFFD;             // what a malformed sequence stands for
+const NO_GLYPH: u64 = 0xFFFFFFFF;
 
 struct Fb {
   regs: Mmio,
@@ -32,7 +46,11 @@ struct Fb {
   cy: u64,
   fg: u64,            // the text colour, as a pixel
   esc: u64,           // 0, or inside an escape sequence: 1 after ESC, 2 after ESC [
-  text: Bytes,        // cols * rows characters
+  u8acc: u64,         // the UTF-8 sequence in progress: the bits so far,
+  u8need: u64,        //   the continuation bytes still to come (0: none),
+  u8min: u64,         //   and the least code point its length may encode
+  held: bool,         // a program draws on the screen (src/lxfb.bastio): the text is kept, not drawn
+  text: Bytes,        // cols * rows cells of 4 bytes
   shown: Bytes,       // what each cell shows now
 }
 
@@ -40,29 +58,193 @@ spec fn fb_ok(f: &Fb) -> bool {
   mmio_base(f.regs) % 4 == 0 && f.size <= mmio_len(f.regs) && f.pitch <= FB_MAX_PITCH
   && 1 <= f.cols && f.cols <= FB_MAX_SIDE && 1 <= f.rows && f.rows <= FB_MAX_SIDE
   && f.cx < f.cols && f.cy < f.rows && f.fg <= 4294967295
+  && f.u8acc <= 16777215 && f.u8need <= 3
 }
 
 fn font() -> Str {
   return include_bytes("font8x8.bin");
 }
 
+fn font16() -> Str {
+  return include_bytes("font16.bin");
+}
+
+/// The little endian number of n bytes (1 to 4) at o in s, 0 past its end.
+fn rd(s: Str, o: u64, n: u64) -> u64
+  requires n <= 4 && o <= 4294967295
+  ensures result <= 4294967295
+{
+  if o + n > slen(s) {
+    return 0;
+  }
+  let mut v = 0;
+  if n >= 1 {
+    v = cast[u64](sget(s, o));
+  }
+  if n >= 2 {
+    v = v + cast[u64](sget(s, o + 1)) * 256;
+  }
+  if n >= 3 {
+    v = v + cast[u64](sget(s, o + 2)) * 65536;
+  }
+  if n >= 4 {
+    v = v + cast[u64](sget(s, o + 3)) * 16777216;
+  }
+  return v;
+}
+
+/// Where in font16.bin the glyph of code point c starts, or NO_GLYPH: a
+/// binary search of the table of two-cell characters (c takes two cells)
+/// or of one-cell ones (c takes one).
+fn glyph_at(c: u64) -> u64
+  ensures result == NO_GLYPH || result < 8388608
+{
+  let g = font16();
+  let nw = smaller(rd(g, 0, 4), 65536);
+  let nn = smaller(rd(g, 4, 4), 65536);
+  let two = cp_width(c) == 2;
+  let mut n = nn;
+  let mut tab = 8 + 2 * nw;                 // the one-cell code points
+  let mut glyphs = 8 + 2 * nw + 2 * nn + 32 * nw;
+  if two {
+    n = nw;
+    tab = 8;
+    glyphs = 8 + 2 * nw + 2 * nn;
+  }
+  let mut lo = 0;
+  let mut hi = n;
+  while lo < hi
+    invariant lo <= hi && hi <= n && n <= 65536 && tab <= 8 + 2 * 65536 + 2 * 65536
+      && glyphs <= 8 + 2 * 65536 + 2 * 65536 + 32 * 65536
+  {
+    let mid = (lo + hi) / 2;
+    let v = rd(g, tab + 2 * mid, 2);
+    if v == c {
+      if two {
+        return glyphs + 32 * mid;
+      }
+      return glyphs + 16 * mid;
+    }
+    if v < c {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return NO_GLYPH;
+}
+
+/// Row r of one cell of character c: 8 pixels, bit 0 the leftmost; `half`
+/// is 1 for the right cell of a two-cell character. `at` is glyph_at(c).
+fn glyph_row(c: u64, at: u64, half: u64, r: u64) -> u64
+  requires r < CELL_H && half <= 1 && (at == NO_GLYPH || at < 8388608)
+  ensures result <= 255
+{
+  let w = cp_width(c);
+  if c < 128 {
+    if half == 1 {
+      return 0;
+    }
+    let g = font();
+    if c * 8 + r / 2 < slen(g) {
+      return cast[u64](sget(g, c * 8 + r / 2));
+    }
+    return 0;
+  }
+  if w == 0 {
+    return 0;
+  }
+  if at == NO_GLYPH {
+    // A "?", on the left cell only.
+    if half == 1 {
+      return 0;
+    }
+    let g = font();
+    if 63 * 8 + r / 2 < slen(g) {
+      return cast[u64](sget(g, 63 * 8 + r / 2));
+    }
+    return 0;
+  }
+  let mut o = at + r;
+  if w == 2 {
+    o = at + 2 * r + half;
+  }
+  return rd(font16(), o, 1) % 256;
+}
+
+/// The 4-byte cell i of b, 32 (a space) past its end.
+fn cell_get(b: &Bytes, i: u64) -> u64
+  ensures result <= 4294967295
+{
+  if i < 4294967296 && i * 4 + 3 < blen(b) {
+    return cast[u64](bget(b, i * 4)) + cast[u64](bget(b, i * 4 + 1)) * 256
+      + cast[u64](bget(b, i * 4 + 2)) * 65536 + cast[u64](bget(b, i * 4 + 3)) * 16777216;
+  }
+  return 32;
+}
+
+fn cell_set(b: &mut Bytes, i: u64, v: u64)
+  requires v <= 4294967295
+  ensures blen(b) == old(blen(b))
+{
+  if i < 4294967296 && i * 4 + 3 < blen(b) {
+    let mut x = v;
+    let mut k = 0;
+    while k < 4
+      invariant k <= 4 && i < 4294967296 && i * 4 + 3 < blen(b)
+    {
+      bset(&mut b, i * 4 + k, cast[u8](x % 256));
+      x = x / 256;
+      k = k + 1;
+    }
+  }
+}
+
+/// The character in cell (col, row).
+fn fb_at(f: &Fb, col: u64, row: u64) -> u64
+  requires fb_ok(f) && col < f.cols && row < f.rows
+  ensures result <= 4294967295
+{
+  return cell_get(f.text, row * f.cols + col);
+}
+
+fn fb_set(f: &mut Fb, col: u64, row: u64, c: u64)
+  requires fb_ok(f) && col < f.cols && row < f.rows && c <= 4294967295
+  ensures fb_ok(f)
+{
+  cell_set(&mut f.text, row * f.cols + col, c);
+}
+
 /// Draws cell (col, row) with character c, inverted if `inv` (the cursor).
+/// A TAIL cell draws the right half of the character to its left.
 fn fb_draw(f: &mut Fb, col: u64, row: u64, c: u64, inv: bool)
   requires fb_ok(f) && col < f.cols && row < f.rows
   ensures fb_ok(f)
 {
-  let g = font();
-  let mut ch = c;
-  if ch >= 128 {
-    ch = 32;
+  if f.held {
+    return;
   }
+  let mut ch = c;
+  let mut half = 0;
+  if c == TAIL {
+    half = 1;
+    ch = 32;
+    if col > 0 {
+      ch = fb_at(f, col - 1, row);
+    }
+    if ch >= TAIL {
+      ch = 32;
+      half = 0;
+    }
+  }
+  let at = glyph_at(ch);
   let mut r = 0;
   while r < CELL_H
     invariant r <= CELL_H && fb_ok(f)
   {
     let off = (row * CELL_H + r) * f.pitch + col * CELL_W * 4;
-    if off % 4 == 0 && off + CELL_W * 4 <= f.size && ch * 8 + r / 2 < slen(g) {
-      let mut bits = cast[u64](sget(g, ch * 8 + r / 2));
+    if off % 4 == 0 && off + CELL_W * 4 <= f.size {
+      let mut bits = glyph_row(ch, at, half, r);
       if inv {
         bits = 255 - bits;
       }
@@ -83,29 +265,18 @@ fn fb_draw(f: &mut Fb, col: u64, row: u64, c: u64, inv: bool)
   }
 }
 
-/// The character in cell (col, row).
-fn fb_at(f: &Fb, col: u64, row: u64) -> u64
+/// Draws cell (col, row) as it is in `text` and records that.
+fn fb_show(f: &mut Fb, col: u64, row: u64)
   requires fb_ok(f) && col < f.cols && row < f.rows
-  ensures result <= 255
-{
-  let i = row * f.cols + col;
-  if i < blen(f.text) {
-    return cast[u64](bget(f.text, i));
-  }
-  return 32;
-}
-
-fn fb_set(f: &mut Fb, col: u64, row: u64, c: u64)
-  requires fb_ok(f) && col < f.cols && row < f.rows && c <= 255
   ensures fb_ok(f)
 {
-  let i = row * f.cols + col;
-  if i < blen(f.text) {
-    bset(&mut f.text, i, cast[u8](c));
-  }
+  let c = fb_at(f, col, row);
+  fb_draw(&mut f, col, row, c, false);
+  cell_set(&mut f.shown, row * f.cols + col, c);
 }
 
-/// Draws every cell whose character differs from what it shows.
+/// Draws every cell whose character differs from what it shows. A change in
+/// the left cell of a two-cell character draws the right one with it.
 fn fb_refresh(f: &mut Fb)
   requires fb_ok(f)
   ensures fb_ok(f)
@@ -120,9 +291,11 @@ fn fb_refresh(f: &mut Fb)
     {
       let i = row * f.cols + col;
       let c = fb_at(f, col, row);
-      if i < blen(f.shown) && cast[u64](bget(f.shown, i)) != c {
-        fb_draw(&mut f, col, row, c, false);
-        bset(&mut f.shown, i, cast[u8](c));
+      if cell_get(f.shown, i) != c {
+        fb_show(&mut f, col, row);
+        if col + 1 < f.cols && fb_at(f, col + 1, row) == TAIL && c != TAIL {
+          fb_show(&mut f, col + 1, row);
+        }
       }
       col = col + 1;
     }
@@ -140,11 +313,12 @@ fn fb_newline(f: &mut Fb)
     return;
   }
   let n = blen(f.text);
+  let step = f.cols * 4;
   let mut i = 0;
-  while i + f.cols < n
-    invariant fb_ok(f) && blen(f.text) == n && i <= n
+  while i + step < n
+    invariant fb_ok(f) && blen(f.text) == n && i <= n && step == f.cols * 4
   {
-    bset(&mut f.text, i, bget(f.text, i + f.cols));
+    bset(&mut f.text, i, bget(f.text, i + step));
     i = i + 1;
   }
   let mut col = 0;
@@ -157,10 +331,76 @@ fn fb_newline(f: &mut Fb)
   fb_refresh(&mut f);
 }
 
-/// Writes byte b at the cursor: printable ASCII, CR, LF, backspace (which
+/// Draws the cursor on its cell (and the right cell of a two-cell
+/// character), or takes it off.
+fn fb_cursor(f: &mut Fb, on: bool)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  let c = fb_at(f, f.cx, f.cy);
+  fb_draw(&mut f, f.cx, f.cy, c, on);
+  if f.cx + 1 < f.cols && fb_at(f, f.cx + 1, f.cy) == TAIL && c != TAIL {
+    fb_draw(&mut f, f.cx + 1, f.cy, TAIL, on);
+  }
+}
+
+/// Blanks the other half of the two-cell character that cell (col, row)
+/// is part of, since the cell is about to hold something else.
+fn fb_split(f: &mut Fb, col: u64, row: u64)
+  requires fb_ok(f) && col < f.cols && row < f.rows
+  ensures fb_ok(f)
+{
+  let c = fb_at(f, col, row);
+  if c == TAIL && col > 0 {
+    fb_set(&mut f, col - 1, row, 32);
+    fb_show(&mut f, col - 1, row);
+  } else if col + 1 < f.cols && fb_at(f, col + 1, row) == TAIL {
+    fb_set(&mut f, col + 1, row, 32);
+    fb_show(&mut f, col + 1, row);
+  }
+}
+
+/// Puts character cp (not a control character) at the cursor, over as many
+/// cells as it takes, and moves on; wraps first if a two-cell character
+/// would not fit.
+fn fb_char(f: &mut Fb, cp: u64)
+  requires fb_ok(f) && cp < TAIL
+  ensures fb_ok(f)
+{
+  let w = cp_width(cp);
+  if w == 0 || (w == 2 && f.cols < 2) {
+    return;
+  }
+  fb_cursor(&mut f, false);
+  if w == 2 && f.cx + 2 > f.cols {
+    f.cx = 0;
+    fb_newline(&mut f);
+  }
+  fb_split(&mut f, f.cx, f.cy);
+  if w == 2 {
+    fb_split(&mut f, f.cx + 1, f.cy);
+  }
+  fb_set(&mut f, f.cx, f.cy, cp);
+  if w == 2 {
+    fb_set(&mut f, f.cx + 1, f.cy, TAIL);
+  }
+  fb_show(&mut f, f.cx, f.cy);
+  if w == 2 {
+    fb_show(&mut f, f.cx + 1, f.cy);
+  }
+  if f.cx + w < f.cols {
+    f.cx = f.cx + w;
+  } else {
+    f.cx = 0;
+    fb_newline(&mut f);
+  }
+  fb_cursor(&mut f, true);
+}
+
+/// Writes byte b at the cursor: UTF-8 characters, CR, LF, backspace (which
 /// only moves back) and tab; escape sequences are skipped.
 fn fb_put(f: &mut Fb, b: u64)
-  requires fb_ok(f)
+  requires fb_ok(f) && b < 256
   ensures fb_ok(f)
 {
   if f.esc == 1 {
@@ -177,8 +417,45 @@ fn fb_put(f: &mut Fb, b: u64)
     }
     return;
   }
+  if f.u8need > 0 {
+    if utf8_cont(b) {
+      f.u8acc = (f.u8acc % 262144) * 64 + b % 64;
+      f.u8need = f.u8need - 1;
+      if f.u8need == 0 {
+        let cp = f.u8acc;
+        if cp < f.u8min || cp >= TAIL || (cp >= 0xD800 && cp < 0xE000) {
+          fb_char(&mut f, FFFD);
+        } else {
+          fb_char(&mut f, cp);
+        }
+      }
+      return;
+    }
+    f.u8need = 0;                     // cut short: it shows as "?", and b is read afresh
+    fb_char(&mut f, FFFD);
+  }
+  if b >= 128 {
+    let n = utf8_len(b);
+    if n < 2 {
+      fb_char(&mut f, FFFD);
+      return;
+    }
+    f.u8acc = utf8_lead_bits(b, n);
+    f.u8need = n - 1;
+    f.u8min = 0x80;
+    if n == 3 {
+      f.u8min = 0x800;
+    } else if n == 4 {
+      f.u8min = 0x10000;
+    }
+    return;
+  }
+  if b >= 32 && b < 127 {
+    fb_char(&mut f, b);
+    return;
+  }
   // Take the cursor off its cell.
-  fb_draw(&mut f, f.cx, f.cy, fb_at(f, f.cx, f.cy), false);
+  fb_cursor(&mut f, false);
   if b == 27 {
     f.esc = 1;
   } else if b == 13 {
@@ -195,21 +472,8 @@ fn fb_put(f: &mut Fb, b: u64)
       n = f.cols - 1 - f.cx;
     }
     f.cx = f.cx + n;
-  } else if b >= 32 && b < 127 {
-    fb_set(&mut f, f.cx, f.cy, b);
-    let i = f.cy * f.cols + f.cx;
-    fb_draw(&mut f, f.cx, f.cy, b, false);
-    if i < blen(f.shown) {
-      bset(&mut f.shown, i, cast[u8](b));
-    }
-    if f.cx + 1 < f.cols {
-      f.cx = f.cx + 1;
-    } else {
-      f.cx = 0;
-      fb_newline(&mut f);
-    }
   }
-  fb_draw(&mut f, f.cx, f.cy, fb_at(f, f.cx, f.cy), true);
+  fb_cursor(&mut f, true);
 }
 
 /// A console on the framebuffer `regs` (size bytes: pitch * height lines of
@@ -224,7 +488,8 @@ fn fb_new(regs: Mmio, size: u64, pitch: u64, width: u64, height: u64, rgb: u64) 
   let rows = height / CELL_H;
   let fg = (FG_LEVEL << (rgb % 32)) + (FG_LEVEL << (rgb / 256 % 32)) + (FG_LEVEL << (rgb / 65536 % 32));
   let mut f = Fb { regs: regs, size: size, pitch: pitch, cols: cols, rows: rows, cx: 0, cy: 0,
-    fg: fg % 4294967296, esc: 0, text: balloc(cols * rows), shown: balloc(cols * rows) };
+    fg: fg % 4294967296, esc: 0, held: false, u8acc: 0, u8need: 0, u8min: 0,
+    text: balloc(cols * rows * 4), shown: balloc(cols * rows * 4) };
   let mut o = 0;
   while o + 4 <= size
     invariant o % 4 == 0 && o <= size && fb_ok(f) && f.size == size
@@ -234,21 +499,70 @@ fn fb_new(regs: Mmio, size: u64, pitch: u64, width: u64, height: u64, rgb: u64) 
   }
   // Both buffers start as spaces: the screen is blank.
   let mut i = 0;
-  while i < blen(f.text)
+  while i < cols * rows
     invariant fb_ok(f)
   {
-    bset(&mut f.text, i, 32);
+    cell_set(&mut f.text, i, 32);
+    cell_set(&mut f.shown, i, 32);
     i = i + 1;
-  }
-  let mut j = 0;
-  while j < blen(f.shown)
-    invariant fb_ok(f)
-  {
-    bset(&mut f.shown, j, 32);
-    j = j + 1;
   }
   fb_draw(&mut f, 0, 0, 32, true);
   return f;
+}
+
+/// A program takes the screen (the pixels it writes are not the console's):
+/// the console goes on filling its text, but stops drawing it.
+fn fb_hold(f: &mut Fb)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  f.held = true;
+}
+
+/// The console has the screen back: blank, then every cell drawn again.
+fn fb_release(f: &mut Fb)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  f.held = false;
+  let mut o = 0;
+  while o + 4 <= f.size
+    invariant o % 4 == 0 && o <= f.size && fb_ok(f)
+  {
+    mmio_write32(&mut f.regs, o, 0);
+    o = o + 4;
+  }
+  let mut i = 0;
+  while i < blen(f.shown)
+    invariant fb_ok(f)
+  {
+    bset(&mut f.shown, i, 0);              // no cell shows its character
+    i = i + 1;
+  }
+  fb_refresh(&mut f);
+  fb_draw(&mut f, f.cx, f.cy, fb_at(f, f.cx, f.cy), true);
+}
+
+/// Stores the n bytes of src from index `from` at byte `off` of the
+/// framebuffer, as far as they fit (a pixel is 4 bytes; a write that
+/// starts or ends inside one is rounded down to whole pixels).
+fn fb_blit(f: &mut Fb, off: u64, src: &Bytes, from: u64, n: u64)
+  requires fb_ok(f) && from <= blen(src) && n <= blen(src) - from && off <= 281474976710656 && n <= 65536
+  ensures fb_ok(f)
+{
+  let mut i = 0;
+  while i + 4 <= n && off + i + 4 <= f.size
+    invariant i <= n && n <= 65536 && off <= 281474976710656 && fb_ok(f) && n <= blen(src) - from && from <= blen(src)
+  {
+    if (off + i) % 4 == 0 {
+      let px = cast[u64](bget(src, from + i)) + 256 * cast[u64](bget(src, from + i + 1))
+        + 65536 * cast[u64](bget(src, from + i + 2)) + 16777216 * cast[u64](bget(src, from + i + 3));
+      mmio_write32(&mut f.regs, off + i, cast[u32](px));
+      i = i + 4;
+    } else {
+      i = i + 1;                           // up to the next pixel boundary
+    }
+  }
 }
 
 /// Gives the block back (at power off).
@@ -292,6 +606,46 @@ fn screen_put(s: &mut Screen, b: u8)
     Screen::None => { s = Screen::None; },
     Screen::Fb(mut f) => {
       fb_put(&mut f, cast[u64](b));
+      s = Screen::Fb(f);
+    },
+  }
+}
+
+/// The console stops drawing, or draws again, or a program's pixels go on the screen (src/lxfb.bastio).
+fn screen_hold(s: &mut Screen)
+  requires screen_ok(s)
+  ensures screen_ok(s)
+{
+  match s {
+    Screen::None => { s = Screen::None; },
+    Screen::Fb(mut f) => {
+      fb_hold(&mut f);
+      s = Screen::Fb(f);
+    },
+  }
+}
+
+fn screen_release(s: &mut Screen)
+  requires screen_ok(s)
+  ensures screen_ok(s)
+{
+  match s {
+    Screen::None => { s = Screen::None; },
+    Screen::Fb(mut f) => {
+      fb_release(&mut f);
+      s = Screen::Fb(f);
+    },
+  }
+}
+
+fn screen_blit(s: &mut Screen, off: u64, src: &Bytes, from: u64, n: u64)
+  requires screen_ok(s) && from <= blen(src) && n <= blen(src) - from && off <= 281474976710656 && n <= 65536
+  ensures screen_ok(s)
+{
+  match s {
+    Screen::None => { s = Screen::None; },
+    Screen::Fb(mut f) => {
+      fb_blit(&mut f, off, src, from, n);
       s = Screen::Fb(f);
     },
   }

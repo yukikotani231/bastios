@@ -82,7 +82,7 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
                "-device", "virtio-net-pci,netdev=n0"]
     # 1G: the kernel's arena is a fraction of RAM (4 MiB up to 128 MiB, 32 MiB
     # here). The per-process tables take 24 KiB a process and double with the
-    # process table, so the 300 processes of mproc need several MiB of it.
+    # process table, so the 700 processes of mproc need several MiB of it.
     return subprocess.Popen(
         [qemu_bin, "-kernel", kernel_path or kernel, "-m", "1G", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -262,6 +262,10 @@ steps = [
     ("mhello > lxout; read y < lxout; echo y=$y", b"y=hello from musl: mhello, argc 1, 6", b"\n# "),
     ("export GREETING=hey; ash", b"built-in shell (ash)", b"\n# "),
     ("echo env $GREETING", b"env hey", b"\n# "),
+    # The environment the kernel gives what it starts names a UTF-8 locale,
+    # and /etc/profile (read by login shells) says the same.
+    ("echo lang $LANG", b"lang C.UTF-8", b"\n# "),
+    ("while read l; do echo p:$l; done < /etc/profile", b"p:export LANG=C.UTF-8", b"\n# "),
     ("exit", b"", b"\n# "),
     ("elfpie a b", b"elfpie: ok", b"\n# "),
     # execve of a file: elfdemo is the elfpie program installed at boot.
@@ -541,7 +545,7 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n1024\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
     # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
     # of the 1 GiB window and grows the stack past 6 MiB).
     ("ulimit -s", b"\r\n8192\r\n", b"\n# "),
@@ -1217,8 +1221,13 @@ session("virtio", True, [
     ("mcont", b"mcont: ok", b"\n# "),
     # Far more open file descriptions than the 1024 the table once held, from several processes (user/mfd.c).
     ("mfd", b"mfd: ok, 8 processes held 1856 descriptions", b"\n# "),
-    # More processes at once than the 256 the process table once held (user/mproc.c).
-    ("mproc", b"mproc: ok, 300 processes at once", b"\n# "),
+    # More processes at once than the 512 the process table once held (user/mproc.c).
+    ("mproc", b"mproc: ok, 700 processes at once", b"\n# "),
+    # /dev/fb0 without a screen (this machine has none): ENODEV (user/mfb.c; the drawing is tested in test/iso_test.sh).
+    ("mfb", b"mfb: no screen (ENODEV)", b"\n# "),
+    ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
+    ("bhello", b"bhello: no window server", b"\n# "),
+    ("bterm", b"bterm: no window server", b"\n# "),
     ("exit", b""),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
