@@ -535,6 +535,7 @@ fn pty_input(k: &mut Kernel, p: u64, ch: u64) -> bool
 fn pty_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && d >= DEV_PTM && d < DEV_PTS + PTY_N
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let p = pty_of(d);
   let master = is_ptm(d);
@@ -591,6 +592,7 @@ fn pty_read(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
 fn pty_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC && d >= DEV_PTM && d < DEV_PTS + PTY_N
   ensures kok(k)
+  ensures lx_count_or_fail(result, n)
 {
   let p = pty_of(d);
   let master = is_ptm(d);
