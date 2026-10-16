@@ -728,5 +728,28 @@ int main(void) {
            struct timespec a, b;
            int x = clock_getres(CLOCK_REALTIME_COARSE, &a), y = clock_getres(CLOCK_MONOTONIC_COARSE, &b);
            x == 0 && y == 0 && a.tv_nsec >= 1000000 && b.tv_nsec >= 1000000; }));
+    EXPECT("mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt", ({
+           char was[32] = "";
+           int r = open("/proc/sys/fs/mqueue/queues_max", O_RDONLY);
+           int n = r >= 0 ? read(r, was, sizeof was - 1) : -1;
+           if (r >= 0) close(r);
+           int ok = n > 0 && strcmp(was, "256\n") == 0;
+           if (ok) {
+             mq_unlink("/mqlim_a"); mq_unlink("/mqlim_b");
+             mqd_t a = mq_open("/mqlim_a", O_RDWR | O_CREAT | O_EXCL, 0666, 0);
+             int w = open("/proc/sys/fs/mqueue/queues_max", O_WRONLY);
+             ok = a != (mqd_t)-1 && w >= 0 && write(w, "1\n", 2) == 2;
+             pid_t c = fork();
+             if (c == 0) {
+               setuid(65534);
+               _exit(mq_open("/mqlim_b", O_RDWR | O_CREAT | O_EXCL, 0600, 0) == (mqd_t)-1 && errno == ENOSPC ? 0 : 1);
+             }
+             int st; waitpid(c, &st, 0);
+             mqd_t b = mq_open("/mqlim_b", O_RDWR | O_CREAT | O_EXCL, 0600, 0);
+             ok = ok && WIFEXITED(st) && WEXITSTATUS(st) == 0 && b != (mqd_t)-1;
+             if (w >= 0) { lseek(w, 0, SEEK_SET); write(w, "256\n", 4); close(w); }
+             mq_unlink("/mqlim_a"); mq_unlink("/mqlim_b");
+           }
+           ok; }));
     return done();
 }
