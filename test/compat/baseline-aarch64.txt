@@ -1201,3 +1201,4 @@ alpine: gdb: attach to a program with three threads, and every thread is listed
 alpine: gdb: a core file of a crashed program shows where it died, its call chain and its arguments
 alpine: apk: install tmux, cmake and lua-language-server over HTTP
 alpine: cmake: configure, build and run a C project
+alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
