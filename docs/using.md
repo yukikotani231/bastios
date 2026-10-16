@@ -166,7 +166,7 @@ What has been tested is this sequence with the mirror replaced by a copy served 
 
 ## 7. A graphical session (early)
 
-From the ISO or USB image, where the screen is a framebuffer, `bwm` starts a small window manager on it: a wallpaper, three windows and a pointer. Click a window to raise and focus it, drag a title bar to move it, type to put text in the focused window, and press Ctrl-Q to leave; the text console comes back. It uses `/dev/fb0` for the screen and `/dev/input/mice` for the mouse (see [linux.md](linux.md)), so it is an ordinary Linux program (`user/bwm.c`). The windows are its own: programs cannot yet open windows of their own.
+From the ISO or USB image, where the screen is a framebuffer, `bwm` starts a small window manager on it: a wallpaper, three windows and a pointer. Click a window to raise and focus it, drag a title bar to move it, type to put text in the focused window, and press Ctrl-Q to leave; the text console comes back. It uses `/dev/fb0` for the screen and `/dev/input/mice` for the mouse (see [linux.md](linux.md)), so it is an ordinary Linux program (`user/bwm.c`). `bwm -n` starts it with no windows of its own, and `bwm -c bhello` also starts a client (`bhello` opens a window, shows what is typed and clicked, and ends with the close box). Programs open windows over a UNIX socket at `/tmp/bwm.sock`: `user/bwmproto.h` describes the messages (create a window of a given size, draw rectangles of 0x00RRGGBB pixels, and receive keys, pointer events and close requests), and `user/bwmlib.h` is a small client library. bwm keeps each window's pixels. The native shell passes no arguments to Linux programs, so run `ash` first to give `bwm` any.
 
 ## 8. On a real PC
 
@@ -178,6 +178,6 @@ From the ISO or USB image, where the screen is a framebuffer, `bwm` starts a sma
 - Users, passwords and SSH host keys are kept in memory and lost at power off; only `/disk` is kept.
 - There is no init system. The console starts in the native shell as root; the boot option `login` (the third entry of the ISO and USB boot menu) starts BusyBox's `login` instead.
 - At most 511 processes, a 512 GiB address window each, and 256 MiB of memory in `make run`. The disk holds up to 262143 files and directories; `make disk` writes an image of at most 1 TiB, 33 MiB or the size of the files plus `MKDISK_FREE_MB` (16 by default), whichever is larger. The other limits are listed in the README's Status section.
-- The graphical session is a start: `bwm` draws windows of its own, and other programs cannot yet open windows (section 7).
+- The graphical session is a start (section 7): windows can be opened by other programs over a socket, but there is no terminal window yet, no shared memory for window contents, and keys come as characters (no key release or modifiers).
 - Some Linux system calls are missing; the kernel prints a note on the console when a program uses one (Dropbear's `execveat` does, harmlessly). [linux.md](linux.md) lists what is there, and `make compat` measures it.
 - The system call ABI and the disk format can still change between versions.

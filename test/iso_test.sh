@@ -306,6 +306,49 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")
             fails += not good
+        # A client over the socket (user/bhello.c): a window of its own
+        # pixels, keys and clicks sent back to it, and its close box.
+        # The native shell passes no arguments, so this runs from BusyBox's ash.
+        mark = len(out)
+        q.stdin.write(b"ash\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bhello\r"); q.stdin.flush()
+        good = until(b"bhello: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a client opens a window on bwm over its socket")
+        fails += not good
+        if good:
+            time.sleep(0.5)
+            w, h, px = screendump()
+            wall = lambda y: at(10, y)
+            good = (at(80, 100) == (255, 0, 0) and at(260, 100) == (0, 0, 255) and at(150, 75) == blue
+                    and at(10, 100) == wall(100) and at(80, 100) != wall(100))
+            print(("ok  " if good else "FAIL"), f"({name}) the client's pixels are in its window")
+            fails += not good
+            monitor("sendkey g")
+            good = until(b"bhello: key g", mark)
+            w, h, px = screendump()
+            good = good and at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a key typed goes to the client, which redraws")
+            fails += not good
+            monitor("mouse_move -362 -244", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: mouse 78 50 1", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a click inside the window reaches the client, in its own coordinates")
+            fails += not good
+            monitor("mouse_move 114 -60", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: closed", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(80, 100) == wall(100) and at(150, 75) == wall(75)
+            print(("ok  " if good else "FAIL"), f"({name}) the close box tells the client, whose window goes when it ends")
+            fails += not good
+            monitor("sendkey ctrl-q")
+            good = until(b"bwm: bye", mark) and until(b"# ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm again")
+            fails += not good
+        mark = len(out)
+        q.stdin.write(b"exit\r"); q.stdin.flush()
+        until(b"bastios> ", mark)
     steps = [("hello", b"hello from user mode"),
              ("echo from the iso > disk/iso", b""),
              ("cat disk/iso", b"from the iso"),

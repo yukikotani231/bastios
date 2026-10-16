@@ -1,16 +1,19 @@
-/* bwm, the window server's first form: a compositing window manager for
- * /dev/fb0 that draws its own windows, takes the mouse from
- * /dev/input/mice and the keyboard from the terminal, and gives the
- * pointer a cursor. A click raises and focuses a window, dragging a
- * title bar moves it, and what is typed goes into the focused window's
- * text. Ctrl-Q ends it (the console comes back when /dev/fb0 closes).
- * There are no client programs yet: the windows are the server's own.
+/* bwm, a compositing window manager for /dev/fb0. It takes the mouse from
+ * /dev/input/mice and the keyboard from the terminal, gives the pointer a
+ * cursor, and keeps the windows. A click raises and focuses a window,
+ * dragging a title bar moves it, the box at the right of a title bar
+ * closes the window, and what is typed goes to the focused window. Ctrl-Q
+ * ends bwm (the console comes back when /dev/fb0 closes).
+ *
+ * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
+ * each window's pixels, takes rectangles to draw, and sends back keys and
+ * pointer events. Three windows of its own, with text only, are there at
+ * the start unless it is run as "bwm -n".
  *
  * Every frame is composed in memory (`scene`) and only the rectangles
- * that changed are written to the screen, line by line, through
- * lseek and write. test/iso_test.sh drives it with QEMU's monitor
- * (mouse_move, mouse_button, sendkey) and reads the screen back from a
- * screendump. */
+ * that changed are written to the screen, line by line, through lseek and
+ * write. test/iso_test.sh drives it with QEMU's monitor (mouse_move,
+ * mouse_button, sendkey) and reads the screen back from a screendump. */
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -19,9 +22,12 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <termios.h>
 #include <unistd.h>
 
+#include "bwmproto.h"
 #include "font8x8.h"
 
 struct bitfield { uint32_t offset, length, msb_right; };
@@ -46,9 +52,12 @@ struct fix_info {
 #define CELL_H 16
 #define TITLE_H 20
 #define BORDER 2
+#define CLOSE_W 16
 #define MAX_COLS 80
 #define MAX_ROWS 40
-#define NWIN 3
+#define MAXWIN 16
+#define MAXCLI 8
+#define RXCAP (BWM_MAX_PAYLOAD + 64)
 
 static int fb = -1;
 static unsigned W, H, PITCH;
@@ -56,19 +65,37 @@ static unsigned roff, goff, boff;
 static uint32_t *scene, *frame;          /* W * H pixels, without and with the cursor */
 
 struct win {
-    int x, y, w, h;
+    int used;
+    int id;
+    int cli;                             /* the client that owns it, or -1 */
+    int x, y, w, h;                      /* the frame, with its title bar */
     char title[24];
     uint32_t body;
+    uint32_t *pix;                       /* a client's contents: (w - 2 * BORDER) * (h - TITLE_H - BORDER) */
     int cols, rows, cx, cy;
     char text[MAX_ROWS][MAX_COLS];
 };
-static struct win wins[NWIN];            /* wins[NWIN - 1] is on top */
-static int nwin = NWIN;
-static int focus = NWIN - 1;             /* an index into wins */
+static struct win pool[MAXWIN];
+static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
+static int nz;
+static int next_id = 1;
+
+struct cli {
+    int fd;                              /* -1 when free */
+    size_t have;
+    unsigned char *rx;
+};
+static struct cli clis[MAXCLI];
+static char path[64];
 
 static uint32_t rgb(unsigned r, unsigned g, unsigned b)
 {
     return (r << roff) | (g << goff) | (b << boff);
+}
+
+static uint32_t from_wire(uint32_t p)
+{
+    return rgb(p >> 16 & 255, p >> 8 & 255, p & 255);
 }
 
 static void fill(uint32_t *buf, int x0, int y0, int x1, int y1, uint32_t c)
@@ -82,7 +109,7 @@ static void fill(uint32_t *buf, int x0, int y0, int x1, int y1, uint32_t c)
             buf[y * W + x] = c;
 }
 
-static void glyph(uint32_t *buf, int x, int y, int ch, uint32_t fg, int has_bg, uint32_t bg)
+static void glyph(uint32_t *buf, int x, int y, int ch, uint32_t fg)
 {
     if (ch < 0 || ch >= 128)
         ch = 32;
@@ -90,12 +117,8 @@ static void glyph(uint32_t *buf, int x, int y, int ch, uint32_t fg, int has_bg, 
         unsigned bits = font8x8[ch * 8 + r / 2];
         for (int p = 0; p < CELL_W; p++, bits >>= 1) {
             int px = x + p, py = y + r;
-            if (px < 0 || py < 0 || px >= (int)W || py >= (int)H)
-                continue;
-            if (bits & 1)
+            if ((bits & 1) && px >= 0 && py >= 0 && px < (int)W && py < (int)H)
                 buf[py * W + px] = fg;
-            else if (has_bg)
-                buf[py * W + px] = bg;
         }
     }
 }
@@ -103,21 +126,50 @@ static void glyph(uint32_t *buf, int x, int y, int ch, uint32_t fg, int has_bg, 
 static void text(uint32_t *buf, int x, int y, const char *s, uint32_t fg)
 {
     for (; *s; s++, x += CELL_W)
-        glyph(buf, x, y, *s, fg, 0, 0);
+        glyph(buf, x, y, *s, fg);
 }
 
-static void win_init(struct win *w, int x, int y, int cw, int ch, const char *title, uint32_t body)
+static int cw_of(const struct win *w) { return w->w - 2 * BORDER; }
+static int ch_of(const struct win *w) { return w->h - TITLE_H - BORDER; }
+
+static struct win *win_new(int x, int y, int cw, int ch, const char *title, int cli)
 {
-    memset(w, 0, sizeof *w);
-    w->x = x; w->y = y; w->w = cw; w->h = ch;
-    snprintf(w->title, sizeof w->title, "%s", title);
-    w->body = body;
-    w->cols = (cw - 2 * BORDER - 8) / CELL_W;
-    w->rows = (ch - TITLE_H - 2 * BORDER - 8) / CELL_H;
-    if (w->cols > MAX_COLS) w->cols = MAX_COLS;
-    if (w->rows > MAX_ROWS) w->rows = MAX_ROWS;
-    for (int r = 0; r < MAX_ROWS; r++)
-        memset(w->text[r], ' ', MAX_COLS);
+    for (int i = 0; i < MAXWIN; i++) {
+        struct win *w = &pool[i];
+        if (w->used)
+            continue;
+        memset(w, 0, sizeof *w);
+        w->used = 1;
+        w->id = next_id++;
+        w->cli = cli;
+        w->x = x; w->y = y;
+        w->w = cw + 2 * BORDER;
+        w->h = ch + TITLE_H + BORDER;
+        snprintf(w->title, sizeof w->title, "%s", title);
+        w->body = rgb(235, 235, 235);
+        w->cols = (cw - 8) / CELL_W;
+        w->rows = (ch - 8) / CELL_H;
+        if (w->cols > MAX_COLS) w->cols = MAX_COLS;
+        if (w->rows > MAX_ROWS) w->rows = MAX_ROWS;
+        for (int r = 0; r < MAX_ROWS; r++)
+            memset(w->text[r], ' ', MAX_COLS);
+        z[nz++] = w;
+        return w;
+    }
+    return NULL;
+}
+
+static void win_free(struct win *w)
+{
+    int i = 0;
+    while (i < nz && z[i] != w)
+        i++;
+    if (i < nz) {
+        memmove(&z[i], &z[i + 1], (nz - 1 - i) * sizeof z[0]);
+        nz--;
+    }
+    free(w->pix);
+    w->used = 0;
 }
 
 static void win_put(struct win *w, int c)
@@ -153,21 +205,34 @@ static void win_say(struct win *w, const char *s)
 
 static void draw_win(const struct win *w, int focused)
 {
-    uint32_t frame_c = rgb(20, 20, 30);
     uint32_t bar = focused ? rgb(40, 90, 200) : rgb(110, 110, 120);
-    fill(scene, w->x, w->y, w->x + w->w, w->y + w->h, frame_c);
+    int bx = w->x + BORDER, by = w->y + TITLE_H;
+    fill(scene, w->x, w->y, w->x + w->w, w->y + w->h, rgb(20, 20, 30));
     fill(scene, w->x + BORDER, w->y + BORDER, w->x + w->w - BORDER, w->y + TITLE_H, bar);
     text(scene, w->x + 8, w->y + BORDER + 1, w->title, rgb(255, 255, 255));
-    fill(scene, w->x + BORDER, w->y + TITLE_H, w->x + w->w - BORDER, w->y + w->h - BORDER, w->body);
-    for (int r = 0; r < w->rows; r++)
-        for (int c = 0; c < w->cols; c++) {
-            int ch = w->text[r][c];
-            if (ch != ' ')
-                glyph(scene, w->x + BORDER + 4 + c * CELL_W, w->y + TITLE_H + 4 + r * CELL_H, ch, rgb(10, 10, 10), 0, 0);
+    fill(scene, w->x + w->w - BORDER - CLOSE_W, w->y + BORDER + 2, w->x + w->w - BORDER - 2, w->y + TITLE_H - 2, rgb(200, 60, 60));
+    if (w->pix) {
+        int cw = cw_of(w), ch = ch_of(w);
+        for (int y = 0; y < ch; y++) {
+            int py = by + y;
+            if (py < 0 || py >= (int)H)
+                continue;
+            for (int x = 0; x < cw; x++) {
+                int px = bx + x;
+                if (px >= 0 && px < (int)W)
+                    scene[py * W + px] = w->pix[y * cw + x];
+            }
         }
+        return;
+    }
+    fill(scene, bx, by, w->x + w->w - BORDER, w->y + w->h - BORDER, w->body);
+    for (int r = 0; r < w->rows; r++)
+        for (int c = 0; c < w->cols; c++)
+            if (w->text[r][c] != ' ')
+                glyph(scene, bx + 4 + c * CELL_W, by + 4 + r * CELL_H, w->text[r][c], rgb(10, 10, 10));
     if (focused)
-        fill(scene, w->x + BORDER + 4 + w->cx * CELL_W, w->y + TITLE_H + 4 + w->cy * CELL_H + CELL_H - 3,
-             w->x + BORDER + 4 + (w->cx + 1) * CELL_W, w->y + TITLE_H + 4 + w->cy * CELL_H + CELL_H - 1, rgb(10, 10, 10));
+        fill(scene, bx + 4 + w->cx * CELL_W, by + 4 + w->cy * CELL_H + CELL_H - 3,
+             bx + 4 + (w->cx + 1) * CELL_W, by + 4 + w->cy * CELL_H + CELL_H - 1, rgb(10, 10, 10));
 }
 
 static void draw_scene(void)
@@ -177,8 +242,8 @@ static void draw_scene(void)
         for (unsigned x = 0; x < W; x++)
             scene[y * W + x] = c;
     }
-    for (int i = 0; i < nwin; i++)
-        draw_win(&wins[i], i == focus);
+    for (int i = 0; i < nz; i++)
+        draw_win(z[i], i == nz - 1);
 }
 
 /* The pointer: '#' black outline, '.' white fill. */
@@ -223,30 +288,198 @@ static int flush(int x0, int y0, int x1, int y1, int mx, int my)
     return 0;
 }
 
-static int hit(int x, int y)
+/* The part of the screen that has changed. */
+static int dx0, dy0, dx1, dy1;
+static void touch(int x0, int y0, int x1, int y1)
 {
-    for (int i = nwin - 1; i >= 0; i--)
-        if (x >= wins[i].x && x < wins[i].x + wins[i].w && y >= wins[i].y && y < wins[i].y + wins[i].h)
-            return i;
-    return -1;
+    if (x0 < dx0) dx0 = x0;
+    if (y0 < dy0) dy0 = y0;
+    if (x1 > dx1) dx1 = x1;
+    if (y1 > dy1) dy1 = y1;
+}
+static void touch_win(const struct win *w) { touch(w->x, w->y, w->x + w->w, w->y + w->h); }
+static void touch_all(void) { touch(0, 0, W, H); }
+
+static struct win *hit(int x, int y)
+{
+    for (int i = nz - 1; i >= 0; i--)
+        if (x >= z[i]->x && x < z[i]->x + z[i]->w && y >= z[i]->y && y < z[i]->y + z[i]->h)
+            return z[i];
+    return NULL;
 }
 
-static void raise_win(int i)
+static void raise_win(struct win *w)
 {
-    struct win t = wins[i];
-    memmove(&wins[i], &wins[i + 1], (nwin - 1 - i) * sizeof t);
-    wins[nwin - 1] = t;
-    focus = nwin - 1;
+    int i = 0;
+    while (i < nz && z[i] != w)
+        i++;
+    if (i >= nz || i == nz - 1)
+        return;
+    memmove(&z[i], &z[i + 1], (nz - 1 - i) * sizeof z[0]);
+    z[nz - 1] = w;
 }
 
-int main(void)
+/* ---- clients ---- */
+
+static void to_client(int cli, uint32_t type, const void *p, uint32_t len)
 {
-    fb = open("/dev/fb0", O_RDWR);
+    if (cli < 0 || clis[cli].fd < 0)
+        return;
+    unsigned char b[sizeof(struct bwm_hdr) + 32];
+    struct bwm_hdr h = { type, len };
+    memcpy(b, &h, sizeof h);
+    memcpy(b + sizeof h, p, len);
+    (void)!write(clis[cli].fd, b, sizeof h + len);        /* events are small: a full socket drops them */
+}
+
+static void drop_client(int i)
+{
+    for (int j = 0; j < MAXWIN; j++)
+        if (pool[j].used && pool[j].cli == i) {
+            touch_win(&pool[j]);
+            win_free(&pool[j]);
+        }
+    close(clis[i].fd);
+    clis[i].fd = -1;
+    clis[i].have = 0;
+}
+
+static struct win *by_id(int cli, uint32_t id)
+{
+    for (int j = 0; j < MAXWIN; j++)
+        if (pool[j].used && pool[j].cli == cli && (uint32_t)pool[j].id == id)
+            return &pool[j];
+    return NULL;
+}
+
+/* One whole message from client i, `n` bytes at c->rx. */
+static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
+{
+    if (type == BWM_CREATE && len == sizeof(struct bwm_create)) {
+        struct bwm_create c;
+        memcpy(&c, p, sizeof c);
+        c.title[sizeof c.title - 1] = 0;
+        if (c.w < 16 || c.h < 16 || c.w > W - 2 * BORDER || c.h > H - TITLE_H - BORDER) {
+            drop_client(i);
+            return;
+        }
+        struct win *w = win_new(40 + 30 * (next_id % 8), 40 + 30 * (next_id % 8), c.w, c.h, c.title, i);
+        if (!w) {
+            drop_client(i);
+            return;
+        }
+        w->pix = calloc((size_t)c.w * c.h, 4);
+        if (!w->pix) {
+            win_free(w);
+            drop_client(i);
+            return;
+        }
+        for (size_t k = 0; k < (size_t)c.w * c.h; k++)
+            w->pix[k] = w->body;
+        struct bwm_created r = { (uint32_t)w->id, c.w, c.h };
+        to_client(i, BWM_CREATED, &r, sizeof r);
+        raise_win(w);
+        touch_win(w);
+    } else if (type == BWM_DRAW && len >= sizeof(struct bwm_draw)) {
+        struct bwm_draw d;
+        memcpy(&d, p, sizeof d);
+        struct win *w = by_id(i, d.id);
+        int cw = w ? cw_of(w) : 0, ch = w ? ch_of(w) : 0;
+        if (!w || d.x >= (uint32_t)cw || d.y >= (uint32_t)ch || d.w > (uint32_t)cw - d.x || d.h > (uint32_t)ch - d.y
+            || len != sizeof d + (size_t)d.w * d.h * 4)
+            return;
+        const unsigned char *s = p + sizeof d;
+        for (uint32_t r = 0; r < d.h; r++)
+            for (uint32_t c = 0; c < d.w; c++) {
+                uint32_t px;
+                memcpy(&px, s + ((size_t)r * d.w + c) * 4, 4);
+                w->pix[(size_t)(d.y + r) * cw + d.x + c] = from_wire(px);
+            }
+        touch(w->x + BORDER + d.x, w->y + TITLE_H + d.y, w->x + BORDER + d.x + d.w, w->y + TITLE_H + d.y + d.h);
+    } else if (type == BWM_DESTROY && len == sizeof(struct bwm_destroy)) {
+        struct bwm_destroy d;
+        memcpy(&d, p, sizeof d);
+        struct win *w = by_id(i, d.id);
+        if (w) {
+            touch_win(w);
+            win_free(w);
+        }
+    } else if (type == BWM_SETTITLE && len == sizeof(struct bwm_settitle)) {
+        struct bwm_settitle t;
+        memcpy(&t, p, sizeof t);
+        struct win *w = by_id(i, t.id);
+        if (w) {
+            t.title[sizeof t.title - 1] = 0;
+            snprintf(w->title, sizeof w->title, "%s", t.title);
+            touch_win(w);
+        }
+    } else {
+        drop_client(i);                                    /* not a message we know */
+    }
+}
+
+static void client_input(int i)
+{
+    struct cli *c = &clis[i];
+    ssize_t n = read(c->fd, c->rx + c->have, RXCAP - c->have);
+    if (n == 0 || (n < 0 && errno != EAGAIN && errno != EINTR)) {
+        drop_client(i);
+        return;
+    }
+    if (n < 0)
+        return;
+    c->have += n;
+    for (;;) {
+        struct bwm_hdr h;
+        if (c->have < sizeof h)
+            return;
+        memcpy(&h, c->rx, sizeof h);
+        if (h.len > BWM_MAX_PAYLOAD) {
+            drop_client(i);
+            return;
+        }
+        if (c->have < sizeof h + h.len)
+            return;
+        message(i, h.type, c->rx + sizeof h, h.len);
+        if (c->fd < 0)
+            return;
+        memmove(c->rx, c->rx + sizeof h + h.len, c->have - sizeof h - h.len);
+        c->have -= sizeof h + h.len;
+    }
+}
+
+static int listen_socket(void)
+{
+    int s = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
+    if (s < 0)
+        return -1;
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    strcpy(a.sun_path, BWM_SOCK);
+    unlink(BWM_SOCK);
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 || listen(s, 8) != 0) {
+        close(s);
+        return -1;
+    }
+    return s;
+}
+
+int main(int argc, char **argv)
+{
+    int builtin = 1;
+    int a = 1;
+    if (a < argc && strcmp(argv[a], "-n") == 0) {
+        builtin = 0;
+        a++;
+    }
+    char **child = a + 1 < argc && strcmp(argv[a], "-c") == 0 ? &argv[a + 1] : NULL;
+    fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
     if (fb < 0 && errno == ENODEV) {
         puts("bwm: no screen (ENODEV)");
         return 2;
     }
-    int mice = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
+    int mice = open("/dev/input/mice", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     struct var_info v;
     struct fix_info f;
     if (fb < 0 || ioctl(fb, 0x4600, &v) != 0 || ioctl(fb, 0x4602, &f) != 0 || v.bits_per_pixel != 32) {
@@ -261,6 +494,11 @@ int main(void)
         puts("bwm: out of memory");
         return 1;
     }
+    for (int i = 0; i < MAXCLI; i++) {
+        clis[i].fd = -1;
+        clis[i].rx = malloc(RXCAP);
+    }
+    int ls = listen_socket();
     struct termios old, raw;
     int have_tty = tcgetattr(0, &old) == 0;
     if (have_tty) {
@@ -272,45 +510,79 @@ int main(void)
         tcsetattr(0, TCSANOW, &raw);
     }
 
-    win_init(&wins[0], 80, 60, 360, 220, "Notes", rgb(250, 245, 200));
-    win_init(&wins[1], 300, 200, 400, 260, "About", rgb(220, 235, 250));
-    win_init(&wins[2], 120, 120, 400, 300, "Terminal", rgb(235, 235, 235));
-    win_say(&wins[0], "A window manager\nfor BastiOS.");
-    win_say(&wins[1], "Drag a title bar.\nClick to focus.\nType into the focus.");
-    win_say(&wins[2], "bwm: type here.\nCtrl-Q quits.\n");
+    if (builtin) {
+        struct win *a = win_new(80, 60, 356, 200, "Notes", -1);
+        struct win *b = win_new(300, 200, 396, 240, "About", -1);
+        struct win *c = win_new(120, 120, 396, 280, "Terminal", -1);
+        a->body = rgb(250, 245, 200);
+        b->body = rgb(220, 235, 250);
+        win_say(a, "A window manager\nfor BastiOS.");
+        win_say(b, "Drag a title bar.\nClick to focus.\nType into the focus.");
+        win_say(c, "bwm: type here.\nCtrl-Q quits.\n");
+    }
 
     int mx = W / 2, my = H / 2;
     draw_scene();
     flush(0, 0, W, H, mx, my);
     printf("bwm: ready %ux%u\n", W, H);
     fflush(stdout);
+    if (child && fork() == 0) {                               /* -c PROGRAM [ARGS]: start a client */
+        execv(child[0][0] == '/' ? child[0] : (snprintf(path, sizeof path, "/bin/%s", child[0]), path), child);
+        _exit(127);
+    }
 
-    int drag = -1, gx = 0, gy = 0, buttons = 0, running = 1;
+    struct win *drag = NULL;
+    int gx = 0, gy = 0, buttons = 0, running = 1;
     while (running) {
-        struct pollfd p[2] = { { 0, POLLIN, 0 }, { mice, POLLIN, 0 } };
-        if (poll(p, mice >= 0 ? 2 : 1, -1) < 0 && errno != EINTR)
+        struct pollfd p[3 + MAXCLI];
+        int np = 0, imice = -1, ils = -1, icli[MAXCLI];
+        p[np++] = (struct pollfd){ 0, POLLIN, 0 };
+        if (mice >= 0) { imice = np; p[np++] = (struct pollfd){ mice, POLLIN, 0 }; }
+        if (ls >= 0) { ils = np; p[np++] = (struct pollfd){ ls, POLLIN, 0 }; }
+        for (int i = 0; i < MAXCLI; i++) {
+            icli[i] = -1;
+            if (clis[i].fd >= 0) { icli[i] = np; p[np++] = (struct pollfd){ clis[i].fd, POLLIN, 0 }; }
+        }
+        if (poll(p, np, -1) < 0 && errno != EINTR)
             break;
-        int ox = mx, oy = my, dirty = 0;
-        int sx0 = W, sy0 = H, sx1 = 0, sy1 = 0;       /* the scene rectangle that changed */
-#define TOUCH(w_) do { \
-            if ((w_)->x < sx0) sx0 = (w_)->x; if ((w_)->y < sy0) sy0 = (w_)->y; \
-            if ((w_)->x + (w_)->w > sx1) sx1 = (w_)->x + (w_)->w; if ((w_)->y + (w_)->h > sy1) sy1 = (w_)->y + (w_)->h; \
-            dirty = 1; } while (0)
+        int ox = mx, oy = my;
+        dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
+        struct win *top = nz ? z[nz - 1] : NULL;
         if (p[0].revents & POLLIN) {
             char b[32];
             ssize_t n = read(0, b, sizeof b);
             if (n <= 0)
                 break;
             for (ssize_t i = 0; i < n; i++) {
-                if (b[i] == 17) {                      /* Ctrl-Q */
+                if (b[i] == 17) {                          /* Ctrl-Q */
                     running = 0;
-                } else {
-                    TOUCH(&wins[focus]);
-                    win_put(&wins[focus], b[i]);
+                } else if (top && top->cli >= 0) {
+                    struct bwm_key k = { (uint32_t)top->id, (unsigned char)b[i] };
+                    to_client(top->cli, BWM_KEY, &k, sizeof k);
+                } else if (top) {
+                    touch_win(top);
+                    win_put(top, b[i]);
                 }
             }
         }
-        if (mice >= 0 && (p[1].revents & POLLIN)) {
+        if (ils >= 0 && (p[ils].revents & POLLIN)) {
+            int c;
+            while ((c = accept4(ls, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC)) >= 0) {
+                int slot = 0;
+                while (slot < MAXCLI && clis[slot].fd >= 0)
+                    slot++;
+                if (slot == MAXCLI) {
+                    close(c);
+                } else {
+                    clis[slot].fd = c;
+                    clis[slot].have = 0;
+                }
+            }
+        }
+        for (int i = 0; i < MAXCLI; i++)
+            if (icli[i] >= 0 && clis[i].fd >= 0 && (p[icli[i]].revents & (POLLIN | POLLHUP | POLLERR)))
+                client_input(i);
+        if (imice >= 0 && (p[imice].revents & POLLIN)) {
             unsigned char m[3];
             while (read(mice, m, 3) == 3) {
                 int dx = (signed char)m[1], dy = (signed char)m[2];
@@ -320,33 +592,45 @@ int main(void)
                 if (mx >= (int)W) mx = W - 1;
                 if (my >= (int)H) my = H - 1;
                 int down = m[0] & 1;
-                if (down && !(buttons & 1)) {
-                    int i = hit(mx, my);
-                    if (i >= 0) {
-                        int grab = my < wins[i].y + TITLE_H;
-                        gx = mx - wins[i].x;
-                        gy = my - wins[i].y;
-                        if (i != nwin - 1 || focus != nwin - 1) {
-                            raise_win(i);
-                            sx0 = 0; sy0 = 0; sx1 = W; sy1 = H; dirty = 1;
+                struct win *under = hit(mx, my);
+                if (down && !(buttons & 1) && under) {
+                    gx = mx - under->x;
+                    gy = my - under->y;
+                    int on_close = my < under->y + TITLE_H && mx >= under->x + under->w - BORDER - CLOSE_W && mx < under->x + under->w - BORDER - 2;
+                    if (on_close) {
+                        if (under->cli >= 0) {
+                            struct bwm_close cl = { (uint32_t)under->id };
+                            to_client(under->cli, BWM_CLOSE, &cl, sizeof cl);
+                        } else {
+                            touch_win(under);
+                            win_free(under);
                         }
-                        drag = grab ? nwin - 1 : -1;
+                        under = NULL;
+                    } else {
+                        if (under != z[nz - 1]) {
+                            raise_win(under);
+                            touch_all();
+                        }
+                        drag = my < under->y + TITLE_H ? under : NULL;
                     }
                 } else if (!down) {
-                    drag = -1;
+                    drag = NULL;
                 }
-                if (drag >= 0 && down) {
-                    struct win *w = &wins[drag];
-                    TOUCH(w);
-                    w->x = mx - gx; w->y = my - gy;
-                    TOUCH(w);
+                if (drag && down) {
+                    touch_win(drag);
+                    drag->x = mx - gx; drag->y = my - gy;
+                    touch_win(drag);
+                } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || (m[0] & 7) != (buttons & 7))) {
+                    struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), m[0] & 7u };
+                    if (under == z[nz - 1])
+                        to_client(under->cli, BWM_MOUSE, &ev, sizeof ev);
                 }
                 buttons = m[0];
             }
         }
-        if (dirty) {
+        if (dx0 < dx1) {
             draw_scene();
-            if (sx0 < sx1 && flush(sx0, sy0, sx1, sy1, mx, my) != 0)
+            if (flush(dx0, dy0, dx1, dy1, mx, my) != 0)
                 break;
             if (flush(ox, oy, ox + ARROW_W, oy + ARROW_H, mx, my) != 0)
                 break;
@@ -359,6 +643,13 @@ int main(void)
     }
     if (have_tty)
         tcsetattr(0, TCSANOW, &old);
+    for (int i = 0; i < MAXCLI; i++)
+        if (clis[i].fd >= 0)
+            close(clis[i].fd);
+    if (ls >= 0) {
+        close(ls);
+        unlink(BWM_SOCK);
+    }
     close(fb);
     puts("bwm: bye");
     return 0;

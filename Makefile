@@ -69,7 +69,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb bwm
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb bwm bhello
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 # Which backend built the kernel and the user programs, rewritten only when it
@@ -171,8 +171,11 @@ build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.e
 build/user/font8x8.h: src/font8x8.bin | build/user
 	(echo 'static const unsigned char font8x8[] = {'; od -An -v -tu1 -w16 $< | sed 's/ \+/,/g; s/^,//; s/$$/,/'; echo '};') > $@
 
-build/user/bwm.elf: user/bwm.c build/user/font8x8.h | build/user
+build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
 	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+
+build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
+	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
 # also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.
