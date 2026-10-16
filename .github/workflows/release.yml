@@ -25,7 +25,11 @@ env:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -38,14 +42,19 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y z3 qemu-system-x86 musl-tools xorriso ovmf
+          sudo apt-get install -y z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools xorriso ovmf
       - name: The tag matches the boot banner and the changelog
         run: |
           version=${TAG#v}
           grep -q "BastiOS ${version%.*}:" src/main.bastio || { echo "::error::src/main.bastio does not print BastiOS ${version%.*}"; exit 1; }
           grep -q "^## \[$version\]" CHANGELOG.md || { echo "::error::CHANGELOG.md has no section for $version"; exit 1; }
-      - run: cd bastiolang/stage0 && cargo build --release --locked
-      - name: Tests (they also build the kernel and the ISO)
+      - name: Build stage0 (paths remapped, as bastiolang's release does)
+        run: |
+          export RUSTFLAGS="--remap-path-prefix=$PWD/bastiolang=/src --remap-path-prefix=$HOME/.cargo=/cargo"
+          cd bastiolang/stage0 && cargo build --release --locked
+      - name: Tests (they also build the kernel and the ISO, and boot the AArch64 kernel)
+        env:
+          AARCH64_REQUIRED: 1
         run: make test BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       - name: Benchmarks (BastiOS alone; TCG on a shared runner, so read them against bench/baseline.json, not as absolute figures)
         run: |
@@ -53,11 +62,17 @@ jobs:
           bench/compare.py bench/baseline.json build/bench/results.json | tee build/bench-compare.md || true
       - name: Package
         run: |
+          # The images are made again with the commit's time, so they do not depend on when the build ran.
+          export SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)
+          rm -f build/bastios.iso build/bastios-gpt.iso build/bastios-usb.img
           make iso usb BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
           mkdir -p dist
           cp build/bastios.iso dist/bastios-$TAG.iso
           cp build/bastios-usb.img dist/bastios-usb-$TAG.img
           cp build/bastios.elf dist/bastios-$TAG.elf
+          make ARCH=aarch64 BASTIOC=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+          cp build/aarch64/bastios.bin dist/bastios-aarch64-$TAG.bin
+          cp build/aarch64/bastios.elf dist/bastios-aarch64-$TAG.elf
           # The kernel image embeds BusyBox, which is GPL-2.0-only: its
           # complete source goes out next to the binaries.
           git -C build/busybox archive --format=tar.gz --prefix=busybox-1.36.1/ -o "$PWD/dist/busybox-1.36.1-source.tar.gz" HEAD
@@ -76,9 +91,23 @@ jobs:
             echo "Change from bench/baseline.json:"
             echo
             cat build/bench-compare.md
+            echo
+            echo "### Status"
+            echo
+            # What does not work yet travels with every release: the README's Status section.
+            awk '/^## Status/ {on=1; next} on && /^## / {exit} on' README.md
+            echo
+            echo "Verify a download with \`sha256sum -c --ignore-missing SHA256SUMS\` and \`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`."
           } > dist/notes.md
           cp build/bench/results.json dist/bench-$TAG.json
           (cd dist && sha256sum bastios-* busybox-* bench-*.json > SHA256SUMS)
+      - name: Provenance
+        uses: actions/attest-build-provenance@v3
+        if: github.event_name == 'push'
+        with:
+          subject-path: |
+            dist/bastios-*
+            dist/busybox-*
       - uses: actions/upload-artifact@v4
         with:
           name: bastios-${{ env.TAG }}
