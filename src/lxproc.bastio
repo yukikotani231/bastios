@@ -1190,7 +1190,7 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     return cg_file_meta(pf);                // src/lxcgroup.bastio
   }
   if pf != 0 {
-    return proc_meta(pf);
+    return proc_file_meta(k, pf);
   }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
@@ -1210,6 +1210,14 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
 }
 
+/// The owner (user, then group times 2^32) of process t's /proc entries:
+/// its effective user and group.
+fn proc_own(k: &Kernel, t: u64) -> u64
+  requires kok(k) && t < NPROC
+{
+  return id_get(k.procs, t, F_UID, true) + id_get(k.procs, t, F_GID, true) * 0x100000000;
+}
+
 /// The metadata of directory dir (as dir_at gives it), the same whether
 /// it is reached by path or by an open descriptor.
 fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
@@ -1221,12 +1229,12 @@ fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
   }
   if dir >= DIR_PROC {
     let m = proc_dir_meta(dir);
-    if dir > DIR_PROC && dir - DIR_PROC < NPROC && dir - DIR_PROC < 0x400 {   // below NS_DIRS (src/lxprocfs.bastio)
-      // /proc/PID belongs to the process's effective user and group, as on
-      // Linux: newuidmap and newgidmap check it before they write a map.
-      let t = dir - DIR_PROC;
-      return Meta { ok: m.ok, mode: m.mode, size: m.size, ino: m.ino, mtime: m.mtime,
-                    own: id_get(k.procs, t, F_UID, true) + id_get(k.procs, t, F_GID, true) * 0x100000000 };
+    let t = proc_dir_pid(dir - DIR_PROC);
+    if t != 0 {
+      // /proc/PID and the directories in it belong to the process's
+      // effective user and group, as on Linux: newuidmap and newgidmap
+      // check it before they write a map, and ps shows it as the owner.
+      return Meta { ok: m.ok, mode: m.mode, size: m.size, ino: m.ino, mtime: m.mtime, own: proc_own(k, t) };
     }
     return m;
   }
@@ -1298,7 +1306,11 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   } else if d.kind == K_DEV && is_cg_file(d.x) {
     m = cg_file_meta(d.x);
   } else if d.kind == K_DEV {
-    m = dev_meta(d.x);
+    if d.x >= PROC_DEV {
+      m = proc_file_meta(k, d.x);             // owned by the process it belongs to
+    } else {
+      m = dev_meta(d.x);
+    }
   } else if d.kind == K_FILE {
     m = file_meta(&mut k.fs, vfs_row_file(k.fs, d.x));
     if !m.ok {
