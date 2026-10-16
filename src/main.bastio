@@ -690,8 +690,8 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if what == SWITCH {
       sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
     }
-    if disk_hold(&mut s.k, p, EIO) || what == SWITCH {
-      return (p + 1) % NPROC;
+    if disk_hold(&mut s.k, p, EIO) || what == SWITCH || ino_pressed(s.k) {
+      return (p + 1) % NPROC;     // (ino_pressed: a reader of a half-full inotify queue goes first)
     }
     if what == KEEP && pt_sys_exit(&mut s.k, p) {
       return (p + 1) % NPROC;               // stopped for its tracer after the call

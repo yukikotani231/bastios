@@ -450,6 +450,7 @@ t_inotify: thirty-two epoll instances
 t_inotify: sixty timerfds at once
 t_inotify: thirty inotify instances at once
 t_inotify: thirty named pipes open at once
+t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
