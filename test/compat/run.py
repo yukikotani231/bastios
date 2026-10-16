@@ -765,9 +765,13 @@ def main():
     # copy of the disk of their own, after the cases that unpack the root and
     # install curl (ocipull.sh's) run there too: they need nothing else the
     # other cases install, and a lane runs its cases one after another. The
-    # group stays alpine.
+    # group stays alpine. The bridged-network cases stay: the package they
+    # install brings libraries the other cases already put on the disk, and
+    # without them its download through the container's network outlasts
+    # the case's timeout.
     alpine_setup = alpine[:3]
-    alpine2 = alpine_setup + [c for c in alpine[3:] if c[0].startswith("container:")]
+    alpine2 = alpine_setup + [c for c in alpine[3:] if c[0].startswith("container:")
+                              and "joins a network namespace" not in c[0]]
     alpine1 = [c for c in alpine if c not in alpine2[len(alpine_setup):]]
     if args.registry_image and (lane_chosen("alpine") or lane_chosen("alpine2")):
         web.add_registry(args.registry_image)
