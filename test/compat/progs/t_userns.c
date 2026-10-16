@@ -181,6 +181,19 @@ static int child_not_over_parent_namespaces(void) {
     return ok;
 }
 
+/* ps prints the owner of /proc/PID: in a user namespace that maps the
+ * caller to 0, the directory and the files in it read as owned by 0, not as
+ * the host user the overflow id stands for. */
+static int proc_owner_mapped(void) {
+    const char *paths[] = {"/proc/self", "/proc/self/status", "/proc/self/stat", "/proc/self/cmdline", "/proc/self/fd", "/proc/self/exe"};
+    for (int i = 0; i < 6; i++) {
+        struct stat st;
+        if (stat(paths[i], &st) != 0) { printf("stat %s %d\n", paths[i], errno), fflush(stdout); return 0; }
+        if (st.st_uid != 0 || st.st_gid != 0) { printf("%s owner %u:%u\n", paths[i], st.st_uid, st.st_gid), fflush(stdout); return 0; }
+    }
+    return 1;
+}
+
 /* After pivot_root, on a directory of the disk, runc's check that a directory descriptor reads back as
  * the path it opened (/proc/self/fd/N names the path from the new root). */
 static char pivot_dir[256];
@@ -537,6 +550,7 @@ int main(void) {
     EXPECT("and the mount namespace of a process in a user namespace it made", in_userns(setns_child_mntns, 0));
     EXPECT("the root of a user namespace joins the UTS and network namespaces a user namespace inside it made", in_userns(parent_over_child_namespaces, 0));
     EXPECT("and a user namespace inside has none over the UTS and mount namespaces of the one around it", in_userns(child_not_over_parent_namespaces, 0));
+    EXPECT("/proc/PID and the files in it belong to the mapped user of their process", in_userns(proc_owner_mapped, 0));
     EXPECT("a directory descriptor reads back from the new root after pivot_root", in_userns(fdlink_after_pivot, 1));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));
