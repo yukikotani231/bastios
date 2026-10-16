@@ -15,8 +15,9 @@
 // +memory +pids and - to hand them down), cgroup.events (populated),
 // cgroup.kill (write 1: SIGKILL every process in the group and below),
 // cgroup.type, cgroup.stat, cgroup.max.descendants, pids.max and
-// pids.current, memory.max, memory.current and memory.events, cpu.max and
-// cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
+// pids.current, memory.max, memory.current and memory.events, memory.stat,
+// memory.high, memory.low, memory.min and memory.swap.max (kept as written,
+// not enforced), memory.swap.current (0), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
 // (threads too) fail with EAGAIN once the group or one above it holds that
 // many tasks, and so does moving a process in.
 //
@@ -541,7 +542,25 @@ fn cgf_name(f: u64) -> Str {
   if f == 16 {
     return "cgroup.freeze";
   }
-  return "cpu.stat";
+  if f == 17 {
+    return "cpu.stat";
+  }
+  if f == 18 {
+    return "memory.high";
+  }
+  if f == 19 {
+    return "memory.low";
+  }
+  if f == 20 {
+    return "memory.min";
+  }
+  if f == 21 {
+    return "memory.swap.max";
+  }
+  if f == 22 {
+    return "memory.swap.current";
+  }
+  return "memory.stat";
 }
 
 /// Which control file x[a..b] names, or CGF_N.
@@ -563,7 +582,7 @@ fn cgf_at(x: &Bytes, a: u64, b: u64) -> u64
 
 /// Whether root may write control file f.
 fn cgf_writable(f: u64) -> bool {
-  return f == 0 || f == 2 || f == 4 || f == 6 || f == 8 || f == 10 || f == 13 || f == 14 || f == 16;
+  return f == 0 || f == 2 || f == 4 || f == 6 || f == 8 || f == 10 || f == 13 || f == 14 || f == 16 || (f >= 18 && f <= 21);
 }
 
 /// Does cgroup s have the name x[a..b]?
@@ -945,6 +964,37 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     a = put_s(&mut o, a, "\nnr_throttled ");
     a = put_n(&mut o, a, cg_get(k, s, CGW_NTHR));
     return put_c(&mut o, a, 10);
+  }
+  if f >= 18 && f <= 21 {
+    // memory.high, low, min and swap.max: kept as written. Only memory.max
+    // is enforced; with no reclaim and no swap there is nothing for these
+    // to hold back or to protect.
+    let v = cg_get(k, s, CGW_MHIGH + f - 18);
+    if v == 0 && f != 19 && f != 20 {
+      return put_s(&mut o, 0, "max\n");
+    }
+    if v == 0 {
+      return put_s(&mut o, 0, "0\n");
+    }
+    if v > CG_BIG {
+      return put_s(&mut o, 0, "max\n");      // memory.low and memory.min protect all of it
+    }
+    let a = put_n(&mut o, 0, v - 1);
+    return put_c(&mut o, a, 10);
+  }
+  if f == 22 {
+    return put_s(&mut o, 0, "0\n");            // no swap
+  }
+  if f == 23 {
+    // The pages mapped are anonymous memory here: there is no page cache
+    // charged to a group, and no slab, socket or kernel stack accounting.
+    let cur = cg_mem_current(&mut k, s);
+    let mut a = put_s(&mut o, 0, "anon ");
+    a = put_n(&mut o, a, cur);
+    a = put_s(&mut o, a, "\nfile 0\nkernel 0\nkernel_stack 0\npagetables 0\nsock 0\nshmem 0\nfile_mapped 0\nfile_dirty 0\nfile_writeback 0\ninactive_anon 0\nactive_anon ");
+    a = put_n(&mut o, a, cur);
+    a = put_s(&mut o, a, "\ninactive_file 0\nactive_file 0\nunevictable 0\nslab_reclaimable 0\nslab_unreclaimable 0\nslab 0\npgfault 0\npgmajfault 0\n");
+    return a;
   }
   return 0;                                 // cgroup.kill is write-only
 }
@@ -1559,15 +1609,20 @@ fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
     cg_kill(&mut k, s);
     return n;
   }
-  if f == 8 || f == 10 {
+  if f == 8 || f == 10 || (f >= 18 && f <= 21) {
     let mut w = CGW_PIDS;
     if f == 10 {
       w = CGW_MEM;
     }
+    if f >= 18 {
+      w = CGW_MHIGH + f - 18;
+    }
     if b.v != CG_BIG - 1 && b.v >= 0x4000000000000000 {
       return EINVAL;
     }
-    if b.v == CG_BIG - 1 {
+    if b.v == CG_BIG - 1 && (f == 19 || f == 20) {
+      cg_put(&mut k, s, w, CG_BIG + 1);
+    } else if b.v == CG_BIG - 1 {
       cg_put(&mut k, s, w, 0);
     } else {
       cg_put(&mut k, s, w, b.v + 1);
@@ -1654,6 +1709,10 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_PARENT, par.slot);
   cg_put(&mut k, free, CGW_PIDS, 0);
   cg_put(&mut k, free, CGW_MEM, 0);
+  cg_put(&mut k, free, CGW_MHIGH, 0);
+  cg_put(&mut k, free, CGW_MLOW, 0);
+  cg_put(&mut k, free, CGW_MMIN, 0);
+  cg_put(&mut k, free, CGW_MSWAP, 0);
   cg_put(&mut k, free, CGW_FRZ, 0);
   cg_put(&mut k, free, CGW_SUB, 0);
   cg_put(&mut k, free, CGW_CPUQ, 0);
