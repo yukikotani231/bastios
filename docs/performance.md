@@ -97,40 +97,48 @@ and run once, the rest are medians of 3.
 
 | Workload | What it does | BastiOS (s) | Linux (s) | BastiOS / Linux |
 |---|---|---:|---:|---:|
-| untar | unpack Alpine's mini root (about 500 small files) | 1.08 | 0.22 | 4.96x |
-| apk | apk add gcc, make and musl-dev from a local repository | 10.54 | 5.64 | 1.87x |
-| hello | gcc -O2 of one small C file, compile and link | 2.45 | 0.55 | 4.49x |
-| make1 | make -j1 of a generated project: one gcc -O1 per file, then a link | 71.76 | 79.79 | 0.90x |
-| make2 | the same with make -j2 | 39.35 | 41.74 | 0.94x |
-| tgz | tar the gcc and header trees through gzip -1 into one file | 4.11 | 1.27 | 3.24x |
-| scan | find over the whole root, grep -rl over the headers | 12.79 | 0.27 | 47.54x |
+| untar | unpack Alpine's mini root (about 500 small files) | 1.95 | 0.39 | 5.05x |
+| apk | apk add gcc, make and musl-dev from a local repository | 16.77 | 9.56 | 1.76x |
+| hello | gcc -O2 of one small C file, compile and link | 3.45 | 1.19 | 2.91x |
+| make1 | make -j1 of a generated project: one gcc -O1 per file, then a link | 125.53 | 130.59 | 0.96x |
+| make2 | the same with make -j2 | 71.19 | 66.86 | 1.06x |
+| tgz | tar the gcc and header trees through gzip -1 into one file | 2.98 | 2.02 | 1.47x |
+| scan | find over the whole root, grep -rl over the headers | 0.97 | 0.41 | 2.37x |
 
-How to read it: a build of many files is CPU-bound, and `make1` and
-`make2` finish a little sooner on BastiOS than on Linux (inferred, not
-profiled: `fork` and `exec` cost a fifth as much, see the table above).
-File-system-heavy work is where BastiOS loses: `scan` walks the whole root and
-reads the headers (a directory listing used to walk every possible entry;
-that is fixed, see the commit history, and `scan` is now about 1.5 s on the
-host these figures were taken from, which the table above does not yet show).
+(2 GiB machine, one processor, QEMU TCG on a shared host with nothing else
+running; the second table below splits the first run from the later ones.)
 
-Much of the rest is the cache, not the work. `bench/workloads.py` also
-prints the first run (cold) apart from the median of the later runs (warm).
-On Linux the later runs find the gcc binaries and the header tree in the
-page cache: `hello` takes 2.4 s the first time and 1.2 s after, `tgz` about
-2.7 s and 1.3 s. BastiOS's block cache was 4 MiB on a 512 MiB machine, far
-below the 20 to 60 MB these programs read, so every run reads the disk again:
-`hello` stays at 3.8 to 4.1 s, and `tgz` takes 3.2 s whether cold or not.
-Cold against cold the gap is 1.2x to 1.6x, not 3x to 4.5x. The `gzip -1`
-of the 19 MB tar alone takes 2.8 s on BastiOS and is the same instructions on
-Linux (inferred, not measured there), so a bigger cache, not faster system calls, is what closes the rest.
-The cache is now a 16th of memory, between 1 MiB and 32 MiB (`dq_slots_for`
-in `src/diskq.bastio`; the kernel heap extension, which it takes half of, is an
-eighth of the page pool). A machine of 512 MiB or more gets the 32 MiB cap,
-which holds a 19 MB tree: a warm re-read of it is 3x faster on 2 GiB. Trees of
-the 20 to 60 MB that gcc reads still do not fit. The cap is 32 MiB because
-doubling it makes Z3 give up on `lx_syscall`.
-(These cold figures come from single runs on a shared host; read them as
-rough.)
+| Workload | BastiOS cold / warm (s) | Linux cold / warm (s) | BastiOS / Linux, cold / warm |
+|---|---:|---:|---:|
+| hello | 3.06 / 3.65 | 2.12 / 1.02 | 1.44x / 3.57x |
+| make1 | 124.27 / 129.67 | 126.66 / 133.81 | 0.98x / 0.97x |
+| make2 | 71.19 / 70.69 | 69.19 / 66.03 | 1.03x / 1.07x |
+| tgz | 3.37 / 2.89 | 4.20 / 1.92 | 0.80x / 1.51x |
+| scan | 0.97 / 1.05 | 0.41 / 0.41 | 2.37x / 2.57x |
+
+How to read it: a build of many files is CPU-bound, and `make1` and `make2`
+run at the speed of Linux's (0.96x to 1.06x); user-side work is the same
+instructions on both. Where BastiOS is behind:
+
+- `untar` (5x) is the file system: each file created costs about four
+  synchronous metadata writes (`disk_set_owner` and `disk_set_meta` write the
+  entry's sector and wait for it), where Linux's ext4 batches them in its
+  journal. Deferring those writes would save at most about 18% and changes
+  what survives a power cut, so it is not done.
+- `hello` and `scan` are slower the second time than the first on BastiOS
+  (`hello` 3.06 then 3.65 s) and 2.4x to 3.6x off Linux, which gets faster once
+  its page cache is warm (2.12 then 1.02 s). A 32 MiB block cache cannot hold
+  the 20 to 60 MB gcc, cc1, as, ld and the headers read, so a warm run still
+  reads the disk. Which part of the warm `hello` is the disk and which is
+  emulation is not known: a `perf` profile of it needed the QEMU code map,
+  which could not be written on the full disk the figures were taken on, and
+  the 39% of its samples in unmapped translated code say nothing about
+  functions. QEMU's own work (translating code blocks, zeroing the host's
+  pages the first time the guest touches them) was 8% and 7.5% of them.
+- The cache stops at 32 MiB because doubling it makes Z3 give up on
+  `lx_syscall`; it is a sixteenth of memory below that (`dq_slots_for` in
+  `src/diskq.bastio`; the kernel heap extension, which it takes half of, is
+  an eighth of the page pool).
 
 ### Over a network card
 
