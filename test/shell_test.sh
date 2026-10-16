@@ -458,6 +458,9 @@ steps = [
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
+    # A symbolic link belongs to its creator (who can lchown it), and the
+    # root of a user namespace may chown what it owns to ids it maps.
+    ("su alice -c 'cd /home/alice; ln -s tgtx slk; ls -ln slk; chown -h $(id -u) slk; echo c1=$?; touch cf; unshare -U -r sh -c \"chown 0:0 cf; echo c2=\\$?; chown -h 0:0 slk; echo c3=\\$?; chown 5:5 cf; echo c4=\\$?\"'; rm -f /home/alice/slk /home/alice/cf", [b"slk -> tgtx", b"c1=0", b"c2=0", b"c3=0", b"c4=1"], b"\n# "),
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
     # With a disk, /etc, /root and /home are links into it (src/main.bastio,
@@ -1918,6 +1921,64 @@ session("after the power cuts", False, [
     ("ls", b"about"),
 ], halt=True)
 fsck("at the end", clean=True)
+# Power cuts with several processes writing at once (user/mpc.c, on a disk
+# that holds it): files grow, are cut back, renamed across directories,
+# made and removed, and replaced whole after an fsync. After each cut the
+# image is checked, and the next boot's mpc finds every byte of every file
+# as it wrote it (test/powercut.py runs many more of these).
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mpc=build/user/mpc.elf"], check=True)
+for n, delay in enumerate([0.6, 1.1, 0.35]):
+    qemu = boot(2, with_disk=n % 2 == 0, virtio=n % 2 == 1)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    if ok:
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        ok = read_until(b"\n# ")
+    mark = len(out)
+    if ok:
+        qemu.stdin.write(b"/disk/mpc run /disk/pc 4\r"); qemu.stdin.flush()
+        ok = read_until(b"mpc: running", mark) and b"mpc: clean" in out[mark:]
+    time.sleep(delay)
+    qemu.kill(); qemu.wait()
+    line = next((l for l in out[mark:].split(b"\n") if b"mpc:" in l), b"(nothing)")
+    print(("ok  " if ok else "FAIL"), f"concurrent writers, power cut {n + 1} after {delay} s:", line.strip().decode(errors="replace"))
+    fails += not ok
+    fsck(f"after concurrent writers' power cut {n + 1}")
+qemu = boot(1, with_disk=True)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ")
+mark = len(out)
+if ok:
+    qemu.stdin.write(b"/disk/mpc check /disk/pc\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ", mark) and b"mpc: clean" in out[mark:]
+qemu.kill(); qemu.wait()
+print(("ok  " if ok else "FAIL"), "after the concurrent writers' power cuts mpc finds every file whole")
+fails += not ok
+# Mounting ext4 (src/ext4.bastio): images made on this machine with mke2fs
+# -d (test/ext4img.py) sit on the disk, and user/mext4.c mounts each of
+# them, checks every file, link, hole and refusal of a write, and unmounts.
+# Four damaged or unsupported images must be refused with EINVAL.
+img_dir = os.path.join(disk_dir.name, "ext4")
+if subprocess.run([sys.executable, "test/ext4img.py", img_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mext4=build/user/mext4.elf"]
+                   + [f"{n}={img_dir}/{f}.img" for n, f in (("e4", "e4"), ("e2", "e2"), ("e4k", "e4k"), ("bz", "bad-zero"), ("bs", "bad-short"), ("br", "bad-recover"), ("bi", "bad-inline"))], check=True)
+    qemu = boot(2, with_disk=True)
+    session("ext4", False, [
+        ("ash", b"", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4 m", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e2 m ext2", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4k m", b"mext4: clean", b"\n# "),
+        ("for i in bz bs br bi; do mkdir m; /disk/mext4 refuse /disk/$i m; rmdir m; done", b"mext4: clean\r\nmext4: clean\r\nmext4: clean\r\nmext4: clean", b"\n# "),
+        ("mkdir fz; /disk/mext4 fuzz /disk/e4k fz 100 1", b"mext4: clean", b"\n# "),
+        ("exit", b"", b"bastios> "),
+    ], halt=True)
+else:
+    print("SKIP ext4: mke2fs is missing")
 # What a power cut inside disk_take_name leaves: a file under the name its
 # hard link still has (disk/b), and a link naming a free entry (disk/c).
 # The mount drops both links; the file stays, and the image is clean. The
