@@ -845,7 +845,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
     // Writable: the pages are recorded and mapped when touched, as for a
     // writable anonymous mmap, so a program can make a large reservation
     // usable (a JIT's code range) and pay for what it touches.
-    if a == 2 && prot / 4 % 2 == 0 && anon_add(&mut k, pid, from, to) {
+    if a == 2 && (LAZY_EXEC == 1 || prot / 4 % 2 == 0) && anon_add(&mut k, pid, from, to) {
       lazy = true;
     } else if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
       return ENOMEM;
