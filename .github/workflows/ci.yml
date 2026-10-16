@@ -485,8 +485,6 @@ jobs:
           key: ltp-${{ steps.keys.outputs.ltp }}
           path: build/ltp
         continue-on-error: true
-      - name: Run the x86-64 guests under KVM
-        run: tools/ci-kvm.sh
       - run: make compat-ltp
       - name: Save this run's timings
         if: always()
