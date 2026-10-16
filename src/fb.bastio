@@ -46,12 +46,24 @@ struct Fb {
   cy: u64,
   fg: u64,            // the text colour, as a pixel
   esc: u64,           // 0, or inside an escape sequence: 1 after ESC, 2 after ESC [
+  top: u64,           // the scroll region: the rows top..=bot
+  bot: u64,
+  attr: u64,          // 1 while the rendition is reverse video
+  scx: u64,           // the saved cursor
+  scy: u64,
+  p0: u64,            // the parameters of the escape sequence being read,
+  p1: u64,
+  p2: u64,
+  p3: u64,
+  pi: u64,            //   which one is being read,
+  priv: u64,          //   and 1 if it is a private one (CSI ?)
   u8acc: u64,         // the UTF-8 sequence in progress: the bits so far,
   u8need: u64,        //   the continuation bytes still to come (0: none),
   u8min: u64,         //   and the least code point its length may encode
   held: bool,         // a program draws on the screen (src/lxfb.bastio): the text is kept, not drawn
   text: Bytes,        // cols * rows cells of 4 bytes
   shown: Bytes,       // what each cell shows now
+  alt: Bytes,         // the text saved by the alternate screen
 }
 
 spec fn fb_ok(f: &Fb) -> bool {
@@ -59,6 +71,9 @@ spec fn fb_ok(f: &Fb) -> bool {
   && 1 <= f.cols && f.cols <= FB_MAX_SIDE && 1 <= f.rows && f.rows <= FB_MAX_SIDE
   && f.cx < f.cols && f.cy < f.rows && f.fg <= 4294967295
   && f.u8acc <= 16777215 && f.u8need <= 3
+  && f.top <= f.bot && f.bot < f.rows && f.attr <= 1 && f.pi <= 3 && f.priv <= 1
+  && f.scx < f.cols && f.scy < f.rows
+  && f.p0 <= 9999 && f.p1 <= 9999 && f.p2 <= 9999 && f.p3 <= 9999
 }
 
 fn font() -> Str {
@@ -215,8 +230,17 @@ fn fb_set(f: &mut Fb, col: u64, row: u64, c: u64)
   cell_set(&mut f.text, row * f.cols + col, c);
 }
 
-/// Draws cell (col, row) with character c, inverted if `inv` (the cursor).
-/// A TAIL cell draws the right half of the character to its left.
+/// Bit 24 of a cell: drawn in reverse video (SGR 7).
+const REV: u64 = 0x1000000;
+
+/// Whether cell value v is the right half of a two-cell character.
+fn is_tail(v: u64) -> bool {
+  return v % REV == TAIL;
+}
+
+/// Draws cell (col, row) with cell value c (a character, or TAIL, and the
+/// reverse video bit), inverted if `inv` (the cursor). A TAIL cell draws
+/// the right half of the character to its left.
 fn fb_draw(f: &mut Fb, col: u64, row: u64, c: u64, inv: bool)
   requires fb_ok(f) && col < f.cols && row < f.rows
   ensures fb_ok(f)
@@ -224,15 +248,19 @@ fn fb_draw(f: &mut Fb, col: u64, row: u64, c: u64, inv: bool)
   if f.held {
     return;
   }
-  let mut ch = c;
+  let mut ch = c % REV;
+  let mut flip = inv;
+  if (c / REV) % 2 == 1 {
+    flip = !inv;
+  }
   let mut half = 0;
-  if c == TAIL {
+  if ch == TAIL {
     half = 1;
     ch = 32;
     if col > 0 {
-      ch = fb_at(f, col - 1, row);
+      ch = fb_at(f, col - 1, row) % REV;
     }
-    if ch >= TAIL {
+    if ch >= TAIL || cp_width(ch) != 2 {
       ch = 32;
       half = 0;
     }
@@ -245,7 +273,7 @@ fn fb_draw(f: &mut Fb, col: u64, row: u64, c: u64, inv: bool)
     let off = (row * CELL_H + r) * f.pitch + col * CELL_W * 4;
     if off % 4 == 0 && off + CELL_W * 4 <= f.size {
       let mut bits = glyph_row(ch, at, half, r);
-      if inv {
+      if flip {
         bits = 255 - bits;
       }
       let mut p = 0;
@@ -293,7 +321,7 @@ fn fb_refresh(f: &mut Fb)
       let c = fb_at(f, col, row);
       if cell_get(f.shown, i) != c {
         fb_show(&mut f, col, row);
-        if col + 1 < f.cols && fb_at(f, col + 1, row) == TAIL && c != TAIL {
+        if col + 1 < f.cols && is_tail(fb_at(f, col + 1, row)) && !is_tail(c) {
           fb_show(&mut f, col + 1, row);
         }
       }
@@ -303,32 +331,93 @@ fn fb_refresh(f: &mut Fb)
   }
 }
 
-/// Moves the cursor down a line, scrolling the text up at the bottom.
+/// Sets cells [from, to) of row `row` to a blank (the current rendition is
+/// not kept in blanks, as terminals that erase to the default colour do).
+fn fb_blank(f: &mut Fb, row: u64, from: u64, to: u64)
+  requires fb_ok(f) && row < f.rows
+  ensures fb_ok(f)
+{
+  let mut col = smaller(from, f.cols);
+  while col < to && col < f.cols
+    invariant col <= f.cols && fb_ok(f)
+  {
+    fb_set(&mut f, col, row, 32);
+    col = col + 1;
+  }
+}
+
+/// Copies n cells from index src to index dst of `text` (a cell is row *
+/// cols + col), forwards if dst < src and backwards otherwise, so the
+/// ranges may overlap.
+fn fb_move(f: &mut Fb, dst: u64, src: u64, n: u64)
+  requires fb_ok(f) && dst <= 4294967296 && src <= 4294967296 && n <= 4294967296
+  ensures fb_ok(f)
+{
+  if dst == src {
+    return;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && fb_ok(f) && n <= 4294967296
+  {
+    let mut k = i;
+    if dst > src {
+      k = n - 1 - i;
+    }
+    let v = cell_get(f.text, src + k);
+    cell_set(&mut f.text, dst + k, v);
+    i = i + 1;
+  }
+}
+
+/// Scrolls the rows top..=bot (a region of the screen) up by n, blanking
+/// the rows that open at the bottom, and draws what changed.
+fn fb_scroll_up(f: &mut Fb, top: u64, bot: u64, n: u64)
+  requires fb_ok(f) && top <= bot && bot < f.rows
+  ensures fb_ok(f)
+{
+  let height = bot - top + 1;
+  let k = smaller(n, height);
+  fb_move(&mut f, top * f.cols, (top + k) * f.cols, (height - k) * f.cols);
+  let mut r = bot + 1 - k;
+  while r <= bot
+    invariant r <= bot + 1 && bot < f.rows && fb_ok(f)
+  {
+    fb_blank(&mut f, r, 0, f.cols);
+    r = r + 1;
+  }
+  fb_refresh(&mut f);
+}
+
+/// Scrolls the rows top..=bot down by n, blanking the rows that open at
+/// the top.
+fn fb_scroll_down(f: &mut Fb, top: u64, bot: u64, n: u64)
+  requires fb_ok(f) && top <= bot && bot < f.rows
+  ensures fb_ok(f)
+{
+  let height = bot - top + 1;
+  let k = smaller(n, height);
+  fb_move(&mut f, (top + k) * f.cols, top * f.cols, (height - k) * f.cols);
+  let mut r = top;
+  while r < top + k
+    invariant r <= top + k && top + k <= bot + 1 && bot < f.rows && fb_ok(f)
+  {
+    fb_blank(&mut f, r, 0, f.cols);
+    r = r + 1;
+  }
+  fb_refresh(&mut f);
+}
+
+/// Moves the cursor down a line, scrolling the scroll region up at its bottom.
 fn fb_newline(f: &mut Fb)
   requires fb_ok(f)
   ensures fb_ok(f)
 {
-  if f.cy + 1 < f.rows {
+  if f.cy == f.bot {
+    fb_scroll_up(&mut f, f.top, f.bot, 1);
+  } else if f.cy + 1 < f.rows {
     f.cy = f.cy + 1;
-    return;
   }
-  let n = blen(f.text);
-  let step = f.cols * 4;
-  let mut i = 0;
-  while i + step < n
-    invariant fb_ok(f) && blen(f.text) == n && i <= n && step == f.cols * 4
-  {
-    bset(&mut f.text, i, bget(f.text, i + step));
-    i = i + 1;
-  }
-  let mut col = 0;
-  while col < f.cols
-    invariant col <= f.cols && fb_ok(f)
-  {
-    fb_set(&mut f, col, f.rows - 1, 32);
-    col = col + 1;
-  }
-  fb_refresh(&mut f);
 }
 
 /// Draws the cursor on its cell (and the right cell of a two-cell
@@ -339,8 +428,8 @@ fn fb_cursor(f: &mut Fb, on: bool)
 {
   let c = fb_at(f, f.cx, f.cy);
   fb_draw(&mut f, f.cx, f.cy, c, on);
-  if f.cx + 1 < f.cols && fb_at(f, f.cx + 1, f.cy) == TAIL && c != TAIL {
-    fb_draw(&mut f, f.cx + 1, f.cy, TAIL, on);
+  if f.cx + 1 < f.cols && is_tail(fb_at(f, f.cx + 1, f.cy)) && !is_tail(c) {
+    fb_draw(&mut f, f.cx + 1, f.cy, fb_at(f, f.cx + 1, f.cy), on);
   }
 }
 
@@ -351,10 +440,10 @@ fn fb_split(f: &mut Fb, col: u64, row: u64)
   ensures fb_ok(f)
 {
   let c = fb_at(f, col, row);
-  if c == TAIL && col > 0 {
+  if is_tail(c) && col > 0 {
     fb_set(&mut f, col - 1, row, 32);
     fb_show(&mut f, col - 1, row);
-  } else if col + 1 < f.cols && fb_at(f, col + 1, row) == TAIL {
+  } else if col + 1 < f.cols && is_tail(fb_at(f, col + 1, row)) {
     fb_set(&mut f, col + 1, row, 32);
     fb_show(&mut f, col + 1, row);
   }
@@ -380,9 +469,9 @@ fn fb_char(f: &mut Fb, cp: u64)
   if w == 2 {
     fb_split(&mut f, f.cx + 1, f.cy);
   }
-  fb_set(&mut f, f.cx, f.cy, cp);
+  fb_set(&mut f, f.cx, f.cy, cp + f.attr * REV);
   if w == 2 {
-    fb_set(&mut f, f.cx + 1, f.cy, TAIL);
+    fb_set(&mut f, f.cx + 1, f.cy, TAIL + f.attr * REV);
   }
   fb_show(&mut f, f.cx, f.cy);
   if w == 2 {
@@ -397,23 +486,268 @@ fn fb_char(f: &mut Fb, cp: u64)
   fb_cursor(&mut f, true);
 }
 
+/// Parameter i of the escape sequence being read, or `def` if it was
+/// left out or is 0.
+fn csi_arg(f: &Fb, i: u64, def: u64) -> u64
+  requires fb_ok(f)
+  ensures result <= 9999 || result == def
+{
+  let mut v = f.p3;
+  if i == 0 {
+    v = f.p0;
+  } else if i == 1 {
+    v = f.p1;
+  } else if i == 2 {
+    v = f.p2;
+  }
+  if v == 0 {
+    return def;
+  }
+  return v;
+}
+
+/// Moves the cursor to row, col (0 based), kept on the screen.
+fn fb_goto(f: &mut Fb, row: u64, col: u64)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  f.cy = smaller(row, f.rows - 1);
+  f.cx = smaller(col, f.cols - 1);
+}
+
+/// Applies the SGR parameters (CSI ... m): 0 resets and 7 reverses; other
+/// renditions (bold, colours) are not drawn.
+fn fb_sgr(f: &mut Fb)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  let mut i = 0;
+  while i <= f.pi
+    invariant i <= 4 && fb_ok(f)
+  {
+    let v = csi_arg(f, i, 0);
+    if v == 0 || v == 27 {
+      f.attr = 0;
+    } else if v == 7 {
+      f.attr = 1;
+    }
+    i = i + 1;
+  }
+}
+
+/// Copies the text to or from the alternate screen `alt` (XTerm's 1049).
+fn fb_swap_alt(f: &mut Fb, save: bool)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  let n = blen(f.text);
+  if blen(f.alt) != n {
+    return;
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && fb_ok(f) && blen(f.alt) == n && blen(f.text) == n
+  {
+    if save {
+      bset(&mut f.alt, i, bget(f.text, i));
+    } else {
+      bset(&mut f.text, i, bget(f.alt, i));
+    }
+    i = i + 1;
+  }
+}
+
+/// Runs the escape sequence CSI (parameters) fin: cursor movement, erasing,
+/// inserting and deleting lines and characters, scrolling, the scroll
+/// region, reverse video, saving the cursor and the alternate screen; the
+/// rest is ignored.
+/// n - 1, stopping at zero (CSI parameters count from 1).
+fn pred(n: u64) -> u64
+  ensures result <= n
+{
+  if n == 0 { return 0; }
+  return n - 1;
+}
+
+fn fb_csi(f: &mut Fb, fin: u64)
+  requires fb_ok(f)
+  ensures fb_ok(f)
+{
+  fb_cursor(&mut f, false);
+  let n = csi_arg(f, 0, 1);
+  if f.priv == 1 {
+    // Private modes: only the alternate screen (1047, 1049) matters.
+    if (fin == 104 || fin == 108) && (f.p0 == 1049 || f.p0 == 1047) {
+      if fin == 104 {
+        fb_swap_alt(&mut f, true);
+        let mut r = 0;
+        while r < f.rows
+          invariant r <= f.rows && fb_ok(f)
+        {
+          fb_blank(&mut f, r, 0, f.cols);
+          r = r + 1;
+        }
+      } else {
+        fb_swap_alt(&mut f, false);
+      }
+      fb_refresh(&mut f);
+    }
+  } else if fin == 65 {                       // A: up
+    f.cy = f.cy - smaller(n, f.cy);
+  } else if fin == 66 || fin == 101 {         // B, e: down
+    f.cy = smaller(f.cy + smaller(n, f.rows), f.rows - 1);
+  } else if fin == 67 || fin == 97 {          // C, a: right
+    f.cx = smaller(f.cx + smaller(n, f.cols), f.cols - 1);
+  } else if fin == 68 {                       // D: left
+    f.cx = f.cx - smaller(n, f.cx);
+  } else if fin == 69 {                       // E: down, to column 1
+    f.cy = smaller(f.cy + smaller(n, f.rows), f.rows - 1);
+    f.cx = 0;
+  } else if fin == 70 {                       // F: up, to column 1
+    f.cy = f.cy - smaller(n, f.cy);
+    f.cx = 0;
+  } else if fin == 71 || fin == 96 {          // G, `: column
+    fb_goto(&mut f, f.cy, pred(n));
+  } else if fin == 100 {                      // d: row
+    fb_goto(&mut f, pred(n), f.cx);
+  } else if fin == 72 || fin == 102 {         // H, f: row and column
+    fb_goto(&mut f, pred(n), pred(csi_arg(f, 1, 1)));
+  } else if fin == 74 {                       // J: erase in display
+    let m = csi_arg(f, 0, 0);
+    if m == 0 {
+      fb_blank(&mut f, f.cy, f.cx, f.cols);
+    }
+    let mut r = 0;
+    if m == 0 {
+      r = f.cy + 1;
+    }
+    while r < f.rows && !(m == 1 && r >= f.cy)
+      invariant r <= f.rows && fb_ok(f)
+    {
+      fb_blank(&mut f, r, 0, f.cols);
+      r = r + 1;
+    }
+    if m == 1 {
+      fb_blank(&mut f, f.cy, 0, f.cx + 1);
+    }
+    fb_refresh(&mut f);
+  } else if fin == 75 {                       // K: erase in line
+    let m = csi_arg(f, 0, 0);
+    if m == 0 {
+      fb_blank(&mut f, f.cy, f.cx, f.cols);
+    } else if m == 1 {
+      fb_blank(&mut f, f.cy, 0, f.cx + 1);
+    } else {
+      fb_blank(&mut f, f.cy, 0, f.cols);
+    }
+    fb_refresh(&mut f);
+  } else if fin == 76 {                       // L: insert lines
+    if f.cy >= f.top && f.cy <= f.bot {
+      fb_scroll_down(&mut f, f.cy, f.bot, n);
+    }
+  } else if fin == 77 {                       // M: delete lines
+    if f.cy >= f.top && f.cy <= f.bot {
+      fb_scroll_up(&mut f, f.cy, f.bot, n);
+    }
+  } else if fin == 80 {                       // P: delete characters
+    let k = smaller(n, f.cols - f.cx);
+    let base = f.cy * f.cols;
+    fb_move(&mut f, base + f.cx, base + f.cx + k, f.cols - f.cx - k);
+    fb_blank(&mut f, f.cy, f.cols - k, f.cols);
+    fb_refresh(&mut f);
+  } else if fin == 64 {                       // @: insert characters
+    let k = smaller(n, f.cols - f.cx);
+    let base = f.cy * f.cols;
+    fb_move(&mut f, base + f.cx + k, base + f.cx, f.cols - f.cx - k);
+    fb_blank(&mut f, f.cy, f.cx, f.cx + k);
+    fb_refresh(&mut f);
+  } else if fin == 88 {                       // X: erase characters
+    fb_blank(&mut f, f.cy, f.cx, f.cx + n);
+    fb_refresh(&mut f);
+  } else if fin == 83 {                       // S: scroll up
+    fb_scroll_up(&mut f, f.top, f.bot, n);
+  } else if fin == 84 {                       // T: scroll down
+    fb_scroll_down(&mut f, f.top, f.bot, n);
+  } else if fin == 114 {                      // r: the scroll region
+    let t = pred(csi_arg(f, 0, 1));
+    let b = pred(csi_arg(f, 1, f.rows));
+    if t < b && b < f.rows {
+      f.top = t;
+      f.bot = b;
+    } else {
+      f.top = 0;
+      f.bot = f.rows - 1;
+    }
+    fb_goto(&mut f, 0, 0);
+  } else if fin == 109 {                      // m: rendition
+    fb_sgr(&mut f);
+  } else if fin == 115 {                      // s: save the cursor
+    f.scx = f.cx;
+    f.scy = f.cy;
+  } else if fin == 117 {                      // u: restore it
+    f.cx = smaller(f.scx, f.cols - 1);
+    f.cy = smaller(f.scy, f.rows - 1);
+  }
+  fb_cursor(&mut f, true);
+}
+
 /// Writes byte b at the cursor: UTF-8 characters, CR, LF, backspace (which
-/// only moves back) and tab; escape sequences are skipped.
+/// only moves back) and tab, and the escape sequences fb_csi runs (others
+/// are skipped).
 fn fb_put(f: &mut Fb, b: u64)
   requires fb_ok(f) && b < 256
   ensures fb_ok(f)
 {
   if f.esc == 1 {
+    f.esc = 0;
     if b == 91 {
       f.esc = 2;                      // ESC [
-    } else {
-      f.esc = 0;
+      f.p0 = 0;
+      f.p1 = 0;
+      f.p2 = 0;
+      f.p3 = 0;
+      f.pi = 0;
+      f.priv = 0;
+    } else if b == 55 {               // ESC 7: save the cursor
+      f.scx = f.cx;
+      f.scy = f.cy;
+    } else if b == 56 {               // ESC 8: restore it
+      fb_cursor(&mut f, false);
+      f.cx = smaller(f.scx, f.cols - 1);
+      f.cy = smaller(f.scy, f.rows - 1);
+      fb_cursor(&mut f, true);
+    } else if b == 77 {               // ESC M: up, scrolling down at the top of the region
+      fb_cursor(&mut f, false);
+      if f.cy == f.top {
+        fb_scroll_down(&mut f, f.top, f.bot, 1);
+      } else if f.cy > 0 {
+        f.cy = f.cy - 1;
+      }
+      fb_cursor(&mut f, true);
     }
     return;
   }
   if f.esc == 2 {
-    if (b >= 65 && b <= 90) || (b >= 97 && b <= 122) {
-      f.esc = 0;                      // the final letter
+    if b >= 48 && b <= 57 {
+      let d = b - 48;
+      if f.pi == 0 {
+        f.p0 = smaller(f.p0 * 10 + d, 9999);
+      } else if f.pi == 1 {
+        f.p1 = smaller(f.p1 * 10 + d, 9999);
+      } else if f.pi == 2 {
+        f.p2 = smaller(f.p2 * 10 + d, 9999);
+      } else {
+        f.p3 = smaller(f.p3 * 10 + d, 9999);
+      }
+    } else if b == 59 {               // ;
+      if f.pi < 3 {
+        f.pi = f.pi + 1;
+      }
+    } else if b == 63 || b == 62 || b == 61 {
+      f.priv = 1;                     // ?, > or =: private
+    } else if b >= 64 && b <= 126 {
+      f.esc = 0;                      // the final byte
+      fb_csi(&mut f, b);
     }
     return;
   }
@@ -460,7 +794,7 @@ fn fb_put(f: &mut Fb, b: u64)
     f.esc = 1;
   } else if b == 13 {
     f.cx = 0;
-  } else if b == 10 {
+  } else if b == 10 || b == 11 || b == 12 {
     fb_newline(&mut f);
   } else if b == 8 {
     if f.cx > 0 {
@@ -488,8 +822,9 @@ fn fb_new(regs: Mmio, size: u64, pitch: u64, width: u64, height: u64, rgb: u64) 
   let rows = height / CELL_H;
   let fg = (FG_LEVEL << (rgb % 32)) + (FG_LEVEL << (rgb / 256 % 32)) + (FG_LEVEL << (rgb / 65536 % 32));
   let mut f = Fb { regs: regs, size: size, pitch: pitch, cols: cols, rows: rows, cx: 0, cy: 0,
-    fg: fg % 4294967296, esc: 0, held: false, u8acc: 0, u8need: 0, u8min: 0,
-    text: balloc(cols * rows * 4), shown: balloc(cols * rows * 4) };
+    fg: fg % 4294967296, esc: 0, held: false, top: 0, bot: rows - 1, attr: 0, scx: 0, scy: 0, p0: 0, p1: 0, p2: 0, p3: 0, pi: 0, priv: 0,
+    u8acc: 0, u8need: 0, u8min: 0,
+    text: balloc(cols * rows * 4), shown: balloc(cols * rows * 4), alt: balloc(cols * rows * 4) };
   let mut o = 0;
   while o + 4 <= size
     invariant o % 4 == 0 && o <= size && fb_ok(f) && f.size == size
@@ -569,6 +904,7 @@ fn fb_blit(f: &mut Fb, off: u64, src: &Bytes, from: u64, n: u64)
 fn fb_free(f: Fb) -> Mmio {
   bfree(f.text);
   bfree(f.shown);
+  bfree(f.alt);
   return f.regs;
 }
 
