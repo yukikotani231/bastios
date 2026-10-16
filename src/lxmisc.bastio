@@ -858,6 +858,35 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// The last of lx_misc_call's calls (split off so the solver proves each half).
+fn lx_misc_tail(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r0: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = r0;
+  if n == LX_CAPGET {
+    r = lx_capget(&mut k, pid, a, b);
+  } else if n == LX_CAPSET {
+    r = lx_capset(&mut k, pid, a, b);
+  } else if n == LX_PRCTL || n == LX_SECCOMP {
+    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
+  } else if n == LX_MLOCK || n == LX_MUNLOCK {
+    r = lx_mlock_call(&mut k, pid, n, a, b);
+  } else if n == LX_MLOCKALL {
+    r = lx_mlockall(&mut k, pid, a);
+  } else if n == LX_MUNLOCKALL {
+    r = lx_munlockall(&mut k, pid);
+  } else if n == LX_GETRANDOM {
+    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
+    if c % 0x100000000 > 7 || c % 8 == 6 {
+      r = EINVAL;
+    } else {
+      r = lx_getrandom(&mut k, pid, a, b);
+    }
+  }
+  return r;
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -1015,25 +1044,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
         r = vpid_of(k, pid, sid_of(k.procs, p));
       }
     }
-  } else if n == LX_CAPGET {
-    r = lx_capget(&mut k, pid, a, b);
-  } else if n == LX_CAPSET {
-    r = lx_capset(&mut k, pid, a, b);
-  } else if n == LX_PRCTL || n == LX_SECCOMP {
-    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
-  } else if n == LX_MLOCK || n == LX_MUNLOCK {
-    r = lx_mlock_call(&mut k, pid, n, a, b);
-  } else if n == LX_MLOCKALL {
-    r = lx_mlockall(&mut k, pid, a);
-  } else if n == LX_MUNLOCKALL {
-    r = lx_munlockall(&mut k, pid);
-  } else if n == LX_GETRANDOM {
-    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
-    if c % 0x100000000 > 7 || c % 8 == 6 {
-      r = EINVAL;
-    } else {
-      r = lx_getrandom(&mut k, pid, a, b);
-    }
+  } else {
+    r = lx_misc_tail(&mut k, pid, n, a, b, c, r);
   }
   // Everything else (madvise, sync) succeeds doing nothing.
   assert kok(k) && con_ok(con);
