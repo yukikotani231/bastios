@@ -382,6 +382,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
+        # The keys that are not characters: arrows, function keys, Home and
+        # Delete send the escape sequences of a VT220. cat takes them in the
+        # terminal's line mode into a file, whose size is then counted (the
+        # console drops ESC when it prints one): ESC [ A, ESC [ 1 5 ~,
+        # ESC [ 3 ~, ESC [ D and ESC [ H are 18 bytes, and the line's end 1.
+        mark = len(out)
+        q.stdin.write(b"cat > /tmp/keys\r"); q.stdin.flush()
+        time.sleep(1)
+        monitor("sendkey up", "sendkey f5", "sendkey delete", "sendkey left", "sendkey home", "sendkey ret", "sendkey ctrl-d")
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"ls -l /tmp/keys\r"); q.stdin.flush()
+        good = until(b" 19 ", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) arrow, function and editing keys send VT220 escape sequences")
+        fails += not good
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.

@@ -1740,6 +1740,28 @@ fn usage_byte(x: &Xhci, k: u64) -> u64
   return c;
 }
 
+/// The PS/2 scan code (plus 256 if it is an extended one) of a USB key
+/// that sends an escape sequence, or 0: arrows, Home, End, Page Up and
+/// Down, Insert, Delete and F1-F12 (the sequence is key_seq's).
+fn usage_scan(k: u64) -> u64
+  ensures result < 512
+{
+  if k == 0x52 { return 256 + 0x48; }      // up
+  if k == 0x51 { return 256 + 0x50; }      // down
+  if k == 0x4F { return 256 + 0x4D; }      // right
+  if k == 0x50 { return 256 + 0x4B; }      // left
+  if k == 0x4A { return 256 + 0x47; }      // home
+  if k == 0x4D { return 256 + 0x4F; }      // end
+  if k == 0x4B { return 256 + 0x49; }      // page up
+  if k == 0x4E { return 256 + 0x51; }      // page down
+  if k == 0x49 { return 256 + 0x52; }      // insert
+  if k == 0x4C { return 256 + 0x53; }      // delete
+  if k >= 0x3A && k <= 0x43 { return k - 0x3A + 0x3B; }    // F1-F10
+  if k == 0x44 { return 0x57; }            // F11
+  if k == 0x45 { return 0x58; }            // F12
+  return 0;
+}
+
 /// Reads a finished report: keys down now that were not before are typed.
 fn kbd_report(x: &mut Xhci)
   requires xhci_ok(x)
@@ -1767,6 +1789,25 @@ fn kbd_report(x: &mut Xhci)
     if k >= 4 && !was && b < 256 && x.qn < 16 {
       bset(&mut x.q, x.qn, cast[u8](b));
       x.qn = x.qn + 1;
+    }
+    let sc = usage_scan(k);
+    if k >= 4 && !was && sc > 0 {
+      let sq = key_seq(sc % 256, sc >= 256);
+      let n = sq / 4294967296;
+      if sq > 0 && x.qn + 1 + n <= 16 {
+        bset(&mut x.q, x.qn, 27);
+        x.qn = x.qn + 1;
+        let mut rest = sq % 4294967296;
+        let mut m = 0;
+        while m < n
+          invariant xhci_ok(x) && m <= n && x.qn + n - m <= 16
+        {
+          bset(&mut x.q, x.qn, cast[u8](rest % 256));
+          rest = rest / 256;
+          x.qn = x.qn + 1;
+          m = m + 1;
+        }
+      }
     }
     i = i + 1;
   }

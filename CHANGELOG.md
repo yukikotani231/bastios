@@ -83,6 +83,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Terminal
 
+- The PS/2 and USB keyboards send the arrow keys, Home, End, Page Up and Down, Insert, Delete and F1-F12 as the escape sequences of a VT220 (`ESC [ A`, `ESC [ 3 ~`, `ESC O P`, `ESC [ 15 ~` and so on), which the console gave nothing for before. A terminal in line mode keeps Tab and ESC in the line (ESC is echoed as `^[`) instead of dropping them, as Linux does. `test/iso_test.sh` types some of them and counts the bytes that arrive; the USB path is proved but no test drives it yet.
 - Keys typed at the console reach a program that waits in `epoll_wait`,
   `select` or `pselect6` (libuv, and so Neovim); before, they stayed queued
   for the native shell unless the program was in `poll`, `ppoll` or `read`.
