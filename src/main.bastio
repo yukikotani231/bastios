@@ -84,6 +84,7 @@ import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "oom.bastio";
 import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
@@ -710,15 +711,45 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       }
       return p;
     }
-    let bus = bus_fault(&mut s.k, p);       // a page past a mapped file's end (src/lxmem.bastio)
+    // A page past a mapped file's end (src/lxmem.bastio). If the file has
+    // grown to cover it the instruction runs again; a second fault at the
+    // same place is not this one's doing, and goes on to the handlers below.
+    let bva = pget(s.k.procs, p, reg_word(R_FAULT));
+    let brip = pget(s.k.procs, p, F_REGS + R_RIP) % 4611686018427387904 + 1;
+    let mut bus = 0;
+    if pget(s.k.procs, p, F_FAULT_RIP) != brip || pget(s.k.procs, p, F_FAULT_VA) != bva {
+      bus = bus_fault(&mut s.k, p);
+    }
     is_bus = bus == 2;
     if bus == 1 {
-      pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
-      return p;                             // the file has grown to cover it
+      pset(&mut s.k.procs, p, F_FAULT_RIP, brip);
+      pset(&mut s.k.procs, p, F_FAULT_VA, bva);
+      return p;
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
       pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
+    }
+    // Out of memory (src/oom.bastio): give cached pages back, or end the
+    // process holding the most. The access was legitimate: the page was
+    // there to map, there was none to map it with.
+    let ova = pget(s.k.procs, p, reg_word(R_FAULT));
+    if ova >= USER_BASE && ova - USER_BASE < USER_SIZE {
+      let oq = (ova - USER_BASE) / 4096;
+      let want = anon_covers(s.k.anon, p, oq) || lazy_covers(s.k, p, oq)
+        || (user_present(&mut s.k.spaces, p, ova) && !user_page_writable(&mut s.k.spaces, p, ova));
+      let oo = oom_fault(&mut s.k, &mut s.con, p, want);
+      if oo == OOM_RETRY {
+        pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+        return p;
+      }
+      if oo == OOM_WAIT {
+        return (p + 1) % NPROC;
+      }
+      if oo == OOM_SELF {
+        terminate(&mut s.k, mmu, p, death_code(SIGKILL, false));
+        return (p + 1) % NPROC;
+      }
     }
     // Another thread, on another processor, may have mapped a page of
     // code (src/lazy.bastio) or anonymous memory (src/lxanon.bastio), or
@@ -1219,7 +1250,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, aux_irq: false, wheel: false, mb: 0, mn: 0 };
+    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, aux_irq: false, wheel: false, mb: 0, mn: 0, pend: 0 };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };

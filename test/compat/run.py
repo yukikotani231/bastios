@@ -68,6 +68,11 @@ def syscall_names():
     return names
 
 
+# Cases that need longer than their lane's timeout say so with a line
+# "# timeout SECONDS" between their name and their command.
+SLOW = {}
+
+
 def load_applets(path):
     """The cases in applets.txt: (name, command, expected lines)."""
     cases, cur = [], None
@@ -76,6 +81,8 @@ def load_applets(path):
         if line.startswith("== "):
             cur = [line[3:].strip(), None, []]
             cases.append(cur)
+        elif cur is not None and cur[1] is None and line.startswith("# timeout "):
+            SLOW[cur[0]] = int(line[len("# timeout "):])
         elif cur is None or (cur[1] is None and (line.startswith("#") or not line.strip())):
             continue
         elif cur[1] is None and line.startswith("$ "):
@@ -122,13 +129,30 @@ def load_tty(path):
     return [(c["name"], c["prog"], c["keys"], c["check"], c["exp"]) for c in cases]
 
 
+def add_aports(www, tcc_src=None):
+    """The abuild cases' files in the web root: /aports.tar, the APKBUILDs
+    and sources of test/compat/aports (every directory but the *-src ones),
+    /libgreet-1.2.tar.gz, libgreet's source (the APKBUILD fetches it over
+    HTTP), and /tinycc-0.9.28.tar.gz, the tcc checkout in tcc_src."""
+    base = os.path.join(HERE, "aports")
+    with tarfile.open(os.path.join(www, "aports.tar"), "w") as t:
+        for d in sorted(os.listdir(base)):
+            if not d.endswith("-src"):
+                t.add(os.path.join(base, d), arcname=d, filter=lambda i: setattr(i, "uid", 0) or setattr(i, "gid", 0) or i)
+    with tarfile.open(os.path.join(www, "libgreet-1.2.tar.gz"), "w:gz") as t:
+        t.add(os.path.join(base, "libgreet-src"), arcname="libgreet-1.2", filter=lambda i: setattr(i, "uid", 0) or setattr(i, "gid", 0) or i)
+    if tcc_src:
+        subprocess.run(["git", "-C", tcc_src, "archive", "--format=tar.gz", "--prefix=tinycc-0.9.28/",
+                        "-o", os.path.join(www, "tinycc-0.9.28.tar.gz"), "HEAD"], check=True)
+
+
 class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
     /repo.git, a git repository for the dumb HTTP protocol, and
     /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
 
-    def __init__(self):
+    def __init__(self, tcc_src=None):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
         with open(os.path.join(self.dir, "hello.txt"), "w") as f:
             f.write("hello from the host\n")
@@ -158,6 +182,7 @@ class WebServer:
         for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "termdebug.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
+        add_aports(self.dir, tcc_src)
         handler = functools.partial(Quiet, directory=self.dir)
         self.httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self.port = self.httpd.server_address[1]
@@ -360,6 +385,8 @@ class Guest:
     def keys(self, prog, keys, timeout):
         """Starts prog and types keys at it once it has drawn something.
         Returns whether it got back to the shell prompt."""
+        self.hang_tail = b""
+        self.hang_disk = 0
         mark = len(self.out)
         # The marker shows the shell is back: a full-screen program's last
         # output can run into the prompt.
@@ -391,6 +418,9 @@ class Guest:
             if not done:
                 self.read_until(b"\x00never", len(self.out), 0.2)
         if not done:
+            # What the screen showed last, for the report of a hang.
+            self.hang_tail = bytes(self.out[-600:])
+            self.hang_disk = self.out.count(b"[disk:")
             self.send(b"\x03")
             if not self.read_until(PROMPT, len(self.out), 10):
                 self.boot()
@@ -560,7 +590,7 @@ def run_applet(env, name, cmd, expected, timeout, bb):
            .replace("SSHPORT", getattr(env, "sshport", "")))
     if cmd.startswith("@host "):
         return run_on_host(name, cmd[6:], expected, timeout)
-    text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", timeout)
+    text, status = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", max(timeout, SLOW.get(name, 0)))
     lines = text.split("\n")
     try:
         start = lines.index("@@begin") + 1
@@ -606,7 +636,13 @@ def run_on_host(name, cmd, expected, timeout):
 
 def run_tty_once(env, name, prog, keys, check, expected, timeout, bb):
     if not env.keys(with_bb(prog, bb), keys, timeout):
-        return {"name": name, "result": "hang", "detail": "the program did not return to the shell",
+        tail = getattr(env, "hang_tail", b"")
+        detail = "the program did not return to the shell"
+        if getattr(env, "hang_disk", 0):
+            detail += "; the kernel reported a dead disk %d time(s)" % env.hang_disk
+        if tail:
+            detail += "; the console ended with " + json.dumps(tail.decode("latin-1")[-300:])
+        return {"name": name, "result": "hang", "detail": detail,
                 "syscalls": []}
     return run_applet(env, name, check, expected, timeout, bb)
 
@@ -696,8 +732,10 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
+    ap.add_argument("--podman-disk", help="the Podman disk (the root of the podman image) for podman.txt")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -710,7 +748,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "debian", "node", "go", "java", "rust"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "debian", "node", "go", "java", "rust", "podman"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -734,11 +772,12 @@ def main():
     go = load_applets(os.path.join(HERE, "go.txt"))
     java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
+    podman = load_applets(os.path.join(HERE, "podman.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
     alpine_tty = load_tty(os.path.join(HERE, "alpine_tty.txt"))
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
-    web = WebServer()
+    web = WebServer(args.tcc_src)
     if args.registry_image and lane_chosen("alpine"):
         web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None
@@ -861,6 +900,11 @@ def main():
         disk = os.path.join(args.out, "rust-run.img")
         shutil.copyfile(args.rust_disk, disk)
         lanes.append(("rust", disk, [("rust", "Rust toolchain", applets_lane(rust, 900))], "2G"))
+    if args.podman_disk and lane_chosen("podman"):
+        # The cases unpack a root of about a hundred megabytes: a copy.
+        disk = os.path.join(args.out, "podman-run.img")
+        shutil.copyfile(args.podman_disk, disk)
+        lanes.append(("podman", disk, [("podman", "Podman", applets_lane(podman, 600))], "2G"))
     lanes = [l for l in lanes if l[2] and lane_chosen(l[0])]
     # The groups the chosen lanes hold, whatever becomes of them: a lane that
     # dies part way loses its checks, it does not drop them.
@@ -884,7 +928,7 @@ def main():
         log.close()
         web.shutdown()
         shutil.rmtree(scratch, ignore_errors=True)
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "podman"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

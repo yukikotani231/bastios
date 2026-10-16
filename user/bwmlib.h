@@ -2,7 +2,12 @@
  * window, draw into it, read events. Header only. */
 #ifndef BWMLIB_H
 #define BWMLIB_H
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <errno.h>
+#include <stdlib.h>
+#include <sys/mman.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -81,6 +86,66 @@ static int bwm_create(int fd, unsigned w, unsigned h, const char *title)
     if (bwm_read_all(fd, &h2, sizeof h2) != 0 || h2.type != BWM_CREATED || h2.len != sizeof r || bwm_read_all(fd, &r, sizeof r) != 0)
         return -1;
     return r.id;
+}
+
+/* Opens a window whose pixels are in memory shared with bwm: *pix is set
+ * to its w * h words, and bwm_damage tells bwm which part changed. Returns
+ * the window's id, or -1 (for instance when the server is too old to take
+ * a memory file), in which case bwm_create can be tried. */
+static int bwm_create_shm(int fd, unsigned w, unsigned h, const char *title, uint32_t **pix)
+{
+    size_t len = (size_t)w * h * 4;
+    int mf = memfd_create("bwm-window", MFD_CLOEXEC);
+    if (mf < 0)
+        return -1;
+    void *m = MAP_FAILED;
+    if (ftruncate(mf, len) == 0)
+        m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, mf, 0);
+    if (m == MAP_FAILED) {
+        close(mf);
+        return -1;
+    }
+    struct bwm_create c;
+    memset(&c, 0, sizeof c);
+    c.w = w;
+    c.h = h;
+    snprintf(c.title, sizeof c.title, "%s", title);
+    struct bwm_hdr hd = { BWM_CREATE_SHM, sizeof c };
+    char msg[sizeof hd + sizeof c];
+    memcpy(msg, &hd, sizeof hd);
+    memcpy(msg + sizeof hd, &c, sizeof c);
+    struct iovec iov = { msg, sizeof msg };
+    union { char b[CMSG_SPACE(sizeof(int))]; struct cmsghdr a; } u;
+    memset(&u, 0, sizeof u);
+    struct msghdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = u.b;
+    mh.msg_controllen = sizeof u.b;
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type = SCM_RIGHTS;
+    cm->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cm), &mf, sizeof(int));
+    ssize_t n = sendmsg(fd, &mh, 0);
+    close(mf);
+    struct bwm_hdr h2;
+    struct bwm_created r;
+    if (n != (ssize_t)sizeof msg || bwm_read_all(fd, &h2, sizeof h2) != 0 || h2.type != BWM_CREATED || h2.len != sizeof r
+        || bwm_read_all(fd, &r, sizeof r) != 0) {
+        munmap(m, len);
+        return -1;
+    }
+    *pix = m;
+    return r.id;
+}
+
+/* Tells bwm that the rectangle (x, y, w, h) of a shared window changed. */
+static int bwm_damage(int fd, int id, unsigned x, unsigned y, unsigned w, unsigned h)
+{
+    struct bwm_draw d = { (uint32_t)id, x, y, w, h };
+    return bwm_send(fd, BWM_DRAW, &d, sizeof d);
 }
 
 /* Sends the rectangle (x, y, w, h) of `pix` (a picture `stride` pixels
