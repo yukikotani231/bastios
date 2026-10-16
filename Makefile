@@ -87,7 +87,7 @@ build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/u
 	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
 
 build/user/%.s: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
-	$(BASTIOC) --lib $(BASTIOLIB) --target user --backend native --emit-asm -o $@ $<
+	$(BASTIOC) --lib $(BASTIOLIB) --target user --backend native-ir --emit-asm -o $@ $<
 
 build/user/%.o: build/user/%.c
 	$(CC) $(UCFLAGS) -c -o $@ $<
