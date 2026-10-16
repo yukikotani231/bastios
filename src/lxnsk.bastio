@@ -266,7 +266,47 @@ fn ipc_unshare(k: &mut Kernel, pid: u64) -> u64
     return ENOMEM;
   }
   nsk_set(&mut k, NSK_IPC, pid, id);
+  ipcns_own(&mut k, pid, id);
   return 0;
+}
+
+/// The user namespace that made IPC namespace id, or 0 (the first, which
+/// only root owns) if it is the first or has no record.
+fn ipcns_owner(k: &Kernel, id: u64) -> u64
+  requires kok(k)
+  ensures result < MNS_MAX
+{
+  let mut i = 0;
+  while id != 0 && i < IO_N
+    invariant i <= IO_N && kok(k)
+  {
+    if get(k.mns, MNS_IO + i * 2) == id {
+      return get(k.mns, MNS_IO + i * 2 + 1) % MNS_MAX;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+/// Records the user namespace of process pid as the owner of IPC namespace
+/// id, which it has just made (after the user namespace of the same call,
+/// if there was one). With no free record the namespace stays root's.
+fn ipcns_own(k: &mut Kernel, pid: u64, id: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while id != 0 && i < IO_N
+    invariant i <= IO_N && kok(k)
+  {
+    let cur = get(k.mns, MNS_IO + i * 2);
+    if cur == 0 || !nsk_live(k, NSK_IPC, cur) {
+      k.mns = set(k.mns, MNS_IO + i * 2, id);
+      k.mns = set(k.mns, MNS_IO + i * 2 + 1, nsk_of(k, NSK_USER, pid));
+      return;
+    }
+    i = i + 1;
+  }
 }
 
 /// unshare or clone's namespaces other than the mount one (flags holds
@@ -1319,16 +1359,49 @@ fn nf_flag(f: u64) -> u64 {
   return CLONE_NEWUTS;
 }
 
+/// May pid, which is not root, join namespace id of link kind f (mount,
+/// UTS, IPC or network): it holds CAP_SYS_ADMIN here and over the user namespace
+/// that made the one it joins. The first of each belongs to root.
+fn ns_join_priv(k: &Kernel, pid: u64, f: u64, id: u64) -> bool
+  requires kok(k) && pid < NPROC && id < MNS_MAX
+{
+  if cap_has(k, pid, CAP_SYS_ADMIN) {
+    return true;
+  }
+  let mut owner = 0;
+  if f == NF_MNT {
+    owner = mo_owner(k, id);
+  } else if f == NF_UTS {
+    let s = uts_slot(k, id);
+    if s < UTS_N {
+      owner = get(k.mns, MNS_UTS + s * UTS_W + UTS_OWN) % MNS_MAX;
+    }
+  } else if f == NF_NET {
+    owner = nic_ns_owner(k.nic, id) % MNS_MAX;
+  } else if f == NF_IPC {
+    owner = ipcns_owner(k, id);
+  } else {
+    return false;
+  }
+  return id != 0 && ns_cap(k, pid, CAP_SYS_ADMIN) && ns_cap_over(k, pid, owner, CAP_SYS_ADMIN);
+}
+
 /// Can pid join namespace id of link kind f? 0, or -errno.
 fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
   requires kok(k) && pid < NPROC && id < MNS_MAX
 {
   if id == nf_id(k, pid, f) && f != NF_TIME && f != NF_TIMEC {
+    if (f == NF_MNT || f == NF_UTS || f == NF_IPC || f == NF_NET) && !ns_join_priv(k, pid, f, id) {
+      return EPERM;                         // even the namespace it is in needs the privilege
+    }
     return 0;                               // already there
   }
   if f == NF_MNT {
     if !mnt_ns_live(k, id) {
       return EINVAL;
+    }
+    if !ns_join_priv(k, pid, f, id) {
+      return EPERM;
     }
     return 0;
   }
@@ -1336,11 +1409,17 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
     if !nsk_live(k, NSK_UTS, id) || (id != 0 && uts_slot(k, id) >= UTS_N) {
       return EINVAL;
     }
+    if !ns_join_priv(k, pid, f, id) {
+      return EPERM;
+    }
     return 0;
   }
   if f == NF_IPC {
     if !nsk_live(k, NSK_IPC, id) {
       return EINVAL;
+    }
+    if !ns_join_priv(k, pid, f, id) {
+      return EPERM;
     }
     return 0;
   }
@@ -1348,11 +1427,17 @@ fn ns_may_join(k: &Kernel, pid: u64, f: u64, id: u64) -> u64
     if id != 0 && !cg_used(k, smaller(id - 1, CG_N - 1)) {
       return EINVAL;                        // its root is gone
     }
+    if !cap_has(k, pid, CAP_SYS_ADMIN) {
+      return EPERM;
+    }
     return 0;
   }
   if f == NF_NET {
     if id >= NNET || !nic_ns_live(k.nic, id) {
       return EINVAL;                        // it ended (its number may since be another's)
+    }
+    if !ns_join_priv(k, pid, f, id) {
+      return EPERM;
     }
     return 0;
   }
@@ -1468,11 +1553,16 @@ fn lx_setns(k: &mut Kernel, pid: u64, fd: u64, nstype: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;
   }
-  // Root joins any namespace; anyone else only a user namespace that they
-  // have CAP_SYS_ADMIN over (ns_may_join).
+  // Root joins any namespace; anyone else only user, mount, UTS, IPC and network
+  // namespaces that they have CAP_SYS_ADMIN over (ns_may_join).
   if !cap_has(k, pid, CAP_SYS_ADMIN) {
-    let user_link = d.kind == K_DEV && is_ns_file(d.x) && nsf_kind(d.x) == NF_USER;
-    if !user_link && !(d.kind == K_PIDFD && nstype == CLONE_NEWUSER) {
+    let mut lk = false;
+    if d.kind == K_DEV && is_ns_file(d.x) {
+      let fk = nsf_kind(d.x);
+      lk = fk == NF_USER || fk == NF_MNT || fk == NF_UTS || fk == NF_IPC || fk == NF_NET;
+    }
+    let ok_mask = CLONE_NEWUSER + CLONE_NEWNS + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWNET;
+    if !lk && !(d.kind == K_PIDFD && nstype != 0 && nstype & ok_mask == nstype) {
       return EPERM;
     }
   }
@@ -1561,9 +1651,8 @@ fn ns_fd_new(k: &mut Kernel, pid: u64, f: u64, id: u64) -> u64
 /// namespace's parent), NS_GET_PARENT (the parent of a user or PID
 /// namespace), NS_GET_NSTYPE (its CLONE_NEW* flag) and NS_GET_OWNER_UID
 /// (the creator of a user namespace, as the caller sees ids). Parents and
-/// owners are only given to a caller that is in them or inside one that
-/// is, as on Linux, and namespaces are two levels deep, so every parent is
-/// the first one. A namespace other than a user namespace is owned by the
+/// owners are only given to a caller that is in them or in a namespace
+/// around them, as on Linux. A namespace other than a user namespace is owned by the
 /// user namespace of the process whose link was opened (the first
 /// namespaces by the first one).
 fn ns_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u64
@@ -1598,18 +1687,53 @@ fn ns_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u6
     if f != NF_USER && f != NF_PID && f != NF_PIDC {
       return EINVAL;                        // not hierarchical
     }
-    let mut here = mine;
-    if f != NF_USER {
-      here = nsk_of(k, NSK_PID, pid);
-    }
-    if id == 0 || here != 0 {
-      return EPERM;
+    if id == 0 {
+      return EPERM;                         // the first has no parent
     }
     let mut g = f;
     if f == NF_PIDC {
       g = NF_PID;
     }
-    return ns_fd_new(&mut k, pid, g, 0);
+    let mut par = 0;
+    let mut here = mine;
+    if f == NF_USER {
+      let us = usr_slot(k, id);
+      if us >= USR_N {
+        return EPERM;
+      }
+      par = usr_get(k, us, UMW_PAR) % MNS_MAX;
+    } else {
+      par = pn_parent(k, id);
+      here = nsk_of(k, NSK_PID, pid);
+    }
+    // The caller is in the parent or in a namespace around it, as on Linux.
+    let mut seen = false;
+    let mut stop = false;
+    let mut v = par;
+    let mut n = 0;
+    while n < USR_N && !seen && !stop
+      invariant n <= USR_N && v < MNS_MAX && kok(k)
+    {
+      if v == here {
+        seen = true;
+      } else if v == 0 {
+        stop = true;
+      } else if f == NF_USER {
+        let vs = usr_slot(k, v);
+        if vs >= USR_N {
+          stop = true;
+        } else {
+          v = usr_get(k, vs, UMW_PAR) % MNS_MAX;
+        }
+      } else {
+        v = pn_parent(k, v);
+      }
+      n = n + 1;
+    }
+    if !seen {
+      return EPERM;
+    }
+    return ns_fd_new(&mut k, pid, g, par);
   }
   if req == NS_GET_OWNER_UID {
     if f != NF_USER {

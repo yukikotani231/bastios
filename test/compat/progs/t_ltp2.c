@@ -39,6 +39,9 @@ static volatile int ticks;
 static void vt(int s) { (void)s; ticks++; }
 static sigjmp_buf back;
 static void segv(int s) { (void)s; siglongjmp(back, 1); }
+static volatile int bus_code = -1;
+static void busplain(int s) { (void)s; bus_code = 2; siglongjmp(back, 1); }
+static void bus(int s, siginfo_t *i, void *u) { (void)s; (void)u; bus_code = i->si_code; siglongjmp(back, 1); }
 
 /* Three connections in turn to a server that accepts, greets and closes
  * each: the closed ones must not be handed out by accept again. */
@@ -688,9 +691,87 @@ int main(void) {
            int r2 = mprotect(m, 4096, PROT_READ);
            munmap(m, 4096); close(z);
            m != MAP_FAILED && r == -1 && e == EACCES && w == MAP_FAILED && we == EACCES && r2 == 0; }));
+    EXPECT("SIGBUS: a mapped page past the end of the file is a bus error", ({
+           struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_sigaction = bus; sa.sa_flags = SA_SIGINFO; sigaction(SIGBUS, &sa, 0);
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 2048);
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+           int in = 0, hit = 0;
+           if (sigsetjmp(back, 1) == 0) { m[100] = 7; in = 1; m[4096 + 1] = 0; } else hit = 1;
+           int code = bus_code;
+           signal(SIGBUS, SIG_DFL); munmap(m, 8192); close(f); unlink("/tmp/sigbus.tmp");
+           m != MAP_FAILED && in && hit && code == BUS_ADRERR; }));
+    EXPECT("SIGBUS: the same page is ordinary memory once the file has grown", ({
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 2048);
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+           ftruncate(f, 8192);
+           m[4096 + 1] = 9; int after = m[4096 + 1] == 9;
+           munmap(m, 8192); close(f); unlink("/tmp/sigbus.tmp");
+           m != MAP_FAILED && after; }));
+    EXPECT("SIGBUS: a forked child gets it too", ({
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 2048);
+           pid_t c = fork();
+           if (c == 0) {
+             signal(SIGBUS, busplain);
+             char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_FILE | MAP_SHARED, f, 0);
+             if (m == MAP_FAILED) _exit(2);
+             int hit = 0;
+             if (sigsetjmp(back, 1) == 0) { char *ch = m + 4096 + 1; *ch = 0; } else hit = 1;
+             _exit(hit ? 0 : 3);
+           }
+           int st = 0; if (c > 0) waitpid(c, &st, 0);
+           signal(SIGBUS, SIG_DFL); close(f); unlink("/tmp/sigbus.tmp");
+           c > 0 && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("SIGBUS: a file cut under a mapping takes the pages past the new end", ({
+           signal(SIGBUS, busplain);
+           int f = open("/tmp/sigbus.tmp", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           ftruncate(f, 8192);
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, f, 0);
+           m[4096 + 1] = 5;
+           ftruncate(f, 4096);
+           int hit = 0;
+           if (sigsetjmp(back, 1) == 0) { m[4096 + 1] = 6; } else hit = 1;
+           int first = m[1] == 0;
+           signal(SIGBUS, SIG_DFL); munmap(m, 8192); close(f); unlink("/tmp/sigbus.tmp");
+           m != MAP_FAILED && hit && first; }));
+    EXPECT("rename: a directory moved from under the working directory leaves it in the moved directory", ({
+           char cwd[256];
+           mkdir("/tmp/rn_a", 0700); mkdir("/tmp/rn_a/sub", 0700);
+           chdir("/tmp/rn_a/sub");
+           int r = rename("/tmp/rn_a", "/tmp/rn_b");
+           int f = open("file", O_CREAT | O_WRONLY, 0600);
+           int e = f >= 0 && access("/tmp/rn_b/sub/file", F_OK) == 0 && getcwd(cwd, sizeof cwd) && !strcmp(cwd, "/tmp/rn_b/sub");
+           if (f >= 0) close(f);
+           unlink("/tmp/rn_b/sub/file"); chdir("/"); rmdir("/tmp/rn_b/sub"); rmdir("/tmp/rn_b");
+           r == 0 && e; }));
     EXPECT("clock_getres: the coarse clocks report their tick, at least 1 ms", ({
            struct timespec a, b;
            int x = clock_getres(CLOCK_REALTIME_COARSE, &a), y = clock_getres(CLOCK_MONOTONIC_COARSE, &b);
            x == 0 && y == 0 && a.tv_nsec >= 1000000 && b.tv_nsec >= 1000000; }));
+    EXPECT("mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt", ({
+           char was[32] = "";
+           int r = open("/proc/sys/fs/mqueue/queues_max", O_RDONLY);
+           int n = r >= 0 ? read(r, was, sizeof was - 1) : -1;
+           if (r >= 0) close(r);
+           int ok = n > 0 && strcmp(was, "256\n") == 0;
+           if (ok) {
+             mq_unlink("/mqlim_a"); mq_unlink("/mqlim_b");
+             mqd_t a = mq_open("/mqlim_a", O_RDWR | O_CREAT | O_EXCL, 0666, 0);
+             int w = open("/proc/sys/fs/mqueue/queues_max", O_WRONLY);
+             ok = a != (mqd_t)-1 && w >= 0 && write(w, "1\n", 2) == 2;
+             pid_t c = fork();
+             if (c == 0) {
+               setuid(65534);
+               _exit(mq_open("/mqlim_b", O_RDWR | O_CREAT | O_EXCL, 0600, 0) == (mqd_t)-1 && errno == ENOSPC ? 0 : 1);
+             }
+             int st; waitpid(c, &st, 0);
+             mqd_t b = mq_open("/mqlim_b", O_RDWR | O_CREAT | O_EXCL, 0600, 0);
+             ok = ok && WIFEXITED(st) && WEXITSTATUS(st) == 0 && b != (mqd_t)-1;
+             if (w >= 0) { lseek(w, 0, SEEK_SET); write(w, "256\n", 4); close(w); }
+             mq_unlink("/mqlim_a"); mq_unlink("/mqlim_b");
+           }
+           ok; }));
     return done();
 }

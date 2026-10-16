@@ -168,7 +168,7 @@ struct DiskFs {
   hint: u64,            // where the next allocation starts looking
   ix: Bytes,            // the index of names (below), IX_BYTES once built, else empty
   ixn: u64,             // its cells in use
-  free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); 0 after one is freed
+  free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); lowered to a freed one
   foreign: bool,        // the disk holds something else, and is left alone
   links: bool,          // a hard link entry may exist: false lets disk_links skip counting them
 }
@@ -828,15 +828,15 @@ fn disk_blank(dev: &mut Blk, sec: &mut Bytes, n: u64) -> bool
 /// blank (else it is left alone: `foreign`), and works out which blocks
 /// are in use. Without a disk (or one too small) the file
 /// system has no entries and every operation on it fails.
-fn disk_mount(dev: Blk) -> DiskFs
-  requires blk_ok(dev)
+fn disk_mount(dev: Blk, cslots: u64) -> DiskFs
+  requires blk_ok(dev) && cslots >= NC_MIN && cslots <= NC
   ensures disk_ok(result)
 {
   let mut n = blk_sectors(dev) / BSECT;
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
   }
-  let mut nc = NC;
+  let mut nc = cslots;
   if n < DATA_B0 + 16 {
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
@@ -1130,7 +1130,7 @@ fn disk_size(d: &DiskFs, i: u64) -> u64
 fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
 {
-  if i >= d.slots || !dent_live(d, i) || cast[u64](dent_byte(d, i, E_NLEN)) != n || n > DNAME_MAX {
+  if i >= d.slots || cast[u64](dent_byte(d, i, E_NLEN)) != n || n > DNAME_MAX || !dent_live(d, i) {
     return false;
   }
   return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, n);
@@ -1460,7 +1460,9 @@ fn disk_take_name(d: &mut DiskFs, i: u64, l: u64) -> bool
     j = j + 1;
   }
   let shared = i / 2 == l / 2;       // two entries to a sector
-  d.free0 = 0;
+  if l < d.free0 {
+    d.free0 = l;
+  }
   if shared {
     dent_setb(&mut d, l, E_KIND, 0);
   }
@@ -1660,7 +1662,9 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   let r = dent_tree(d, i);
   let file = dent_byte(d, i, E_KIND) == 1 || cast[u64](dent_byte(d, i, E_KIND)) == K_ORPHAN;
   dent_setb(&mut d, i, E_KIND, 0);
-  d.free0 = 0;
+  if i < d.free0 {
+    d.free0 = i;
+  }
   if !ent_flush(&mut d, i) {
     return false;
   }

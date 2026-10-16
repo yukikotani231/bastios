@@ -11,7 +11,9 @@
 // lease on the space (win_quiet), and every entry to user mode reloads CR3.
 //
 // A fresh private anonymous PROT_NONE mmap maps no pages until mprotect
-// makes them usable, so a large reservation costs nothing; touching it
+// makes them usable, and an mprotect that makes them writable records them to
+// be mapped when touched (src/lxanon.bastio), so a large reservation costs
+// nothing even then; touching it
 // faults (and a system call given it fails with -EFAULT) as on Linux.
 //
 // Not done: an mprotect that allows access maps fresh pages into any hole
@@ -46,13 +48,19 @@ fn l2_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
 }
 
 /// Sets what the program may do with window page p, if it is mapped:
-/// 0 nothing (PROT_NONE), 1 read, 2 read and write. False if not mapped. A
+/// 0 nothing (PROT_NONE), 1 read, 2 read and write; and, if x, run code from
+/// it. False if not mapped. A
 /// shared page of program text (src/text.bastio) made writable is first
 /// replaced by a private copy, so the process cannot write the others'
 /// (it stays read-only if there is no page for the copy). So is a
 /// copy-on-write page either way: what it may do with the page is now the
 /// mapping's own, not what fork shared.
-fn l2_protect(m: &mut Mem, l2: &mut PageTable, p: u64, a: u64) -> bool
+///
+/// Whether a page can be run is decided when its entry is made (pt_put_frame
+/// and pt_put_shared: writable means no-execute, read-only means execute) and
+/// pt_set_access leaves it alone, so the page is mapped again here, with the
+/// flag the new permission wants, and then given its access.
+fn l2_protect(m: &mut Mem, l2: &mut PageTable, p: u64, a: u64, x: bool) -> bool
   requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES && pt_leases(l2) == 0 && a <= 2
   ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
 {
@@ -69,7 +77,8 @@ fn l2_protect(m: &mut Mem, l2: &mut PageTable, p: u64, a: u64) -> bool
       if b < NPAGES {
         let f = shared_copy(take_dirty(&mut m, b), s);
         drop_shared(&mut m, s);
-        pt_put_frame(&mut l1, p % 512, f, a == 2);
+        mark_x(&mut m, f, x && a == 2);
+        pt_put_frame(&mut l1, p % 512, f, !x);
         pt_set_access(&mut l1, p % 512, a);
       } else {
         pt_put_shared(&mut l1, p % 512, s, false);
@@ -79,16 +88,21 @@ fn l2_protect(m: &mut Mem, l2: &mut PageTable, p: u64, a: u64) -> bool
       if b < NPAGES {
         let f = shared_copy(take_dirty(&mut m, b), s);
         drop_shared(&mut m, s);
-        pt_put_frame(&mut l1, p % 512, f, true);
+        mark_x(&mut m, f, x);
+        pt_put_frame(&mut l1, p % 512, f, !x);
+        pt_set_access(&mut l1, p % 512, a);
       } else {
         pt_put_shared(&mut l1, p % 512, s, false);
       }
     } else {
-      pt_put_shared(&mut l1, p % 512, s, a == 2);
+      pt_put_shared(&mut l1, p % 512, s, !x);
       pt_set_access(&mut l1, p % 512, a);
     }
     ok = true;
   } else if pt_has(l1, p % 512) {
+    let f = pt_take_frame(&mut l1, p % 512);
+    mark_x(&mut m, f, x && a == 2);
+    pt_put_frame(&mut l1, p % 512, f, !x);
     pt_set_access(&mut l1, p % 512, a);
     ok = true;
   }
@@ -276,7 +290,7 @@ fn w_unmap(m: &mut Mem, l3: &mut PageTable, p: u64)
   }
 }
 
-fn w_protect(m: &mut Mem, l3: &mut PageTable, p: u64, a: u64) -> bool
+fn w_protect(m: &mut Mem, l3: &mut PageTable, p: u64, a: u64, x: bool) -> bool
   requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && pt_leases(l3) == 0 && a <= 2
   ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
 {
@@ -285,7 +299,7 @@ fn w_protect(m: &mut Mem, l3: &mut PageTable, p: u64, a: u64) -> bool
     return false;
   }
   let mut l2 = pt_take(&mut l3, t);
-  let r = l2_protect(&mut m, &mut l2, p % L2_PAGES, a);
+  let r = l2_protect(&mut m, &mut l2, p % L2_PAGES, a, x);
   pt_put(&mut l3, t, l2);
   return r;
 }
@@ -416,7 +430,7 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
               } else if op == WOP_ZERO {
                 hit = w_zero(&mut m, &mut l3, q);
               } else if op == WOP_PROTECT {
-                hit = arg <= 2 && w_protect(&mut m, &mut l3, q, arg);
+                hit = arg < 8 && arg % 4 <= 2 && w_protect(&mut m, &mut l3, q, arg % 4, arg >= 4);
               }
               if hit && r < WPAGES {
                 r = r + 1;
@@ -438,6 +452,7 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
 /// part of the window below the stack.
 fn win_range(addr: u64, n: u64) -> u64
   ensures result != 18446744073709551615 ==> (result / 4294967296 < result % 4294967296 && result % 4294967296 <= STACK_FIRST)
+  ensures result != 18446744073709551615 ==> (addr >= USER_BASE && addr - USER_BASE < STACK_FIRST * 4096)
 {
   if addr % 4096 != 0 || addr < USER_BASE || n == 0 || n > USER_SIZE {
     return 18446744073709551615;
@@ -704,6 +719,7 @@ fn hole_fork(k: &mut Kernel, pid: u64, c: u64)
 fn lx_munmap(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == DISK_RETRY
 {
   let r = win_range(addr, n);
   if r == 18446744073709551615 {
@@ -734,6 +750,62 @@ fn prot_access(prot: u64) -> u64
   return 0;
 }
 
+/// What win_op's WOP_PROTECT takes for `prot`: prot_access, plus 4 with
+/// PROT_EXEC.
+fn prot_arg(prot: u64) -> u64
+  ensures result < 7 && result % 4 <= 2
+{
+  if prot / PROT_EXEC % 2 == 1 {
+    return prot_access(prot) + 4;
+  }
+  return prot_access(prot);
+}
+
+/// Lets the program run code from window page p of level-2 table l2, keeping
+/// its access. False if not mapped.
+fn l2_exec(m: &mut Mem, l2: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0
+{
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  let mut l1 = pt_take(&mut l2, t);
+  let mut ok = false;
+  if pt_has(l1, p % 512) && !pt_shared(l1, p % 512) {
+    let mut a = 0;
+    if pt_writable(l1, p % 512) {
+      a = 2;
+    } else if pt_accessible(l1, p % 512) {
+      a = 1;
+    }
+    let f = pt_take_frame(&mut l1, p % 512);
+    mark_x(&mut m, f, a == 2);
+    pt_put_frame(&mut l1, p % 512, f, false);
+    pt_set_access(&mut l1, p % 512, a);
+    ok = true;
+  }
+  pt_put(&mut l2, t, l1);
+  return ok;
+}
+
+/// l2_exec for window page p: the pages of an executable segment, which
+/// elf_space maps as data pages (no-execute) before it copies the image in.
+fn w_exec(m: &mut Mem, l3: &mut PageTable, p: u64) -> bool
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+{
+  let t = p / L2_PAGES;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let mut l2 = pt_take(&mut l3, t);
+  let r = l2_exec(&mut m, &mut l2, p % L2_PAGES);
+  pt_put(&mut l3, t, l2);
+  return r;
+}
+
 /// mprotect(addr, n, prot): writable with PROT_WRITE, read-only with only
 /// PROT_READ or PROT_EXEC, inaccessible with neither; -EACCES for
 /// PROT_WRITE on a shared mapping of a file opened read-only.
@@ -743,6 +815,7 @@ fn prot_access(prot: u64) -> u64
 fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == EACCES
 {
   if addr % 4096 != 0 {
     return EINVAL;
@@ -755,6 +828,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
     return ENOMEM;                          // not memory the process has
   }
   let a = prot_access(prot);
+  let pa = prot_arg(prot);
   let from = r / 4294967296;
   let to = r % 4294967296;
   // As on Linux: a MAP_SHARED mapping of a file opened without write
@@ -766,15 +840,21 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
   anon_reach(&mut k, pid, from, to);        // memory not touched yet: map it first
   // Only pages mmap handed out can have been left unmapped by PROT_NONE.
   let low = pget(k.procs, pid, F_MMAP) / 4096;
+  let mut lazy = false;
   if prot != 0 && from >= low {
-    if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
+    // Writable: the pages are recorded and mapped when touched, as for a
+    // writable anonymous mmap, so a program can make a large reservation
+    // usable (a JIT's code range) and pay for what it touches.
+    if a == 2 && (LAZY_EXEC == 1 || prot / 4 % 2 == 0) && anon_add(&mut k, pid, from, to) {
+      lazy = true;
+    } else if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, from, to, false) {
       return ENOMEM;
     }
     hole_cut(&mut k, pid, from, to);        // mapped now: not a hole to hand out
   }
   // PROT_NONE leaves mmap's reserved pages unmapped, so they do not count.
-  let got = win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, from, to, a);
-  if got > to - from || (got != to - from && (a != 0 || from < low)) {
+  let got = win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, from, to, pa);
+  if got > to - from || (got != to - from && !lazy && (a != 0 || from < low)) {
     return ENOMEM;
   }
   return 0;
@@ -789,6 +869,7 @@ fn lx_mprotect(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64) -> u64
 fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   let r = win_range(addr, oldn);
   if addr % 4096 != 0 || oldn > USER_SIZE || newn == 0 || newn > USER_SIZE {
@@ -914,9 +995,9 @@ fn map_whole(k: &Kernel, pid: u64, first: u64, pages: u64) -> u64
   while i < MAP_N
     invariant i <= MAP_N
   {
-    let h = get(k.maps, mp_at(pid, i, 2));
-    if get(k.maps, mp_at(pid, i, 0)) == first + 1 && get(k.maps, mp_at(pid, i, 1)) == pages
-      && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE && get(k.maps, mp_at(pid, i, 3)) % 4096 == 0 {
+    let h = wget(k.maps, mp_at(pid, i, 2));
+    if wget(k.maps, mp_at(pid, i, 0)) == first + 1 && wget(k.maps, mp_at(pid, i, 1)) == pages
+      && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE {
       let row = of_get(k.ofd, h, 2);
       if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 && row_file(k.fs, row) != NO_FILE {
         return i;
@@ -935,11 +1016,12 @@ fn map_whole(k: &Kernel, pid: u64, first: u64, pages: u64) -> u64
 fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u64) -> u64
   requires kok(k) && pid < NPROC && ri < MAP_N && from < oend && oend <= WPAGES && oend - from < want && want <= WPAGES
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   let have = oend - from;
-  let h = get(k.maps, mp_at(pid, ri, 2));
-  let off = get(k.maps, mp_at(pid, ri, 3));
-  if h >= OFD_N || off % 4096 != 0 || off > 0xFFFFFFFFFFFF {
+  let h = wget(k.maps, mp_at(pid, ri, 2));
+  let off = mp_off(k, pid, ri);
+  if h >= OFD_N || off > 0xFFFFFFFFFFFF {
     return EINVAL;
   }
   let row = of_get(k.ofd, h, 2);
@@ -977,8 +1059,8 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
     return ENOMEM;
   }
-  k.maps = set(k.maps, mp_at(pid, ri, 0), at + 1);
-  k.maps = set(k.maps, mp_at(pid, ri, 1), want);
+  wset(&mut k.maps, mp_at(pid, ri, 0), at + 1);
+  wset(&mut k.maps, mp_at(pid, ri, 1), want);
   if fresh {
     pset(&mut k.procs, pid, F_MMAP, at * 4096);
   }
@@ -995,6 +1077,7 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
 fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
   requires kok(k) && pid < NPROC && to_addr >= USER_BASE && newn <= USER_SIZE && to_addr - USER_BASE <= USER_SIZE - newn
   ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
 {
   let from = r / 4294967296;
   let oend = r % 4294967296;
@@ -1066,9 +1149,9 @@ fn map_no_write(k: &Kernel, pid: u64, from: u64, to: u64) -> bool
   while i < MAP_N
     invariant i <= MAP_N
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    let h = get(k.maps, mp_at(pid, i, 2));
-    let len = get(k.maps, mp_at(pid, i, 1));
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    let h = wget(k.maps, mp_at(pid, i, 2));
+    let len = wget(k.maps, mp_at(pid, i, 1));
     if first1 != 0 && h < OFD_N && first1 - 1 < to && (from < first1 - 1 || from - (first1 - 1) < len) {
       let kind = of_get(k.ofd, h, 0);
       let row = of_get(k.ofd, h, 2);
@@ -1097,7 +1180,7 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
     return;
   }
   let mut i = 0;
-  while i < MAP_N && get(k.maps, mp_at(pid, i, 0)) != 0
+  while i < MAP_N && wget(k.maps, mp_at(pid, i, 0)) != 0
     invariant i <= MAP_N && kok(k)
   {
     i = i + 1;
@@ -1116,8 +1199,8 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
       while j < MAP_N && i >= MAP_N
         invariant j <= MAP_N && kok(k)
       {
-        let h2 = get(k.maps, mp_at(pid, j, 2));
-        if get(k.maps, mp_at(pid, j, 0)) != 0 && h2 < OFD_N && of_get(k.ofd, h2, 0) == OF_FILE {
+        let h2 = wget(k.maps, mp_at(pid, j, 2));
+        if wget(k.maps, mp_at(pid, j, 0)) != 0 && h2 < OFD_N && of_get(k.ofd, h2, 0) == OF_FILE {
           let row2 = of_get(k.ofd, h2, 2);
           if row2 < FD_ROWS && fget(k.fs.ftab, row2, FD_MODE) / O_WRITE % 2 == 0 {
             map_drop(&mut k, pid, j);
@@ -1132,10 +1215,193 @@ fn map_record(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u6
     return;
   }
   of_set(&mut k.ofd, h, 1, sat_add(of_get(k.ofd, h, 1), 1));
-  k.maps = set(k.maps, mp_at(pid, i, 0), first + 1);
-  k.maps = set(k.maps, mp_at(pid, i, 1), pages);
-  k.maps = set(k.maps, mp_at(pid, i, 2), h);
-  k.maps = set(k.maps, mp_at(pid, i, 3), off);
+  wset(&mut k.maps, mp_at(pid, i, 0), first + 1);
+  wset(&mut k.maps, mp_at(pid, i, 1), pages);
+  wset(&mut k.maps, mp_at(pid, i, 2), h);
+  wset(&mut k.maps, mp_at(pid, i, 3), off);
+}
+
+/// The file offset of mapping record i of process pid. The word keeps
+/// bit 0 set once bus_mark has protected pages of the mapping that lie
+/// past the end of the file.
+fn mp_off(k: &Kernel, pid: u64, i: u64) -> u64
+  requires kok(k) && pid < NPROC && i < MAP_N
+  ensures result % 4096 == 0
+{
+  return wget(k.maps, mp_at(pid, i, 3)) / 4096 * 4096;
+}
+
+/// The record of process pid that covers window page p, or MAP_N.
+fn map_find(k: &Kernel, pid: u64, p: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= MAP_N
+{
+  let mut i = 0;
+  while i < MAP_N
+    invariant i <= MAP_N
+  {
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < wget(k.maps, mp_at(pid, i, 1)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return MAP_N;
+}
+
+/// The file layer's handle of the file that record i of process pid maps,
+/// or NO_FILE if it is not a mapping of a plain file.
+fn map_file(k: &Kernel, pid: u64, i: u64) -> u64
+  requires kok(k) && pid < NPROC && i < MAP_N
+{
+  let h = wget(k.maps, mp_at(pid, i, 2));
+  if h >= OFD_N || of_get(k.ofd, h, 0) != OF_FILE {
+    return NO_FILE;
+  }
+  let row = of_get(k.ofd, h, 2);
+  if row >= FD_ROWS {
+    return NO_FILE;
+  }
+  return row_file(k.fs, row);
+}
+
+/// The size of the file that record i of process pid maps, or NO_FILE if
+/// it is not a mapping of a plain file.
+fn map_file_size(k: &mut Kernel, pid: u64, i: u64) -> u64
+  requires kok(k) && pid < NPROC && i < MAP_N
+  ensures kok(k)
+{
+  let f = map_file(k, pid, i);
+  if f == NO_FILE {
+    return NO_FILE;
+  }
+  return vfs_size(&mut k.fs, f);
+}
+
+/// Window pages first .. first + pages of process pid were just mapped as
+/// a shared mapping that map_record recorded: the pages that lie wholly
+/// past the end of the file become inaccessible, so that touching one is a
+/// page fault that bus_fault turns into SIGBUS, as on Linux. Mappings that
+/// found no record keep their zero pages there.
+fn bus_mark(k: &mut Kernel, pid: u64, first: u64, pages: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if SIGBUS_PAGES == 0 || first >= WPAGES || pages > WPAGES - first {
+    return;
+  }
+  let i = map_find(k, pid, first);
+  if i >= MAP_N || wget(k.maps, mp_at(pid, i, 0)) != first + 1 || wget(k.maps, mp_at(pid, i, 1)) != pages {
+    return;
+  }
+  bus_cover(&mut k, pid, i);
+}
+
+/// Makes the pages of record i of process pid that lie wholly past the end
+/// of its file inaccessible (and flags the record for bus_fault).
+fn bus_cover(k: &mut Kernel, pid: u64, i: u64)
+  requires kok(k) && pid < NPROC && i < MAP_N
+  ensures kok(k)
+{
+  let first1 = wget(k.maps, mp_at(pid, i, 0));
+  let pages = wget(k.maps, mp_at(pid, i, 1));
+  if first1 == 0 || first1 > WPAGES || pages > WPAGES - (first1 - 1) {
+    return;
+  }
+  let first = first1 - 1;
+  let size = map_file_size(&mut k, pid, i);
+  if size == NO_FILE {
+    return;
+  }
+  let off = mp_off(k, pid, i);
+  let mut skip = 0;                         // the pages of the mapping that hold file bytes
+  if size > off {
+    skip = (size - off) / 4096;
+    if (size - off) % 4096 != 0 {
+      skip = skip + 1;
+    }
+  }
+  if skip < pages {
+    win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, first + skip, first + pages, 0);
+    wset(&mut k.maps, mp_at(pid, i, 3), off + 1);
+  }
+}
+
+/// The file f was cut: every mapping of it, in every process, loses access
+/// to the pages that now lie past its end (a process whose space a
+/// processor runs keeps them until its next mmap).
+fn bus_shrink(k: &mut Kernel, f: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if SIGBUS_PAGES == 0 || f == NO_FILE {
+    return;
+  }
+  let mut pid = 1;
+  while pid < NPROC
+    invariant 1 <= pid && pid <= NPROC && kok(k)
+  {
+    if state(k.procs, pid) != FREE {
+      let mut i = 0;
+      while i < MAP_N
+        invariant i <= MAP_N && kok(k) && pid < NPROC
+      {
+        if wget(k.maps, mp_at(pid, i, 0)) != 0 && map_file(k, pid, i) == f {
+          bus_cover(&mut k, pid, i);
+        }
+        i = i + 1;
+      }
+    }
+    pid = pid + 1;
+  }
+}
+
+/// A page fault of process p on a page that bus_mark made inaccessible:
+/// 0 if it is not such a page, 1 if the file has grown to cover it (it is
+/// accessible again: run the instruction again), 2 if it still lies past
+/// the end of the file (SIGBUS).
+fn bus_fault(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+  ensures result <= 2
+{
+  let va = pget(k.procs, p, reg_word(R_FAULT));
+  if va < USER_BASE || va - USER_BASE >= USER_SIZE {
+    return 0;
+  }
+  let q = (va - USER_BASE) / 4096;
+  if q >= WPAGES {
+    return 0;
+  }
+  let i = map_find(k, p, q);
+  if i >= MAP_N || wget(k.maps, mp_at(p, i, 3)) % 4096 != 1 {
+    return 0;
+  }
+  let size = map_file_size(&mut k, p, i);
+  if size == NO_FILE {
+    return 0;
+  }
+  let first1 = wget(k.maps, mp_at(p, i, 0));
+  if first1 == 0 || q < first1 - 1 || q - (first1 - 1) > WPAGES {
+    return 0;
+  }
+  let foff = sat_add(mp_off(k, p, i), (q - (first1 - 1)) * 4096);
+  if foff >= size {
+    return 2;
+  }
+  // The file has grown since: the page is file memory now, read-write if
+  // the file was opened for writing (the mapping's own protection is not
+  // kept).
+  let h = wget(k.maps, mp_at(p, i, 2));
+  let mut acc = 1;
+  if h < OFD_N {
+    let row = of_get(k.ofd, h, 2);
+    if row < FD_ROWS && fget(k.fs.ftab, row, FD_MODE) / O_WRITE % 2 == 1 {
+      acc = 2;
+    }
+  }
+  win_op(&mut k.mem, &mut k.spaces, p, WOP_PROTECT, q, q + 1, acc);
+  return 1;
 }
 
 /// Writes the pages of record i of process pid that lie in window pages
@@ -1146,8 +1412,8 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
   requires kok(k) && pid < NPROC && i < MAP_N
   ensures kok(k)
 {
-  let first1 = get(k.maps, mp_at(pid, i, 0));
-  let h = get(k.maps, mp_at(pid, i, 2));
+  let first1 = wget(k.maps, mp_at(pid, i, 0));
+  let h = wget(k.maps, mp_at(pid, i, 2));
   if first1 == 0 || h >= OFD_N || of_get(k.ofd, h, 0) != OF_FILE {
     return 0;
   }
@@ -1160,8 +1426,8 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
     return 0;
   }
   let first = first1 - 1;
-  let end = sat_add(first, get(k.maps, mp_at(pid, i, 1)));
-  let off = get(k.maps, mp_at(pid, i, 3));
+  let end = sat_add(first, wget(k.maps, mp_at(pid, i, 1)));
+  let off = mp_off(k, pid, i);
   let last = smaller(smaller(end, to), WPAGES);
   let mut p = first;
   if p < from {
@@ -1209,9 +1475,9 @@ fn map_drop(k: &mut Kernel, pid: u64, i: u64)
   requires kok(k) && pid < NPROC && i < MAP_N
   ensures kok(k)
 {
-  let first1 = get(k.maps, mp_at(pid, i, 0));
-  let h = get(k.maps, mp_at(pid, i, 2));
-  k.maps = set(k.maps, mp_at(pid, i, 0), 0);
+  let first1 = wget(k.maps, mp_at(pid, i, 0));
+  let h = wget(k.maps, mp_at(pid, i, 2));
+  wset(&mut k.maps, mp_at(pid, i, 0), 0);
   if first1 != 0 && h < OFD_N {
     unref_value(&mut k, FD_OFD + h);
   }
@@ -1225,6 +1491,7 @@ fn map_drop(k: &mut Kernel, pid: u64, i: u64)
 fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
   requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
   ensures kok(k)
+  ensures result == 0 || result == DISK_RETRY
 {
   let mut i = 0;
   while i < MAP_N
@@ -1239,8 +1506,8 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
   while i < MAP_N
     invariant i <= MAP_N && kok(k)
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    let pages = get(k.maps, mp_at(pid, i, 1));
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    let pages = wget(k.maps, mp_at(pid, i, 1));
     if first1 != 0 {
       let first = first1 - 1;
       let end = sat_add(first, pages);
@@ -1248,11 +1515,11 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
         map_drop(&mut k, pid, i);                     // all of it
       } else if from <= first && first < to {
         // The head goes: the record starts at `to`.
-        k.maps = set(k.maps, mp_at(pid, i, 0), to + 1);
-        k.maps = set(k.maps, mp_at(pid, i, 1), end - to);
-        k.maps = set(k.maps, mp_at(pid, i, 3), sat_add(get(k.maps, mp_at(pid, i, 3)), (to - first) * 4096));
+        wset(&mut k.maps, mp_at(pid, i, 0), to + 1);
+        wset(&mut k.maps, mp_at(pid, i, 1), end - to);
+        wset(&mut k.maps, mp_at(pid, i, 3), sat_add(wget(k.maps, mp_at(pid, i, 3)), (to - first) * 4096));
       } else if first < from && from < end && end <= to {
-        k.maps = set(k.maps, mp_at(pid, i, 1), from - first);   // the tail goes
+        wset(&mut k.maps, mp_at(pid, i, 1), from - first);   // the tail goes
       } else if first < from && to < end {
         // A hole in the middle: one record cannot say that, and a page
         // mapped there later must never reach the file. The rest was
@@ -1286,17 +1553,17 @@ fn map_fork(k: &mut Kernel, pid: u64, c: u64)
   while i < MAP_N
     invariant i <= MAP_N && kok(k)
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    let h = get(k.maps, mp_at(pid, i, 2));
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    let h = wget(k.maps, mp_at(pid, i, 2));
     if first1 != 0 && h < OFD_N {
       of_set(&mut k.ofd, h, 1, sat_add(of_get(k.ofd, h, 1), 1));
-      k.maps = set(k.maps, mp_at(c, i, 0), first1);
+      wset(&mut k.maps, mp_at(c, i, 0), first1);
     } else {
-      k.maps = set(k.maps, mp_at(c, i, 0), 0);
+      wset(&mut k.maps, mp_at(c, i, 0), 0);
     }
-    k.maps = set(k.maps, mp_at(c, i, 1), get(k.maps, mp_at(pid, i, 1)));
-    k.maps = set(k.maps, mp_at(c, i, 2), h);
-    k.maps = set(k.maps, mp_at(c, i, 3), get(k.maps, mp_at(pid, i, 3)));
+    wset(&mut k.maps, mp_at(c, i, 1), wget(k.maps, mp_at(pid, i, 1)));
+    wset(&mut k.maps, mp_at(c, i, 2), h);
+    wset(&mut k.maps, mp_at(c, i, 3), wget(k.maps, mp_at(pid, i, 3)));
     i = i + 1;
   }
 }
@@ -1308,6 +1575,7 @@ fn map_fork(k: &mut Kernel, pid: u64, c: u64)
 fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == DISK_RETRY
 {
   // MS_ASYNC 1, MS_INVALIDATE 2, MS_SYNC 4
   if flags & !7 != 0 || addr % 4096 != 0 || flags & 1 != 0 && flags & 4 != 0 {
@@ -1343,6 +1611,7 @@ fn lx_msync(k: &mut Kernel, pid: u64, addr: u64, n: u64, flags: u64) -> u64
 fn lx_mincore(k: &mut Kernel, pid: u64, addr: u64, n: u64, vec: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM || result == EFAULT
 {
   if addr % 4096 != 0 {
     return EINVAL;
@@ -1400,8 +1669,8 @@ fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
   while i < MAP_N
     invariant i <= MAP_N
   {
-    let first1 = get(k.maps, mp_at(pid, i, 0));
-    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < get(k.maps, mp_at(pid, i, 1)) {
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    if first1 != 0 && first1 - 1 <= p && p - (first1 - 1) < wget(k.maps, mp_at(pid, i, 1)) {
       return true;
     }
     i = i + 1;
@@ -1422,6 +1691,7 @@ fn map_covers(k: &Kernel, pid: u64, p: u64) -> bool
 fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
+  ensures result == 0 || result == EINVAL || result == ENOMEM
 {
   if addr % 4096 != 0 || n >= 0x8000000000000000 {
     return EINVAL;
@@ -1546,6 +1816,7 @@ fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64,
 fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC && first <= WPAGES && pages <= WPAGES - first && off % 4096 == 0
   ensures kok(k)
+  ensures result == 0 || result == ENOMEM
 {
   let mut j = 0;
   while j < pages

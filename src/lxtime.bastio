@@ -903,7 +903,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           i = i + 1;
         }
         bset(&mut k.fs.xfer, 0, cast[u8](s));
-        info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(pid, s)));   // si_pid, si_value
+        info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(pid, s)), wget(k.sigsave, value_at(pid, s)));   // si_pid, si_value
         if wget(k.sigsave, sender_at(pid, s)) < FAULT_MARK && nsk_of(k, NSK_PID, pid) != 0 {
           xfer_u64(&mut k.fs.xfer, 16, vpid_of(k, pid, wget(k.sigsave, sender_at(pid, s)) % SW_PID));
         }

@@ -52,6 +52,7 @@ import "lxptrace.bastio";
 import "lxsplice.bastio";
 import "lxmsg.bastio";
 import "acpi.bastio";
+import "uhci.bastio";
 import "info.bastio";
 import "lxcred.bastio";
 import "lxprio.bastio";
@@ -83,10 +84,12 @@ import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "oom.bastio";
 import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
 import "lxmouse.bastio";
+import "lxfb.bastio";
 import "lxserial.bastio";
 import "arch/rnghw.bastio";
 import "kernel.bastio";
@@ -695,6 +698,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     return p;
   }
+  let mut is_bus = false;
   if v == 14 {
     let lz = lazy_fault(&mut s.k, p);
     if lz == LZ_WAIT && state(s.k.procs, p) == READY {
@@ -708,9 +712,45 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       }
       return p;
     }
+    // A page past a mapped file's end (src/lxmem.bastio). If the file has
+    // grown to cover it the instruction runs again; a second fault at the
+    // same place is not this one's doing, and goes on to the handlers below.
+    let bva = pget(s.k.procs, p, reg_word(R_FAULT));
+    let brip = pget(s.k.procs, p, F_REGS + R_RIP) % 4611686018427387904 + 1;
+    let mut bus = 0;
+    if pget(s.k.procs, p, F_FAULT_RIP) != brip || pget(s.k.procs, p, F_FAULT_VA) != bva {
+      bus = bus_fault(&mut s.k, p);
+    }
+    is_bus = bus == 2;
+    if bus == 1 {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, brip);
+      pset(&mut s.k.procs, p, F_FAULT_VA, bva);
+      return p;
+    }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) {
       pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
+    }
+    // Out of memory (src/oom.bastio): give cached pages back, or end the
+    // process holding the most. The access was legitimate: the page was
+    // there to map, there was none to map it with.
+    let ova = pget(s.k.procs, p, reg_word(R_FAULT));
+    if ova >= USER_BASE && ova - USER_BASE < USER_SIZE {
+      let oq = (ova - USER_BASE) / 4096;
+      let want = anon_covers(s.k.anon, p, oq) || lazy_covers(s.k, p, oq)
+        || (user_present(&mut s.k.spaces, p, ova) && !user_page_writable(&mut s.k.spaces, p, ova));
+      let oo = oom_fault(&mut s.k, &mut s.con, p, want);
+      if oo == OOM_RETRY {
+        pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+        return p;
+      }
+      if oo == OOM_WAIT {
+        return (p + 1) % NPROC;
+      }
+      if oo == OOM_SELF {
+        terminate(&mut s.k, mmu, p, death_code(SIGKILL, false));
+        return (p + 1) % NPROC;
+      }
     }
     // Another thread, on another processor, may have mapped a page of
     // code (src/lazy.bastio) or anonymous memory (src/lxanon.bastio), or
@@ -735,6 +775,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // SIGSEGV (or SIGFPE, SIGILL, SIGTRAP), and a shell prints 128 + it.
     // A handler for it runs instead, if the process has one.
     let mut sig = SIGSEGV;
+    if is_bus {
+      sig = SIGBUS;
+    }
     if v == 0 {
       sig = SIGFPE;
     } else if v == 6 {
@@ -806,7 +849,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   after_trap(&mut s, p);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
   return Next { job: j, from: c };
 }
@@ -864,7 +907,7 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
     s.idle = s.idle - 1;
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
   return j;
 }
@@ -875,7 +918,7 @@ fn idled_p(s: &mut Sys, cpu: &Cpu, v: u64, pend: &Atomic[u64])
   ensures sys_ok(s)
 {
   idled(&mut s, cpu, v);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
 }
 
 /// `finish`, then publishes how much console output waits in `pend`.
@@ -886,7 +929,7 @@ fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64, p
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
   after_trap(&mut s, p);
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   return c;
 }
 
@@ -896,10 +939,10 @@ const CHUNK: u64 = 256;
 /// Under the kernel lock, for `pump`: queues the rn bytes received in rx as
 /// typed input, and moves the next chunk of output into tx. Returns how
 /// many bytes of tx to send.
-fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, sx: &Bytes, sn: u64, sacc: u64,
+fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u64, sx: &Bytes, sn: u64, sacc: u64,
   stx: &mut Bytes, cad: bool, pend: &Atomic[u64]) -> u64
-  requires sys_ok(s)
-  ensures sys_ok(s)
+  requires sys_ok(s) && blen(gx) == GXB_LEN
+  ensures sys_ok(s) && blen(gx) == GXB_LEN
 {
   if cad {
     // Ctrl-Alt-Delete restarts the machine, as on Linux, so a host that
@@ -959,10 +1002,12 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, rx: &Bytes, rn: u64, mx: &Bytes, mn: u6
     stn = ser_peek(s.k, &mut stx, CHUNK);
   }
   let n = con_take(&mut s.con, &mut tx);
-  if con_room(s.con) >= OUTCAP / 2 {
+  // What the screen is told next, if a program draws on it (src/lxfb.bastio).
+  let drew = gfx_take(&mut s.k, &mut gx);
+  if con_room(s.con) >= OUTCAP / 2 || drew {
     wake_writers(&mut s.k.procs);
   }
-  atomic_store(pend, s.con.r.n);
+  atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   return smaller(n, 65535) + smaller(stn, CHUNK) * 65536;
 }
 
@@ -992,10 +1037,11 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
   let mut sx = balloc(CHUNK);
   let mut stx = balloc(CHUNK);
   let mut sacc = 0;
+  let mut gx = balloc(GXB_LEN);
   let mut rounds = 0;
   let mut more = true;
-  while more && rounds < 16
-    invariant term_ok(t) && blen(rx) == CHUNK && blen(mx) == CHUNK && blen(sx) == CHUNK && blen(stx) == CHUNK
+  while more && rounds < 64
+    invariant term_ok(t) && blen(rx) == CHUNK && blen(mx) == CHUNK && blen(sx) == CHUNK && blen(stx) == CHUNK && blen(gx) == GXB_LEN
   {
     let mut rn = 0;
     let mut mn = 0;
@@ -1023,11 +1069,23 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
         mn = mn + 4;
       }
     }
-    let r = locked(s, exchange, &mut tx, rx, rn, mx, mn, sx, sn, sacc, &mut stx, cad, pend);
+    let r = locked(s, exchange, &mut tx, &mut gx, rx, rn, mx, mn, sx, sn, sacc, &mut stx, cad, pend);
     let tn = r % 65536;
     term_send(&mut t, tx, tn);
     sacc = term_ser_send(&mut t, stx, r / 65536);
-    more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK || sacc > 0;
+    let gk = get_u64(gx, 0);
+    if gk == GX_HOLD {
+      screen_hold(&mut t.screen);
+    } else if gk == GX_RELEASE {
+      screen_release(&mut t.screen);
+    } else if gk == GX_BLIT {
+      let go = get_u64(gx, 8);
+      let gn = get_u64(gx, 16);
+      if go <= 281474976710656 {
+        screen_blit(&mut t.screen, go, gx, 24, smaller(gn, XFER));
+      }
+    }
+    more = tn == CHUNK || rn == CHUNK || mn + 4 > CHUNK || sacc > 0 || gk != GX_NONE;
     rounds = rounds + 1;
   }
   if sacc > 0 {
@@ -1038,6 +1096,7 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
   bfree(mx);
   bfree(sx);
   bfree(stx);
+  bfree(gx);
 }
 
 /// Pumps the console if no other processor is already doing it. One that
@@ -1233,7 +1292,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, aux_irq: false, wheel: false, mb: 0, mn: 0 };
+    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, aux_irq: false, wheel: false, mb: 0, mn: 0, pend: 0 };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
@@ -1330,6 +1389,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // with pages from USB_AT: a USB stick with a BastiOS partition on it
   // becomes the disk, and a USB keyboard and mouse the keyboard and mouse.
   let xn = usb_count(&mut pci);
+  // UHCI controllers are only looked at, to say in the boot log whether a
+  // keyboard may be out of reach behind one (no driver yet).
+  let uh = uhci_survey(&mut ports, &mut pci, acpi_lo, acpi_hi);
   let mut usb = usb_find(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, msi, V_DISK);
   let usb_lo = usb_base(usb);
   let usb_hi = usb_top(usb);
@@ -1351,7 +1413,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
   let dk_hi = blk_mmio_hi(dev);
-  let disk = disk_mount(dev);
+  let disk = disk_mount(dev, dq_slots_for(pool_pages));
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
   } else if blk_is_nvme(disk.dev) {
@@ -1383,6 +1445,15 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     Usb::Xhci(stale) => { mmio_release(&mut win, xhci_free(stale, &mut m)); },
   }
   term.usb = usb;
+  if uh % 16 > 0 {
+    puts(&mut con, "usb: ");
+    put_num(&mut con, uh % 16);
+    puts(&mut con, " UHCI controller(s), ");
+    put_num(&mut con, uh / 16 % 16);
+    puts(&mut con, " device(s) on their ports (");
+    put_num(&mut con, uh / 256);
+    puts(&mut con, " low-speed); no driver for them yet\r\n");
+  }
   if usb_on {
     puts(&mut con, "keyboard: USB (xHCI)\r\n");
   } else if xn > 0 && ser_on == SER_NONE {
@@ -1497,6 +1568,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
   ser_set_kind(&mut k, ser_on);
+  if screen_on(term.screen) {
+    gfx_screen(&mut k, fb_w, fb_h, fb_pitch, boot_info(cpu, INFO_FB, 4));   // /dev/fb0 (src/lxfb.bastio)
+  }
   let mut hi = 0;
   while hi < hw_n
     invariant hi <= hw_n && hw_n <= VRNG_WORDS && len(hw) == VRNG_WORDS && kok(k)
@@ -1505,6 +1579,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     hi = hi + 1;
   }
   free(hw);
+  let hr = rng_hw_boot(&mut k, cpu);
+  if hr > 0 {
+    puts(&mut con, "rng: the processor's RDSEED/RDRAND, ");
+    put_num(&mut con, hr);
+    puts(&mut con, " bytes of entropy\r\n");
+  }
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {
@@ -1595,6 +1675,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.ptys);
   bfree(sys.k.ptyb);
   bfree(sys.k.mice);
+  bfree(sys.k.gfx);
   free(sys.k.ipc);
   bfree(sys.k.ipcb);
   free(sys.k.sys);

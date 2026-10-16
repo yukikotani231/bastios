@@ -148,7 +148,7 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if tk.mode != TM_NEW {
     return EINVAL;
   }
-  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port);    // port 0: an ephemeral one
+  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port, ofd_fam(k, tk.h));    // port 0: an ephemeral one
   if t >= TCBS {
     return EADDRINUSE;
   }
@@ -434,7 +434,11 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     if tk.mode == TM_CONN {
       port = tcp_local_port(k.nic, tk.t);   // word 3 only says whether connect reported it
     }
-    return sin_out(&mut k, pid, addr, lenp, 0, port, ofd_v6(k, tk.h));
+    let mut me = 0;
+    if tk.mode == TM_CONN && tk.t < TCBS && is_v6tok(tcp_peer_ip(k.nic, tk.t)) {
+      me = V6_SELF;                         // connected over IPv6: our address there
+    }
+    return sin_out(&mut k, pid, addr, lenp, me, port, ofd_v6(k, tk.h));
   }
   if tk.mode != TM_CONN || tk.t >= TCBS {
     return ENOTCONN;

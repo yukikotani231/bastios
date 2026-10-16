@@ -10,3 +10,11 @@ const BIO_RUNNING: u64 = 0;           // still going
 const BIO_OK: u64 = 1;                // finished, and it worked
 const BIO_FAILED: u64 = 2;            // finished, and it did not
 const BIO_IDLE: u64 = 3;              // nothing was started
+
+/// An extra data page lent to a drive for the blocks after the first of a
+/// batched request (virtio_begin_n, nvme_begin_n), or none where no page
+/// was free.
+enum Extra {
+  None,
+  Page(Dma),
+}

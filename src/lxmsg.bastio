@@ -363,6 +363,35 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   return done;
 }
 
+/// The hop limit control message of the datagram just received on fd, if
+/// the socket (an AF_INET6 one) asked for it and there is room at ctl:
+/// writes it and returns its length (24), else 0; a bad ctl gives 25.
+fn recv_hlim(k: &mut Kernel, pid: u64, fd: u64, ctl: u64, clen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= 25
+{
+  if ctl == 0 || ctl > 0xFFFFFFFFFFFF0000 || clen < 24 || is_tcp(k, pid, fd) || is_unix(k, pid, fd) || is_nl(k, pid, fd) {
+    return 0;
+  }
+  let h = fd_ofd(k, pid, fd);
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 || ofd_hlim(k, h) == 0 {
+    return 0;
+  }
+  let mut t = IPV6_2292HOPLIMIT;
+  if ofd_hlim(k, h) == 2 {
+    t = IPV6_HOPLIMIT;
+  }
+  lx_fill(&mut k, 0, 24);
+  xfer_u64(&mut k.fs.xfer, 0, 20);                       // cmsg_len: header and an int
+  xfer_u64(&mut k.fs.xfer, 8, 41 + 0x100000000 * t);     // SOL_IPV6 and the type
+  xfer_u64(&mut k.fs.xfer, 16, sock_peer_port(k.nic, sk.s));
+  if lx_put_out(&mut k, pid, ctl, 24) != 0 {
+    return 25;
+  }
+  return 24;
+}
+
 /// recvmsg(fd, msg, flags): fills the buffers in turn, as recv would; the
 /// first may wait, the rest take only what is already there. Writes the
 /// source to msg_name (msg_namelen updated), a description in flight as
@@ -553,6 +582,12 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     } else {
       mflags = MSG_CTRUNC;
       unref_value(&mut k, FD_OFD + fly - 1);
+    }
+  }
+  if cused == 0 {
+    cused = recv_hlim(&mut k, pid, fd, ctl, clen);
+    if cused > 24 {
+      return EFAULT;
     }
   }
   xfer_u64(&mut k.fs.xfer, 0, cused);

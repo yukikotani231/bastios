@@ -276,6 +276,7 @@ fn disk_wake(k: &mut Kernel) -> bool
 {
   let mut woke = false;
   disk_pump(&mut k.fs.disk, k.ticks);
+  let mut sleeping = 0;
   let moved = k.fs.disk.q.moved;
   let done = k.fs.disk.q.done;
   let dead = k.fs.disk.q.dead;
@@ -283,7 +284,7 @@ fn disk_wake(k: &mut Kernel) -> bool
   let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
   while p < cap
-    invariant 1 <= p && cap <= NPROC && kok(k)
+    invariant 1 <= p && cap <= NPROC && kok(k) && sleeping < p
   {
     if state(k.procs, p) == DISKWAIT {
       let w = pget(k.procs, p, F_WAIT);
@@ -294,10 +295,20 @@ fn disk_wake(k: &mut Kernel) -> bool
         }
         pset(&mut k.procs, p, F_STATE, READY);
         woke = true;
+        k.fs.disk.q.w_wakes = (k.fs.disk.q.w_wakes % 0x4000000000000000 + 1) % 0x4000000000000000;
+      } else {
+        sleeping = sleeping + 1;
       }
     }
     p = p + 1;
   }
+  // The sleepers' time: those that slept through the ticks since the last
+  // look (the ones just woken, not counted, slept through them too, but
+  // within one tick of it).
+  if k.ticks > k.fs.disk.q.w_last && sleeping <= NPROC {
+    k.fs.disk.q.w_tk = (k.fs.disk.q.w_tk % 0x4000000000000000 + (k.ticks - k.fs.disk.q.w_last) % 0x100000000 * sleeping) % 0x4000000000000000;
+  }
+  k.fs.disk.q.w_last = k.ticks;
   return woke;
 }
 
@@ -358,9 +369,10 @@ fn sock_wake(k: &mut Kernel) -> bool
   let mut woke = false;
   let mut left = false;
   let mut asleep = false;
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
   {
     if state(k.procs, p) == SOCKWAIT {
       let w = pget(k.procs, p, F_WAIT);
@@ -601,7 +613,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     if a == 0 {
       return NO_SOCK;                 // a listener nobody could find
     }
-    return tcp_listen(&mut k.nic, 0, a);
+    return tcp_listen(&mut k.nic, 0, a, FAM_V4);
   }
   if n == SYS_TCP_ACCEPT {
     return tcp_accept(&mut k.nic, a);
@@ -653,47 +665,110 @@ fn etc_on_disk(v: &mut Vfs) -> bool
   return f != NO_FILE && vfs_is_link(&mut v, f);
 }
 
-/// Writes /etc/resolv.conf naming name server ns (a.b.c.d), which the C
-/// library's resolver reads; nothing is written for no server (0). A file
-/// a program wrote there is replaced when a lease names a new server.
-fn write_resolv(k: &mut Kernel, ns: u64)
+/// Appends byte c to b at o, if there is room: the new end.
+fn rv_put(b: &mut Bytes, o: u64, c: u64) -> u64
+  requires blen(b) == 128 && o <= 128 && c <= 255
+  ensures blen(b) == 128 && result <= 128
+{
+  if o >= 128 {
+    return o;
+  }
+  bset(&mut b, o, cast[u8](c));
+  return o + 1;
+}
+
+/// Appends "nameserver " to b at o.
+fn rv_head(b: &mut Bytes, o: u64) -> u64
+  requires blen(b) == 128 && o <= 128
+  ensures blen(b) == 128 && result <= 128
+{
+  let head = "nameserver ";
+  let mut a = o;
+  let mut i = 0;
+  while i < slen(head)
+    invariant i <= slen(head) && slen(head) == 11 && blen(b) == 128 && a <= 128
+  {
+    a = rv_put(&mut b, a, cast[u64](sget(head, i)));
+    i = i + 1;
+  }
+  return a;
+}
+
+/// Writes /etc/resolv.conf naming the name servers the C library's
+/// resolver reads: ns (a.b.c.d) from DHCP or the static fallback, and an
+/// IPv6 one (hi:lo) from a router advertisement; a line for each that
+/// there is, and no file for neither (0). A file a program wrote there is
+/// replaced when a lease or an advertisement names a new server.
+fn write_resolv(k: &mut Kernel, ns: u64, hi: u64, lo: u64)
   requires kok(k)
   ensures kok(k)
 {
-  if ns == 0 || ns > 4294967295 {
+  let v4 = ns != 0 && ns <= 4294967295;
+  let v6 = hi != 0 || lo != 0;
+  if !v4 && !v6 {
     return;
   }
-  let mut b = balloc(32);
-  let head = "nameserver ";
+  let mut b = balloc(128);
   let mut o = 0;
-  while o < slen(head)
-    invariant o <= slen(head) && slen(head) == 11 && blen(b) == 32
-  {
-    bset(&mut b, o, sget(head, o));
-    o = o + 1;
+  if v4 {
+    o = rv_head(&mut b, o);
+    let mut i = 0;
+    while i < 4
+      invariant i <= 4 && o <= 128 && blen(b) == 128
+    {
+      let part = ns / pow256(3 - i) % 256;
+      if part >= 100 {
+        o = rv_put(&mut b, o, 48 + part / 100);
+      }
+      if part >= 10 {
+        o = rv_put(&mut b, o, 48 + part / 10 % 10);
+      }
+      o = rv_put(&mut b, o, 48 + part % 10);
+      if i < 3 {
+        o = rv_put(&mut b, o, 46);        // .
+      } else {
+        o = rv_put(&mut b, o, 10);        // newline
+      }
+      i = i + 1;
+    }
   }
-  let mut i = 0;
-  while i < 4
-    invariant i <= 4 && o <= 11 + 4 * i && blen(b) == 32
-  {
-    let part = ns / pow256(3 - i) % 256;
-    if part >= 100 {
-      bset(&mut b, o, cast[u8](48 + part / 100));
-      o = o + 1;
+  if v6 {
+    o = rv_head(&mut b, o);
+    let mut g = 0;
+    while g < 8
+      invariant g <= 8 && o <= 128 && blen(b) == 128
+    {
+      // Group g of the address, as up to 4 hex digits without leading zeros.
+      let mut w = hi;
+      let mut j = g;
+      if g >= 4 {
+        w = lo;
+        j = g - 4;
+      }
+      let grp = w / pow65536(3 - j) % 65536;
+      let mut started = false;
+      let mut d = 4;
+      while d > 0
+        invariant d <= 4 && o <= 128 && blen(b) == 128
+      {
+        d = d - 1;
+        let dig = grp / pow16(d) % 16;
+        if dig != 0 || started || d == 0 {
+          started = true;
+          if dig < 10 {
+            o = rv_put(&mut b, o, 48 + dig);
+          } else {
+            o = rv_put(&mut b, o, 87 + dig);
+          }
+        }
+      }
+      if g < 7 {
+        o = rv_put(&mut b, o, 58);        // :
+      } else {
+        o = rv_put(&mut b, o, 10);
+      }
+      g = g + 1;
     }
-    if part >= 10 {
-      bset(&mut b, o, cast[u8](48 + part / 10 % 10));
-      o = o + 1;
-    }
-    bset(&mut b, o, cast[u8](48 + part % 10));
-    o = o + 1;
-    if i < 3 {
-      bset(&mut b, o, 46);              // .
-    } else {
-      bset(&mut b, o, 10);              // newline
-    }
-    o = o + 1;
-    i = i + 1;
   }
   // With a disk, /etc is a link to /disk/etc (install_files).
   if etc_on_disk(&mut k.fs) {
@@ -702,6 +777,40 @@ fn write_resolv(k: &mut Kernel, ns: u64)
     vfs_install_bytes(&mut k.fs, &mut k.mem, "etc/resolv.conf", b, o);
   }
   bfree(b);
+}
+
+/// 65536 to the power e (at most 3).
+fn pow65536(e: u64) -> u64
+  requires e <= 3
+  ensures result >= 1
+{
+  if e == 0 {
+    return 1;
+  }
+  if e == 1 {
+    return 65536;
+  }
+  if e == 2 {
+    return 4294967296;
+  }
+  return 281474976710656;
+}
+
+/// 16 to the power e (at most 3).
+fn pow16(e: u64) -> u64
+  requires e <= 3
+  ensures result >= 1
+{
+  if e == 0 {
+    return 1;
+  }
+  if e == 1 {
+    return 16;
+  }
+  if e == 2 {
+    return 256;
+  }
+  return 4096;
 }
 
 /// Runs the network's timers (DHCP retries) and wakes the process whose
@@ -713,7 +822,7 @@ fn net_wake(k: &mut Kernel)
 {
   nic_tick(&mut k.nic, k.ticks);
   if nic_dns_take(&mut k.nic) {
-    write_resolv(&mut k, nic_info(k.nic, 4));
+    write_resolv(&mut k, nic_info(k.nic, 4), nic_v6_state(k.nic, 5), nic_v6_state(k.nic, 6));
   }
   let w = nic_ping_check(&mut k.nic, k.ticks);
   if w == NET_NONE {

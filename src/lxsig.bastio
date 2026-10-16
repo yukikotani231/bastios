@@ -46,11 +46,11 @@ const SIGWINCH: u64 = 28;
 // A sender word (k.sigsave) at or above this says the signal came from a
 // processor exception at the address it holds less FAULT_MARK.
 const FAULT_MARK: u64 = 0x8000000000000000;
+const FAULT_BUS: u64 = 0x4000000000000000;   // in a fault word: the exception is a SIGBUS (si_code BUS_ADRERR)
 // The sender word of a pending signal (k.sigsave): the sender's pid in the low 10 bits (below 1024, past
-// NPROC), SW_QUEUE when sigqueue carried a value, the value times SW_VAL above it.
+// NPROC), SW_QUEUE when sigqueue carried a value (kept in value_at).
 const SW_PID: u64 = 1024;
 const SW_QUEUE: u64 = 1024;
-const SW_VAL: u64 = 2048;
 const MESGQ_MARK: u64 = 0x4000000000000;   // 2^50: a sender word from a message queue (post_mesgq)
 const TKILL_MARK: u64 = 0x8000000000000;   // 2^51: from tkill or tgkill (si_code SI_TKILL, si_pid the sender's group)
 const SIG_DFL: u64 = 0;
@@ -349,6 +349,15 @@ fn sender_at(p: u64, s: u64) -> u64
   return p * SIGSAVE_ROW + s;
 }
 
+/// Where k.sigsave keeps the 64-bit sigval that came with p's pending
+/// signal s (sigqueue), after the NSIG sender words.
+fn value_at(p: u64, s: u64) -> u64
+  requires p < NPROC && 1 <= s && s <= NSIG
+  ensures result < SIGSAVE_LEN
+{
+  return p * SIGSAVE_ROW + NSIG + s;
+}
+
 /// post_sig, from process `from` (for the siginfo's si_pid).
 fn post_from(k: &mut Kernel, p: u64, s: u64, from: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
@@ -359,14 +368,16 @@ fn post_from(k: &mut Kernel, p: u64, s: u64, from: u64)
 }
 
 /// post_from with a value (sigqueue): the siginfo says SI_QUEUE and
-/// carries the low 32 bits of `value` (sival_int; a sival_ptr loses its
-/// upper half). The sender word holds from + SW_QUEUE + SW_VAL * value.
+/// carries `value` whole (a sival_ptr in a randomized address space can
+/// sit above 4 GiB). The sender word holds from + SW_QUEUE; the value is in
+/// value_at.
 fn post_queued(k: &mut Kernel, p: u64, s: u64, from: u64, value: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG && from < NPROC
   ensures kok(k)
 {
   post_sig(&mut k, p, s);
-  wset(&mut k.sigsave, sender_at(p, s), from + SW_QUEUE + SW_VAL * (value % 0x100000000));
+  wset(&mut k.sigsave, sender_at(p, s), from + SW_QUEUE);
+  wset(&mut k.sigsave, value_at(p, s), value);
 }
 
 /// post_queued from a message queue (mq_notify): si_code SI_MESGQ.
@@ -375,20 +386,22 @@ fn post_mesgq(k: &mut Kernel, p: u64, s: u64, from: u64, value: u64)
   ensures kok(k)
 {
   post_sig(&mut k, p, s);
-  wset(&mut k.sigsave, sender_at(p, s), from + SW_QUEUE + SW_VAL * (value % 0x100000000) + MESGQ_MARK);
+  wset(&mut k.sigsave, sender_at(p, s), from + SW_QUEUE + MESGQ_MARK);
+  wset(&mut k.sigsave, value_at(p, s), value);
 }
 
 /// Writes the parts of a siginfo at `at` in b that come from a sender
 /// word (see post_queued): si_pid, and for a queued signal si_code
 /// SI_QUEUE (-1), or SI_MESGQ (-3) with MESGQ_MARK, and si_value.
-fn info_from(b: &mut Bytes, at: u64, word: u64)
+fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
   requires at + 32 <= blen(b)
   ensures blen(b) == old(blen(b))
 {
   if word >= FAULT_MARK {
-    // A processor exception (fault_caught): si_code SEGV_MAPERR, si_addr.
-    bset(&mut b, at + 8, cast[u8](1));
-    xfer_u64(&mut b, at + 16, word - FAULT_MARK);
+    // A processor exception (fault_caught): si_code SEGV_MAPERR (BUS_ADRERR
+    // for a SIGBUS), si_addr.
+    bset(&mut b, at + 8, cast[u8](1 + (word - FAULT_MARK) / FAULT_BUS % 2));
+    xfer_u64(&mut b, at + 16, (word - FAULT_MARK) % FAULT_BUS);
     return;
   }
   bset(&mut b, at + 16, cast[u8](word % 256));          // si_pid
@@ -411,9 +424,9 @@ fn info_from(b: &mut Bytes, at: u64, word: u64)
       } else {
         bset(&mut b, at + 8 + i, cast[u8](255));         // si_code: SI_QUEUE
       }
-      bset(&mut b, at + 24 + i, cast[u8](word / SW_VAL / pow256(i) % 256));
       i = i + 1;
     }
+    xfer_u64(&mut b, at + 24, value);
   }
 }
 
@@ -1058,7 +1071,11 @@ fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64) -> bool
     return false;
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
-  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + addr % FAULT_MARK);
+  let mut bus = 0;
+  if s == SIGBUS {
+    bus = FAULT_BUS;
+  }
+  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + bus + addr % FAULT_BUS);
   return true;
 }
 
