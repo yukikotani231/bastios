@@ -99,6 +99,9 @@ fn opath_denied(k: &Kernel, pid: u64, n: u64) -> bool
   if n == LX_MMAP {
     return pget(k.procs, pid, F_REGS + R_R10) & MAP_ANONYMOUS == 0 && is_opath(k, pid, pget(k.procs, pid, F_REGS + R_R8));
   }
+  if n == 275 {                            // splice (src/lxsplice.bastio)
+    return is_opath(k, pid, a) || is_opath(k, pid, pget(k.procs, pid, F_REGS + R_RDX));   // either end
+  }
   if n == LX_EPOLL_CTL {
     return is_opath(k, pid, pget(k.procs, pid, F_REGS + R_RDX));   // the descriptor to watch
   }

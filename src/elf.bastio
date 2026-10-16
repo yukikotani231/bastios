@@ -48,12 +48,14 @@ const STACK_SHIFT_MAX: u64 = 524288;  // how far down the stack's top may move (
 const MMAP_RND_PAGES: u64 = 16777216; // the mmap area's top moves down by up to this many pages (64 GiB)
 const PIE_RND_PAGES: u64 = 4194304;   // a position-independent program moves up by up to this many pages (16 GiB)
 const BRK_RND_PAGES: u64 = 8192;      // the program break starts up to this many pages (32 MiB) above the image
-const AUX_WORDS: u64 = 32;            // the auxiliary vector: 16 pairs
+const AUX_WORDS: u64 = 36;            // the auxiliary vector: 18 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
 const VDSO_PAGE: u64 = 134215679;     // STACK_FIRST - 1
 const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch, then 1 if the process is in a time namespace
 const AT_SYSINFO_EHDR: u64 = 33;
+const AT_HWCAP: u64 = 16;
+const AT_HWCAP2: u64 = 26;
 const AT_IGNORE: u64 = 1;
 
 /// Where an executable's bytes come from: built-in image `prog`, or file
@@ -516,7 +518,9 @@ fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   } else {
     aux(&mut vec, v + 28, AT_IGNORE, 0);
   }
-  aux(&mut vec, v + 30, 0, 0);                     // AT_NULL
+  aux(&mut vec, v + 30, AT_HWCAP, hwcap());        // the processor's features, as the C library's ifuncs read them
+  aux(&mut vec, v + 32, AT_HWCAP2, hwcap2());
+  aux(&mut vec, v + 34, 0, 0);                     // AT_NULL
   let mut rnd = balloc(16);
   put_u64(&mut rnd, 0, rn.a);
   put_u64(&mut rnd, 8, rn.b);
@@ -742,6 +746,21 @@ fn share_text_in(m: &mut Mem, txt: &mut Store, l3: &mut PageTable, v: &mut Vfs, 
   }
 }
 
+/// Lets the program run code from window pages from .. to, which hold an
+/// executable segment (the private ones: shared text can run already).
+fn exec_pages(m: &mut Mem, l3: &mut PageTable, from: u64, to: u64)
+  requires mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+{
+  let mut p = from;
+  while p < to && p < WPAGES
+    invariant mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+  {
+    w_exec(&mut m, &mut l3, p);
+    p = p + 1;
+  }
+}
+
 /// Builds an address space for the checked ELF image `src`: its loadable
 /// segments, zero-filled to their memory size, those of the interpreter
 /// `isrc` too when `ie` is ok, and a stack holding argv, envp and the
@@ -773,11 +792,14 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
       }
       let mut i = 0;
       while ok && i < e.phnum
-        invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l3) == 3 && vfs_ok(v)
+        invariant i <= e.phnum && e.phnum <= PH_MAX && pt_level(l3) == 3 && pt_leases(l3) == 0 && mem_ok(m) && vfs_ok(v)
       {
         let s = seg(&mut v, src, e.phoff, i, e.bias);
         if s.kind == SEG_LOAD {
           ok = copy_in(&mut l3, &mut v, src, s.from, s.off, s.filesz);
+          if ok && s.x {
+            exec_pages(&mut m, &mut l3, s.off / 4096, (s.off + s.memsz + 4095) / 4096);
+          }
         } else if s.kind == SEG_BAD {
           ok = false;                       // the file changed since elf_parse
         }
@@ -790,7 +812,7 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
       }
       let mut j = 0;
       while ok && j < iph
-        invariant j <= iph && iph <= PH_MAX && pt_level(l3) == 3 && vfs_ok(v) && mem_ok(m)
+        invariant j <= iph && iph <= PH_MAX && pt_level(l3) == 3 && vfs_ok(v) && mem_ok(m) && pt_leases(l3) == 0
       {
         let s = seg(&mut v, isrc, ie.phoff, j, ie.bias);
         if s.kind == SEG_LOAD {
@@ -803,6 +825,9 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
           }
           if ok {
             ok = copy_in(&mut l3, &mut v, isrc, s.from, s.off, s.filesz);
+          }
+          if ok && s.x {
+            exec_pages(&mut m, &mut l3, s.off / 4096, (s.off + s.memsz + 4095) / 4096);
           }
         } else if s.kind == SEG_BAD {
           ok = false;

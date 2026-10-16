@@ -20,6 +20,12 @@ struct layout {
     unsigned char rnd[16];
 };
 
+/* Whether this program is position-independent (ET_DYN); the AArch64 programs are linked at a fixed address. */
+extern const unsigned char __ehdr_start[];
+static int is_pie(void) {
+    return __ehdr_start[16] == 3;   /* e_type == ET_DYN */
+}
+
 static int report(void) {
     int local = 0;
     void *m = mmap(NULL, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -103,7 +109,10 @@ int main(int argc, char **argv) {
     EXPECT("the stack moves between runs", DISTINCT(on, stack) >= RUNS - 1);
     EXPECT("the mmap area moves between runs", DISTINCT(on, mmap) >= RUNS - 1);
     EXPECT("the program break moves between runs", DISTINCT(on, brk) >= RUNS - 1);
-    EXPECT("a position-independent program moves between runs", DISTINCT(on, code) >= RUNS - 1);
+    if (is_pie())
+        EXPECT("a position-independent program moves between runs", DISTINCT(on, code) >= RUNS - 1);
+    else
+        EXPECT("a program linked at a fixed address stays where it is", DISTINCT(on, code) == 1);
     EXPECT("the break starts at a random distance above the image", DISTINCT_GAP(on) >= RUNS - 1);
     EXPECT("every address is page-plausible and in user space", ({
         int ok = 1;
