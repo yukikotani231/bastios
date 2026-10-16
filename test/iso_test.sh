@@ -212,6 +212,56 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if not good:
             print("\n".join(l for l in text if l))
         fails += not good
+    if ok and not diag and not usb and not nvme and not stick:
+        # /dev/fb0 (user/mfb.c): a program draws on the screen, and the
+        # console stops drawing while it holds the device and comes back
+        # when it closes it. The pixels are read back from screendumps.
+        def screendump():
+            m2 = socket.socket(socket.AF_UNIX)
+            m2.connect(mon_path)
+            path = os.path.join(tmp.name, "fb.ppm")
+            if os.path.exists(path):
+                os.remove(path)
+            m2.sendall(f"screendump {path}\n".encode())
+            for _ in range(50):
+                time.sleep(0.1)
+                if os.path.exists(path) and os.path.getsize(path) > 1024 * 768 * 3:
+                    time.sleep(0.2)
+                    break
+            m2.close()
+            d = open(path, "rb").read()
+            _, rest = d.split(b"\n", 1)
+            dims, rest = rest.split(b"\n", 1)
+            _, px = rest.split(b"\n", 1)
+            w, h = map(int, dims.split())
+            return w, h, px
+        mark = len(out)
+        q.stdin.write(b"mfb\r"); q.stdin.flush()
+        good = until(b"mfb: drawn 1024x768", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) mfb opens /dev/fb0, reads its mode and draws")
+        fails += not good
+        if good:
+            w, h, px = screendump()
+            def at(x, y):
+                i = (y * w + x) * 3
+                return tuple(px[i:i + 3])
+            good = (at(10, 10) == (255, 0, 0) and at(900, 380) == (255, 0, 0) and at(10, 700) == (0, 0, 255)
+                    and at(100, 100) == (0, 255, 0) and at(163, 163) == (0, 255, 0)
+                    and at(164, 164) == (255, 0, 0) and at(99, 99) == (255, 0, 0))
+            print(("ok  " if good else "FAIL"), f"({name}) the program's pixels are on the screen")
+            fails += not good
+            q.stdin.write(b"\r"); q.stdin.flush()
+            good = until(b"mfb: done", mark) and until(b"bastios> ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) mfb ends (a write at the end of the screen is ENOSPC)")
+            fails += not good
+            time.sleep(0.5)
+            w, h, px = screendump()
+            lines = screen_text(b"P6\n%d %d\n255\n" % (w, h) + px)
+            good = any("mfb: drawn 1024x768" in l for l in lines) and any("mfb: done" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the console is drawn again, its text from before and after, once the device is closed")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
     steps = [("hello", b"hello from user mode"),
              ("echo from the iso > disk/iso", b""),
              ("cat disk/iso", b"from the iso"),
