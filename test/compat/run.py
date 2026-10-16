@@ -360,6 +360,8 @@ class Guest:
     def keys(self, prog, keys, timeout):
         """Starts prog and types keys at it once it has drawn something.
         Returns whether it got back to the shell prompt."""
+        self.hang_tail = b""
+        self.hang_disk = 0
         mark = len(self.out)
         # The marker shows the shell is back: a full-screen program's last
         # output can run into the prompt.
@@ -391,6 +393,9 @@ class Guest:
             if not done:
                 self.read_until(b"\x00never", len(self.out), 0.2)
         if not done:
+            # What the screen showed last, for the report of a hang.
+            self.hang_tail = bytes(self.out[-600:])
+            self.hang_disk = self.out.count(b"[disk:")
             self.send(b"\x03")
             if not self.read_until(PROMPT, len(self.out), 10):
                 self.boot()
@@ -606,7 +611,13 @@ def run_on_host(name, cmd, expected, timeout):
 
 def run_tty_once(env, name, prog, keys, check, expected, timeout, bb):
     if not env.keys(with_bb(prog, bb), keys, timeout):
-        return {"name": name, "result": "hang", "detail": "the program did not return to the shell",
+        tail = getattr(env, "hang_tail", b"")
+        detail = "the program did not return to the shell"
+        if getattr(env, "hang_disk", 0):
+            detail += "; the kernel reported a dead disk %d time(s)" % env.hang_disk
+        if tail:
+            detail += "; the console ended with " + json.dumps(tail.decode("latin-1")[-300:])
+        return {"name": name, "result": "hang", "detail": detail,
                 "syscalls": []}
     return run_applet(env, name, check, expected, timeout, bb)
 

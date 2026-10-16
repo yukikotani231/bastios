@@ -69,7 +69,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb bwm bhello bterm
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 # Which backend built the kernel and the user programs, rewritten only when it
@@ -167,6 +167,19 @@ MUSLCC ?= musl-gcc
 build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
+# bwm draws text with the console's font.
+build/user/font8x8.h: src/font8x8.bin | build/user
+	(echo 'static const unsigned char font8x8[] = {'; od -An -v -tu1 -w16 $< | sed 's/ \+/,/g; s/^,//; s/$$/,/'; echo '};') > $@
+
+build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
+	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+
+build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
+	$(MUSLCC) -static-pie -O2 -o $@ $<
+
+build/user/bterm.elf: user/bterm.c user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
+	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
 # also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.
 build/user/mdyn.elf: user/mdyn.c | build/user
@@ -208,7 +221,7 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin 
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin src/font16.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
@@ -745,10 +758,18 @@ build/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLANG)/stage1/*.bastio) |
 build/compat/bastioc1: build/compat/bastioc1.c
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
 
-build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc test/compat/bastiodisk.sh \
-    $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py
+# bastiolang's developer tools (tools/bastiofmt, tools/bastio-lsp), built here
+# the way bastioc1 is, as static PIEs against musl, to run on BastiOS.
+build/compat/bastiofmt.c build/compat/bastio-lsp.c: build/compat/%.c: $(BASTIOC) $(wildcard $(BASTIOLANG)/tools/*/*.bastio) | build/compat
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLANG)/tools/$*/$(if $(filter bastio-lsp,$*),lsp,$*).bastio
+
+build/compat/bastiofmt build/compat/bastio-lsp: build/compat/%: build/compat/%.c
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
+build/compat/bastio.img: build/compat/bastioc1 build/compat/z3 build/compat/tcc build/compat/bastiofmt build/compat/bastio-lsp test/compat/bastiodisk.sh \
+    $(wildcard test/compat/bastio/*) test/compat/mkdisk.py
 	test/compat/bastiodisk.sh $@ build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc \
-	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1
+	  $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB) $(BASTIOLANG)/stage1 build/compat/bastiofmt build/compat/bastio-lsp
 
 # Alpine Linux on BastiOS, on a fourth disk (test/compat/alpinedisk.py) for
 # test/compat/alpine.txt: Alpine's root file system, which the checks enter
