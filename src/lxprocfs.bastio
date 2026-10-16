@@ -1967,18 +1967,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       // The address, reference count and inode are not kept.
       let mut a = put_s(&mut o, 0, "Num       RefCount Protocol Flags    Type St Inode Path\n");
       let mut l = 0;
-      while l < UX_LIS && a + 160 < PROC_OUT
+      while l < UX_LIS && a + 330 < PROC_OUT
         invariant l <= UX_LIS && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
       {
         let st = ul_row(k, l, 0, 0);
         if st != UL_FREE {
           a = put_s(&mut o, a, "0000000000000000: 00000002 00000000 ");
-          if st == UL_LISTEN {
+          if st == UL_LISTEN || st == UL_SEQ {
             a = put_s(&mut o, a, "00010000 ");
           } else {
             a = put_s(&mut o, a, "00000000 ");
           }
-          if st == UL_DGRAM {
+          if st == UL_SEQ {
+            a = put_s(&mut o, a, "0005 01 0");
+          } else if st == UL_DGRAM {
             a = put_s(&mut o, a, "0002 01 0");
           } else {
             a = put_s(&mut o, a, "0001 01 0");
