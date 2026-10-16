@@ -575,9 +575,12 @@ t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
+t_ltp2: mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt
 t_ltp2: SIGBUS: a mapped page past the end of the file is a bus error
 t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
 t_ltp2: SIGBUS: a forked child gets it too
+t_ltp2: SIGBUS: a file cut under a mapping takes the pages past the new end
+t_ltp2: rename: a directory moved from under the working directory leaves it in the moved directory
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
@@ -762,6 +765,8 @@ t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
+t_net: IPV6_V6ONLY reads back
+t_net: IPV6_V6ONLY: an IPv6-only listener and an IPv4 one share a port
 t_net: SO_REUSEADDR
 t_net: TCP bind/listen
 t_net: TCP loopback connect/accept
@@ -770,10 +775,13 @@ t_net: TCP_NODELAY
 t_net: UDP bind port 0
 t_net: UDP loopback
 t_net: UDP socket
+t_net: a dual-stack listener cannot take it
 t_net: getaddrinfo localhost
+t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_net: ping6 ::1 (raw ICMPv6 socket)
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
 t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
