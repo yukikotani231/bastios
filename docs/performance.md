@@ -117,12 +117,18 @@ Much of the rest is the cache, not the work. `bench/workloads.py` also
 prints the first run (cold) apart from the median of the later runs (warm).
 On Linux the later runs find the gcc binaries and the header tree in the
 page cache: `hello` takes 2.4 s the first time and 1.2 s after, `tgz` about
-2.7 s and 1.3 s. BastiOS's block cache is 4 MiB on a 512 MiB machine, far
+2.7 s and 1.3 s. BastiOS's block cache was 4 MiB on a 512 MiB machine, far
 below the 20 to 60 MB these programs read, so every run reads the disk again:
 `hello` stays at 3.8 to 4.1 s, and `tgz` takes 3.2 s whether cold or not.
 Cold against cold the gap is 1.2x to 1.6x, not 3x to 4.5x. The `gzip -1`
 of the 19 MB tar alone takes 2.8 s on BastiOS and is the same instructions on
 Linux (inferred, not measured there), so a bigger cache, not faster system calls, is what closes the rest.
+The cache is now a 16th of memory, between 1 MiB and 32 MiB (`dq_slots_for`
+in `src/diskq.bastio`; the kernel heap extension, which it takes half of, is an
+eighth of the page pool). A machine of 512 MiB or more gets the 32 MiB cap,
+which holds a 19 MB tree: a warm re-read of it is 3x faster on 2 GiB. Trees of
+the 20 to 60 MB that gcc reads still do not fit. The cap is 32 MiB because
+doubling it makes Z3 give up on `lx_syscall`.
 (These cold figures come from single runs on a shared host; read them as
 rough.)
 

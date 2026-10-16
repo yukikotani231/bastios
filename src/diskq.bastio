@@ -89,12 +89,12 @@ spec fn dq_ok(q: &DiskQ) -> bool {
 }
 
 /// How many cache slots a machine with `pages` pages of memory gets: a
-/// 128th of its memory in bytes, so the cache is an eighth of the kernel's
-/// heap extension (a 16th of memory), between NC_STD and NC.
+/// 16th of its memory in bytes, so the cache is half of the kernel's heap
+/// extension (an eighth of memory), between NC_STD and NC.
 fn dq_slots_for(pages: u64) -> u64
   ensures result >= NC_STD && result <= NC
 {
-  let s = pages / 128;
+  let s = pages / 16;
   if s < NC_STD {
     return NC_STD;
   }
