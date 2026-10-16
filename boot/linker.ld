@@ -5,6 +5,7 @@ SECTIONS
     .note.pvh : { KEEP(*(.note.pvh)) }
     .text : {
         KEEP(*(.multiboot))
+        INCLUDE build/hot.ld
         *(.text .text.*)
     }
     .tramp ALIGN(4096) : { *(.tramp.text) }   /* the entry area's code (core.h): page-aligned, mapped on its own */

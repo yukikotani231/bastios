@@ -1,0 +1,24 @@
+# Maintainer: Compat Suite <compat@example.org>
+pkgname=libgreet
+pkgver=1.2
+pkgrel=0
+pkgdesc="A greeting library"
+url="https://example.org/libgreet"
+arch="all"
+license="MIT"
+subpackages="$pkgname-dev $pkgname-doc"
+source="@URL@/libgreet-$pkgver.tar.gz
+	exclaim.patch
+	"
+
+build() {
+	make CFLAGS="$CFLAGS"
+}
+
+check() {
+	make check
+}
+
+package() {
+	make DESTDIR="$pkgdir" install
+}
