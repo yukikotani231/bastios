@@ -1,0 +1,21 @@
+// The files the installer image adds to the file system (see
+// arch/initfiles.bastio): none. The Makefile writes
+// build/installer/lib/extra/initextra.bastio for the installer image; its
+// --lib directory comes before this one (src/x86_64/default), so the
+// compiler finds that one first.
+
+const NEXTRA: u64 = 0;
+
+fn extra_name(i: u64) -> Str
+  ensures slen(result) <= 16
+{
+  return "";
+}
+
+fn extra_data(i: u64) -> Str {
+  return "";
+}
+
+fn extra_mode(i: u64) -> u64 {
+  return 420;
+}

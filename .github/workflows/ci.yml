@@ -9,12 +9,48 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # test/all.sh in two parts that run on runners of their own (LANES, see
-  # test/all.sh): the x86-64 boots, whose longest is the shell test, and the
-  # AArch64 kernel's. Each part keeps a proof cache of its own, since the
-  # caches are saved and restored whole.
+  # A pull request that only touches text nobody builds or runs (docs, the
+  # changelog, templates) starts none of the jobs below: they are skipped,
+  # which counts as passing. The README and the two guides test/guide_test.py
+  # follows are code for this purpose.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.diff.outputs.code }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          HEAD: ${{ github.sha }}
+        run: |
+          # A push to main runs everything. While a run is going, GitHub keeps
+          # only the newest waiting run for main and drops the others, so the
+          # run that starts may cover several pushes while event.before names
+          # only the last one; a docs-only last push would then skip the code
+          # merged before it. A pull request with no usable base (a forced
+          # push) runs everything too.
+          if [ "$GITHUB_EVENT_NAME" = push ] || ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
+            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          files=$(git diff --name-only "$BASE" "$HEAD")
+          echo "$files"
+          code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
+          guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
+          if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
+  # test/all.sh in three parts that run on runners of their own (LANES, see
+  # test/all.sh): the x86-64 boots in two halves, the shell and network
+  # tests (a b) and the rest (c e), each about as long as the shell test,
+  # and the AArch64 kernel's. The two x86-64 halves build the same kernel,
+  # so they share one proof cache; the AArch64 part keeps its own, since
+  # the caches are saved and restored whole.
   test:
     name: test (${{ matrix.part }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     strategy:
@@ -22,9 +58,14 @@ jobs:
       matrix:
         include:
           - part: x86-64
-            lanes: a b c
+            lanes: a b
+            cache: x86-64
+          - part: x86-64 rest
+            lanes: c e
+            cache: x86-64
           - part: aarch64
             lanes: d
+            cache: aarch64
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -32,7 +73,7 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools xorriso dosfstools mtools ovmf
       - name: Tool versions
         run: |
           echo "bastiolang $(git -C bastiolang rev-parse HEAD)"
@@ -45,9 +86,9 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-${{ matrix.part }}-none
+          key: proof-${{ matrix.cache }}-none
           restore-keys: |
-            proof-${{ matrix.part }}-
+            proof-${{ matrix.cache }}-
             proof-
           path: build/proof-cache
       - run: make test BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
@@ -58,13 +99,15 @@ jobs:
         if: always() && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          key: proof-${{ matrix.part }}-${{ hashFiles('build/proof-cache/**') }}
+          key: proof-${{ matrix.cache }}-${{ hashFiles('build/proof-cache/**') }}
           path: build/proof-cache
         continue-on-error: true
   # The same suite with the kernel and the Bastio user programs built by the
   # native x86-64 backend, so no C compiler sees any proved code (the C
   # compiler still builds boot/, the C library and the musl test programs).
   native:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -84,12 +127,14 @@ jobs:
             proof-x86-64-
             proof-
           path: build/proof-cache
-      - run: make test NATIVE=1 LANES='a b c' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - run: make test NATIVE=1 LANES='a b ce' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
   # the model's sources). The `test` job skips these boots; here they run
   # DHCP, TCP and IPv6 through the ENA queues.
   ena:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     env:
@@ -138,14 +183,21 @@ jobs:
   # The Linux compatibility suite (test/compat). Most of its time on a fresh
   # runner goes to building third-party programs from source (Z3, CPython,
   # Perl, git, ...) and to fetching Alpine's images from Docker Hub, so both
-  # are cached. A cache entry is used only when every input it was built
-  # from is unchanged: the pinned versions (every `?=` setting in the
-  # Makefile), the BusyBox configuration, the patches, pyzip.py and
-  # alpinedisk.py. A change to a recipe alone is not seen: bump CACHE_V to
-  # rebuild. Disk images and everything built from this repository are
-  # never cached. The caches are saved only after the build step succeeded,
-  # so a build that failed halfway is never kept.
+  # are cached. The third-party programs are used only when every input
+  # they were built from is unchanged: the pinned versions (every `?=`
+  # setting in the Makefile), the BusyBox configuration, the patches and
+  # pyzip.py. A change to a recipe alone is not seen: bump CACHE_V to
+  # rebuild. Alpine's images are kept by digest and alpinedisk.py checks
+  # each layer against its digest when it reads it from the cache, so an
+  # older entry is restored when there is no exact one, and only the images
+  # it lacks are fetched; they are saved from main only (an entry saved by a
+  # pull request serves no other branch and fills the repository's cache
+  # space). Disk images and everything built from this repository are never
+  # cached. The caches are saved only after the build step succeeded, so a
+  # build that failed halfway is never kept.
   compat:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     env:
@@ -155,6 +207,11 @@ jobs:
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
     steps:
+      # The third-party programs, Alpine's layers and the disk images together
+      # fill much of the runner's disk. Deleting what the job does not use
+      # takes minutes, so it runs beside the steps up to the disk build.
+      - name: Make room
+        run: nohup sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL >/dev/null 2>&1 &
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
@@ -169,12 +226,13 @@ jobs:
       - name: Cache keys
         id: keys
         run: |
-          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "images=$(grep -E '^[A-Z0-9_]+ *\?=' Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Restore the third-party programs
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -195,12 +253,21 @@ jobs:
             build/compat/python
             build/compat/tcc
             build/compat/make
+            build/compat/rg
             build/compat/z3
+      # A restored program is older than the sources the checkout just
+      # wrote, so make would build it again (CPython, from test/compat/
+      # pyzip.py; tcc, from its patch). The key covers those inputs, so a
+      # hit is up to date.
+      - name: Mark the restored programs up to date
+        if: steps.tp.outputs.cache-hit == 'true'
+        run: find build/busybox build/compat -exec touch -h {} +
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
         with:
-          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-${{ env.CACHE_V }}-
           path: |
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
@@ -212,19 +279,17 @@ jobs:
             proof-x86-64-
             proof-
           path: build/proof-cache
-      - name: Make room
+      - name: Wait for room
         run: |
-          # The third-party programs, Alpine's layers and the disk images together fill much of the runner's disk.
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 5; done
           df -h /
       - name: Build the disks
-        run: make -j4 build/bastios.elf
-          build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img
+        run: make -j4 compat-disks
       - name: Save the third-party programs
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -245,17 +310,20 @@ jobs:
             build/compat/python
             build/compat/tcc
             build/compat/make
+            build/compat/rg
             build/compat/z3
         continue-on-error: true
       - name: Save Alpine's images
-        if: steps.al.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}
           path: |
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
         continue-on-error: true
+      - name: Run the x86-64 guests under KVM
+        run: tools/ci-kvm.sh
       - run: make compat
       - name: What failed
         if: failure()
@@ -276,14 +344,43 @@ jobs:
           if-no-files-found: ignore
   # The Linux compatibility suite on AArch64 (arch/aarch64/Makefile): the
   # suite's C programs and a BusyBox against glibc, and Alpine, on QEMU's virt
-  # machine.
+  # machine. Every guest is emulated (TCG), so the lanes (test/compat/run.py)
+  # are spread over four runners, each building only the disks of its
+  # lanes (the two Alpine parts build the same disk and share its caches).
+  # The last part runs every lane the others do not name, so a lane added
+  # later runs there (its disk must be added to that part's list, or
+  # run.py stops for want of it). Each part holds to the baseline every
+  # check of the groups its lanes hold.
   compat-aarch64:
+    name: compat-aarch64 (${{ matrix.part }})
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: programs
+            lanes: main1,bastio
+            disks: disk.img bastio.img
+          - part: alpine
+            lanes: alpine,alpine2
+            disks: alpine.img
+            cache: alpine
+          - part: alpine-tools
+            lanes: alpine3,alpine4
+            disks: alpine.img
+            cache: alpine
+          - part: rest
+            skip: main1,bastio,alpine,alpine2,alpine3,alpine4
+            disks: debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
       # never replaced: a key that hits is not saved again).
       CACHE_V: 1
+      COMPAT_LANES: ${{ matrix.lanes }}
+      COMPAT_SKIP_LANES: ${{ matrix.skip }}
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
     steps:
@@ -306,12 +403,12 @@ jobs:
       - name: Cache keys
         id: keys
         run: |
-          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' arch/aarch64/Makefile test/compat/images.mk | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
+          echo "pins=$(grep -E '^[A-Z0-9_]+ *\?=' arch/aarch64/Makefile | sha256sum | cut -c1-16)" >> "$GITHUB_OUTPUT"
       - name: Restore the third-party programs
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-arm64-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -319,21 +416,27 @@ jobs:
             build/aarch64/compat/musl
             build/aarch64/compat/dropbear
             build/aarch64/compat/runc
+      # As in the compat job: a hit is up to date, though older than the
+      # checkout's sources.
+      - name: Mark the restored programs up to date
+        if: steps.tp.outputs.cache-hit == 'true'
+        run: find build/aarch64/compat -exec touch -h {} +
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
         with:
-          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          key: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          restore-keys: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
       - name: Build the disks
-        run: make ARCH=aarch64 compat-disks
+        run: make -j4 ARCH=aarch64 compat-disks COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
       - name: Save the third-party programs
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-arm64-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
+          key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
             build/aarch64/compat/tcc
@@ -342,23 +445,23 @@ jobs:
             build/aarch64/compat/dropbear
             build/aarch64/compat/runc
         continue-on-error: true
-      - run: make ARCH=aarch64 compat
-      - name: Checks that did not pass
-        if: always()
-        run: grep -E '^\| ' build/aarch64/compat/report.md | grep -v -E '\| pass \||\| ---' | head -80 || true
       - name: Save Alpine's images
-        if: always() && steps.al.outputs.cache-hit != 'true'
+        if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-alpine-arm64-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
+          key: compat-alpine-arm64-${{ matrix.cache || matrix.part }}-${{ hashFiles('test/compat/images.mk', 'test/compat/alpinedisk.py') }}
           path: |
             build/aarch64/compat/alpine/*.tar.gz
             build/aarch64/compat/alpine/*.json
         continue-on-error: true
+      - run: make ARCH=aarch64 compat COMPAT_DISKS="$(printf 'build/aarch64/compat/%s ' ${{ matrix.disks }})"
+      - name: Checks that did not pass
+        if: always()
+        run: grep -E '^\| ' build/aarch64/compat/report.md | grep -v -E '\| pass \||\| ---' | head -80 || true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: compat-aarch64-report
+          name: compat-aarch64-report-${{ matrix.part }}
           path: |
             build/aarch64/compat/report.md
             build/aarch64/compat/results.json
@@ -369,6 +472,8 @@ jobs:
   # results.json is kept too: ltp.py uses its timings to put the tests that
   # only wait out a timeout on machines of their own.
   compat-ltp:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     env:

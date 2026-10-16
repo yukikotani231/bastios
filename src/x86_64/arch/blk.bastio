@@ -527,7 +527,7 @@ fn blk_is_usb(b: &Blk) -> bool {
 /// from a USB mouse there (MOUSE_PKT plus its bytes), or 256.
 fn blk_kbd_poll(b: &mut Blk) -> u64
   requires blk_ok(b)
-  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+  ensures blk_ok(b) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT) || (result >= SER_PKT && result < SER_PKT + 256))
 {
   match b {
     Blk::Usb(mut x) => {
@@ -564,6 +564,41 @@ fn blk_mouse(b: &Blk) -> bool {
     Blk::Nvme(n) => { return false; },
     Blk::Ahci(h) => { return false; },
     Blk::Loop(l) => { return false; },
+  }
+}
+
+/// SER_NONE, SER_FTDI or SER_ACM: is there a USB serial port on the disk's
+/// controller?
+fn blk_ser(b: &Blk) -> u64
+  ensures result <= SER_ACM
+{
+  match b {
+    Blk::Usb(x) => { return ser_kind_of(x.sp.kind); },
+    Blk::Ata(a) => { return SER_NONE; },
+    Blk::Virtio(v) => { return SER_NONE; },
+    Blk::Nvme(n) => { return SER_NONE; },
+    Blk::Ahci(h) => { return SER_NONE; },
+    Blk::Loop(l) => { return SER_NONE; },
+  }
+}
+
+/// Sends the first n bytes of src to the USB serial port on the disk's
+/// controller, if there is one: how many it took.
+fn blk_ser_send(b: &mut Blk, src: &Bytes, n: u64) -> u64
+  requires blk_ok(b)
+  ensures blk_ok(b) && result <= n && result <= blen(src)
+{
+  match b {
+    Blk::Usb(mut x) => {
+      let r = xhci_ser_send(&mut x, src, n);
+      b = Blk::Usb(x);
+      return r;
+    },
+    Blk::Ata(a) => { b = Blk::Ata(a); return 0; },
+    Blk::Virtio(v) => { b = Blk::Virtio(v); return 0; },
+    Blk::Nvme(nv) => { b = Blk::Nvme(nv); return 0; },
+    Blk::Ahci(h) => { b = Blk::Ahci(h); return 0; },
+    Blk::Loop(l) => { b = Blk::Loop(l); return 0; },
   }
 }
 

@@ -36,6 +36,7 @@ const NETMASK: u64 = 0xFFFFFF00;      // /24
 const DNS_SERVER: u64 = 0x0A000203;   // 10.0.2.3, QEMU's resolver, with the static address
 
 const IP_ICMP: u64 = 1;
+const IP_ICMP6: u64 = 58;               // ICMPv6, as the protocol of the IPv4 frame that stands for it
 const IP_UDP: u64 = 17;
 const IP_TCP: u64 = 6;
 const ICMP_ECHO_REPLY: u64 = 0;
@@ -79,6 +80,7 @@ const NO_SOCK: u64 = 18446744073709551615;
 const V6N: u64 = 64;                  // IPv6 peers (src/net6.bastio)
 const V6W: u64 = 4;                   // words per peer: address (2), MAC, in use
 const V6_BASE: u64 = 0xF0000000;      // 240.0.0.0: the first peer's token
+const V6_SELF: u64 = 0xF0000010;      // V6_BASE + V6N: in a socket's name, our own IPv6 address
 const LOQ: u64 = 64;                  // frames the loopback queue holds at most ...
 const LO_BYTES: u64 = 98304;         // ... in this many bytes (a ring: a frame is as long as it is)
 // The frame buffers (pkt, out, and the loopback queue's slots) are far larger
@@ -103,7 +105,15 @@ const SLOT_W: u64 = 3;
 const S_CORK: u64 = 54;               // bytes held back by MSG_MORE, in cork
 const S_NS: u64 = 55;                 // its network namespace (src/netns.bastio)
 const RAW_ICMP: u64 = 65537;           // S_PORT of a raw ICMP socket (no port number is)
-const SOCK_FIELDS: u64 = 56;          // S_SLOTS + RXQ * SLOT_W + 2
+const RAW_ICMP6: u64 = 65538;          // S_PORT of a raw ICMPv6 socket (src/net6.bastio)
+const S_FAM: u64 = 56;                // FAM_*: which peers it takes datagrams from
+const SOCK_FIELDS: u64 = 57;          // S_SLOTS + RXQ * SLOT_W + 2, then S_NS and S_FAM
+// Which address family a socket (UDP here, TCP listeners in tcp.bastio)
+// answers to. The IPv4 and IPv6 sides share one port space, as on Linux,
+// except that an IPv6-only socket and an IPv4 one may hold the same port.
+const FAM_BOTH: u64 = 0;               // an AF_INET6 socket that takes IPv4 peers too (the default)
+const FAM_V4: u64 = 4;                 // an AF_INET socket
+const FAM_V6: u64 = 6;                 // an AF_INET6 socket with IPV6_V6ONLY
 
 // Network namespaces and interfaces (src/netns.bastio).
 const NNET: u64 = 64;                  // network namespaces
@@ -164,7 +174,7 @@ const NAT_NONE: u64 = 18446744073709551615;
 
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 240;                // connections (listeners and TIME_WAIT hold some)
-const TCB_W: u64 = 28;                // words per connection (TCP_RING, the size of
+const TCB_W: u64 = 29;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
 struct Net {
@@ -223,6 +233,9 @@ struct Net {
   iid: u64,           // our interface id (low half of our IPv6 addresses)
   pfx: u64,           // the advertised prefix (high half of our global address), 0: none yet
   rtr_mac: u64,       // the IPv6 default router's MAC, 0: none
+  rtr_lo: u64,        // and the low half of its link-local address (fe80::...)
+  dns6_hi: u64,       // an IPv6 name server from a router advertisement (RDNSS), 0: none
+  dns6_lo: u64,
   rs_n: u64,          // router solicitations sent
   rs_until: u64,      // the tick to send the next at
   ns: u64,            // the network namespace being handled (src/netns.bastio)
@@ -497,6 +510,9 @@ fn can_reach(n: &Net, ip: u64) -> bool
   }
   if n.ns != 0 {
     return route_if(n, nsw(n, n.ns, NS_GW)) < IFN;
+  }
+  if is_v6tok(ip) {
+    return card_live(n.dev);          // IPv6 needs no IPv4 address to send
   }
   return card_live(n.dev) && n.ip != 0;
 }
@@ -794,7 +810,7 @@ fn udp_in(n: &mut Net, total: u64)
   if be32(n.pkt, 30) == IP_MAX {
     return;                           // other broadcasts: nobody listens
   }
-  let s = sock_find(n, dport);
+  let s = sock_find_in(n, dport, is_v6tok(be32(n.pkt, 26)));
   if s < SOCKS {
     udp_deliver(&mut n, s, ulen);
   } else if dport == UDP_ECHO_PORT {
@@ -1246,6 +1262,65 @@ fn sock_find(n: &Net, port: u64) -> u64
   return SOCKS;
 }
 
+/// Can a socket of family a and one of family b hold the same port? Only
+/// an IPv4 socket and an IPv6-only one can.
+fn fam_apart(a: u64, b: u64) -> bool
+{
+  return (a == FAM_V4 && b == FAM_V6) || (a == FAM_V6 && b == FAM_V4);
+}
+
+/// Does a socket of family fam take what comes from an IPv6 peer (v6) or
+/// an IPv4 one?
+fn fam_takes(fam: u64, v6: bool) -> bool
+{
+  if v6 {
+    return fam != FAM_V4;
+  }
+  return fam != FAM_V6;
+}
+
+/// The socket a datagram from an IPv6 (v6) or IPv4 peer to `port` goes
+/// to; SOCKS if none.
+fn sock_find_in(n: &Net, port: u64, v6: bool) -> u64
+  requires net_ok(n)
+  ensures result <= SOCKS
+{
+  if port == 0 {
+    return SOCKS;
+  }
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS
+  {
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == port && sk_get(n, s, S_NS) == n.ns
+      && fam_takes(sk_get(n, s, S_FAM), v6) {
+      return s;
+    }
+    s = s + 1;
+  }
+  return SOCKS;
+}
+
+/// Does a socket of family fam keep another from `port`?
+fn port_busy(n: &Net, port: u64, fam: u64) -> bool
+  requires net_ok(n)
+{
+  if port == 0 {
+    return false;
+  }
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS
+  {
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == port && sk_get(n, s, S_NS) == n.ns
+      && !fam_apart(sk_get(n, s, S_FAM), fam) {
+      return true;
+    }
+    s = s + 1;
+  }
+  return false;
+}
+
 /// Queues the payload of the received UDP datagram (ulen bytes with its
 /// header, at 34) on socket s. A datagram arriving at a full queue is
 /// dropped, which UDP allows.
@@ -1302,11 +1377,24 @@ fn raw_sendto(n: &mut Net, s: u64, to: u64, buf: &Bytes, size: u64) -> u64
   ensures net_ok(n)
 {
   let ip = dst_ip(to);
-  if !udp_is_open(n, s) || sk_get(n, s, S_PORT) != RAW_ICMP || ip > IP_MAX || ip == 0
+  if !udp_is_open(n, s) {
+    return NO_SOCK;
+  }
+  let kind = sk_get(n, s, S_PORT);
+  if (kind != RAW_ICMP && kind != RAW_ICMP6) || ip > IP_MAX || ip == 0
     || size < 8 || size > UDP_MAX + 8 || size > blen(buf) {
     return NO_SOCK;
   }
   sk_enter(&mut n, s);
+  let mut proto = IP_ICMP;
+  if kind == RAW_ICMP6 {
+    proto = IP_ICMP6;
+    if !is_v6tok(ip) {
+      return raw6_local(&mut n, ip, buf, size);   // ::1 or our own address
+    }
+  } else if is_v6tok(ip) {
+    return NO_SOCK;                   // an ICMPv4 message cannot go to an IPv6 peer
+  }
   if !can_reach(n, ip) {
     return NO_SOCK;
   }
@@ -1315,7 +1403,7 @@ fn raw_sendto(n: &mut Net, s: u64, to: u64, buf: &Bytes, size: u64) -> u64
     return NO_SOCK;
   }
   eth_header(&mut n, 0, ETH_IP);
-  ip_header(&mut n, 20 + size, IP_ICMP, ip);
+  ip_header(&mut n, 20 + size, proto, ip);
   bcopy(&mut n.out, 34, buf, 0, size);
   if !send_via(&mut n, hop, 34 + size) {
     return NO_SOCK;
@@ -1341,6 +1429,7 @@ fn udp_open(n: &mut Net) -> u64
       sk_set(&mut n, s, S_PEER_PORT, 0);
       sk_set(&mut n, s, S_CORK, 0);
       sk_set(&mut n, s, S_NS, n.ns);
+      sk_set(&mut n, s, S_FAM, FAM_V4);
       return s;
     }
     s = s + 1;
@@ -1411,7 +1500,7 @@ fn udp_bind(n: &mut Net, s: u64, port: u64) -> bool
   if port == 0 {
     return udp_bind_any(&mut n, s) != 0;
   }
-  if sock_find(n, port) != SOCKS {
+  if port_busy(n, port, sk_get(n, s, S_FAM)) {
     return false;
   }
   sk_set(&mut n, s, S_PORT, port);
@@ -1667,7 +1756,7 @@ fn net_up(d: Card) -> Nic
     socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), cork: balloc(SOCKS * UDP_MAX), eph: 0,
     tcbs: alloc(TCBS * TCB_W), rb: rings_new(), iss: 0,
     lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, seen_rx: 0, seen_tick: 0, irq_on: false,
-    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rs_n: 0, rs_until: 0,
+    v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_lo: 0, dns6_hi: 0, dns6_lo: 0, rs_n: 0, rs_until: 0,
     ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,
     nlq: balloc(NLS * NLQ), nls: alloc(NLS * NL_W), nl_at: 0, nl_lim: 0, nl_msg: 0, nl_full: false,
     nat: alloc(NATN * NAT_W), nat_next: 0 };
@@ -2077,12 +2166,44 @@ fn sock_make_raw(c: &mut Nic, s: u64)
   }
 }
 
+/// Sets the address family socket s answers to (FAM_*).
+fn sock_set_fam(c: &mut Nic, s: u64, fam: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) && sk_get(n, s, S_PORT) == 0 {
+        sk_set(&mut n, s, S_FAM, fam);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// Makes socket s (just opened) a raw ICMPv6 socket.
+fn sock_make_raw6(c: &mut Nic, s: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) {
+        sk_set(&mut n, s, S_PORT, RAW_ICMP6);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
 fn sock_is_raw(c: &Nic, s: u64) -> bool
   requires nic_ok(c)
 {
   match c {
     Nic::None => { return false; },
-    Nic::Up(n) => { return udp_is_open(n, s) && sk_get(n, s, S_PORT) == RAW_ICMP; },
+    Nic::Up(n) => { return udp_is_open(n, s) && (sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6); },
   }
 }
 
@@ -2260,7 +2381,7 @@ fn sock_row(c: &Nic, s: u64, ns: u64, f: u64) -> u64
   match c {
     Nic::None => { return 0; },
     Nic::Up(n) => {
-      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP {
+      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 {
         return 0;
       }
       if f == 0 {
