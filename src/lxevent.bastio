@@ -203,16 +203,16 @@ fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
     xfer_u64(&mut k.fs.xfer, 12, vpid_of(k, pid, word % SW_PID) % 0x100000000);   // and ssi_uid (below) is set after
   }
   if word / SW_QUEUE % 2 == 1 {
-    let v = word / SW_VAL;
+    let v = wget(k.sigsave, value_at(pid, s));
     let mut i = 0;
     while i < 4
       invariant i <= 4 && kok(k)
     {
       bset(&mut k.fs.xfer, 8 + i, cast[u8](255));        // ssi_code: SI_QUEUE
-      bset(&mut k.fs.xfer, 44 + i, cast[u8](v / pow256(i) % 256));   // ssi_int
-      bset(&mut k.fs.xfer, 48 + i, cast[u8](v / pow256(i) % 256));   // ssi_ptr
       i = i + 1;
     }
+    xfer_u64(&mut k.fs.xfer, 44, v % 0x100000000);       // ssi_int (its top half is ssi_ptr's, set next)
+    xfer_u64(&mut k.fs.xfer, 48, v);                     // ssi_ptr
   }
   return va <= VA_LAST && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, SFD_INFO) == SFD_INFO;
 }

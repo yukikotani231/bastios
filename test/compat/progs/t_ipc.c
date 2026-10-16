@@ -8,10 +8,27 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/inotify.h>
+#include <sys/signalfd.h>
+#include <sys/syscall.h>
 #include <sys/timerfd.h>
 #include <sys/uio.h>
 #include <sys/un.h>
 #include <sys/wait.h>
+
+/* splice from an empty pipe into a descriptor that cannot be written fails at once (EBADF or EINVAL), as on Linux; it does not wait for data. */
+static int splice_refused(int out) {
+    int p[2];
+    if (pipe(p) < 0)
+        return 0;
+    alarm(5);
+    long r = splice(p[0], NULL, out, NULL, 1, 0);
+    int e = errno;
+    alarm(0);
+    close(p[0]);
+    close(p[1]);
+    return r == -1 && (e == EBADF || e == EINVAL);
+}
 
 int main(void) {
     setup();
@@ -119,6 +136,23 @@ int main(void) {
                     a.st_ino == b.st_ino && a.st_dev == b.st_dev && a.st_mode == b.st_mode;
            close(fd); ok; }));
     unlink("/cu_fifo");
+    {
+        int f0 = open("/spl_f", O_CREAT | O_RDWR, 0600);
+        int ok = 1;
+        sigset_t ss;
+        sigemptyset(&ss);
+        int outs[] = { open("/", O_RDONLY), open("/dev/zero", O_RDONLY), open("/proc/self/maps", O_RDONLY),
+                       epoll_create1(0), eventfd(0, 0), signalfd(-1, &ss, 0), timerfd_create(CLOCK_MONOTONIC, 0),
+                       inotify_init(), open("/spl_f", O_RDONLY), open("/spl_f", O_PATH), -1 };
+        for (unsigned i = 0; i < sizeof outs / sizeof *outs - 1; i++)
+            ok &= outs[i] >= 0 && splice_refused(outs[i]);
+        for (unsigned i = 0; i < sizeof outs / sizeof *outs - 1; i++)
+            if (outs[i] >= 0)
+                close(outs[i]);
+        close(f0);
+        unlink("/spl_f");
+        EXPECT("splice from an empty pipe into a read-only, O_PATH or non-writable descriptor fails at once", ok);
+    }
     EXPECT("isatty(0)", isatty(0) == 1);
     EXPECT("ttyname(0)", ttyname(0) != NULL);
     return done();
