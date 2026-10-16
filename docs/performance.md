@@ -133,10 +133,15 @@ instructions on both. Where BastiOS is behind:
   Most of a round trip is the host's `fsync`: the virtio-blk device does not
   take the cache feature, so QEMU makes every write durable before it answers,
   and the same run with `cache=unsafe` on the drive takes 0.71 s instead of
-  1.16 s. Accepting the feature and flushing only at the queue's barriers does
-  not help while the metadata sectors are written synchronously: each of those
-  writes must then be followed by its own flush, and the run got slower (1.33 s).
-  The gain needs those writes to go through the queue's group commit.
+  1.16 s. Accepting the feature does not help by itself: the queue already
+  writes twice and flushes twice per file (the data, a flush, the directory
+  block, a flush: 1094 writes and 1094 flushes for the run), so a real flush
+  costs the fsync a write-through write costs now, and the synchronous
+  entry-sector writes need a flush each on top. The run got slower with the
+  feature (1.33 s). Gaining anything takes merging a transaction's trailing
+  flush into the next one's leading flush, and queueing the entry-sector
+  writes. That is a large change to the proofs and the crash tests for at
+  most a fifth of the time, so it is not done.
 - `scan` (2.4x in the table) was profiled on a different machine from the
   table's, where a warm run took 0.54 s: the guest's own time is mostly
   `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
