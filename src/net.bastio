@@ -80,7 +80,7 @@ const NO_SOCK: u64 = 18446744073709551615;
 const V6N: u64 = 64;                  // IPv6 peers (src/net6.bastio)
 const V6W: u64 = 4;                   // words per peer: address (2), MAC, in use
 const V6_BASE: u64 = 0xF0000000;      // 240.0.0.0: the first peer's token
-const V6_SELF: u64 = 0xF0000010;      // V6_BASE + V6N: in a socket's name, our own IPv6 address
+const V6_SELF: u64 = 0xF0000040;      // V6_BASE + V6N (keep in step): in a socket's name, our own IPv6 address
 const LOQ: u64 = 64;                  // frames the loopback queue holds at most ...
 const LO_BYTES: u64 = 98304;         // ... in this many bytes (a ring: a frame is as long as it is)
 // The frame buffers (pkt, out, and the loopback queue's slots) are far larger
