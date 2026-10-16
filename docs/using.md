@@ -164,7 +164,11 @@ bastios:~# git --version
 
 What has been tested is this sequence with the mirror replaced by a copy served from the host over HTTP (`echo http://10.0.2.2:8000 > etc/apk/repositories` with the packages in `x86_64/`), since the test machines cannot reach Alpine's mirrors; `make compat` runs it with git, curl, bash, make, jq, rsync, openssl and more (`test/compat/alpine.txt`). Alpine's mirrors serve HTTPS, which has not been tried yet; if it fails, change `https://` to `http://` in `/etc/apk/repositories`: the signatures are checked either way.
 
-## 7. On a real PC
+## 7. A graphical session (early)
+
+From the ISO or USB image, where the screen is a framebuffer, `bwm` starts a small window manager on it: a wallpaper, three windows and a pointer. Click a window to raise and focus it, drag a title bar to move it, type to put text in the focused window, and press Ctrl-Q to leave; the text console comes back. It uses `/dev/fb0` for the screen and `/dev/input/mice` for the mouse (see [linux.md](linux.md)), so it is an ordinary Linux program (`user/bwm.c`). The windows are its own: programs cannot yet open windows of their own.
+
+## 8. On a real PC
 
 [Getting started](getting-started.md#5-boot-from-a-usb-stick) builds a bootable ISO and a USB stick image, and lists the hardware BastiOS supports. The image boots through [Limine](https://github.com/limine-bootloader/limine), which the build fetches itself, so the only package it needs is `xorriso`. `make iso` and `make usb` build it, and `make run-iso` / `make run-uefi` try the image in QEMU first. No real PC has booted it yet; [real-hardware.md](real-hardware.md) says how to try and what to report.
 
@@ -174,6 +178,6 @@ What has been tested is this sequence with the mirror replaced by a copy served 
 - Users, passwords and SSH host keys are kept in memory and lost at power off; only `/disk` is kept.
 - There is no init system. The console starts in the native shell as root; the boot option `login` (the third entry of the ISO and USB boot menu) starts BusyBox's `login` instead.
 - At most 511 processes, a 512 GiB address window each, and 256 MiB of memory in `make run`. The disk holds up to 262143 files and directories; `make disk` writes an image of at most 1 TiB, 33 MiB or the size of the files plus `MKDISK_FREE_MB` (16 by default), whichever is larger. The other limits are listed in the README's Status section.
-- There is no graphical desktop; the screen is a text console when booted from the ISO.
+- The graphical session is a start: `bwm` draws windows of its own, and other programs cannot yet open windows (section 7).
 - Some Linux system calls are missing; the kernel prints a note on the console when a program uses one (Dropbear's `execveat` does, harmlessly). [linux.md](linux.md) lists what is there, and `make compat` measures it.
 - The system call ABI and the disk format can still change between versions.
