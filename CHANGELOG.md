@@ -205,6 +205,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Linux programs
 
+- A `bwm` client can give its window's pixels as shared memory: `BWM_CREATE_SHM` carries a `memfd` over the socket with `SCM_RIGHTS`, the client writes into it and a `BWM_DRAW` with no pixels names the rectangle that changed (`bwm_create_shm` and `bwm_damage` in `user/bwmlib.h`). `bterm` uses it and `bhello -s` shows it; `test/iso_test.sh` checks the pixels on the screendump.
 - `bterm` (`user/bterm.c`), a terminal window for `bwm`: an 80 x 24 grid drawn with the console font, with BusyBox's `ash` on a pseudo-terminal behind it. It reads a VT100 subset (CR, LF, backspace, tab, cursor moves, erase, insert and delete of characters and lines, scroll regions, the alternate screen, colours) and sends keys to the shell. `test/iso_test.sh` types a command into it and reads the output back cell by cell from the screendump.
 
 - `bwm` takes windows from other programs over a UNIX socket at `/tmp/bwm.sock` (`user/bwmproto.h`, with a header-only client library in `user/bwmlib.h`): a client opens a window, draws rectangles of pixels, and gets key, pointer and close events back; the pixels are kept by bwm and the close box tells the client. `bwm -n` starts with no windows of its own and `bwm -c PROGRAM` starts a client. `user/bhello.c` is the test client; `test/iso_test.sh` checks its pixels on a screendump and the key, click and close round trips.
