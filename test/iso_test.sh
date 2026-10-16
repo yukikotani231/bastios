@@ -280,6 +280,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if not good:
             print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
         fails += not good
+        # Editing keys: the arrows send ESC [ A to ESC [ D, Delete ESC [ 3 ~;
+        # the line editor drops the ESC, so the rest shows in the line.
+        mark = len(out)
+        keys = ["e", "c", "h", "o", "spc", "up", "down", "right", "left", "delete"]
+        if usb:
+            usbkeys(qmp_path, keys)
+        else:
+            sendkeys(mon, keys)
+        time.sleep(1)
+        text = grab()
+        good = any(l.endswith("bastios> echo [A[B[C[D[3~") for l in text)
+        print(("ok  " if good else "FAIL"), f"({name}) arrow and Delete keys send escape sequences")
+        if not good:
+            print("\n".join(f"{i}: {l}" for i, l in enumerate(text) if l))
+        fails += not good
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"bastios> ", mark)
         mon.close()
     if ok and not diag and not usb and not nvme and not stick:
         # /dev/fb0 (user/mfb.c): a program draws on the screen, and the
