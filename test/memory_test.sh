@@ -160,17 +160,35 @@ check("pages went out and came back", vm("pswpout") > 1000 and vm("pswpin") > 10
 check("nothing was killed", vm("oom_kill") == kills)
 check("every slot is free again", meminfo("SwapFree") == SWAP_KB)
 # A holder is pushed out by a second program; swapoff brings it home.
-run(f"/disk/mhog hold {HOLD} & big=$!; sleep 1")
+run(f"mkdir /sys/fs/cgroup/sw; echo +memory > /sys/fs/cgroup/cgroup.subtree_control; ash -c 'echo $$ > /sys/fs/cgroup/sw/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 check("a holder and a second program both fit", f"touched {SECOND} MiB" in t and "rc=0" in t and vm("oom_kill") == kills, t)
 used = meminfo("SwapTotal") - meminfo("SwapFree")
 check("the holder's pages are in the swap file", used > 1000, str(used))
+cgswap = int(run("cat /sys/fs/cgroup/sw/memory.swap.current").split()[-2]) if True else 0
+check("the holder's group counts its swapped bytes", cgswap == used * 1024 or cgswap > 1000 * 4096, str(cgswap))
 t = run("/disk/mhog swapoff /disk/swap; echo rc=$?")
 check("swapoff brings the pages back", "swap off" in t and "rc=0" in t and meminfo("SwapTotal") == 0, t)
+check("the group's swapped bytes are back in memory", run("cat /sys/fs/cgroup/sw/memory.swap.current").split()[-2] == "0")
 check("the holder is alive and whole", "bigalive" in run("kill -0 $big && echo bigalive"))
-run("kill -9 $big; sleep 1")
+run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sw")
 # More than memory and swap together: the killer still ends the program.
 run("/disk/mhog swapon /disk/swap")
+# memory.swap.max: nothing of a group at 0 goes to the swap file (the program that
+# wants more memory is killed instead, as there is nothing else to swap);
+# a group with a small limit gets no more into the swap file than that.
+def group_swap(g):
+    return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
+run("mkdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm; echo 0 > /sys/fs/cgroup/sl/memory.swap.max; echo 2097152 > /sys/fs/cgroup/sm/memory.swap.max")
+run(f"ash -c 'echo $$ > /sys/fs/cgroup/sl/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
+used = meminfo("SwapTotal") - meminfo("SwapFree")
+check("a group with memory.swap.max 0 keeps its pages in memory", group_swap("sl") == 0 and "Out of memory: Killed process" in t, f"{group_swap('sl')} {t}")
+run("kill -9 $big; sleep 1")
+run(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
+check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") == 2097152, f"{group_swap('sm')} {t}")
+run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm")
 t = run(f"/disk/mhog touch {HUGE}; echo rc=$?")
 check("a program bigger than memory and swap is killed", "Out of memory: Killed process" in t and "rc=137" in t, t)
 check("the system carries on after it", "alive" in run("echo alive") and meminfo("SwapFree") == SWAP_KB)

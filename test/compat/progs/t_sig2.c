@@ -13,7 +13,7 @@
 #include <time.h>
 
 static volatile int got;
-static volatile char *where;
+static char *volatile where;   /* the pointer is volatile: a handler sets it, and the compiler must not assume otherwise */
 static void h(int s) { char here; got = s; where = &here; }
 
 /* Sends SIGUSR1 to the parent after 50 ms, from a child. */

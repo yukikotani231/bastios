@@ -116,6 +116,7 @@ const P_LEN: u64 = 38;
 const G_A0: u64 = 118;                         // the call's first argument (the result may overwrite its register)
 const G_PID: u64 = 119;
 const G_FANM: u64 = 120;
+const G_COOL: u64 = 121;                       // no call waits for a reader before this time (ns): the last wait found none
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -851,6 +852,48 @@ fn ino_bits(k: &Kernel, x: u64) -> u64
 }
 
 // ---------------------------------------------------------------- the calls
+
+/// Calls that queue inotify or fanotify events: the ones ino_before and
+/// ino_after report on, and writes.
+fn ino_producer(n: u64) -> bool {
+  return n == LX_OPEN || n == LX_CREAT || n == LX_OPENAT || n == LX_OPENAT2 || n == LX_UNLINK || n == LX_UNLINKAT
+    || n == LX_RMDIR || n == LX_RENAME || n == LX_RENAMEAT || n == LX_RENAMEAT2 || n == LX_MKDIR || n == LX_MKDIRAT
+    || n == LX_LINK || n == LX_LINKAT || n == LX_SYMLINK || n == LX_SYMLINKAT || n == LX_MKNOD || n == LX_MKNODAT
+    || n == LX_WRITE || n == LX_WRITEV || n == LX_PWRITE64 || n == LX_TRUNCATE || n == LX_FTRUNCATE;
+}
+
+const INO_WAIT: u64 = 30000000;                // how long a call waits for a reader of a half-full queue (ns): three timer ticks, as a reader on an idle processor starts at the next tick
+const INO_COOL: u64 = 1000000000;              // and how long calls go on without waiting after one found no reader
+
+/// Before a call that queues events, when some queue is half full: the
+/// process waits (true) for its reader to drain it, as it would have no
+/// need to on Linux, whose queue holds 16384 events and this kernel's far
+/// fewer. On another processor a reader gets no turn from the writer's
+/// yielding. The wait is bounded: if the queue is still half full when it
+/// ends, nobody is reading, and for INO_COOL calls go on at once.
+fn ino_throttle(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if iget(k, INO_G + G_WATCHES) == 0 && iget(k, INO_G + G_FANM) == 0 {
+    return false;
+  }
+  let n = pget(k.procs, pid, F_REGS + R_LXNR);
+  if !ino_producer(n) || !ino_pressed(k) || k.ns < iget(k, INO_G + G_COOL) {
+    return false;
+  }
+  let r = pget(k.procs, pid, F_RESTART);
+  if r >= 2 && r - 2 <= k.ns {
+    iput(&mut k, INO_G + G_COOL, sat_add(k.ns, INO_COOL));
+    return false;
+  }
+  let mut dl = sat_add(k.ns, INO_WAIT);
+  if r >= 2 {
+    dl = r - 2;
+  }
+  wait_until(&mut k, pid, n, dl);
+  return true;
+}
 
 /// Whether some inotify or fanotify instance has half its queue full. The
 /// kernel then lets another process run after the call that queued the
