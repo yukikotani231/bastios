@@ -78,4 +78,5 @@ def main():
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
                                f"busybox={busybox}", f"g={root}"], env)
 
-main()
+if __name__ == "__main__":
+    main()

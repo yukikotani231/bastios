@@ -339,7 +339,7 @@ jobs:
           df -h /
           ls -la build/compat/alpine/disk build/compat/*.img build/compat/alpine-run.img || true
           tar -tf build/compat/alpine/disk/root.tar | head -3 || true
-          grep -E '^\| [a-z0-9_-]+ \| .*\| fail \|' build/compat/report.md | cut -c1-400 | head -30 || true
+          grep -E '^\| [a-z0-9_-]+ \| .*\| fail \|' build/compat/report.md | cut -c1-1200 | head -30 || true
           tail -n 120 build/compat/serial.log || true
       - if: always()
         uses: actions/upload-artifact@v4
