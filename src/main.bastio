@@ -1318,7 +1318,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut debug_exit = port_claim(&mut ports, DEBUG_EXIT, 1);
   let mut uart = Uart { io: port_claim(&mut ports, COM1, 8), present: true };
   let mut kbd = Kbd { data: port_claim(&mut ports, KBD_DATA, 1), status: port_claim(&mut ports, KBD_STATUS, 1),
-    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, aux_irq: false, wheel: false, mb: 0, mn: 0, pend: 0 };
+    shift: false, ctrl: false, alt: false, ext: false, present: true, aux: false, aux_irq: false, wheel: false, mb: 0, mn: 0, pend: 0, kev: 0 };
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
