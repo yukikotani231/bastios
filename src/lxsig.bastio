@@ -970,12 +970,19 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
 /// lx_kill with the sender word of the siginfo; `thread` aims a signal at
 /// one thread (tkill) instead of the process, where it goes to a thread
 /// that does not block it.
-fn lx_kill_w(k: &mut Kernel, pid: u64, target: u64, s: u64, word: u64, thread: bool) -> u64
+fn lx_kill_w(k: &mut Kernel, pid: u64, raw: u64, s: u64, word: u64, thread: bool) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
   if s > NSIG {
     return EINVAL;
+  }
+  // The call's pid is an int: a C library may pass a negative one with the
+  // upper half of the register clear, which still names a group.
+  let low = raw % 0x100000000;
+  let mut target = low;
+  if low >= 0x80000000 {
+    target = low + 0xFFFFFFFF00000000;
   }
   if target == 0 || target >= 0x8000000000000000 {
     let all = target == 0xFFFFFFFFFFFFFFFF;
