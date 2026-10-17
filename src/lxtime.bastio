@@ -708,9 +708,10 @@ fn lx_alarms(k: &mut Kernel)
   requires kok(k)
   ensures kok(k)
 {
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE and has no timer
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
   {
     let dl = get(k.alarms, 2 * p);
     if dl != 0 && k.ns >= dl {

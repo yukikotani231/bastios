@@ -599,9 +599,7 @@ build/compat/gotools.tar: test/compat/gotools.py test/compat/godisk.py test/comp
 # image on Docker Hub (musl, linked to Alpine's libc), pinned by the layer's SHA-256.
 STRACE_LAYER := sha256:1380bf046ab307e9340c2273fdcd2b1f224d019544a8db326d5776eeac5c5525
 build/compat/strace: | build/compat/src
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:stagex/strace:pull" | jq -r .token) && \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/strace.tgz https://registry-1.docker.io/v2/stagex/strace/blobs/$(STRACE_LAYER)
-	echo "$(patsubst sha256:%,%,$(STRACE_LAYER))  build/compat/src/strace.tgz" | sha256sum -c - >/dev/null
+	test/compat/hubblob.sh stagex/strace $(STRACE_LAYER) build/compat/src/strace.tgz
 	rm -rf build/compat/src/strace && mkdir build/compat/src/strace
 	tar xzf build/compat/src/strace.tgz -C build/compat/src/strace usr/bin/strace
 	strip -o $@.part build/compat/src/strace/usr/bin/strace
@@ -621,10 +619,8 @@ GDB_LAYERS := sha256:0b9b7727f90001f8d1eaeff1db88899575254b37875d1ab6fd10af2703e
 GDB_LIBS := libexpat.so.1 liblzma.so.5 libreadline.so.8 libz.so.1 libzstd.so.1 libncursesw.so.6 libpython3.14.so.1.0 libmpfr.so.6 libgmp.so.10 libdebuginfod.so.1 libstdc++.so.6 libgcc_s.so.1 libcurl.so.4 libelf.so.1 libfts.so.0 libjson-c.so.5 libbrotlicommon.so.1 libbrotlidec.so.1 libcares.so.2 libidn2.so.0 libnghttp2.so.14 libpsl.so.5 libssl.so.3 libcrypto.so.3 libunistring.so.5
 build/compat/gdb.tar: | build/compat/src
 	rm -rf build/compat/src/gdb && mkdir -p build/compat/src/gdb/all build/compat/src/gdb/gdb/bin build/compat/src/gdb/gdb/lib
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$(GDB_REPO):pull" | jq -r .token) && \
 	for d in $(GDB_LAYERS); do \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/gdb/layer.tgz https://registry-1.docker.io/v2/$(GDB_REPO)/blobs/$$d && \
-	  echo "$${d#sha256:}  build/compat/src/gdb/layer.tgz" | sha256sum -c - >/dev/null && \
+	  test/compat/hubblob.sh $(GDB_REPO) $$d build/compat/src/gdb/layer.tgz && \
 	  tar xzf build/compat/src/gdb/layer.tgz -C build/compat/src/gdb/all --exclude='dev/*' --no-same-owner || exit 1; \
 	done
 	cd build/compat/src/gdb && cp all/usr/bin/gdb gdb/bin/gdb && cp all/lib/ld-musl-x86_64.so.1 gdb/lib/ld-musl-x86_64.so.1 && ln -s ld-musl-x86_64.so.1 gdb/lib/libc.musl-x86_64.so.1 && \
@@ -978,8 +974,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
-# Besides runtest/syscalls: the pseudo-terminal and the namespace (container) tests.
-LTP_SUITES ?= --suite pty --suite containers
+# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests.
+LTP_SUITES ?= --suite pty --suite containers --suite cve
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -1003,6 +999,7 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
+	$(MAKE) -C build/ltp/testcases/cve -s -k || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs

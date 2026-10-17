@@ -766,8 +766,12 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     let ova = pget(s.k.procs, p, reg_word(R_FAULT));
     if ova >= USER_BASE && ova - USER_BASE < USER_SIZE {
       let oq = (ova - USER_BASE) / 4096;
+      // (A stack page it grows into is wanted too: with swap on, a program
+      // that fills memory still calls deeper, and the page comes from swap.)
+      let present = user_present(&mut s.k.spaces, p, ova);
       let want = anon_covers(s.k.anon, p, oq) || lazy_covers(s.k, p, oq)
-        || (user_present(&mut s.k.spaces, p, ova) && !user_page_writable(&mut s.k.spaces, p, ova));
+        || (present && !user_page_writable(&mut s.k.spaces, p, ova))
+        || (!present && oq >= STACK_FIRST && oq < STACK_LOW && pget(s.k.procs, p, F_BRK) != 0);
       let oo = oom_fault(&mut s.k, &mut s.con, p, want);
       if oo == OOM_RETRY {
         pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
