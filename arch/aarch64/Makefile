@@ -213,6 +213,9 @@ $(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/com
 	for o in $$(grep -v '^#' test/compat/busybox.config) $(COMPAT_BB_MORE); do \
 	  sed -i "s/^# $$o is not set/$$o=y/" $(B)/compat/bb/.config; done
 	yes "" | $(MAKE) -C $(B)/compat/bb -s oldconfig >/dev/null
+	# musl's <net/if.h> defines IFF_DORMANT and glibc's does not, and BusyBox's `ip link` prints the operstate only under
+	# #ifdef IFF_DORMANT: build it in, so the output is what the x86-64 build prints.
+	sed -i 's/^#ifdef IFF_DORMANT$$/#if 1/' $(B)/compat/bb/networking/libiproute/ipaddress.c
 	$(MAKE) -C $(B)/compat/bb -s CROSS_COMPILE=$(CROSS) CFLAGS_busybox="-static $(ULFLAGS)" busybox
 	cp $(B)/compat/bb/busybox $@
 
