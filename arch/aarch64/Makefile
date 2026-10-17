@@ -446,6 +446,14 @@ $(B)/compat/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | $
 $(B)/compat/bastioc1: $(B)/compat/bastioc1.c
 	$(ACC) -O2 -w -static -no-pie -s $(ULFLAGS) -o $@ $<
 
+# bastiolang's developer tools (tools/bastiofmt, tools/bastio-lsp), built the
+# way bastioc1 is, as static executables for the Bastio disk (bastio.txt).
+$(B)/compat/bastiofmt.c $(B)/compat/bastio-lsp.c: $(B)/compat/%.c: $(BASTIOC) $(wildcard $(BASTIOLIB)/tools/*/*.bastio) | $(B)/compat
+	$(BASTIOC) --emit-c -o $@ $(BASTIOLIB)/tools/$*/$(if $(filter bastio-lsp,$*),lsp,$*).bastio
+
+$(B)/compat/bastiofmt $(B)/compat/bastio-lsp: $(B)/compat/%: $(B)/compat/%.c
+	$(ACC) -O2 -w -static -no-pie -s $(ULFLAGS) -o $@ $<
+
 # The mkdisk.py arguments for the toolchain: the headers are listed by this
 # machine's compiler (tcc cannot run here), the C runtime is musl's static one.
 BASTIO_TOOLS = $(shell BASTIO_DEPCC=gcc BASTIO_DEPMODE=-E BASTIO_CLIBS="crt1.o crti.o crtn.o libc.a" test/compat/bastiotools.sh \
@@ -453,11 +461,11 @@ BASTIO_TOOLS = $(shell BASTIO_DEPCC=gcc BASTIO_DEPMODE=-E BASTIO_CLIBS="crt1.o c
 
 # The Bastio disk (test/compat/bastio.txt): the same toolchain and the programs
 # it builds, on a disk of its own, as on x86-64 (bastiodisk.sh).
-$(B)/compat/bastio.img: $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a test/compat/bastiodisk.sh \
+$(B)/compat/bastio.img: $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/bastiofmt $(B)/compat/bastio-lsp test/compat/bastiodisk.sh \
     test/compat/bastiotools.sh $(wildcard test/compat/bastio/*.bastio) test/compat/mkdisk.py | $(B)/compat
 	BASTIO_DEPCC=gcc BASTIO_DEPMODE=-E BASTIO_CLIBS="crt1.o crti.o crtn.o libc.a" test/compat/bastiodisk.sh $@ \
 	  $(B)/compat/bastioc1 $(B)/compat/bastioc1.c $(B)/compat/z3 $(B)/compat/tcc $(CURDIR)/$(TCC_SRC) \
-	  $(MUSL_ROOT)/include $(MUSL_ROOT)/lib $(BASTIOLIB)/stage1
+	  $(MUSL_ROOT)/include $(MUSL_ROOT)/lib $(BASTIOLIB)/stage1 $(B)/compat/bastiofmt $(B)/compat/bastio-lsp
 
 # Debian (glibc) and Node (musl, V8) the same way, from the arm64 layers.
 $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox

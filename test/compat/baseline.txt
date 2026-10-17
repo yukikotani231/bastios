@@ -1541,6 +1541,8 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a compile error is reported
+rust: rust: rust-analyzer reports its version
+rust: rust: rust-analyzer finds a type error in a crate
 podman: podman: unpack the image root and set it up
 podman: podman: version
 podman: podman: import a root and run a container as root

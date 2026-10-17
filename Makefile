@@ -918,8 +918,24 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
 # gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
 # digest, its layers kept in ALPINE_CACHE like the others'. x86-64 only.
-build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/rust-analyzer build/compat/rust-src.tgz
+	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --rust-analyzer build/compat/rust-analyzer --rust-src build/compat/rust-src.tgz
+
+# The standard library's source, pinned by the SHA-256 of its tar.gz in the Rust
+# release's manifest; the Rust disk unpacks it where rust-analyzer looks for it.
+build/compat/rust-src.tgz: | build/compat/src
+	curl -fsSL -o $@.part $(RUST_SRC_URL)
+	echo "$(RUST_SRC_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	mv $@.part $@
+
+# rust-analyzer, Rust's language server (a static musl program), for the Rust
+# disk: it goes in as /usr/local/cargo/bin/rust-analyzer. x86-64 only.
+build/compat/rust-analyzer: | build/compat/src
+	curl -fsSL -o build/compat/src/rust-analyzer.tgz $(RUST_ANALYZER_URL)
+	echo "$(RUST_ANALYZER_SHA256)  build/compat/src/rust-analyzer.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/rust-analyzer && mkdir build/compat/src/rust-analyzer
+	tar xzf build/compat/src/rust-analyzer.tgz -C build/compat/src/rust-analyzer --strip-components=3 --wildcards '*/rust-analyzer-preview/bin/rust-analyzer'
+	mv build/compat/src/rust-analyzer/rust-analyzer $@
 
 # Rootless-capable Podman (the static mgoltzsche/podman image), as a tar file
 # the cases unpack, for podman.txt. Pinned by digest, its layers kept in
