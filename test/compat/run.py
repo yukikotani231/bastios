@@ -621,7 +621,7 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
     if status is None:
         return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
 
 
@@ -637,7 +637,7 @@ def run_on_host(name, cmd, expected, timeout):
     while body and not body[-1]:
         body.pop()
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
