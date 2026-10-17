@@ -29,6 +29,7 @@ else
   MEM=${MEM:-64M}
   UPROG=build/user/mhog.elf
 fi
+if [ "$ARCH" = aarch64 ]; then TIMEOUT=${TIMEOUT:-900}; fi   # emulated on an x86 host: the swap-bound cases take minutes
 TIMEOUT=${TIMEOUT:-300}
 SMP=${SMP:-1}
 
