@@ -1599,3 +1599,14 @@ t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
 t_inotify: two hundred and fifty timerfds at once
 t_timens: an offset that overflows the clock is ERANGE
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
+apps: ash: a 1200-byte typed line
+apps: wget: a file from the host
+apps: wget: 1 MiB from the host
+apps: wget: a missing file is an error
+apps: httpd: serve a page, fetch it over loopback
+apps: wget: HTTPS from the host (BusyBox's own TLS)
+apps: wget: 1 MiB over HTTPS
+apps: wget: an IPv6 loopback server
+apps: nc: a raw HTTP request to the host
+apps: netns: a new network namespace has only lo, down
+apps: netns: a veth pair on a bridge; ping across, wget out through masquerade

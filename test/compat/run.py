@@ -298,7 +298,7 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
-AARCH64_APPS = ("lua", "qjs", "sqlite3")
+AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns")
 
 
 class Guest:
