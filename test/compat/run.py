@@ -57,6 +57,14 @@ NOTE = re.compile(r"\[pid \d+: Linux system call (\d+) not implemented\]")
 KILLNOTE = re.compile(r"\[pid \d+ \(.*\): .*killed\]$|\[fault diag: ")
 
 
+def clip(text, head=300, tail=450):
+    """The start and the end of a failing check's output: the start says what
+    went wrong first, the end says how it finished."""
+    if len(text) <= head + tail:
+        return text
+    return text[:head] + " ... " + text[-tail:]
+
+
 def syscall_names():
     names = {}
     for line in open(os.path.join(HERE, "syscalls.txt")):
@@ -621,7 +629,7 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
     if status is None:
         return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps(clip("\n".join(body))) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
 
 
@@ -637,7 +645,7 @@ def run_on_host(name, cmd, expected, timeout):
     while body and not body[-1]:
         body.pop()
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps(clip("\n".join(body))) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
