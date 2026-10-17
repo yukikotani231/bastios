@@ -2601,9 +2601,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     if dp > dobs {
       a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in each namespace inside, down to its own
       a = put_n(&mut o, a, vpid_of(k, pid, p));
-      let mut j = smaller(dp - dobs, 3);
-      while j > 0 && j <= 3
-        invariant j <= 3 && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
+      let mut j = smaller(dp - dobs, PN_LEVELS);
+      while j > 0 && j <= PN_LEVELS
+        invariant j <= PN_LEVELS && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
       {
         j = j - 1;
         a = put_c(&mut o, a, 9);
