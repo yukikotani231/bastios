@@ -179,6 +179,8 @@ fn lx_number(n: u64) -> u64
   if n == 169 { return LX_GETTIMEOFDAY; }
   if n == 170 { return LX_SETTIMEOFDAY; }
   if n == 171 { return LX_ADJTIMEX; }
+  if n == 224 { return LX_SWAPON; }
+  if n == 225 { return LX_SWAPOFF; }
   if n == 173 { return LX_GETPPID; }
   if n == 174 { return LX_GETUID; }
   if n == 175 { return LX_GETEUID; }

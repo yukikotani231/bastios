@@ -47,6 +47,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/input/mice") || xfer_is(x, 0, n, "dev/psaux") {
     return DEV_MICE;                        // src/lxmouse.bastio
   }
+  if xfer_is(x, 0, n, "dev/input/event0") {
+    return DEV_KEYEV;                       // src/lxkeyev.bastio
+  }
   if xfer_is(x, 0, n, "dev/ttyUSB0") || xfer_is(x, 0, n, "dev/ttyACM0") {
     return DEV_SER;                         // src/lxserial.bastio
   }
@@ -83,6 +86,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_TTY {
     return 0x500;
   }
+  if d == DEV_PTMX {
+    return 0x502;                           // 5:2
+  }
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return 0x700 + d - DEV_LOOP;            // block major 7
   }
@@ -91,6 +97,9 @@ fn dev_rdev(d: u64) -> u64 {
   }
   if d == DEV_FB {
     return 0x1D00;                          // 29:0, /dev/fb0
+  }
+  if d == DEV_KEYEV {
+    return 0xD40;                           // 13:64, /dev/input/event0
   }
   if d == DEV_MICE {
     return 0xD3F;                           // 13:63, /dev/input/mice
@@ -118,6 +127,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev == 0x500 || rdev == 0x501 {
     return DEV_TTY;
   }
+  if rdev == 0x502 {
+    return DEV_PTMX;                        // a /dev/ptmx made by mknod, in a chroot
+  }
   if rdev >= 0x700 && rdev < 0x700 + LOOP_N {
     return DEV_LOOP + rdev - 0x700;
   }
@@ -126,6 +138,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   }
   if rdev == 0x1D00 {
     return DEV_FB;
+  }
+  if rdev == 0xD40 {
+    return DEV_KEYEV;
   }
   if rdev == 0xD3F || rdev == 0xA01 {
     return DEV_MICE;                        // /dev/input/mice, /dev/psaux (10:1)

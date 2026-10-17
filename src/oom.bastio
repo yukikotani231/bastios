@@ -184,6 +184,9 @@ fn oom_fault(k: &mut Kernel, con: &mut Con, p: u64, want: bool) -> u64
   if pc_shrink(&mut k.fs.pc, &mut k.mem, PC_N) > 0 && find_free(&mut k.mem) < NPAGES {
     return OOM_RETRY;
   }
+  if swap_out(&mut k, 32) > 0 && find_free(&mut k.mem) < NPAGES {
+    return OOM_RETRY;                       // pages went to swap (src/swap.bastio)
+  }
   if oom_dying(k) {
     return OOM_WAIT;
   }
