@@ -1656,3 +1656,4 @@ t_time: a zone file is written
 t_time: TZ naming a zone file reads it
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
 t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
+java: java: Eclipse JDT LS, the language server, finds a type error and answers a hover
