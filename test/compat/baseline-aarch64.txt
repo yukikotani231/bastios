@@ -397,6 +397,7 @@ t_inotify: removing it twice is EINVAL
 t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
+t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
