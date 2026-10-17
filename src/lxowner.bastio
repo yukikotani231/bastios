@@ -155,6 +155,24 @@ fn sigio_perm(k: &Kernel, cred: u64, p: u64) -> bool
   return euid == 0 || euid == tr || euid == ts || ruid == tr || ruid == ts;
 }
 
+/// The lowest descriptor of process p that is open on description h
+/// (LXNFD if there is none).
+fn fd_on(k: &Kernel, p: u64, h: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result <= LXNFD
+{
+  let mut fd = 0;
+  while fd < LXNFD
+    invariant fd <= LXNFD && kok(k)
+  {
+    if fd_ofd(k, p, fd) == h {
+      return fd;
+    }
+    fd = fd + 1;
+  }
+  return LXNFD;
+}
+
 /// Sends description h's I/O signal to its owner, if it has one.
 fn sigio_send(k: &mut Kernel, h: u64)
   requires kok(k) && h < OFD_N
@@ -178,7 +196,12 @@ fn sigio_send(k: &mut Kernel, h: u64)
     let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p);
     let hit = (ty == F_OWNER_PGRP + 1 && pgid_of(k.procs, p) == id) || (ty != F_OWNER_PGRP + 1 && p == id);
     if live && hit && sigio_perm(k, cred, p) {
-      post_sig(&mut k, p, s);
+      let fd = fd_on(k, p, h);
+      if of_get(k.ofd, h, OF_SIG) != 0 && fd < LXNFD {
+        post_wv(&mut k, p, s, SW_QUEUE + POLL_MARK, fd);   // F_SETSIG: the siginfo names the descriptor
+      } else {
+        post_sig(&mut k, p, s);
+      }
     }
     p = p + 1;
   }

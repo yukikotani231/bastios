@@ -55,6 +55,7 @@ const CHLD_MARK: u64 = 0x10000000000000;   // 2^52: a SIGCHLD from a child's cha
 const CHLD_CODE: u64 = 0x100000000000;     // 2^44: three bits of si_code (CLD_EXITED .. CLD_CONTINUED)
 const TIMER_MARK: u64 = 0x20000000000000;  // 2^53: from a POSIX timer (with SW_QUEUE): si_code SI_TIMER, si_pid the timer's id
 const FAULT_CODE: u64 = 0x1000000000000;   // 2^48: in a fault word, si_code (a byte) times this, then the address (below)
+const POLL_MARK: u64 = 0x2000000000000;    // 2^49: from O_ASYNC input on a descriptor (with SW_QUEUE): si_code POLL_IN, si_band POLLIN|POLLRDNORM, si_fd its value
 const MESGQ_MARK: u64 = 0x4000000000000;   // 2^50: a sender word from a message queue (post_mesgq)
 const TKILL_MARK: u64 = 0x8000000000000;   // 2^51: from tkill or tgkill (si_code SI_TKILL, si_pid the sender's group)
 const RTQ_N: u64 = 32;                        // queued instances of real-time signals per process, beyond the pending ones
@@ -574,6 +575,13 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
     bset(&mut b, at + 8, cast[u8](word / CHLD_CODE % 8));     // si_code: CLD_*
     bset(&mut b, at + 24, cast[u8](word / SW_VAL % 256));     // si_status
     bset(&mut b, at + 25, cast[u8](word / SW_VAL / 256 % 256));
+    return;
+  }
+  if word / SW_QUEUE % 2 == 1 && word / POLL_MARK % 2 == 1 {
+    bset(&mut b, at + 8, 1);                            // si_code: POLL_IN
+    bset(&mut b, at + 16, 0x41);                        // si_band: POLLIN | POLLRDNORM
+    bset(&mut b, at + 17, 0);
+    xfer_u64(&mut b, at + 24, value);                   // si_fd
     return;
   }
   if word / TKILL_MARK % 2 == 1 {

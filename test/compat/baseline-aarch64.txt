@@ -1311,3 +1311,4 @@ alpine: vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
 alpine: gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again
 alpine: sshd: Alpine's OpenSSH server takes a public-key login from its own client
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
+t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
