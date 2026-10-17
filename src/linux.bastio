@@ -55,6 +55,9 @@ const LX_IO_GETEVENTS: u64 = 208;
 const LX_IO_SUBMIT: u64 = 209;
 const LX_IO_CANCEL: u64 = 210;
 const LX_MEMBARRIER: u64 = 324;
+const LX_MBIND: u64 = 237;
+const LX_SET_MEMPOLICY: u64 = 238;
+const LX_GET_MEMPOLICY: u64 = 239;
 const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
 const LX_CREAT: u64 = 85;
@@ -894,6 +897,17 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
+  // The memory policy calls: there is one memory node, so every policy is
+  // already in force. mbind and set_mempolicy accept what they are given
+  // (numpy's BLAS threads call mbind); get_mempolicy says MPOL_DEFAULT.
+  if n == LX_MBIND || n == LX_SET_MEMPOLICY {
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
+  }
+  if n == LX_GET_MEMPOLICY {
+    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, a, 4));   // *mode = MPOL_DEFAULT
+    return KEEP;
+  }
   // membarrier: MEMBARRIER_CMD_QUERY answers that no command is
   // supported, so callers (liburcu, which BIND uses) keep to their own
   // barriers; any other command is EINVAL, as Linux says for one it lacks.
@@ -1002,6 +1016,7 @@ const SIOCSIFNAME: u64 = 0x8923;
 const SIOCGIFINDEX: u64 = 0x8933;
 const SIOCGIFMTU: u64 = 0x8921;
 const SIOCGIFTXQLEN: u64 = 0x8942;
+const SIOCETHTOOL: u64 = 0x8946;
 const IFREQ_SIZE: u64 = 40;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
@@ -1163,6 +1178,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
+  }
+  if d.kind == K_SOCK && req == SIOCETHTOOL {
+    return EOPNOTSUPP;                       // no driver to ask (psutil's net_if_stats takes this)
   }
   if d.kind != K_CONSOLE {
     return ENOTTY;

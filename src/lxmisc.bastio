@@ -195,7 +195,7 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
 
 /// getrusage(who, usage): the user and system times (see tm_ticks) of the
 /// caller, or with RUSAGE_CHILDREN of its waited-for children; the rest
-/// is zero.
+/// is zero (ru_maxrss too, for the children).
 fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -211,6 +211,11 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
   xfer_u64(&mut k.fs.xfer, 16, st / 100);            // ru_stime
   xfer_u64(&mut k.fs.xfer, 24, st % 100 * 10000);
+  if !children {
+    // ru_maxrss in kilobytes: every page the process has counts as resident
+    // (the peak is not kept; this is the current size).
+    xfer_u64(&mut k.fs.xfer, 32, smaller(anon_count(&mut k, pid, 0, WPAGES), WPAGES) * 4);
+  }
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;
   }
