@@ -1170,4 +1170,6 @@ utsname03_clone
 utsname03_unshare
 utsname04_clone
 utsname04_unshare
+userns07
+userns08
 pidns13
