@@ -44,9 +44,16 @@
 // SECCOMP_RET_TRACE) which one it is, with the call's number and arguments,
 // the result at an exit and the filter's data at a seccomp stop.
 //
-// Not done: the exit event and PTRACE_O_TRACEVFORKDONE (PTRACE_SETOPTIONS
-// keeps them and only PTRACE_O_EXITKILL acts), the floating point and debug
-// registers, and PTRACE_LISTEN. A tracer that is not the parent hears of its
+// PTRACE_O_TRACEEXIT stops the tracee before exit and exit_group finish
+// (PTRACE_EVENT_EXIT, the status as the event message; the call starts again
+// when the tracer resumes it), and PTRACE_O_TRACEVFORKDONE stops a vfork
+// parent when its child lets the address space go. A stop signal stops a
+// seized tracee in a ptrace-stop of its own (PTRACE_EVENT_STOP, the signal in
+// the status), which PTRACE_LISTEN turns into a plain group-stop: the tracee
+// stays stopped, and SIGCONT ends it with another event stop.
+//
+// Not done: the exit event of a process a signal ends, the debug registers.
+// A tracer that is not the parent hears of its
 // tracee's end once, then the parent reaps it. There is no Yama scope: the
 // caller needs root or the target's user and group ids, as for
 // pidfd_getfd.
@@ -73,6 +80,8 @@ const PTRACE_SETFPREGS: u64 = 15;
 const PTRACE_ATTACH: u64 = 16;
 const PTRACE_DETACH: u64 = 17;
 const PTRACE_SETOPTIONS: u64 = 0x4200;
+const EV_EXIT: u64 = 6;                // PTRACE_EVENT_EXIT
+const EV_VFORK_DONE: u64 = 5;          // PTRACE_EVENT_VFORK_DONE
 const PTRACE_GETEVENTMSG: u64 = 0x4201;
 const PTRACE_GETSIGINFO: u64 = 0x4202;
 const PTRACE_SETSIGINFO: u64 = 0x4203;
@@ -80,6 +89,7 @@ const PTRACE_GETREGSET: u64 = 0x4204;
 const PTRACE_SETREGSET: u64 = 0x4205;
 const PTRACE_SEIZE: u64 = 0x4206;
 const PTRACE_INTERRUPT: u64 = 0x4207;
+const PTRACE_LISTEN: u64 = 0x4208;
 const PTRACE_GET_SYSCALL_INFO: u64 = 0x420e;
 const NT_PRSTATUS: u64 = 1;
 const USER_DEBUGREG: u64 = 848;          // offsetof(struct user, u_debugreg)
@@ -183,7 +193,13 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
   if t / TS_CUT % 2 == 1 && t / TS_EXIT % 2 == 1 && sys && !detach {
     next = next + TS_CUT;                   // the signal that cut the call short is next
   }
-  tr2_put(&mut k, c, next);
+  tr2_put(&mut k, c, sat_add(next, t / TS_XEV % 2 * TS_XEV));
+  if t / TS_VFDONE % 2 == 1 && t / TS_EV % 16 == 2 && !detach {
+    // The vfork event is over: the vfork-done one comes next, with the
+    // same message (the child's id).
+    tr2_put(&mut k, c, tr2_get(k, c) % TS_EV + EV_VFORK_DONE * TS_EV + t / TS_MSG % 65536 * TS_MSG);
+    post_from(&mut k, c, 5, c);
+  }
   jc_set(&mut k, c, jc_get(k, c) / JC_EXECED % 2 * JC_EXECED);   // the stop is no news any more
   if sig != 0 {
     pset(&mut k.procs, c, F_SIGPEND, pget(k.procs, c, F_SIGPEND) | sbit(sig));
@@ -330,6 +346,54 @@ fn pt_fork_event(k: &mut Kernel, p: u64, c: u64, kind: u64)
   }
   tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + kind * TS_EV + vpid_of(k, p, c) % 65536 * TS_MSG);
   post_from(&mut k, p, 5, p);               // SIGTRAP, which the stop reports with the event
+}
+
+/// Process p calls exit or exit_group with status `code`. With
+/// PTRACE_O_TRACEEXIT its tracer is told first: p stops with SIGTRAP and
+/// PTRACE_EVENT_EXIT (the status, code << 8, is the event message), and the
+/// call starts again when the tracer resumes it. True if p stops.
+fn pt_exit_event(k: &mut Kernel, p: u64, code: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let w = tr_get(k, p);
+  let t = tr2_get(k, p);
+  let rip = pget(k.procs, p, F_REGS + R_RIP);
+  if w % 65536 == 0 || tr_opt(w) / 64 % 2 == 0 || t / TS_XEV % 2 == 1 || rip < SYSCALL_LEN {
+    return false;
+  }
+  pset(&mut k.procs, p, F_REGS + R_RIP, rip - SYSCALL_LEN);
+  tr2_put(&mut k, p, t % TS_EV + EV_EXIT * TS_EV + (code % 256) * 256 * TS_MSG + TS_XEV);
+  post_from(&mut k, p, 5, p);
+  return true;
+}
+
+/// Process p has made a child with vfork (a copy here: the parent does not
+/// wait). If its tracer asked for PTRACE_O_TRACEVFORKDONE, the stop for the
+/// vfork event is followed by one for the child's end of the borrowing, as
+/// soon as the tracer resumes it (pt_resume).
+fn pt_vfork_copied(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let w = tr_get(k, p);
+  let t = tr2_get(k, p);
+  if w % 65536 != 0 && tr_opt(w) / 32 % 2 == 1 && t / TS_EV % 16 == 2 {
+    tr2_put(&mut k, p, sat_add(t, TS_VFDONE * (1 - t / TS_VFDONE % 2)));
+  }
+}
+
+/// Process p's vfork child c has let go of the address space: with
+/// PTRACE_O_TRACEVFORKDONE p's tracer is told (the child's id is the message).
+fn pt_vfork_done(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && 1 <= p && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let w = tr_get(k, p);
+  if w % 65536 != 0 && tr_opt(w) / 32 % 2 == 1 {
+    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_VFORK_DONE * TS_EV + vpid_of(k, p, c) % 65536 * TS_MSG);
+    post_from(&mut k, p, 5, p);
+  }
 }
 
 /// Process p has made a new program (execve). With PTRACE_O_TRACEEXEC its
@@ -660,6 +724,17 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
     post_from(&mut k, p, SIGKILL, pid);
     return 0;
   }
+  if req == PTRACE_LISTEN {
+    // Only a seized tracee: it is restarted, but kept from running, as by a
+    // stop signal; SIGCONT ends the stop with an event stop (post_sig).
+    let w = tr_get(k, p);
+    if tr_opt(w) / 512 % 2 == 0 {
+      return EIO;
+    }
+    tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), 0, 0, 0, tr_opt(w)));
+    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + TS_LISTEN);
+    return 0;
+  }
   if req == PTRACE_GET_SYSCALL_INFO {
     // struct ptrace_syscall_info: op, arch, ip, sp, then entry (nr, six
     // arguments), exit (result, is_error) or seccomp (nr, arguments,
@@ -751,6 +826,11 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
     }
     xfer_u64(&mut k.fs.xfer, 0, sig);
     xfer_u64(&mut k.fs.xfer, 8, code);
+    if sig != 5 && 1 <= sig && sig <= NSIG {
+      // The siginfo the signal was sent with: its sender, SI_TKILL, the
+      // address of a fault, a queued value (the word of src/lxsig.bastio).
+      info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(p, sig)), wget(k.sigsave, value_at(p, sig)));
+    }
     return lx_put_out(&mut k, pid, data, 128);
   }
   if req == PTRACE_SETSIGINFO {

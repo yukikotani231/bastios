@@ -819,10 +819,27 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       pt_stepped(&mut s.k, p);
     }
     let mut addr = pget(s.k.procs, p, F_REGS + R_RIP);
+    // The siginfo's si_code: SEGV_MAPERR (1) for an address nothing maps,
+    // SEGV_ACCERR (2) for a page the access is not allowed on (the page
+    // fault error code says it was present), ILL_ILLOPN (2) for a bad
+    // opcode, SI_KERNEL (0x80) for a general protection fault.
+    let mut code = 1;
     if v == 14 {
       addr = pget(s.k.procs, p, F_REGS + 19);   // CR2
+      let off = addr - smaller(addr, USER_BASE);
+      let low = pget(s.k.procs, p, F_MMAP);
+      if pget(s.k.procs, p, F_REGS + 18) % 2 == 1 {
+        code = 2;
+      } else if addr >= USER_BASE && low <= STACK_FIRST * 4096 && off >= low && off < STACK_FIRST * 4096 && !hole_within(s.k, p, off / 4096, off / 4096 + 1) {
+        code = 2;                           // inside the mmap area: a PROT_NONE reservation maps no pages
+      }
+    } else if v == 6 {
+      code = 2;
+    } else if v == 13 {
+      code = 128;
+      addr = 0;
     }
-    if fault_caught(&mut s.k, p, sig, addr) {
+    if fault_caught(&mut s.k, p, sig, addr, code) {
       return (p + 1) % NPROC;
     }
     puts(&mut s.con, "\r\n[pid ");
