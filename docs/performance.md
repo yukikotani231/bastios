@@ -118,6 +118,18 @@ running; the second table below splits the first run from the later ones.)
 | tgz | 3.37 / 2.89 | 4.20 / 1.92 | 0.80x / 1.51x |
 | scan | 0.97 / 1.05 | 0.41 / 0.41 | 2.37x / 2.57x |
 
+Measured again on 2026-10-17 after the directory-listing, lazy-entry and
+removal changes below (the same programs; `-smp 2`, 512 MiB, median of 3 on a
+different host, so the ratios and not the seconds are comparable):
+
+| Workload | BastiOS (s) | Linux (s) | BastiOS / Linux |
+|---|---:|---:|---:|
+| untar | 0.93 | 0.32 | 2.88x |
+| apk | 8.65 | 6.30 | 1.37x |
+| hello | 0.79 | 0.64 | 1.23x |
+| tgz | 1.72 | 1.25 | 1.37x |
+| scan | 0.47 | 0.26 | 1.76x |
+
 How to read it: a build of many files is CPU-bound, and `make1` and `make2`
 run at the speed of Linux's (0.96x to 1.06x); user-side work is the same
 instructions on both. Where BastiOS is behind:
