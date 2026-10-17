@@ -486,6 +486,17 @@ def mon_nic():
         v = re.search(r": (0x[0-9a-f]+)", r)
         got.append("%s=%s" % (name, v.group(1) if v else "?"))
     print("DEBUG nic:", " ".join(got), flush=True)
+    r = mon_cmd("xp /1wx 0x%x" % (bar + 0x2800))
+    v = re.search(r": (0x[0-9a-f]+)", r)
+    if v:
+        # The eight receive descriptors: the status byte (bit 0 = DD, a frame
+        # waiting for the guest) and the length of each.
+        d = mon_cmd("xp /32wx %s" % v.group(1))
+        words = [int(w, 16) for line in d.splitlines() if re.match(r"\s*[0-9a-f]+:", line)
+                 for w in re.findall(r"0x([0-9a-f]{8})", line.split(":", 1)[1])]
+        ring = ["%d:st=%02x,len=%d" % (i, words[4 * i + 3] & 0xff, words[4 * i + 2] & 0xffff)
+                for i in range(min(8, len(words) // 4))]
+        print("DEBUG ring:", " ".join(ring), flush=True)
 
 def check(ok, what):
     global fails
