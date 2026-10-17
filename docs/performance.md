@@ -153,6 +153,11 @@ instructions on both. Where BastiOS is behind:
   (the host is noisy: single runs ranged 1.1 to 1.8 s before the change);
   `apk` improved by about 5%. Directories and hard links are still written
   at once, so a directory is on the disk before the entries in it.
+  The same goes for removing a file the disk never held (or held empty):
+  its entry rides the next commit as the creation did, and `O_TRUNC` on a
+  file that is already empty no longer drains the queue. The `create` test
+  (create, write 1 KiB, close, unlink) went from 2 host writes per
+  iteration to 0.5 and from about 2.2 ms to 0.8-1.2 ms on the same host.
 - `scan` (2.4x in the table) was profiled on a different machine from the
   table's, where a warm run took 0.54 s: the guest's own time is mostly
   `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
