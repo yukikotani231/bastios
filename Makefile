@@ -980,8 +980,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
-# Besides runtest/syscalls: the pseudo-terminal and the namespace (container) tests.
-LTP_SUITES ?= --suite pty --suite containers
+# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests.
+LTP_SUITES ?= --suite pty --suite containers --suite cve
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -1005,6 +1005,7 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
+	$(MAKE) -C build/ltp/testcases/cve -s -k || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs
