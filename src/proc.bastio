@@ -1495,8 +1495,9 @@ fn evg(k: &Kernel, at: u64) -> u64
   return 0;
 }
 
-/// Sets word at of k.evt, growing the table to hold it (in steps of 4096
-/// words, up to EVT_LEN). Nothing is stored when memory runs out.
+/// Sets word at of k.evt. The first store of a non-zero word allocates the
+/// whole table (in steps, the freed smaller tables would fragment a heap
+/// with an exact-size free list). Nothing is stored when memory runs out.
 fn evs(k: &mut Kernel, at: u64, v: u64)
   requires kok(k)
   ensures kok(k)
@@ -1508,11 +1509,7 @@ fn evs(k: &mut Kernel, at: u64, v: u64)
     if v == 0 {
       return;                              // a zero word is already what reads give
     }
-    let mut n = (at / 4096 + 1) * 4096;
-    if n > EVT_LEN {
-      n = EVT_LEN;
-    }
-    if !zgrow(&mut k.evt, n) {
+    if !zgrow(&mut k.evt, EVT_LEN) {
       return;
     }
   }
