@@ -205,6 +205,37 @@ static int cgroup_cpuset(void) {
     return ok;
 }
 
+/* pids.events counts the forks pids.max refused, in the group at its limit. */
+static int cgroup_pids_events(void) {
+    if (!put("/sys/fs/cgroup/cgroup.subtree_control", "+pids")) return 0;
+    if (mkdir("/sys/fs/cgroup/cgp", 0755) != 0) return 0;
+    int ok = 0;
+    char buf[64];
+    do {
+        if (!slurp("/sys/fs/cgroup/cgp/pids.events", buf, sizeof buf) || strcmp(buf, "max 0\n") != 0) { errno = 1001; break; }
+        if (!put("/sys/fs/cgroup/cgp/pids.max", "1")) { errno = 1002; break; }
+        pid_t p = fork();
+        if (p == 0) {
+            char me[32];
+            snprintf(me, sizeof me, "%d\n", (int)getpid());
+            if (!put("/sys/fs/cgroup/cgp/cgroup.procs", me)) _exit(10);
+            pid_t q = fork();
+            if (q >= 0 || errno != EAGAIN) _exit(11);
+            q = fork();
+            _exit(q >= 0 || errno != EAGAIN ? 12 : 0);
+        }
+        int st = 0;
+        if (p < 0 || waitpid(p, &st, 0) != p || !WIFEXITED(st) || WEXITSTATUS(st) != 0) { errno = 1100 + (WIFEXITED(st) ? WEXITSTATUS(st) : 99); break; }
+        if (!slurp("/sys/fs/cgroup/cgp/pids.events", buf, sizeof buf) || strcmp(buf, "max 2\n") != 0) { errno = 1003; break; }
+        ok = 1;
+    } while (0);
+    int saved = errno;
+    ok = rmdir("/sys/fs/cgroup/cgp") == 0 && ok;
+    put("/sys/fs/cgroup/cgroup.subtree_control", "-pids");
+    if (!ok) errno = saved;
+    return ok;
+}
+
 /* The other memory files a runtime writes: memory.high, memory.low,
  * memory.min and memory.swap.max read back what was written ("max" and 0 as
  * they start), memory.swap.current is 0 and memory.stat counts the pages the
@@ -671,6 +702,7 @@ int main(void) {
     EXPECT("not root: EPERM", not_root());
     EXPECT("a cgroup namespace roots the tree", cgroup_ns());
     EXPECT("cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there", cgroup_cpuset());
+    EXPECT("pids.events counts the forks pids.max refused", cgroup_pids_events());
     EXPECT("memory.high, low, min, swap.max and stat read back what a runtime writes", cgroup_mem_files());
     EXPECT("memory.max kills the biggest process of a group that passes it", cgroup_mem());
     EXPECT("seccomp USER_NOTIF: a supervisor answers a call", notifier());

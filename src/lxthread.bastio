@@ -381,7 +381,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if !pn_open_for_new(k, nsk_of(k, NSK_PID, pid)) {
     return ENOMEM;                          // the init of its PID namespace has ended
   }
-  if !cg_fork_ok(k, pid) {
+  if !cg_fork_ok(&mut k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
   if flags & CLONE_PIDFD != 0 && (fd_free(k, pid, 0) >= LXNFD || (flags & CLONE_PARENT_SETTID != 0 && ptid == pfdp)) {
