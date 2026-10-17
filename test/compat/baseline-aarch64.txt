@@ -657,6 +657,8 @@ t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
 t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do
 t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
+t_mem: mprotect makes 300 MiB of a PROT_NONE reservation readable, writable and executable (a JIT's code range), more than the machine has: only touched pages count, and code written there runs
+t_mem: mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the machine has: only touched pages count
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space
