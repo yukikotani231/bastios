@@ -1314,7 +1314,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     // open, lstat, fstat check of os.fwalk and shutil compares the two.
     let ff = pi_get(k.pipes, d.x, 4);
     if ff >= 1 && ff - 1 < FIFO_N {
-      let h = get(k.evt, FIFO_AT + (ff - 1) * FIFO_STRIDE);
+      let h = evg(k, FIFO_AT + (ff - 1) * FIFO_STRIDE);
       if h >= 1 {
         let fm = file_meta(&mut k.fs, h - 1);
         if fm.ok {

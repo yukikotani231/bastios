@@ -453,7 +453,7 @@ fn idle_horizon(k: &Kernel) -> u64
   while t < TFD_N
     invariant t <= TFD_N && kok(k)
   {
-    if get(k.evt, t * TFD_STRIDE + 2) != 0 {
+    if evg(k, t * TFD_STRIDE + 2) != 0 {
       return 0;                             // a timerfd is armed
     }
     t = t + 1;
