@@ -341,18 +341,29 @@ int main(void) {
            if (sf >= 0) close(sf);
            unlink("mem_shared");
            ok; }));
-    EXPECT("mprotect makes 300 MiB of a PROT_NONE reservation writable (and executable where writable pages can run code: AArch64), more than the machine has: only touched pages count", ({
-#ifdef __x86_64__
-           int rwx = PROT_READ | PROT_WRITE;   /* x86-64 maps an executable range at once (NX) */
-#else
-           int rwx = PROT_READ | PROT_WRITE | PROT_EXEC;
-#endif
+    for (int x = 0; x < 2; x++)
+    EXPECT(x ? "mprotect makes 300 MiB of a PROT_NONE reservation readable, writable and executable (a JIT's code range), more than the machine has: only touched pages count, and code written there runs"
+             : "mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the machine has: only touched pages count", ({
+           int rwx = PROT_READ | PROT_WRITE | (x ? PROT_EXEC : 0);
            size_t sz = 300u << 20;
            char *r = mmap(0, 512u << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
            int ok = r != MAP_FAILED && mprotect(r, sz, rwx) == 0;
            if (ok) {
                r[0] = 1; r[sz / 2] = 2; r[sz - 1] = 3;
                ok = r[0] == 1 && r[sz / 2] == 2 && r[sz - 1] == 3 && r[4096] == 0;
+#if defined(__x86_64__) || defined(__aarch64__)
+               if (ok && x) {
+#ifdef __x86_64__
+                   static const unsigned char code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};   /* mov eax, 42; ret */
+#else
+                   static const unsigned char code[] = {0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6};   /* mov w0, #42; ret */
+#endif
+                   char *c = r + sz / 4;   /* a page not touched yet */
+                   memcpy(c, code, sizeof code);
+                   __builtin___clear_cache(c, c + sizeof code);
+                   ok = ((int (*)(void))(void *)c)() == 42;
+               }
+#endif
                ok = ok && mprotect(r + 4096, 8192, PROT_NONE) == 0 && mprotect(r + 4096, 8192, PROT_READ | PROT_WRITE) == 0 && r[4096] == 0;
                ok = ok && munmap(r, 512u << 20) == 0;
            }

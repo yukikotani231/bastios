@@ -2,6 +2,7 @@
 # make compat-ltp fails if one of them stops passing.
 abort01
 accept01
+accept02
 accept03
 accept4_01
 access01
@@ -505,6 +506,7 @@ lstat01_64
 lstat02
 lstat02_64
 madvise01
+madvise02
 madvise03
 madvise05
 madvise10
@@ -604,6 +606,7 @@ msgsnd05
 msgsnd06
 msync01
 msync02
+msync03
 munlock01
 munlock02
 munlockall01

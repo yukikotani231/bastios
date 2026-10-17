@@ -145,9 +145,28 @@ static int pidns(void)
     return 0;
 }
 
+/* The process at nesting level n (the first PID namespace is level 0) makes
+ * the next level, whose init has id 1, until the sixth; the seventh is
+ * refused. Returns an exit status: 0 when all of it held. */
+static int pidnest_below(int n)
+{
+    int st;
+    errno = 0;
+    if (n == 6)
+        return syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0) == -1 && errno == ENOSPC ? 0 : 13;
+    pid_t c = syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
+    if (c == 0)
+        _exit(getpid() == 1 ? pidnest_below(n + 1) : 12);
+    if (c < 0)
+        return 14;
+    if (waitpid(c, &st, 0) != c)
+        return 14;
+    return WIFEXITED(st) ? WEXITSTATUS(st) : 15;
+}
+
 /* PID namespaces inside one another: the init of the inner one is 1 there
  * and 2 in the outer one, which sees it by that, and the host sees the
- * outer init with both ids; the fourth level is refused. */
+ * outer init with both ids; the seventh level is refused. */
 static int pidnest(void)
 {
     int st;
@@ -161,16 +180,7 @@ static int pidnest(void)
         if (b == 0) {
             if (getpid() != 1 || getppid() != 0)
                 _exit(11);
-            pid_t c = syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0);
-            if (c == 0) {
-                errno = 0;
-                if (getpid() != 1)
-                    _exit(12);
-                _exit(syscall(SYS_clone, CLONE_NEWPID | SIGCHLD, 0, 0, 0, 0) == -1 && errno == ENOSPC ? 0 : 13);
-            }
-            if (c != 2 || waitpid(c, &st, 0) != c)
-                _exit(14);
-            _exit(WIFEXITED(st) ? WEXITSTATUS(st) : 15);
+            _exit(pidnest_below(2));
         }
         if (b != 2 || kill(b, 0) != 0)
             _exit(16);

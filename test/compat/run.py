@@ -150,7 +150,7 @@ class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
     /repo.git, a git repository for the dumb HTTP protocol, and
-    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
+    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua, /lsp-gopls-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
 
     def __init__(self, tcc_src=None):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
@@ -179,7 +179,7 @@ class WebServer:
             subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)
             subprocess.run(git + ["update-server-info"], cwd=bare, capture_output=True)
             shutil.rmtree(work)
-        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "termdebug.lua"):
+        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "gopls-client.lua", "termdebug.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
         add_aports(self.dir, tcc_src)
@@ -621,7 +621,7 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
     if status is None:
         return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
 
 
@@ -637,7 +637,7 @@ def run_on_host(name, cmd, expected, timeout):
     while body and not body[-1]:
         body.pop()
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
@@ -743,6 +743,8 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--python-disk", help="the Python disk (the root of the python:alpine image) for python.txt")
+    ap.add_argument("--python-wheels", help="the Python packages python.txt installs, served at HOSTURL/wheels/")
     ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
@@ -759,7 +761,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "debian", "node", "go", "java", "rust", "podman"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "rust", "python", "podman"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -781,6 +783,7 @@ def main():
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
+    python = load_applets(os.path.join(HERE, "python.txt"))
     java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     podman = load_applets(os.path.join(HERE, "podman.txt"))
@@ -796,8 +799,8 @@ def main():
     # (ocipull.sh's), and a lane that needs a package another lane's case
     # installs runs that case too; such a shared case is counted from the
     # lane it belongs to. The group stays alpine.
-    #   alpine   the cases up to the install of tmux, cmake and
-    #            lua-language-server, but the container cases and Vim's;
+    #   alpine   the cases up to the install of Neovim, but the container
+    #            cases;
     #   alpine2  the container cases: they need nothing else the other cases
     #            install. The bridged-network cases stay where they are: the
     #            package they install brings libraries the other cases
@@ -807,31 +810,36 @@ def main():
     #   alpine3  the install of tmux, cmake and lua-language-server and the
     #            cases after it (they use Neovim and gcc too), but cmake's;
     #   alpine4  cmake's case, after that install, and the programs on the
-    #            terminal (alpine_tty.txt: Neovim, gcc, make and tmux).
+    #            terminal (alpine_tty.txt: Neovim, gcc, make and tmux);
+    #   alpine5  the install of Neovim and the cases after it, up to the
+    #            install of tmux, cmake and lua-language-server, but the
+    #            container cases and Vim's (Neovim, gcc, gdb and strace).
     # The lanes are cut so that each takes about as long as the others
     # under emulation on aarch64 (CI runs alpine and alpine2 on one runner,
-    # alpine3 and alpine4 on another).
+    # alpine5 on a second, alpine3 and alpine4 on a third).
     at = {c[0]: i for i, c in enumerate(alpine)}
     alpine_setup = alpine[:3]
     nvim_gcc = [alpine[at["apk: install neovim over HTTP"]],
                 alpine[at["apk: install gcc and the C library's headers over HTTP"]]]
     tools_at = at["apk: install tmux, cmake and lua-language-server over HTTP"]
+    nvim_at = at["apk: install neovim over HTTP"]
     containers = [c for c in alpine[3:] if c[0].startswith("container:")
                   and "joins a network namespace" not in c[0]]
     vim = [alpine[at["vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it"]]]
     cmake = [alpine[at["cmake: configure, build and run a C project"]]]
-    alpine1 = [c for c in alpine[:tools_at] if c not in containers + vim]
+    alpine1 = [c for c in alpine[:nvim_at] if c not in containers + vim]
+    alpine5 = alpine_setup + [c for c in alpine[nvim_at:tools_at] if c not in containers + vim]
     alpine2 = alpine_setup + containers + vim
     alpine3 = alpine_setup + nvim_gcc + [c for c in alpine[tools_at:] if c not in containers + cmake]
     alpine4 = alpine_setup + nvim_gcc + [alpine[tools_at]] + cmake
     # Each lane's cases, by the key its results come back under, and the
     # lane each case belongs to.
-    alpine_parts = {"alpine": alpine1, "alpine#2": alpine2, "alpine#3": alpine3, "alpine#4": alpine4}
+    alpine_parts = {"alpine": alpine1, "alpine#2": alpine2, "alpine#5": alpine5, "alpine#3": alpine3, "alpine#4": alpine4}
     alpine_owner = {}
-    for k in ["alpine", "alpine#2", "alpine#3", "alpine#4"]:
+    for k in ["alpine", "alpine#2", "alpine#5", "alpine#3", "alpine#4"]:
         for c in alpine_parts[k]:
             alpine_owner.setdefault(c[0], k)
-    alpine_lanes = ["alpine", "alpine2", "alpine3", "alpine4"]
+    alpine_lanes = ["alpine", "alpine2", "alpine3", "alpine4", "alpine5"]
     if args.registry_image and any(map(lane_chosen, alpine_lanes)):
         web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None
@@ -940,6 +948,10 @@ def main():
                                             ("alpine-tty", "programs on the terminal in Alpine",
                                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])],
                           "384M"))
+        if lane_chosen("alpine5"):
+            disk = os.path.join(args.out, "alpine-run5.img")
+            shutil.copyfile(args.alpine_disk, disk)
+            lanes.append(("alpine5", disk, [("alpine#5", "Neovim, gcc and the debuggers in Alpine", applets_lane(alpine5, 300))], "384M"))
     if args.debian_disk and lane_chosen("debian"):
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
@@ -957,6 +969,19 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append(("go", disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
+    if args.python_disk and lane_chosen("python"):
+        # Compilers and test suites on the emulated processor take a while;
+        # the cases write the disk. The packages pip installs come from the
+        # host's web server.
+        disk = os.path.join(args.out, "python-run.img")
+        shutil.copyfile(args.python_disk, disk)
+        if args.python_wheels:
+            os.symlink(os.path.abspath(args.python_wheels), os.path.join(web.dir, "wheels"))
+        os.symlink(os.path.join(HERE, "pyprogs"), os.path.join(web.dir, "pyprogs"))
+        if args.alpine_repo and not os.path.exists(os.path.join(web.dir, "alpine")):
+            os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
+            os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
+        lanes.append(("python", disk, [("python", "Python development", applets_lane(python, 900))], "1G"))
     if args.jdk_disk and lane_chosen("java"):
         # The cases unpack a root of about 400 MB onto the disk: a copy.
         disk = os.path.join(args.out, "jdk-run.img")
@@ -1013,7 +1038,7 @@ def main():
                 if c["name"] not in merged or alpine_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["alpine"] = sorted(merged.values(), key=lambda c: at.get(c["name"], len(at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "podman"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "python", "podman"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

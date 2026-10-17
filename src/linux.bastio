@@ -55,6 +55,9 @@ const LX_IO_GETEVENTS: u64 = 208;
 const LX_IO_SUBMIT: u64 = 209;
 const LX_IO_CANCEL: u64 = 210;
 const LX_MEMBARRIER: u64 = 324;
+const LX_MBIND: u64 = 237;
+const LX_SET_MEMPOLICY: u64 = 238;
+const LX_GET_MEMPOLICY: u64 = 239;
 const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
 const LX_CREAT: u64 = 85;
@@ -289,6 +292,9 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if d.kind == K_DEV && (d.x | 4) == DEV_SER {   // DEV_MICE or DEV_SER
     return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio; the serial port too
   }
+  if d.kind == K_DEV && d.x == DEV_KEYEV {
+    return keyev_read(&mut k, pid, n, a, va, cnt);  // src/lxkeyev.bastio
+  }
   let mut r = EBADF;
   if d.kind == K_FILE {
     r = lx_file_read(&mut k, pid, d.x, va, cnt);
@@ -348,6 +354,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
   }
+  swap_args(&mut k, pid);                   // pages the arguments point at come back from swap (src/swap.bastio)
   let was = pget(k.procs, pid, F_RESTART);  // a timed wait keeps its deadline here
   pset(&mut k.procs, pid, F_RESTART, 0);
   let mut a = pget(k.procs, pid, F_REGS + R_RDI);
@@ -412,6 +419,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     pfdp = c3.pfd;
     ctid = c3.ctid;
     tls = c3.tls;
+  }
+  if (n == LX_EXIT || n == LX_EXIT_GROUP) && pt_exit_event(&mut k, pid, a) {
+    return SWITCH;                          // PTRACE_O_TRACEEXIT: the tracer is told first
   }
   if n == LX_EXIT && thread_only(k.procs, pid) {
     lx_thread_exit(&mut k, mmu, pid);
@@ -610,8 +620,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
     }
     let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
-    if flags & 0x2000 != 0 && r < 0x8000000000000000 {
-      lock_mapped(&mut k, pid, b);          // MAP_LOCKED
+    if r < 0x8000000000000000 {
+      if flags / MAP_FIXED % 2 == 1 {
+        lock_unmapped(&mut k, pid, r, b);   // what was locked there is replaced
+      }
+      if flags & 0x2000 != 0 {
+        lock_mapped(&mut k, pid, r, b);     // MAP_LOCKED
+      }
     }
     ret(&mut k.procs, pid, r);
     return KEEP;
@@ -649,6 +664,7 @@ fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was:
       sig_reset(&mut k.sigact, r, true);
     }
     pt_fork_event(&mut k, pid, r, 2);
+    pt_vfork_stop(&mut k, pid);
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
@@ -687,6 +703,9 @@ fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was:
         kind = 2;
       }
       pt_fork_event(&mut k, pid, r, kind);
+      if n == LX_VFORK {
+        pt_vfork_copied(&mut k, pid);
+      }
     }
     return KEEP;
   }
@@ -799,6 +818,9 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if is_sys_call(n) {
     return lx_sys_call(&mut k, pid, n, a, b);
   }
+  if is_swap_call(n) {
+    return lx_swap_call(&mut k, pid, n, a, b);
+  }
   if is_prio_call(n) {
     ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));
     return KEEP;
@@ -885,6 +907,17 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
       || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
     ret(&mut k.procs, pid, ENOSYS);
+    return KEEP;
+  }
+  // The memory policy calls: there is one memory node, so every policy is
+  // already in force. mbind and set_mempolicy accept what they are given
+  // (numpy's BLAS threads call mbind); get_mempolicy says MPOL_DEFAULT.
+  if n == LX_MBIND || n == LX_SET_MEMPOLICY {
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
+  }
+  if n == LX_GET_MEMPOLICY {
+    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, a, 4));   // *mode = MPOL_DEFAULT
     return KEEP;
   }
   // membarrier: MEMBARRIER_CMD_QUERY answers that no command is
@@ -995,6 +1028,7 @@ const SIOCSIFNAME: u64 = 0x8923;
 const SIOCGIFINDEX: u64 = 0x8933;
 const SIOCGIFMTU: u64 = 0x8921;
 const SIOCGIFTXQLEN: u64 = 0x8942;
+const SIOCETHTOOL: u64 = 0x8946;
 const IFREQ_SIZE: u64 = 40;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
@@ -1156,6 +1190,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
+  }
+  if d.kind == K_SOCK && req == SIOCETHTOOL {
+    return EOPNOTSUPP;                       // no driver to ask (psutil's net_if_stats takes this)
   }
   if d.kind != K_CONSOLE {
     return ENOTTY;
@@ -2673,9 +2710,10 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // (docs/security.md). Such a copy does not see later writes to the file.
   let cached = sh && !anon && f != NO_FILE && can_write;
   // Private writable anonymous memory gets its pages when first touched
-  // (src/lxanon.bastio), unless MAP_POPULATE or MAP_LOCKED asks for them
-  // now.
-  let lazy = anon && !sh && prot / 2 % 2 == 1 && prot / 4 % 2 == 0 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
+  // (src/lxanon.bastio), executable or not, unless MAP_POPULATE or
+  // MAP_LOCKED asks for them now.
+  let lazy = anon && !sh && prot / 2 % 2 == 1 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
+  let x = prot / 4 % 2 == 1;
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {
@@ -2695,7 +2733,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     fixed_taken(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !cached && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !(lazy && anon_add_x(&mut k, pid, at / 4096, at / 4096 + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
@@ -2703,7 +2741,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Where addr asks, if nothing is there (mmap_hint, src/lxmem.bastio).
     let hp = mmap_hint(&mut k, pid, addr, pages);
     if hp < STACK_FIRST {
-      if !reserve && !(lazy && anon_add(&mut k, pid, hp, hp + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
+      if !reserve && !(lazy && anon_add_x(&mut k, pid, hp, hp + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
         hole_add(&mut k, pid, hp, hp + pages);
         return ENOMEM;
       }
@@ -2712,7 +2750,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
-      if !reserve && !(lazy && anon_add(&mut k, pid, h, h + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+      if !reserve && !(lazy && anon_add_x(&mut k, pid, h, h + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
@@ -2731,7 +2769,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // mapped when an mprotect makes them usable (lx_mprotect), and touching
     // it before that faults, as on Linux. Shared memory is mapped now and
     // hidden (read_only), so the pages mprotect uncovers are the shared ones.
-    if !reserve && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
+    if !reserve && !(lazy && anon_add_x(&mut k, pid, at / 4096, at / 4096 + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);

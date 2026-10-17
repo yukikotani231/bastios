@@ -77,10 +77,10 @@ const SOCKS: u64 = 32;                // UDP sockets in the table
 const RXQ: u64 = 16;                  // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
-const V6N: u64 = 16;                  // IPv6 peers (src/net6.bastio)
+const V6N: u64 = 64;                  // IPv6 peers (src/net6.bastio)
 const V6W: u64 = 4;                   // words per peer: address (2), MAC, in use
 const V6_BASE: u64 = 0xF0000000;      // 240.0.0.0: the first peer's token
-const V6_SELF: u64 = 0xF0000010;      // V6_BASE + V6N: in a socket's name, our own IPv6 address
+const V6_SELF: u64 = 0xF0000040;      // V6_BASE + V6N (keep in step): in a socket's name, our own IPv6 address
 const LOQ: u64 = 64;                  // frames the loopback queue holds at most ...
 const LO_BYTES: u64 = 98304;         // ... in this many bytes (a ring: a frame is as long as it is)
 // The frame buffers (pkt, out, and the loopback queue's slots) are far larger
@@ -116,7 +116,7 @@ const FAM_V4: u64 = 4;                 // an AF_INET socket
 const FAM_V6: u64 = 6;                 // an AF_INET6 socket with IPV6_V6ONLY
 
 // Network namespaces and interfaces (src/netns.bastio).
-const NNET: u64 = 16;                  // network namespaces
+const NNET: u64 = 64;                  // network namespaces
 const NS_W: u64 = 6;                   // words per namespace:
 const NS_USED: u64 = 0;                //   1 while it exists
 const NS_GW: u64 = 1;                  //   the default route's gateway (0: none; ns 0 uses n.gw)
@@ -125,7 +125,7 @@ const NS_LO: u64 = 3;                  //   its loopback interface's slot
 const NS_INO: u64 = 4;                 //   its inode number (/proc/PID/ns/net)
 const NS_OWNER: u64 = 5;               //   the user namespace id that made it (0: the first)
 
-const IFN: u64 = 32;                   // interfaces, all namespaces together
+const IFN: u64 = 128;                  // interfaces, all namespaces together
 const IF_W: u64 = 10;                  // words per interface:
 const IF_KIND: u64 = 0;                //   IFK_*
 const IF_NS: u64 = 1;                  //   its namespace
@@ -154,7 +154,7 @@ const NAME_LO: u64 = 0x6F6C;           // "lo"
 const NAME_ETH0: u64 = 0x30687465;     // "eth0"
 const CAP_NET_ADMIN: u64 = 12;          // configuring interfaces, addresses, routes
 const CAP_NET_RAW: u64 = 13;            // raw sockets (ping)
-const NLS: u64 = 8;                    // netlink sockets (src/rtnl.bastio)
+const NLS: u64 = 32;                   // netlink sockets (src/rtnl.bastio)
 const NLQ: u64 = 8192;                 // the answers each can queue, in bytes
 const NL_W: u64 = 5;                   // words per socket:
 const NL_USED: u64 = 0;

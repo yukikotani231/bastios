@@ -510,6 +510,46 @@ int main(void) {
                _exit(r == 0 && me == (SCHED_FIFO | 0x40000000) && gp == SCHED_OTHER && gq.sched_priority == 0 ? 0 : 1);
            }
            int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("locked pages: msync(MS_INVALIDATE) is EBUSY and madvise(MADV_DONTNEED) EINVAL, until munlock", ({
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_LOCKED, -1, 0);
+           int a = msync(m, 4096, MS_INVALIDATE), ae = errno;
+           int b = madvise(m, 4096, MADV_DONTNEED), be = errno;
+           int c = madvise(m + 4096, 4096, MADV_DONTNEED);          // the second page is locked too
+           munlock(m, 4096);
+           int d = msync(m, 4096, MS_INVALIDATE);
+           int e = madvise(m, 4096, MADV_DONTNEED);
+           int f = madvise(m + 4096, 4096, MADV_DONTNEED), fe = errno;
+           munmap(m, 8192);
+           a == -1 && ae == EBUSY && b == -1 && be == EINVAL && c == -1 && d == 0 && e == 0 && f == -1 && fe == EINVAL; }));
+    EXPECT("locked pages: unmapping or mapping over them unlocks them", ({
+           char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int l = mlock(m, 4096);
+           munmap(m, 4096);
+           char *n = mmap(m, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+           int a = madvise(n, 4096, MADV_DONTNEED);                  // a new mapping is not locked
+           mlock(n, 4096);
+           char *o = mmap(n, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+           int b = madvise(o, 4096, MADV_DONTNEED);                  // nor is one mapped over a locked one
+           munmap(o, 4096);
+           l == 0 && n == m && a == 0 && o == n && b == 0; }));
+    EXPECT("splice from a pipe into a Unix socket and into a TCP connection delivers the bytes", ({
+           int pp[2], sv[2]; pipe(pp); socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+           char in[3000], out[3000]; for (int i = 0; i < 3000; i++) in[i] = i * 7;
+           write(pp[1], in, 3000);
+           long a = splice(pp[0], 0, sv[0], 0, 3000, 0);
+           int got = 0; while (got < a) { int r = read(sv[1], out + got, 3000 - got); if (r <= 0) break; got += r; }
+           int ok1 = a == 3000 && got == 3000 && memcmp(in, out, 3000) == 0;
+           int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+           bind(ls, (void *)&sa, sizeof sa); listen(ls, 1); socklen_t sl = sizeof sa; getsockname(ls, (void *)&sa, &sl);
+           int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (void *)&sa, sizeof sa); int s = accept(ls, 0, 0);
+           write(pp[1], in, 1000);
+           long b = splice(pp[0], 0, c, 0, 1000, 0);
+           got = 0; while (got < b) { int r = read(s, out + got, 1000 - got); if (r <= 0) break; got += r; }
+           int ok2 = b == 1000 && got == 1000 && memcmp(in, out, 1000) == 0;
+           int u = socket(AF_INET, SOCK_DGRAM, 0); write(pp[1], in, 10);
+           long d = splice(pp[0], 0, u, 0, 10, 0);                     // a datagram socket is not done
+           close(pp[0]); close(pp[1]); close(sv[0]); close(sv[1]); close(ls); close(c); close(s); close(u);
+           ok1 && ok2 && d == -1 && errno == EINVAL; }));
     EXPECT("shutdown(SHUT_RD) on a unix socket: reads end, the peer's sends are EPIPE, poll reports POLLRDHUP", ({
            int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
            write(sv[1], "ab", 2);
@@ -780,6 +820,19 @@ int main(void) {
            ok = ok && madvise(m, 2 * 4096, MADV_NORMAL) == 0;
            ok = ok && madvise(m, 3 * 4096, MADV_NORMAL) == -1 && errno == ENOMEM;
            munmap(m, 2 * 4096);
+           ok; }));
+    EXPECT("IPv4 multicast: leaving a group never joined is EADDRNOTAVAIL, a join then a leave works", ({
+           int s = socket(AF_INET, SOCK_DGRAM, 0);
+           struct ip_mreq m;
+           m.imr_multiaddr.s_addr = htonl(0xe0000123);
+           m.imr_interface.s_addr = htonl(INADDR_ANY);
+           int ok = s >= 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, 3) == -1 && errno == EINVAL;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m) == 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
+           close(s);
            ok; }));
     return done();
 }

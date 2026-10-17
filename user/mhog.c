@@ -6,16 +6,20 @@
  *   mhog cache MIB [F]  write a MIB MiB file F (default /tmp/mhog.cache)
  *   mhog mapfile MIB F  map MIB MiB of file F shared and read every page: the
  *                     kernel's page cache holds them afterwards
+ *   mhog mkswap MIB F   make F a MIB MiB swap file (what mkswap does)
+ *   mhog swapon F | swapoff F
  *   mhog meminfo      print MemTotal, MemFree and SwapFree from /proc/meminfo
  *
  * touch exits 0 when it got all its memory; the out-of-memory killer ends
  * it with SIGKILL when the machine runs out first.
  */
+#include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/swap.h>
 #include <unistd.h>
 
 static unsigned long arg_mib(int argc, char **argv) {
@@ -32,6 +36,8 @@ static int grab(unsigned long mib, int verify) {
     for (unsigned long i = 0; i < len; i += 4096)
         p[i] = (unsigned char)(i >> 12);
     if (verify) {
+        printf("mhog: written\n");
+        fflush(stdout);
         for (unsigned long i = 0; i < len; i += 4096)
             if (p[i] != (unsigned char)(i >> 12)) {
                 printf("mhog: page %lu changed\n", i >> 12);
@@ -97,6 +103,48 @@ int main(int argc, char **argv) {
         munmap(p, len);
         close(fd);
         printf("mhog: read %lu MiB of %s (sum %lu)\n", len >> 20, argv[3], sum);
+        return 0;
+    }
+    if (strcmp(argv[1], "mkswap") == 0 && argc > 3) {
+        unsigned long pages = (arg_mib(argc, argv) << 20) / 4096;
+        int fd = open(argv[3], O_CREAT | O_TRUNC | O_RDWR, 0600);
+        if (fd < 0) {
+            printf("mhog: cannot create %s\n", argv[3]);
+            return 1;
+        }
+        static unsigned char page[4096];
+        unsigned int *hdr = (unsigned int *)(page + 1024);
+        hdr[0] = 1;                    // version
+        hdr[1] = pages - 1;            // last_page
+        memcpy(page + 4086, "SWAPSPACE2", 10);
+        if (write(fd, page, 4096) != 4096) {
+            puts("mhog: write failed");
+            return 1;
+        }
+        memset(page, 0, sizeof page);
+        for (unsigned long i = 1; i < pages; i++)
+            if (write(fd, page, 4096) != 4096) {
+                printf("mhog: short write at page %lu\n", i);
+                return 1;
+            }
+        close(fd);
+        printf("mhog: swap file %s, %lu pages\n", argv[3], pages);
+        return 0;
+    }
+    if (strcmp(argv[1], "swapon") == 0 && argc > 2) {
+        if (swapon(argv[2], 0) != 0) {
+            printf("mhog: swapon failed (errno %d)\n", errno);
+            return 1;
+        }
+        puts("mhog: swap on");
+        return 0;
+    }
+    if (strcmp(argv[1], "swapoff") == 0 && argc > 2) {
+        if (swapoff(argv[2]) != 0) {
+            printf("mhog: swapoff failed (errno %d)\n", errno);
+            return 1;
+        }
+        puts("mhog: swap off");
         return 0;
     }
     if (strcmp(argv[1], "meminfo") == 0) {

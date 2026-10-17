@@ -4,15 +4,19 @@
  * it. From the stack, the heap, a data array or a plain read-write mapping
  * that must kill the child with SIGSEGV; from a mapping that is executable,
  * or that mprotect made executable after the code was written, it returns 42.
- * x86-64 only: the other architectures do not mark pages no-execute yet. */
+ * x86-64 (mov eax, 42; ret) and AArch64 (mov w0, #42; ret). */
 #include "compat.h"
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
 
+#ifdef __x86_64__
 static const unsigned char CODE[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
+#else
+static const unsigned char CODE[] = {0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6};
+#endif
 
 typedef int (*fn_t)(void);
 
@@ -30,7 +34,10 @@ static int in_child(int (*body)(void)) {
 
 static unsigned char data_page[4096] __attribute__((aligned(4096)));
 
-static int call(void *p) { return ((fn_t)p)() == 42 ? 0 : 1; }
+static int call(void *p) {
+    __builtin___clear_cache((char *)p, (char *)p + 64);   /* no-op on x86-64 */
+    return ((fn_t)p)() == 42 ? 0 : 1;
+}
 
 static int from_stack(void) {
     unsigned char buf[64] __attribute__((aligned(16)));
