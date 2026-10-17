@@ -821,6 +821,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.scf);
   free(s.k.swp);
   bfree(s.k.mstr);
+  bfree(s.k.xab);
   pool = s.k.mem.pool;
   return 0;
 }
