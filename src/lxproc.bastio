@@ -25,7 +25,7 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if lim != 0 {
     return lim;                             // -EAGAIN: RLIMIT_NPROC
   }
-  if !cg_fork_ok(k, pid) {
+  if !cg_fork_ok(&mut k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
   if !pidns_room(k, pid) {
@@ -70,7 +70,7 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
   if !pidns_room(k, pid) {
     return ENOMEM;                          // the init of its PID namespace has ended
   }
-  if !cg_fork_ok(k, pid) {
+  if !cg_fork_ok(&mut k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
   let c = new_fork_pid(&mut k);
