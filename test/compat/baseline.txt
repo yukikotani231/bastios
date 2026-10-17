@@ -596,6 +596,7 @@ t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
 t_ltp2: SIGBUS: a forked child gets it too
 t_ltp2: SIGBUS: a file cut under a mapping takes the pages past the new end
 t_ltp2: rename: a directory moved from under the working directory leaves it in the moved directory
+t_ltp2: splice from a pipe into a Unix socket and into a TCP connection delivers the bytes
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL

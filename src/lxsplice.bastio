@@ -6,7 +6,8 @@
 // the bytes in the first. vmsplice is writev into a pipe's write end, or
 // readv out of its read end.
 //
-// Not done: splice to or from a socket (EINVAL). The bytes are copied,
+// A pipe can be spliced into a TCP or Unix socket. Not done: splice out of a
+// socket, or into another kind (EINVAL). The bytes are copied,
 // never moved page by page, so SPLICE_F_MOVE and SPLICE_F_GIFT change
 // nothing.
 
@@ -276,8 +277,8 @@ fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u
     if (dout.kind == K_FILE && fget(k.fs.ftab, dout.x, FD_MODE) / O_WRITE % 2 == 0) || (dout.kind == K_DEV && ofd_lacks(k, fd_ofd(k, pid, out), ACC_NOWRITE)) {
       return EBADF;                         // opened read-only
     }
-    if dout.kind == K_SOCK {
-      return EINVAL;                        // not done
+    if dout.kind == K_SOCK && !is_tcp(k, pid, out) && !is_unix(k, pid, out) {
+      return EINVAL;                        // not done: only TCP and Unix sockets take the bytes
     }
     if dout.kind == K_FILE && fget(k.fs.ftab, dout.x, FD_MODE) / O_APPEND % 2 == 1 {
       return EINVAL;                        // as Linux: no splice onto an O_APPEND file
