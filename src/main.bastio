@@ -674,6 +674,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if pt_sys_entry(&mut s.k, p, pget(s.k.procs, p, F_RESTART) != 0) {
       return (p + 1) % NPROC;               // stopped for its tracer before the call (src/lxptrace.bastio)
     }
+    if ino_throttle(&mut s.k, p) {
+      return (p + 1) % NPROC;               // (a reader of a half-full inotify queue goes first)
+    }
     ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
