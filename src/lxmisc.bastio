@@ -1092,6 +1092,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_misc_tail(&mut k, pid, n, a, b, c, r);
   }
   // Everything else (madvise, sync) succeeds doing nothing.
-  assert kok(k) && con_ok(con) && pid < NPROC;
+  assert pid < NPROC;
+  assert kok(k) && con_ok(con);
   return lx_misc_done(&mut k, pid, n, r);
 }

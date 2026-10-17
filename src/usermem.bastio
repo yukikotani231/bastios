@@ -387,10 +387,19 @@ fn frame_page(f: &mut Frame) -> u64
 
 /// Word f of record i of process p in k.anon.
 fn an_at(p: u64, i: u64, f: u64) -> u64
-  requires p < NPROC && i < AN_N && f < AN_W
+  requires p < NPROC && i < AN_N && f < 2
   ensures result < ANON_LEN
 {
-  return (p * AN_N + i) * AN_W + f;
+  return (p * AN_N + i) * 2 + f;
+}
+
+/// The word of process p in k.anon whose bit i says whether the pages of
+/// record i may also run code.
+fn an_xat(p: u64) -> u64
+  requires p < NPROC
+  ensures result < ANON_LEN
+{
+  return NPROC * AN_N * 2 + p;
 }
 
 /// Word i of an, or 0 past its end.
@@ -431,7 +440,7 @@ fn anon_exec(an: &Buf, pid: u64, q: u64) -> bool
   {
     let first1 = an_get(an, an_at(pid, i, 0));
     if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < an_get(an, an_at(pid, i, 1)) {
-      return an_get(an, an_at(pid, i, 2)) == 1;
+      return (an_get(an, an_xat(pid)) >> i) % 2 == 1;
     }
     i = i + 1;
   }

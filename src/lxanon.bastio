@@ -5,9 +5,10 @@
 // instruction again (anon_fault), as Linux does. So a program can reserve
 // more than the machine has (a large malloc, a sparse array, a JIT's code
 // range) and pay only for the pages it touches. Each process has AN_N
-// records in k.anon: the first window page + 1 (0: free), the page count,
-// and 1 if the pages may also run code (PROT_EXEC with PROT_WRITE; the
-// fault maps such a page with the bit it needs, src/usermem.bastio). A record says the
+// records in k.anon: the first window page + 1 (0: free) and the page
+// count, and a word with a bit per record, set if its pages may also run
+// code (PROT_EXEC with PROT_WRITE; the fault maps such a page with the bit
+// it needs, src/usermem.bastio). A record says the
 // pages of its range that are not mapped read as zeros; pages it covers
 // that are mapped are ordinary memory. Records never overlap: a range is
 // forgotten (map_forget, src/lxmem.bastio) before anything is mapped over
@@ -42,15 +43,33 @@ fn anon_add(k: &mut Kernel, pid: u64, from: u64, to: u64) -> bool
   return anon_add_x(&mut k, pid, from, to, false);
 }
 
+/// Whether the pages of record i of process pid may also run code.
+fn anon_xbit(k: &Kernel, pid: u64, i: u64) -> bool
+  requires kok(k) && pid < NPROC && i < AN_N
+{
+  return (get(k.anon, an_xat(pid)) >> i) % 2 == 1;
+}
+
+/// Sets that bit to x.
+fn anon_xset(k: &mut Kernel, pid: u64, i: u64, x: bool)
+  requires kok(k) && pid < NPROC && i < AN_N
+  ensures kok(k)
+{
+  let w = get(k.anon, an_xat(pid));
+  let b: u64 = 1 << i;
+  let on = (w >> i) % 2 == 1;
+  if x && !on && w <= 0xFFFFFFFFFFFFFFFF - b {
+    k.anon = set(k.anon, an_xat(pid), w + b);
+  } else if !x && on && w >= b {
+    k.anon = set(k.anon, an_xat(pid), w - b);
+  }
+}
+
 /// anon_add for memory that may run code as well if x.
 fn anon_add_x(k: &mut Kernel, pid: u64, from: u64, to: u64, x: bool) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let mut xw = 0;
-  if x {
-    xw = 1;
-  }
   if from >= to || to > WPAGES {
     return false;
   }
@@ -65,7 +84,7 @@ fn anon_add_x(k: &mut Kernel, pid: u64, from: u64, to: u64, x: bool) -> bool
       if free == AN_N {
         free = i;
       }
-    } else if get(k.anon, an_at(pid, i, 2)) != xw {
+    } else if anon_xbit(k, pid, i) != x {
       // may run code or not: kept apart
     } else if first1 - 1 == to && pages <= WPAGES {
       // Just above the new range (mmap hands out space downwards).
@@ -83,7 +102,7 @@ fn anon_add_x(k: &mut Kernel, pid: u64, from: u64, to: u64, x: bool) -> bool
   }
   k.anon = set(k.anon, an_at(pid, free, 0), from + 1);
   k.anon = set(k.anon, an_at(pid, free, 1), to - from);
-  k.anon = set(k.anon, an_at(pid, free, 2), xw);
+  anon_xset(&mut k, pid, free, x);
   return true;
 }
 
@@ -116,7 +135,7 @@ fn anon_forget(k: &mut Kernel, pid: u64, from: u64, to: u64)
       } else {
         // A hole in the middle: the left part keeps the record, the right
         // part takes a free one, or gets its pages now.
-        let x = get(k.anon, an_at(pid, i, 2)) == 1;
+        let x = anon_xbit(k, pid, i);
         k.anon = set(k.anon, an_at(pid, i, 1), from - first);
         assert end <= WPAGES;
         if !anon_add_x(&mut k, pid, to, end, x) {
@@ -154,7 +173,7 @@ fn anon_reach(k: &mut Kernel, pid: u64, from: u64, to: u64)
       let b = smaller(first1 - 1 + pages, to);
       if a < b {
         lx_map_pages(&mut k.mem, &mut k.spaces, pid, a, b, false);
-        if get(k.anon, an_at(pid, i, 2)) == 1 {
+        if anon_xbit(k, pid, i) {
           win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, a, b, 6);   // read, write and run
         }
       }
@@ -233,9 +252,9 @@ fn anon_fork(k: &mut Kernel, pid: u64, c: u64)
   {
     k.anon = set(k.anon, an_at(c, i, 0), get(k.anon, an_at(pid, i, 0)));
     k.anon = set(k.anon, an_at(c, i, 1), get(k.anon, an_at(pid, i, 1)));
-    k.anon = set(k.anon, an_at(c, i, 2), get(k.anon, an_at(pid, i, 2)));
     i = i + 1;
   }
+  k.anon = set(k.anon, an_xat(c), get(k.anon, an_xat(pid)));
 }
 
 /// A row with a new window, or a new thread's row (the group's records
