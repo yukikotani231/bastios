@@ -20,11 +20,53 @@ const LX_SETXATTR: u64 = 188;            // 188 .. 199: set, get, list,
 const LX_FREMOVEXATTR: u64 = 199;        // remove, each as path, l-path, fd
 const EOPNOTSUPP_X: u64 = 18446744073709551521;  // 2^64 - 95
 const ENODATA_X: u64 = 18446744073709551555;     // 2^64 - 61
-const XA_N: u64 = 256;                   // attributes in the table (SYS_XA, XAB in src/proc.bastio)
-const XA_ROW: u64 = 320;                 // bytes per attribute in k.mstr from XAB: name, then value
+const XA_N: u64 = 256;                   // attributes in the table (SYS_XA in src/proc.bastio; the rows are k.xab)
+const XA_ROW: u64 = 320;                 // bytes per attribute in k.xab: name, then value
 const XA_NAME: u64 = 64;                 // name bytes (with a NUL, for listxattr)
 const XA_VAL: u64 = 256;                 // the most value bytes
 const XA_VOFF: u64 = 64;                 // where the value starts in a row
+
+/// Byte at of the attribute rows: 0 while the table is not allocated.
+fn xbg(k: &Kernel, at: u64) -> u8
+  requires kok(k)
+{
+  if at < blen(k.xab) {
+    return bget(k.xab, at);
+  }
+  return 0;
+}
+
+/// Allocates the attribute rows (all of them, in one step: a table grown in
+/// steps would fragment a heap with an exact-size free list). False when
+/// memory runs out.
+fn xa_room(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+  ensures result ==> blen(k.xab) == XAB_LEN
+{
+  if blen(k.xab) == XAB_LEN {
+    return true;
+  }
+  let nb = try_balloc(XAB_LEN);
+  if blen(nb) != XAB_LEN {
+    bfree(nb);
+    return false;
+  }
+  let prev = k.xab;
+  k.xab = nb;
+  bfree(prev);
+  return true;
+}
+
+/// Sets byte at of the attribute rows (after xa_room).
+fn xbs(k: &mut Kernel, at: u64, v: u8)
+  requires kok(k)
+  ensures kok(k)
+{
+  if at < blen(k.xab) {
+    bset(&mut k.xab, at, v);
+  }
+}
 
 fn is_xattr_call(n: u64) -> bool
   ensures result == (n >= LX_SETXATTR && n <= LX_FREMOVEXATTR)
@@ -47,7 +89,7 @@ fn xa_find(k: &Kernel, h: u64, nm: &Bytes, nl: u64) -> u64
       while i < nl
         invariant i <= nl && nl < XA_NAME && e < XA_N && nl <= blen(nm) && kok(k)
       {
-        if bget(k.mstr, XAB + e * XA_ROW + i) != bget(nm, i) {
+        if xbg(k, e * XA_ROW + i) != bget(nm, i) {
           same = false;
         }
         i = i + 1;
@@ -241,18 +283,21 @@ fn xa_set(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, vl: u6
     }
   }
   if e < XA_N {
+    if !xa_room(&mut k) {
+      return ENOSPC;
+    }
     let mut i = 0;
     while i < nl
       invariant i <= nl && nl < XA_NAME && e < XA_N && nl <= blen(nm) && kok(k)
     {
-      bset(&mut k.mstr, XAB + e * XA_ROW + i, bget(nm, i));
+      xbs(&mut k, e * XA_ROW + i, bget(nm, i));
       i = i + 1;
     }
     let mut j = 0;
     while j < vl
       invariant j <= vl && vl <= XA_VAL && e < XA_N && kok(k)
     {
-      bset(&mut k.mstr, XAB + e * XA_ROW + XA_VOFF + j, bget(k.fs.xfer, j));
+      xbs(&mut k, e * XA_ROW + XA_VOFF + j, bget(k.fs.xfer, j));
       j = j + 1;
     }
     if get(k.sys, SYS_XA + 3 * e) == 0 && get(k.sys, XA_COUNT) < XA_N {
@@ -295,7 +340,7 @@ fn xa_get(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, size: 
   while j < vl
     invariant j <= vl && vl <= XA_VAL && e < XA_N && kok(k)
   {
-    bset(&mut k.fs.xfer, j, bget(k.mstr, XAB + e * XA_ROW + XA_VOFF + j));
+    bset(&mut k.fs.xfer, j, xbg(k, e * XA_ROW + XA_VOFF + j));
     j = j + 1;
   }
   if vl > 0 && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, vl) != vl {
@@ -329,7 +374,7 @@ fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
         while i < nl
           invariant i <= nl && nl < XA_NAME && total + nl < XFER && e < XA_N && kok(k)
         {
-          bset(&mut k.fs.xfer, total + i, bget(k.mstr, XAB + e * XA_ROW + i));
+          bset(&mut k.fs.xfer, total + i, xbg(k, e * XA_ROW + i));
           i = i + 1;
         }
         bset(&mut k.fs.xfer, total + nl, 0);

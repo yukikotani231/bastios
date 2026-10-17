@@ -1764,6 +1764,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.scf);
   free(sys.k.swp);
   bfree(sys.k.mstr);
+  bfree(sys.k.xab);
   pool = sys.k.mem.pool;
   // Off, or a restart. QEMU's isa-debug-exit device (tests) exits at once,
   // with status 33; elsewhere the port is unused.
