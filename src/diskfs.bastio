@@ -1766,7 +1766,14 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   if i < d.free0 {
     d.free0 = i;
   }
-  if !ent_flush(&mut d, i) {
+  // A file whose only version is the batch's was never on the disk (or was
+  // there empty): nothing the disk holds names blocks that this frees, so
+  // the removal rides the next commit like the creation did.
+  if dropped && oldroot == 0 {
+    if !ent_lazy(&mut d, i) {
+      return false;
+    }
+  } else if !ent_flush(&mut d, i) {
     return false;
   }
   if dropped {
@@ -2605,11 +2612,11 @@ fn disk_truncate(d: &mut DiskFs, i: u64, now: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
+  if dent_get(d, i, E_SIZE) == 0 && dent_tree(d, i) == 0 {
+    return true;                      // already empty: O_TRUNC on a new file
+  }
   disk_drain(&mut d);                 // queued writes reach the disk first
   let r = dent_tree(d, i);
-  if dent_get(d, i, E_SIZE) == 0 && r == 0 {
-    return true;
-  }
   dent_set(&mut d, i, E_SIZE, 0);
   dent_set(&mut d, i, E_ROOT, 0);
   dent_set(&mut d, i, E_MTIME, now);
