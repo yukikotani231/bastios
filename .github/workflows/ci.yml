@@ -31,38 +31,18 @@ jobs:
           path: build/proof-cache
       - run: make build/bastios.elf
       - run: tools/ci-kvm.sh
-      - name: variant Y, no tick stretch
-        run: |
-          sed -i 's/  if s.slept != 0 || s.stop || !s.apic.on {/  if true || s.slept != 0 || s.stop || !s.apic.on {/' src/main.bastio
-          git diff --stat
-          make build/bastios.elf
-      - name: Y NIC=e1000
-        run: NIC=e1000 test/tcp_test.sh
+      - name: MON=1 NIC=e1000
+        run: MON=1 NIC=e1000 test/tcp_test.sh
         continue-on-error: true
-      - name: Y SMP=1 NIC=e1000
-        run: SMP=1 NIC=e1000 test/tcp_test.sh
+      - name: MON=1 SEED=3 NIC=e1000
+        run: MON=1 SEED=3 NIC=e1000 test/tcp_test.sh
         continue-on-error: true
-      - name: Y SEED=2 NIC=e1000
-        run: SEED=2 NIC=e1000 test/tcp_test.sh
+      - name: MON=1 SEED=4 NIC=e1000
+        run: MON=1 SEED=4 NIC=e1000 test/tcp_test.sh
         continue-on-error: true
-      - name: Y SEED=3 NIC=e1000
-        run: SEED=3 NIC=e1000 test/tcp_test.sh
+      - name: MON=1 SMP=1 NIC=e1000
+        run: MON=1 SMP=1 NIC=e1000 test/tcp_test.sh
         continue-on-error: true
-      - name: variant X, no e1000 interrupt
-        run: |
-          git checkout src/main.bastio
-          sed -i 's/^        nic_irq_on(&mut nic);/        \/\/ nic_irq_on(\&mut nic);/' src/main.bastio
-          git diff --stat
-          make build/bastios.elf
-      - name: X NIC=e1000
-        run: NIC=e1000 test/tcp_test.sh
-        continue-on-error: true
-      - name: X SMP=1 NIC=e1000
-        run: SMP=1 NIC=e1000 test/tcp_test.sh
-        continue-on-error: true
-      - name: X SEED=2 NIC=e1000
-        run: SEED=2 NIC=e1000 test/tcp_test.sh
-        continue-on-error: true
-      - name: X SEED=3 NIC=e1000
-        run: SEED=3 NIC=e1000 test/tcp_test.sh
+      - name: MON=1 SEED=5 NIC=e1000
+        run: MON=1 SEED=5 NIC=e1000 test/tcp_test.sh
         continue-on-error: true

@@ -405,12 +405,14 @@ qemu_bin = "qemu-system-x86_64"
 if card == "ena":
     qemu_bin = os.environ.get("QEMU_ENA", "build/qemu-ena/bin/qemu-system-x86_64")
 
+MON_PATH = "/tmp/tcp_test_mon.%d" % os.getpid() if os.environ.get("MON") else None
+MON_ARG = ("unix:%s,server,nowait" % MON_PATH) if MON_PATH else "none"
 link = Link()
 net = Net(link)
 qemu = subprocess.Popen(
     [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", os.environ.get("SMP", "2"),
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-     "-serial", "stdio", "-monitor", "none",
+     "-serial", "stdio", "-monitor", MON_ARG,
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
                 f"remote.type=inet,remote.host=127.0.0.1,remote.port={link.port}",
      "-device", f"{card},netdev=n0"],
@@ -446,9 +448,50 @@ def type_line(line):
     qemu.stdin.write(line.encode() + b"\r")
     qemu.stdin.flush()
 
+def mon_cmd(cmd):
+    """One HMP command on the debug monitor (MON=1), its output."""
+    import socket as _s
+    m = _s.socket(_s.AF_UNIX)
+    m.settimeout(2)
+    m.connect(MON_PATH)
+    buf = b""
+    try:
+        while b"(qemu)" not in buf:
+            buf += m.recv(4096)
+        m.sendall(cmd.encode() + b"\n")
+        buf = b""
+        while buf.count(b"(qemu)") < 1:
+            buf += m.recv(4096)
+    except Exception as e:
+        buf += b" [%s]" % str(e).encode()
+    m.close()
+    return buf.decode(errors="replace")
+
+def mon_nic():
+    """The card's counters and ring pointers, read through the monitor."""
+    import re
+    pci = mon_cmd("info pci")
+    m = re.search(r"8086:100e.*?BAR0: 32 bit memory at (0x[0-9a-f]+)", pci, re.S)
+    if not m:
+        m = re.search(r"BAR0: 32 bit memory at (0x[0-9a-f]+)", pci)
+    if not m:
+        print("DEBUG nic: no BAR0 in", pci[:300].replace("\n", " | "), flush=True)
+        return
+    bar = int(m.group(1), 16)
+    regs = [("RDH", 0x2810), ("RDT", 0x2818), ("RCTL", 0x100), ("IMS", 0xD0), ("GPRC", 0x4074),
+            ("MPC", 0x4010), ("RNBC", 0x40A0), ("GPTC", 0x4080), ("STATUS", 0x8)]
+    got = []
+    for name, off in regs:
+        r = mon_cmd("xp /1wx 0x%x" % (bar + off))
+        v = re.search(r": (0x[0-9a-f]+)", r)
+        got.append("%s=%s" % (name, v.group(1) if v else "?"))
+    print("DEBUG nic:", " ".join(got), flush=True)
+
 def check(ok, what):
     global fails
     print(("ok  " if ok else "FAIL"), what, flush=True)
+    if MON_PATH:
+        mon_nic()
     fails += not ok
 
 def pattern(n, salt):
