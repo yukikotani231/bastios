@@ -247,6 +247,7 @@ fn sfd_read(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
         stop = true;
       } else {
         pset(&mut k.procs, pid, F_SIGPEND, pend & !sbit(s));
+        rtq_refill(&mut k, pid, s);
         done = done + SFD_INFO;
       }
     }

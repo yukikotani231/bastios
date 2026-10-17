@@ -132,7 +132,12 @@ fn vfork_give_back(k: &mut Kernel, mmu: &Mmu, c: u64)
   ensures kok(k)
 {
   let par = pget(k.procs, c, F_PARENT);
-  if par == 0 || par >= NPROC || state(k.procs, par) != LXVFORK || pget(k.procs, par, F_WAIT) != c {
+  if par == 0 || par >= NPROC || pget(k.procs, par, F_WAIT) != c {
+    return;
+  }
+  // The parent waits, or its tracer holds it in the vfork event stop.
+  let waiting = state(k.procs, par) == LXVFORK;
+  if !waiting && state(k.procs, par) != STOPPED {
     return;
   }
   match take_space(&mut k.spaces, c) {
@@ -148,7 +153,12 @@ fn vfork_give_back(k: &mut Kernel, mmu: &Mmu, c: u64)
     },
   }
   pset(&mut k.procs, par, F_WAIT, 0);
-  pset(&mut k.procs, par, F_STATE, READY);
+  if waiting {
+    pset(&mut k.procs, par, F_STATE, READY);
+    pt_vfork_done(&mut k, par, c);
+  } else {
+    pt_vfork_copied(&mut k, par);           // stopped: the vfork-done stop follows its resume
+  }
 }
 
 /// lx_fork, once the child's address space `t` and FPU page are made:
@@ -211,6 +221,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   }
   pidns_enter(&mut k, pid, c);              // with an id in the PID namespace children start in
   pset(&mut k.procs, c, F_SIGPEND, 0);
+  rtq_clear(&mut k, c);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_ASLEEP, 0);       // it has not run yet, whatever its parent was doing
   pset(&mut k.procs, c, F_STATE, READY);
@@ -856,6 +867,20 @@ fn child_of_group(procs: &Buf, c: u64, pid: u64) -> bool
   return par < NPROC && par != 0 && tgid(procs, par) == tgid(procs, pid);
 }
 
+/// The tracer of zombie c, which is not its parent, has reaped the report of
+/// its end: the parent is told now, as Linux does, and wakes from wait.
+fn tracer_reaped(k: &mut Kernel, c: u64)
+  requires kok(k) && 1 <= c && c < NPROC
+  ensures kok(k)
+{
+  let par = pget(k.procs, c, F_PARENT);
+  if 1 <= par && par < NPROC && state(k.procs, c) == ZOMBIE {
+    let pg = tgid(k.procs, par);
+    wake_waiters(&mut k, pg);
+    child_ended(&mut k, par, c);
+  }
+}
+
 /// wait4(want, status, options, rusage): collects a child that has ended
 /// (one wait_match names), storing its exit code as the Linux
 /// status at user address `status` if not NULL. With none ended yet, the
@@ -940,6 +965,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
           pset(&mut k.procs, c, F_STATE, FREE);
         } else {
           tr_put(&mut k, c, 0);             // its tracer has heard; the parent reaps it
+          tracer_reaped(&mut k, c);
         }
         ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
@@ -1054,6 +1080,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
             pset(&mut k.procs, c, F_STATE, FREE);
           } else {
             tr_put(&mut k, c, 0);           // its tracer has heard; the parent reaps it
+            tracer_reaped(&mut k, c);
           }
         }
         ret(&mut k.procs, pid, 0);
