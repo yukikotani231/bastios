@@ -510,6 +510,28 @@ int main(void) {
                _exit(r == 0 && me == (SCHED_FIFO | 0x40000000) && gp == SCHED_OTHER && gq.sched_priority == 0 ? 0 : 1);
            }
            int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("locked pages: msync(MS_INVALIDATE) is EBUSY and madvise(MADV_DONTNEED) EINVAL, until munlock", ({
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_LOCKED, -1, 0);
+           int a = msync(m, 4096, MS_INVALIDATE), ae = errno;
+           int b = madvise(m, 4096, MADV_DONTNEED), be = errno;
+           int c = madvise(m + 4096, 4096, MADV_DONTNEED);          // the second page is locked too
+           munlock(m, 4096);
+           int d = msync(m, 4096, MS_INVALIDATE);
+           int e = madvise(m, 4096, MADV_DONTNEED);
+           int f = madvise(m + 4096, 4096, MADV_DONTNEED), fe = errno;
+           munmap(m, 8192);
+           a == -1 && ae == EBUSY && b == -1 && be == EINVAL && c == -1 && d == 0 && e == 0 && f == -1 && fe == EINVAL; }));
+    EXPECT("locked pages: unmapping or mapping over them unlocks them", ({
+           char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int l = mlock(m, 4096);
+           munmap(m, 4096);
+           char *n = mmap(m, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+           int a = madvise(n, 4096, MADV_DONTNEED);                  // a new mapping is not locked
+           mlock(n, 4096);
+           char *o = mmap(n, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+           int b = madvise(o, 4096, MADV_DONTNEED);                  // nor is one mapped over a locked one
+           munmap(o, 4096);
+           l == 0 && n == m && a == 0 && o == n && b == 0; }));
     EXPECT("splice from a pipe into a Unix socket and into a TCP connection delivers the bytes", ({
            int pp[2], sv[2]; pipe(pp); socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
            char in[3000], out[3000]; for (int i = 0; i < 3000; i++) in[i] = i * 7;
