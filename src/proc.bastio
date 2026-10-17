@@ -832,7 +832,10 @@ const HOLES_LEN: u64 = NPROC * 64;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
 const LAZY_LEN: u64 = NPROC * LZ_W;
 const AN_N: u64 = 32;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
-const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages
+const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages (+ AN_X)
+// Added to a record's page count if its pages may also run code: the flag
+// takes no room of its own, which the native kernel's small heap has none of.
+const AN_X: u64 = 4294967296;
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;

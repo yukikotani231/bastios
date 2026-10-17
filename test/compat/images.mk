@@ -23,6 +23,8 @@ GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09
 PYTHON_IMAGE := library/python@sha256:f6a589d43c42b9e7f7dc67a12d37132491f362859a5d750607710cc56da3bc72
 PODMAN_IMAGE ?= mgoltzsche/podman@sha256:86e6ecde27e86140a20fa16dcc03cc1e67150536bd8335f6effbba067e352b48
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+# gopls, the Go language server, built from this release (Makefile: build/compat/gopls).
+GOPLS_VER := v0.20.0
 # The tree-sitter C parser for Neovim (npm package, pinned by version and SHA-256).
 TREESITTER_C_VER    := 0.24.1
 TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e

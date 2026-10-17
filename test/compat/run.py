@@ -150,7 +150,7 @@ class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
     /repo.git, a git repository for the dumb HTTP protocol, and
-    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
+    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua, /lsp-gopls-client.lua and /lsp-termdebug.lua, the files of the Neovim LSP and debugger cases."""
 
     def __init__(self, tcc_src=None):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
@@ -179,7 +179,7 @@ class WebServer:
             subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)
             subprocess.run(git + ["update-server-info"], cwd=bare, capture_output=True)
             shutil.rmtree(work)
-        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "termdebug.lua"):
+        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "gopls-client.lua", "termdebug.lua"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
         add_aports(self.dir, tcc_src)
@@ -621,7 +621,7 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
     if status is None:
         return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
 
 
@@ -637,7 +637,7 @@ def run_on_host(name, cmd, expected, timeout):
     while body and not body[-1]:
         body.pop()
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:200]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 

@@ -18,7 +18,17 @@ def main():
     def check(name):
         def deco(f):
             def hang():
+                # One line per thread (innermost call first, the watchdog
+                # itself left out), short enough for the lane's report.
                 print("HANG %s: no end after %d s" % (name, HANG_SECONDS), flush=True)
+                for tid, frame in sys._current_frames().items():
+                    if tid == threading.get_ident():
+                        continue
+                    calls = []
+                    while frame and len(calls) < 7:
+                        calls.append("%s:%d %s" % (os.path.basename(frame.f_code.co_filename), frame.f_lineno, frame.f_code.co_name))
+                        frame = frame.f_back
+                    print("thread %d: %s" % (tid & 0xffff, " < ".join(calls)), flush=True)
                 faulthandler.dump_traceback(file=sys.stdout, all_threads=True)
                 sys.stdout.flush()
                 os._exit(3)

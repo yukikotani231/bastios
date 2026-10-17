@@ -23,6 +23,7 @@ alpine: git: commit, log and diff
 alpine: jq: query JSON
 alpine: less: copies a pipe through
 alpine: make: rebuild only what is out of date
+alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 alpine: openssl: a digest and random bytes
 alpine: rsync: copy a tree
 alpine: ssh-keygen: an ed25519 key
@@ -695,6 +696,8 @@ t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
 t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do
 t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
+t_mem: mprotect makes 300 MiB of a PROT_NONE reservation readable, writable and executable (a JIT's code range), more than the machine has: only touched pages count, and code written there runs
+t_mem: mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the machine has: only touched pages count
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space
@@ -1502,6 +1505,9 @@ go: go: build a program and run it, and its exit status
 go: go: files, directories and the clock
 go: go: go test
 go: go: gofmt rewrites a program
+go: go: gopls finds the definition of a function
+go: go: gopls formats a file
+go: go: gopls reports a type error
 go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
@@ -1611,6 +1617,7 @@ alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 alpine: nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
+alpine: nvim: the LSP client talks to gopls, Go's language server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
 alpine: apk: free the disk, then install python3 over HTTP
 alpine: python3: asyncio talks over a socketpair
