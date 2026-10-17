@@ -13,8 +13,6 @@
 // queued on that endpoint; each completed one is a boot report (modifier
 // bits, then up to six keys held down), and keys that were not down in the
 // last report become the bytes a serial terminal would send, as for PS/2.
-// Every press and release, of a key or a modifier, is also queued as a key
-// event packet (src/lxkeyev.bastio), in the mouse's queue.
 // The first that offers a HID boot mouse interface becomes the mouse, the
 // same way: its boot reports (buttons, then the motion in x and y, down
 // positive, then, from most mice, the wheel, up positive) become PS/2
@@ -84,7 +82,7 @@ const XHCI_CLASS: u64 = 0x0C0330;      // serial bus controller, USB, xHCI
 const XHCI_PAGES: u64 = 13;
 const USB_AT: u64 = 32;                // the controller's pages: 32 .. 44
 const XHCI_SLOTS: u64 = 6;             // the keyboard's, the mouse's, the disk's, the serial port's, and two hubs'
-const MQ_N: u64 = 16;                  // mouse and key event packets kept, not yet taken
+const MQ_N: u64 = 16;                  // mouse packets kept, not yet taken
 const XHCI_DEPTH: u64 = 2;             // hubs followed: one on a root port, and one on that
 const XHCI_MAX_LEN: u64 = 0x100000;    // registers claimed: the BAR, up to 1 MiB
 const XHCI_SPINS: u64 = 20000000;
@@ -223,7 +221,7 @@ struct Xhci {
   // The keyboard.
   slot: u8, 
   dci: u64,           // its endpoint's context index
-  port: u8,           // the modifier bits of the last report
+  port: u8, 
   keys: Bytes,        // keys down in the last report
   q: Bytes,           // bytes typed, not yet taken
   qn: u64,
@@ -1026,7 +1024,7 @@ fn hid_setup(x: &mut Xhci, s: u64, p: u64, route: u64, tt: u64, speed: u64, conf
   if kbd {
     x.slot = cast[u8](s);
     x.dci = kdci;
-    x.port = 0;
+    x.port = cast[u8](p);
     x.live = true;
     kbd_queue(&mut x);
   }
@@ -1988,38 +1986,7 @@ fn usage_byte(x: &Xhci, k: u64) -> u64
   return c;
 }
 
-/// Queues the key event (Linux key code lk, 1 down or 0 up) for Linux
-/// programs (src/lxkeyev.bastio) as a packet of 1, the code, the value and 0
-/// in the mouse's queue, unless that is full or the key has no code.
-fn kbd_event(x: &mut Xhci, lk: u64, v: u64)
-  requires xhci_ok(x) && v < 2
-  ensures xhci_ok(x)
-{
-  if lk == 0 || lk >= 128 || x.mqn >= MQ_N {
-    return;
-  }
-  let at = x.mqn * 4;
-  bset(&mut x.mq, at, 1);
-  bset(&mut x.mq, at + 1, cast[u8](lk));
-  bset(&mut x.mq, at + 2, cast[u8](v));
-  bset(&mut x.mq, at + 3, 0);
-  x.mqn = x.mqn + 1;
-}
-
-/// Queues the event of the modifier with this bit of a boot report's first
-/// byte if it differs between the reports mods (now) and pm (before).
-fn kbd_mod_event(x: &mut Xhci, mods: u64, pm: u64, bit: u64, lk: u64)
-  requires xhci_ok(x) && bit >= 1 && bit <= 128
-  ensures xhci_ok(x)
-{
-  let now = mods / bit % 2;
-  if now != pm / bit % 2 {
-    kbd_event(&mut x, lk, now);
-  }
-}
-
-/// Reads a finished report: keys down now that were not before are typed,
-/// and every change of a modifier or a key is queued as a key event.
+/// Reads a finished report: keys down now that were not before are typed.
 fn kbd_report(x: &mut Xhci)
   requires xhci_ok(x)
   ensures xhci_ok(x)
@@ -2027,16 +1994,6 @@ fn kbd_report(x: &mut Xhci)
   let mods = cast[u64](dma_read8(&mut x.intr, 2048));
   x.ctrl = mods & 0x11 != 0;
   x.shift = mods & 0x22 != 0;
-  let pm = cast[u64](x.port);
-  kbd_mod_event(&mut x, mods, pm, 1, 29);        // left Ctrl
-  kbd_mod_event(&mut x, mods, pm, 2, 42);        // left Shift
-  kbd_mod_event(&mut x, mods, pm, 4, 56);        // left Alt
-  kbd_mod_event(&mut x, mods, pm, 8, 125);       // left Meta
-  kbd_mod_event(&mut x, mods, pm, 16, 97);       // right Ctrl
-  kbd_mod_event(&mut x, mods, pm, 32, 54);       // right Shift
-  kbd_mod_event(&mut x, mods, pm, 64, 100);      // right Alt
-  kbd_mod_event(&mut x, mods, pm, 128, 126);     // right Meta
-  x.port = cast[u8](mods % 256);
   let mut i = 0;
   while i < 6
     invariant i <= 6 && xhci_ok(x)
@@ -2051,9 +2008,6 @@ fn kbd_report(x: &mut Xhci)
         was = true;
       }
       j = j + 1;
-    }
-    if k >= 4 && !was {
-      kbd_event(&mut x, evkey_usb(k), 1);
     }
     let b = usage_byte(x, k);
     if k >= 4 && !was && b < 256 && x.qn < 16 {
@@ -2076,28 +2030,7 @@ fn kbd_report(x: &mut Xhci)
     }
     i = i + 1;
   }
-  // Keys that were down and are not now.
   let mut j = 0;
-  while j < 6
-    invariant j <= 6 && xhci_ok(x)
-  {
-    let prev = cast[u64](bget(x.keys, j));
-    let mut still = false;
-    let mut m = 0;
-    while m < 6
-      invariant m <= 6 && xhci_ok(x)
-    {
-      if cast[u64](dma_read8(&mut x.intr, 2050 + m)) == prev {
-        still = true;
-      }
-      m = m + 1;
-    }
-    if prev >= 4 && !still {
-      kbd_event(&mut x, evkey_usb(prev), 0);
-    }
-    j = j + 1;
-  }
-  j = 0;
   while j < 6
     invariant j <= 6 && xhci_ok(x)
   {

@@ -298,45 +298,6 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         fails += not good
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"bastios> ", mark)
-        if usb:
-            # /dev/input/event0 sees what the USB keyboard does as it does for
-            # PS/2: Shift's press and release (96 bytes with the SYN records;
-            # it makes no character, so the shell does not see it) and
-            # Ctrl's (192 bytes after both).
-            mark = len(out)
-            q.stdin.write(b"ash\r"); q.stdin.flush()
-            until(b"# ", mark)
-            mark = len(out)
-            q.stdin.write(b"cat /dev/input/event0 > /tmp/ev &\r"); q.stdin.flush()
-            time.sleep(1)
-            usbkeys(qmp_path, ["shift"])
-            time.sleep(1)
-            q.stdin.write(b"ls -l /tmp/ev\r"); q.stdin.flush()
-            good = until(b" 96 ", mark)
-            print(("ok  " if good else "FAIL"), f"({name}) /dev/input/event0 reports the press and the release of Shift on the USB keyboard")
-            fails += not good
-            until(b"# ", mark)
-            mark = len(out)
-            usbkeys(qmp_path, ["ctrl"])
-            time.sleep(1)
-            q.stdin.write(b"ls -l /tmp/ev\r"); q.stdin.flush()
-            good = until(b" 192 ", mark)
-            print(("ok  " if good else "FAIL"), f"({name}) a second modifier on the USB keyboard adds its own")
-            fails += not good
-            until(b"# ", mark)
-            # ash gets a second between the kill of its sleeping child and
-            # its exit.
-            q.stdin.write(b"kill $!\r"); q.stdin.flush()
-            time.sleep(1)
-            mark = len(out)
-            q.stdin.write(b"exit\r"); q.stdin.flush()
-            until(b"bastios> ", mark)
-            # The first line typed after ash leaves is not run once ash has
-            # read event0 here (cause not found yet), so the next test starts
-            # with an empty one.
-            time.sleep(1)
-            q.stdin.write(b"\r"); q.stdin.flush()
-            time.sleep(1)
         mon.close()
     if ok and not diag and not usb and not nvme and not stick:
         # /dev/fb0 (user/mfb.c): a program draws on the screen, and the
@@ -509,30 +470,6 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         good = until(b" 19 ", mark)
         print(("ok  " if good else "FAIL"), f"({name}) a line-mode terminal keeps the escape sequences of the special keys")
         fails += not good
-        until(b"# ", mark)
-        # /dev/input/event0 gives the key events as Linux's evdev does:
-        # a press and a release of one key are an EV_KEY and an EV_SYN
-        # record each, 24 bytes a record, 96 bytes in all. Shift and Ctrl make
-        # no character, so only this device sees them (192 bytes after both).
-        mark = len(out)
-        q.stdin.write(b"cat /dev/input/event0 > /tmp/ev &\r"); q.stdin.flush()
-        time.sleep(1)
-        monitor("sendkey shift")
-        time.sleep(1)
-        q.stdin.write(b"ls -l /tmp/ev\r"); q.stdin.flush()
-        good = until(b" 96 ", mark)
-        print(("ok  " if good else "FAIL"), f"({name}) /dev/input/event0 reports the press and the release of a key")
-        fails += not good
-        until(b"# ", mark)
-        mark = len(out)
-        monitor("sendkey ctrl")
-        time.sleep(1)
-        q.stdin.write(b"ls -l /tmp/ev\r"); q.stdin.flush()
-        good = until(b" 192 ", mark)
-        print(("ok  " if good else "FAIL"), f"({name}) a modifier is reported as keys of its own")
-        fails += not good
-        until(b"# ", mark)
-        q.stdin.write(b"kill $!\r"); q.stdin.flush()
         until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
