@@ -510,6 +510,24 @@ int main(void) {
                _exit(r == 0 && me == (SCHED_FIFO | 0x40000000) && gp == SCHED_OTHER && gq.sched_priority == 0 ? 0 : 1);
            }
            int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("splice from a pipe into a Unix socket and into a TCP connection delivers the bytes", ({
+           int pp[2], sv[2]; pipe(pp); socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+           char in[3000], out[3000]; for (int i = 0; i < 3000; i++) in[i] = i * 7;
+           write(pp[1], in, 3000);
+           long a = splice(pp[0], 0, sv[0], 0, 3000, 0);
+           int got = 0; while (got < a) { int r = read(sv[1], out + got, 3000 - got); if (r <= 0) break; got += r; }
+           int ok1 = a == 3000 && got == 3000 && memcmp(in, out, 3000) == 0;
+           int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+           bind(ls, (void *)&sa, sizeof sa); listen(ls, 1); socklen_t sl = sizeof sa; getsockname(ls, (void *)&sa, &sl);
+           int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (void *)&sa, sizeof sa); int s = accept(ls, 0, 0);
+           write(pp[1], in, 1000);
+           long b = splice(pp[0], 0, c, 0, 1000, 0);
+           got = 0; while (got < b) { int r = read(s, out + got, 1000 - got); if (r <= 0) break; got += r; }
+           int ok2 = b == 1000 && got == 1000 && memcmp(in, out, 1000) == 0;
+           int u = socket(AF_INET, SOCK_DGRAM, 0); write(pp[1], in, 10);
+           long d = splice(pp[0], 0, u, 0, 10, 0);                     // a datagram socket is not done
+           close(pp[0]); close(pp[1]); close(sv[0]); close(sv[1]); close(ls); close(c); close(s); close(u);
+           ok1 && ok2 && d == -1 && errno == EINVAL; }));
     EXPECT("shutdown(SHUT_RD) on a unix socket: reads end, the peer's sends are EPIPE, poll reports POLLRDHUP", ({
            int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
            write(sv[1], "ab", 2);
