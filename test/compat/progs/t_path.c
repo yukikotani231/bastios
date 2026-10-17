@@ -7,11 +7,14 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/sendfile.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 
 #define NOBODY 65534
@@ -150,6 +153,20 @@ static int sendfile_statx(void) {
     return ok;
 }
 
+/* A socket bound by a name in a chroot reads back by that name, not by the
+ * path from the top (multiprocessing's managers connect to what they read). */
+static int jail_socket_name(void) {
+    struct sockaddr_un a = { .sun_family = AF_UNIX }, got;
+    socklen_t len = sizeof got;
+    int s = socket(AF_UNIX, SOCK_STREAM, 0), c = socket(AF_UNIX, SOCK_STREAM, 0);
+    strcpy(a.sun_path, "/sub/js");
+    int ok = s >= 0 && c >= 0 && bind(s, (struct sockaddr *)&a, sizeof a) == 0 && listen(s, 1) == 0
+        && getsockname(s, (struct sockaddr *)&got, &len) == 0 && strcmp(got.sun_path, "/sub/js") == 0
+        && connect(c, (struct sockaddr *)&a, sizeof a) == 0;
+    close(s); close(c);
+    return ok;
+}
+
 static int in_jail(void) {
     struct stat st;
     char here[64];
@@ -158,7 +175,8 @@ static int in_jail(void) {
         && fails(stat("/pt_jail", &st), ENOENT)
         && chdir("/sub") == 0 && getcwd(here, sizeof here) && strcmp(here, "/sub") == 0
         && stat("../f", &st) == 0 && stat("../../../f", &st) == 0 && stat("up", &st) == 0
-        && chdir("/") == 0 && getcwd(here, sizeof here) && strcmp(here, "/") == 0;
+        && chdir("/") == 0 && getcwd(here, sizeof here) && strcmp(here, "/") == 0
+        && jail_socket_name();
 }
 
 static int nobody_chroot(void) {
@@ -171,7 +189,7 @@ static int chroot_jail(void) {
     int ok = make("pt_jail/f") && symlink("/f", "pt_jail/abs") == 0 && symlink("../../../f", "pt_jail/sub/up") == 0
         && fails(chroot("pt_jail/f"), ENOTDIR) && fails(chroot("pt_none"), ENOENT)
         && in_child(nobody_chroot) && in_child(in_jail);
-    unlink("pt_jail/sub/up"); unlink("pt_jail/abs"); unlink("pt_jail/f"); rmdir("pt_jail/sub"); rmdir("pt_jail");
+    unlink("pt_jail/sub/js"); unlink("pt_jail/sub/up"); unlink("pt_jail/abs"); unlink("pt_jail/f"); rmdir("pt_jail/sub"); rmdir("pt_jail");
     return ok;
 }
 
@@ -189,6 +207,11 @@ static int device_nodes(void) {
     int fd = open("pt_null", O_RDWR | O_TRUNC);
     ok = ok && fd >= 0 && write(fd, "data", 4) == 4 && read(fd, b, 4) == 0;
     close(fd);
+    int one = 0;
+    fd = mknod("pt_ptmx", S_IFCHR | 0666, makedev(5, 2)) == 0 ? open("pt_ptmx", O_RDWR | O_NOCTTY) : -1;   /* a /dev/ptmx made in a chroot */
+    ok = ok && fd >= 0 && ioctl(fd, 0x80045430, &one) == 0 && one == 0;                                  /* TIOCGPTN */
+    if (fd >= 0) close(fd);
+    unlink("pt_ptmx");
     ok = ok && mknod("pt_zero", S_IFCHR | 0444, makedev(1, 5)) == 0;
     fd = open("pt_zero", O_RDONLY);
     ok = ok && fd >= 0 && read(fd, b, 4) == 4 && b[0] == 0 && b[3] == 0;

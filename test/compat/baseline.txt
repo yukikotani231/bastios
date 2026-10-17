@@ -749,6 +749,11 @@ t_more: fstatat with AT_SYMLINK_NOFOLLOW
 t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
+t_more: getrusage self reports a maximum resident size
+t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
+t_more: /proc/PID/status has VmRSS and the context switch counts
+t_more: /proc/meminfo has Active, Inactive and Shmem
+t_more: SIOCETHTOOL on a socket is EOPNOTSUPP
 t_more: ioctl FIOCLEX and FIONCLEX
 t_more: ioctl FIONBIO makes a read EAGAIN
 t_more: memfd_create
@@ -1395,6 +1400,15 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+python: python: unpack the root, chroot into it, run python3
+python: apk: install gcc, musl-dev, binutils and make over HTTP
+python: gcc: build a C program and run it
+python: python: venv and pip
+python: pip: install pytest and its dependencies from the host's web server
+python: pip: build a C extension from source (setuptools, gcc) and import it
+python: pytest: the whole test suite of a real project (Jinja2's)
+python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
+python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
 java: java: version
 java: java: compile and run a program
