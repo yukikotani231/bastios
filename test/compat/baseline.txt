@@ -452,6 +452,7 @@ t_inotify: sixty timerfds at once
 t_inotify: thirty inotify instances at once
 t_inotify: thirty named pipes open at once
 t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
+t_inotify: a watch nobody reads does not hold its writer back: 2000 files made and removed take under 3 s
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
@@ -595,6 +596,9 @@ t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
 t_ltp2: SIGBUS: a forked child gets it too
 t_ltp2: SIGBUS: a file cut under a mapping takes the pages past the new end
 t_ltp2: rename: a directory moved from under the working directory leaves it in the moved directory
+t_ltp2: locked pages: msync(MS_INVALIDATE) is EBUSY and madvise(MADV_DONTNEED) EINVAL, until munlock
+t_ltp2: locked pages: unmapping or mapping over them unlocks them
+t_ltp2: splice from a pipe into a Unix socket and into a TCP connection delivers the bytes
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
@@ -1128,6 +1132,37 @@ t_ptrace: PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only
 t_ptrace: a buffer that is too small gets what fits, and the full size is the result
 t_ptrace: and at its exit the result, as an error
 t_ptrace: the tracee goes on to its end
+t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH
+t_ptrace2: PTRACE_DETACH with a signal delivers it
+t_ptrace2: PTRACE_GETFPREGS gives the SSE state
+t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS agrees with PTRACE_GETREGS
+t_ptrace2: PTRACE_GETSIGINFO at a fault: SIGSEGV, SEGV_MAPERR and the address
+t_ptrace2: PTRACE_GETSIGINFO at a signal stop gives the signal and its sender
+t_ptrace2: PTRACE_LISTEN keeps a group-stopped tracee stopped; SIGCONT then wakes it
+t_ptrace2: PTRACE_O_EXITKILL kills the tracee when the tracer dies
+t_ptrace2: PTRACE_O_TRACECLONE reports a new thread, which is traced
+t_ptrace2: PTRACE_O_TRACEEXIT stops the tracee at exit with the status as the event message
+t_ptrace2: PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop
+t_ptrace2: PTRACE_O_TRACEFORK: the event message is the new child's pid
+t_ptrace2: PTRACE_O_TRACESYSGOOD marks a system call stop with SIGTRAP | 0x80
+t_ptrace2: PTRACE_O_TRACEVFORK and PTRACE_O_TRACEVFORKDONE report the vfork and its end
+t_ptrace2: PTRACE_PEEKDATA of an unmapped address is EIO
+t_ptrace2: PTRACE_POKEDATA of an unmapped address is EIO
+t_ptrace2: PTRACE_SEIZE reports a group-stop as PTRACE_EVENT_STOP
+t_ptrace2: PTRACE_SETOPTIONS with an unknown option is EINVAL
+t_ptrace2: PTRACE_SINGLESTEP from a signal stop inside raise() stops with SIGTRAP one instruction on, though SIGTRAP is blocked
+t_ptrace2: SIGKILL ends a tracee in a signal stop
+t_ptrace2: a request on a process that is not a tracee of the caller is ESRCH
+t_ptrace2: a signal the tracee blocks does not stop it
+t_ptrace2: a tracee runs on when its tracer dies
+t_ptrace2: a tracee stopped when its tracer dies runs again
+t_ptrace2: a tracer attaching to a stopped process sees it stop
+t_ptrace2: a tracer can wait for a tracee that is not its child
+t_ptrace2: an unknown request is EIO
+t_ptrace2: changing orig_rax to -1 at the entry skips the call; rax at the exit is the result
+t_ptrace2: changing the arguments at the entry changes the call
+t_ptrace2: resuming with another signal delivers that one
+t_ptrace2: resuming with no signal drops it
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file
@@ -1206,6 +1241,73 @@ t_sig2: a PROT_NONE MAP_SHARED page is still shared after mprotect
 t_sig2: a forked child keeps a page PROT_NONE
 t_sig2: mmap of a file with fd -1 is EBADF
 t_sig2: mmap of length 0 with fd -1 is EBADF
+t_sig3: SA_NOCLDWAIT: wait is ECHILD once the children are gone
+t_sig3: SA_NODEFER lets the handler nest
+t_sig3: SA_RESTART restarts a blocking read
+t_sig3: SA_RESTART restarts waitpid
+t_sig3: SIGCHLD arrives for a stop without it
+t_sig3: SIGCHLD does not arrive for a stop with SA_NOCLDSTOP
+t_sig3: SIGCHLD ignored: children are reaped and wait is ECHILD
+t_sig3: SIGCONT discards pending stop signals
+t_sig3: SIGCONT is reported with WCONTINUED
+t_sig3: SIGFPE on an integer division by zero: FPE_INTDIV
+t_sig3: SIGKILL and SIGSTOP cannot be blocked
+t_sig3: SIGKILL and SIGSTOP cannot be caught
+t_sig3: SIGKILL ends a stopped process
+t_sig3: SIGPIPE ends a writer; with SIGPIPE ignored it is EPIPE
+t_sig3: SIGPIPE with the default action kills
+t_sig3: SIGRTMIN is at least 32 and SIGRTMAX 64
+t_sig3: SIGSEGV on a PROT_NONE page: SEGV_ACCERR
+t_sig3: SIGSEGV on a write to a read-only page: SEGV_ACCERR
+t_sig3: SIGSEGV on an unmapped address: SEGV_MAPERR and si_addr
+t_sig3: SIGTERM to a stopped process waits for SIGCONT
+t_sig3: SIGTSTP stops a process by default
+t_sig3: SS_ONSTACK shows inside a handler that runs on the alternate stack
+t_sig3: WNOHANG with a running child returns 0
+t_sig3: WNOWAIT leaves the child to be waited for again
+t_sig3: a fresh alternate stack reads back SS_DISABLE
+t_sig3: a handler for SIGCONT runs even when SIGCONT is blocked, on the resume
+t_sig3: a handler may change the blocked set through uc_sigmask
+t_sig3: a handler may clobber SSE registers: the interrupted code does not notice
+t_sig3: a handler starts with the stack aligned as the ABI says
+t_sig3: a handler without SA_ONSTACK stays on the normal stack
+t_sig3: a partial read is not EINTR
+t_sig3: a periodic timer that was not served counts overruns
+t_sig3: a process-directed signal goes to a thread that does not block it
+t_sig3: a real-time signal sent three times while blocked arrives three times
+t_sig3: a signal ignored while pending is dropped
+t_sig3: a standard signal sent twice while blocked arrives once
+t_sig3: a stop is reported once
+t_sig3: a stop signal discards a pending SIGCONT
+t_sig3: a stopped child is seen with WUNTRACED, as WIFSTOPPED
+t_sig3: an invalid ss_flags is EINVAL
+t_sig3: changing the alternate stack while on it is EPERM
+t_sig3: exec keeps an ignored signal and resets a handled one
+t_sig3: kill with signal 65 is EINVAL, and signal 0 only probes
+t_sig3: kill(-pgrp) reaches every member
+t_sig3: kill(pid) of a zombie succeeds, and of a reaped child is ESRCH
+t_sig3: pending signals are taken lowest number first
+t_sig3: queued real-time signals keep their values, in the order sent
+t_sig3: real-time signals are taken after the standard ones, lowest first
+t_sig3: rt_sigqueueinfo with SI_USER to another process is EPERM
+t_sig3: sa_mask holds signals back until the handler returns
+t_sig3: signalfd gives a queued value
+t_sig3: signalfd is readable only while a signal is pending
+t_sig3: signalfd reads a blocked signal with its sender
+t_sig3: sigqueue gives the handler si_value and SI_QUEUE
+t_sig3: sigsuspend returns EINTR and puts the mask back
+t_sig3: sigtimedwait times out with EAGAIN
+t_sig3: tgkill reaches the named thread only
+t_sig3: the SIGCHLD handler sees si_pid, si_status and si_code
+t_sig3: the child inherits the mask and the handlers
+t_sig3: the child of a fork has no pending signals
+t_sig3: the mask comes back after the handler
+t_sig3: the signal is blocked while its own handler runs
+t_sig3: timer_create with SIGEV_SIGNAL queues sigev_value
+t_sig3: waitid reports CLD_EXITED with the status
+t_sig3: waitid reports CLD_KILLED for a child ended by a signal
+t_sig3: waitid reports CLD_STOPPED and CLD_CONTINUED
+t_sig3: without SA_RESTART a blocking read is EINTR
 t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN

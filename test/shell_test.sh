@@ -327,6 +327,8 @@ steps = [
     # rmdir refusing a directory that is not empty.
     ("mkdir dd; cd dd; /bin/pwd; echo deep > f; cat ../dd/f", b"\r\n/dd\r\ndeep\r\n", b"\n# "),
     ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
+    # A directory lists only its own entries, though the disk's slots hold its neighbours' between them (getdents skips ahead over the others).
+    ("mkdir gl1 gl2; echo 1 > gl1/a; echo 2 > gl2/b; echo 3 > gl1/c; echo 4 > gl2/d; mkdir gl1/s; echo 5 > gl1/s/e; echo 6 > gl2/f; echo gl1/*; echo gl2/*; echo gl1/s/*; rm gl2/d; echo gl2/*", b"\r\ngl1/a gl1/c gl1/s\r\ngl2/b gl2/d gl2/f\r\ngl1/s/e\r\ngl2/b gl2/f\r\n", b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
     # rename through BusyBox's mv: over a file, into a directory, and a
