@@ -862,7 +862,7 @@ fn ino_producer(n: u64) -> bool {
     || n == LX_WRITE || n == LX_WRITEV || n == LX_PWRITE64 || n == LX_TRUNCATE || n == LX_FTRUNCATE;
 }
 
-const INO_WAIT: u64 = 5000000;                 // how long a call waits for a reader of a half-full queue (ns)
+const INO_WAIT: u64 = 30000000;                // how long a call waits for a reader of a half-full queue (ns): three timer ticks, as a reader on an idle processor starts at the next tick
 const INO_COOL: u64 = 1000000000;              // and how long calls go on without waiting after one found no reader
 
 /// Before a call that queues events, when some queue is half full: the
