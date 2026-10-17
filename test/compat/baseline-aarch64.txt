@@ -1596,3 +1596,4 @@ t_userns: and not without one
 t_userns: the root of a user namespace gives up capabilities
 t_userns: a user namespace made inside one mounts in a mount namespace of its own
 t_userns: an unprivileged user mounts nothing
+t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
