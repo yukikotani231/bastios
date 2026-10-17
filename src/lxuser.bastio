@@ -10,7 +10,7 @@
 // process is in. An id with no map shows as the overflow id 65534, and one
 // that is passed in without a map is -EINVAL. A user namespace's slot in
 // k.mns holds its owner (the creator's effective ids), whether setgroups is
-// denied, and the uid and gid maps of up to UM_N (32) extents (inside id, outside
+// denied, and the uid and gid maps of up to UM_N (8) extents (inside id, outside
 // id, count). Outside ids are host ids. A namespace made inside another
 // records its parent; the outside ids written to its map are the parent's
 // inside ids, and are composed through the parent's map when they are
