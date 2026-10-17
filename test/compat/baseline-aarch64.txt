@@ -626,6 +626,9 @@ t_ltp3: utime sets the modification time
 t_ltp3: utimensat with UTIME_OMIT keeps the access time
 t_ltp3: utimensat with UTIME_OMIT keeps the modification time
 t_ltp3: with that room it gives the handle and a mount id
+t_ltp3: a loop device's queue/ files give the sector size and DMA alignment
+t_ltp3: statx(STATX_DIOALIGN) of a block device gives its alignment
+t_ltp3: statx(STATX_DIOALIGN) of a directory leaves the bit clear
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
@@ -1305,3 +1308,4 @@ alpine: cmake: configure, build and run a C project
 alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 alpine: vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
 alpine: gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again
+alpine: sshd: Alpine's OpenSSH server takes a public-key login from its own client

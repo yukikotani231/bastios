@@ -662,6 +662,9 @@ t_ltp3: the window size keeps its pixel fields
 t_ltp3: TIOCGETD reports N_TTY
 t_ltp3: /proc/self/fd lists the open descriptors
 t_ltp3: readlink with a zero-size buffer is EINVAL
+t_ltp3: a loop device's queue/ files give the sector size and DMA alignment
+t_ltp3: statx(STATX_DIOALIGN) of a block device gives its alignment
+t_ltp3: statx(STATX_DIOALIGN) of a directory leaves the bit clear
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
@@ -1501,6 +1504,9 @@ go: go: build a program and run it, and its exit status
 go: go: files, directories and the clock
 go: go: go test
 go: go: gofmt rewrites a program
+go: go: gopls finds the definition of a function
+go: go: gopls formats a file
+go: go: gopls reports a type error
 go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
