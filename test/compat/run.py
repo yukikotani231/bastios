@@ -743,6 +743,8 @@ def main():
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
+    ap.add_argument("--python-disk", help="the Python disk (the root of the python:alpine image) for python.txt")
+    ap.add_argument("--python-wheels", help="the Python packages python.txt installs, served at HOSTURL/wheels/")
     ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
@@ -759,7 +761,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "debian", "node", "go", "java", "rust", "podman"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "debian", "node", "go", "java", "rust", "python", "podman"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -781,6 +783,7 @@ def main():
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
+    python = load_applets(os.path.join(HERE, "python.txt"))
     java = load_applets(os.path.join(HERE, "java.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     podman = load_applets(os.path.join(HERE, "podman.txt"))
@@ -957,6 +960,19 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append(("go", disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
+    if args.python_disk and lane_chosen("python"):
+        # Compilers and test suites on the emulated processor take a while;
+        # the cases write the disk. The packages pip installs come from the
+        # host's web server.
+        disk = os.path.join(args.out, "python-run.img")
+        shutil.copyfile(args.python_disk, disk)
+        if args.python_wheels:
+            os.symlink(os.path.abspath(args.python_wheels), os.path.join(web.dir, "wheels"))
+        os.symlink(os.path.join(HERE, "pyprogs"), os.path.join(web.dir, "pyprogs"))
+        if args.alpine_repo and not os.path.exists(os.path.join(web.dir, "alpine")):
+            os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
+            os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
+        lanes.append(("python", disk, [("python", "Python development", applets_lane(python, 900))], "1G"))
     if args.jdk_disk and lane_chosen("java"):
         # The cases unpack a root of about 400 MB onto the disk: a copy.
         disk = os.path.join(args.out, "jdk-run.img")
@@ -1013,7 +1029,7 @@ def main():
                 if c["name"] not in merged or alpine_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["alpine"] = sorted(merged.values(), key=lambda c: at.get(c["name"], len(at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "podman"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "python", "podman"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

@@ -114,7 +114,7 @@ const NF_N: u64 = 10;
 const SY_UM: u64 = SY_NS + NPROC * NF_N;   // /proc/P/uid_map, gid_map, setgroups at P * 3 + 0, 1, 2 (src/lxuser.bastio)
 const UMF_N: u64 = 3;
 const SY_CG: u64 = SY_UM + NPROC * UMF_N;   // a cgroup's control file f at slot * CGF_N + f (src/lxcgroup.bastio)
-const CGF_N: u64 = 24;
+const CGF_N: u64 = 28;
 const SY_LOOP: u64 = SY_CG + CG_N * CGF_N;   // after the cgroups: loop device n's attribute a at n * LOOP_SYS + a
 const NS_DIRS: u64 = 0x400;            // DIR_PROC + NS_DIRS + pid: /proc/PID/ns
 const FD_DIRS: u64 = 0x800;            // DIR_PROC + FD_DIRS + pid: /proc/PID/fd
@@ -2280,7 +2280,10 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, free + cached);
     a = put_s(&mut o, a, " kB\nBuffers: 0 kB\nCached: ");
     a = put_n(&mut o, a, cached);
-    return put_s(&mut o, a, " kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\n");
+    // The memory in use counts as active; psutil and free(1) read these.
+    a = put_s(&mut o, a, " kB\nSwapCached: 0 kB\nActive: ");
+    a = put_n(&mut o, a, total - smaller(free, total));
+    return put_s(&mut o, a, " kB\nInactive: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\nDirty: 0 kB\nWriteback: 0 kB\nShmem: 0 kB\nSReclaimable: 0 kB\n");
   }
   if what == PF_CPUINFO && p == 0 {
     let mut a = 0;
@@ -2601,9 +2604,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     if dp > dobs {
       a = put_s(&mut o, a, "\nNSpid:\t");     // its id here, then in each namespace inside, down to its own
       a = put_n(&mut o, a, vpid_of(k, pid, p));
-      let mut j = smaller(dp - dobs, 3);
-      while j > 0 && j <= 3
-        invariant j <= 3 && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
+      let mut j = smaller(dp - dobs, PN_LEVELS);
+      while j > 0 && j <= PN_LEVELS
+        invariant j <= PN_LEVELS && blen(o) == PROC_OUT && a <= PROC_OUT && kok(k)
       {
         j = j - 1;
         a = put_c(&mut o, a, 9);
@@ -2624,8 +2627,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_c(&mut o, a, 32);
       i = i + 1;
     }
-    a = put_s(&mut o, a, "\nVmLck:\t");
+    // Every page the process has counts as resident (as in statm).
+    let kb = smaller(anon_count(&mut k, p, 0, WPAGES), WPAGES) * 4;
+    a = put_s(&mut o, a, "\nVmPeak:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nVmSize:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nVmLck:\t");
     a = put_n(&mut o, a, rl_locked(k, p) / 1024);
+    a = put_s(&mut o, a, " kB\nVmHWM:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nVmRSS:\t");
+    a = put_n(&mut o, a, kb);
+    a = put_s(&mut o, a, " kB\nRssAnon:\t");
+    a = put_n(&mut o, a, kb);
     a = put_s(&mut o, a, " kB\nThreads:\t");
     a = put_n(&mut o, a, group_size(k, p));
     a = put_s(&mut o, a, "\nNoNewPrivs:\t");
@@ -2638,6 +2653,8 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, sc_mode(k, p));
     a = put_s(&mut o, a, "\nSeccomp_filters:\t");
     a = put_n(&mut o, a, sc_depth(k, p));
+    // Nothing counts context switches.
+    a = put_s(&mut o, a, "\nvoluntary_ctxt_switches:\t0\nnonvoluntary_ctxt_switches:\t0");
     return put_c(&mut o, a, 10);
   }
   if what == PF_COMM {
