@@ -688,5 +688,5 @@ fn sigpending_full(k: &Kernel, p: u64, s: u64) -> bool
     m = m / 2;
     i = i + 1;
   }
-  return n >= lim;
+  return n + rtq_count(k, p) >= lim;
 }

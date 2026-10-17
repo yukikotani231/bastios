@@ -692,7 +692,7 @@ fn swap_out(k: &mut Kernel, want: u64) -> u64
       if r != 0 {
         let c = cg_resident(&mut k, r);
         let sw = swap_count(k, q);
-        if c > sw && c - sw > best {
+        if c > sw && c - sw > best && cg_swap_room(k, q) > 0 {   // memory.swap.max
           best = c - sw;
           v = q;
           vr = r;
@@ -710,9 +710,10 @@ fn swap_out(k: &mut Kernel, want: u64) -> u64
     from = hand;
   }
   let mut stop = from;
-  let mut n = swap_out_space(&mut k, v, vr, from, want, &mut stop);
+  let room = smaller(want, cg_swap_room(k, v));            // memory.swap.max
+  let mut n = swap_out_space(&mut k, v, vr, from, room, &mut stop);
   if n == 0 && from > 0 {
-    n = swap_out_space(&mut k, v, vr, 0, want, &mut stop);   // the hand wrapped
+    n = swap_out_space(&mut k, v, vr, 0, room, &mut stop);   // the hand wrapped
   }
   sw_set(&mut k.swp, SW_RPID, v);
   sw_set(&mut k.swp, SW_RPAGE, stop);
