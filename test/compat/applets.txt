@@ -121,6 +121,10 @@ a b
 $ X=1 bb env | bb grep '^X='
 X=1
 
+== lang
+$ bb env | bb grep '^LANG='
+LANG=C.UTF-8
+
 == printenv
 $ Y=2 bb printenv Y
 2

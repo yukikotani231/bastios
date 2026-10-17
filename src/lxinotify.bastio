@@ -72,6 +72,7 @@ const LX_FANOTIFY_MARK: u64 = 301;
 const FD_QUIET: u64 = 32;                     // in a file's FD_MODE: opened by fanotify, no events for it
 const FAN_CLOEXEC: u64 = 1;
 const FAN_NONBLOCK: u64 = 2;
+const FAN_CLASS_MASK: u64 = 0xC;             // FAN_CLASS_NOTIF (0), CONTENT (4), PRE_CONTENT (8)
 const FAN_UNLIMITED_QUEUE: u64 = 0x10;
 const FAN_UNLIMITED_MARKS: u64 = 0x20;
 const FAN_REPORT_TID: u64 = 0x100;
@@ -243,6 +244,35 @@ fn ino_free(k: &mut Kernel, i: u64)
     w = w + 1;
   }
   iput(&mut k, ino_base(i), 0);
+}
+
+/// The overlay copied the file or directory at handle `from` up to handle
+/// `to` (ovl_make_up): inotify watches on it follow, as Linux hashes the
+/// copy by the lower inode.
+fn ino_retarget(k: &mut Kernel, from: u64, to: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if from >= 0xFFFFFFFFFFFF || to >= 0xFFFFFFFFFFFF || from == to || iget(k, INO_G + G_WATCHES) == 0 {
+    return;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    if iget(k, ino_base(i)) == 1 {
+      let mut w = 0;
+      while w < INO_W
+        invariant w <= INO_W && i < INO_N && kok(k)
+      {
+        if iget(k, wat_at(i, w)) == from + 1 {
+          iput(&mut k, wat_at(i, w), to + 1);
+        }
+        w = w + 1;
+      }
+    }
+    i = i + 1;
+  }
 }
 
 /// Frees watch w of instance i.
@@ -822,6 +852,30 @@ fn ino_bits(k: &Kernel, x: u64) -> u64
 
 // ---------------------------------------------------------------- the calls
 
+/// Whether some inotify or fanotify instance has half its queue full. The
+/// kernel then lets another process run after the call that queued the
+/// event, so a reader gets its turn before the queue (INO_Q events, far
+/// fewer than Linux's 16384) overflows and drops events a fast writer made
+/// within one time slice.
+fn ino_pressed(k: &Kernel) -> bool
+  requires kok(k)
+{
+  if iget(k, INO_G + G_WATCHES) == 0 && iget(k, INO_G + G_FANM) == 0 {
+    return false;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    let b = ino_base(i);
+    if iget(k, b) != 0 && iget(k, b + 2) >= INO_Q / 2 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 /// Before process pid's Linux system call runs: which call it is, and
 /// what it will remove, rename or create, looked up now while its old
 /// names still resolve.
@@ -1112,7 +1166,11 @@ fn next_cookie(k: &mut Kernel) -> u64
 // as on Linux. The file of an event is opened when it is read, and that
 // descriptor makes no events itself (FD_QUIET in the open file's mode).
 //
-// Not done: permission events and the other classes, the events that need
+// The content classes are accepted but make no difference: they only matter
+// for permission events, which are not done, and for the order groups are
+// served in, and the events here are only notifications.
+//
+// Not done: permission events, the events that need
 // FAN_REPORT_FID (create, delete, move, attributes), pidfds, unlimited queues
 // and marks beyond the fixed limits, and the ignore mask's eviction.
 
@@ -1140,8 +1198,8 @@ fn fan_init(k: &mut Kernel, pid: u64, flags: u64, evf: u64) -> u64
   if !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;
   }
-  if flags >= 0x100000000 || flags & !(FAN_CLOEXEC | FAN_NONBLOCK | FAN_UNLIMITED_QUEUE | FAN_UNLIMITED_MARKS | FAN_REPORT_TID) != 0 {
-    return EINVAL;                          // the other classes and the FID reports are not offered
+  if flags >= 0x100000000 || flags & !(FAN_CLOEXEC | FAN_NONBLOCK | FAN_CLASS_MASK | FAN_UNLIMITED_QUEUE | FAN_UNLIMITED_MARKS | FAN_REPORT_TID) != 0 || flags & FAN_CLASS_MASK == FAN_CLASS_MASK {
+    return EINVAL;                          // the FID reports are not offered; the content classes only order groups, which see no permission events
   }
   let okf = LO_ACCMODE | LO_APPEND | LO_NONBLOCK | 0x101000 | LO_NOATIME | LO_CLOEXEC | 0x8000;
   if evf >= 0x100000000 || evf & !okf != 0 || evf & LO_ACCMODE == 3 {

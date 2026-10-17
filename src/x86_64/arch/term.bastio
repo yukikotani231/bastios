@@ -26,7 +26,7 @@ fn term_write(t: &mut Term, b: u8)
 /// packet (MOUSE_PKT plus its bytes, src/kbd.bastio), or 256.
 fn term_poll(t: &mut Term) -> u64
   requires term_ok(t)
-  ensures term_ok(t) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT))
+  ensures term_ok(t) && (result <= 256 || (result >= MOUSE_PKT && result < 2 * MOUSE_PKT) || (result >= SER_PKT && result < SER_PKT + 256))
 {
   let b = uart_poll(&mut t.uart);
   if b < 256 {
@@ -37,6 +37,23 @@ fn term_poll(t: &mut Term) -> u64
     return k;
   }
   return usb_poll(&mut t.usb);
+}
+
+/// SER_NONE, SER_FTDI or SER_ACM: is there a USB serial port?
+fn term_ser(t: &Term) -> u64
+  requires term_ok(t)
+  ensures result <= SER_ACM
+{
+  return usb_ser(t.usb);
+}
+
+/// Sends the first n bytes of buf to the USB serial port, if there is one:
+/// how many it took.
+fn term_ser_send(t: &mut Term, buf: &Bytes, n: u64) -> u64
+  requires term_ok(t)
+  ensures term_ok(t) && result <= n && result <= blen(buf)
+{
+  return usb_ser_send(&mut t.usb, buf, n);
 }
 
 /// Writes everything waiting to the devices. For when one processor owns

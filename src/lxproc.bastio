@@ -31,7 +31,7 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if !pidns_room(k, pid) {
     return ENOMEM;                          // the init of its PID namespace has ended
   }
-  let c = new_tid(&mut k);
+  let c = new_fork_pid(&mut k);
   if c == 0 {
     return EAGAIN;
   }
@@ -73,7 +73,7 @@ fn lx_vfork_vm(k: &mut Kernel, mmu: &Mmu, pid: u64, stack: u64) -> u64
   if !cg_fork_ok(k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
   }
-  let c = new_tid(&mut k);
+  let c = new_fork_pid(&mut k);
   if c == 0 {
     return EAGAIN;
   }
@@ -168,6 +168,10 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   drop_fpu(&mut k.mem, take_fpu(&mut k.fpus, c));
   put_fpu(&mut k.fpus, c, Fpu::State(fpu));
   wcopy(&mut k.procs, c * STRIDE, pid * STRIDE, STRIDE);
+  pset(&mut k.procs, c, F_FDNEXT, 0);       // its descriptors are its own copies
+  pset(&mut k.procs, c, F_FDHOLD, 0);
+  pset(&mut k.procs, c, F_FSNEXT, 0);       // so is its cwd, root and umask
+  pset(&mut k.procs, c, F_FSHOLD, 0);
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
@@ -303,7 +307,8 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   if src.file {
     hold = vfs_hold(&mut k.fs, src.f);
   }
-  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, k.ticks % 0x100000000 * NPROC + pid, k.tsc, k.epoch, pid, src, isrc, args, alen, total, hold < HOLD_N);
+  let rn = layout_rnd(&mut k.rng, k.sys, k.procs, pid);
+  let sp = load_image(&mut k.mem, &mut k.txt, &mut k.fs, &mut k.procs, rn, k.tsc, k.epoch, pid, src, isrc, args, alen, total, hold < HOLD_N);
   bfree(args);
   match sp {
     Space::Empty => {
@@ -322,7 +327,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   }
   hole_clear(&mut k, pid);                // a new window has no holes
   anon_clear(&mut k, pid);
-  lazy_set(&mut k, pid, src, hold);       // map_drop_all dropped the old record
+  lazy_set(&mut k, pid, src, hold, rn);   // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);
@@ -477,8 +482,8 @@ fn file_writing(k: &Kernel, f: u64) -> bool
   if rows_writing(k, f, 0, smaller(k.fs.pool_hi, have)) {
     return true;
   }
-  // Rows past the pool (a native process's) are scanned only if any was opened.
-  return k.fs.nat_rows && rows_writing(k, f, FD_POOL, have);
+  // Rows past the pool (a native process's) are scanned only as far as one was opened.
+  return rows_writing(k, f, FD_POOL, smaller(have, k.fs.nat_hi));
 }
 
 /// Whether a row from `lo` to below `hi` is open for writing on file f.
@@ -1198,7 +1203,7 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
     return cg_file_meta(pf);                // src/lxcgroup.bastio
   }
   if pf != 0 {
-    return proc_meta(pf);
+    return proc_file_meta(k, pf);
   }
   let dir = dir_at(&mut k, n);
   if dir != NO_FILE {
@@ -1218,6 +1223,14 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
 }
 
+/// The owner (user, then group times 2^32) of process t's /proc entries:
+/// its effective user and group.
+fn proc_own(k: &Kernel, t: u64) -> u64
+  requires kok(k) && t < NPROC
+{
+  return id_get(k.procs, t, F_UID, true) + id_get(k.procs, t, F_GID, true) * 0x100000000;
+}
+
 /// The metadata of directory dir (as dir_at gives it), the same whether
 /// it is reached by path or by an open descriptor.
 fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
@@ -1228,7 +1241,15 @@ fn dir_meta(k: &mut Kernel, dir: u64) -> Meta
     return cg_dir_meta(dir - DIR_CG);
   }
   if dir >= DIR_PROC {
-    return proc_dir_meta(dir);
+    let m = proc_dir_meta(dir);
+    let t = proc_dir_pid(dir - DIR_PROC);
+    if t != 0 {
+      // /proc/PID and the directories in it belong to the process's
+      // effective user and group, as on Linux: newuidmap and newgidmap
+      // check it before they write a map, and ps shows it as the owner.
+      return Meta { ok: m.ok, mode: m.mode, size: m.size, ino: m.ino, mtime: m.mtime, own: proc_own(k, t) };
+    }
+    return m;
   }
   if dir >= DIR_VFS {
     let dm = vfs_meta(&mut k.fs, dir - DIR_VFS);
@@ -1298,7 +1319,11 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   } else if d.kind == K_DEV && is_cg_file(d.x) {
     m = cg_file_meta(d.x);
   } else if d.kind == K_DEV {
-    m = dev_meta(d.x);
+    if d.x >= PROC_DEV {
+      m = proc_file_meta(k, d.x);             // owned by the process it belongs to
+    } else {
+      m = dev_meta(d.x);
+    }
   } else if d.kind == K_FILE {
     m = file_meta(&mut k.fs, vfs_row_file(k.fs, d.x));
     if !m.ok {

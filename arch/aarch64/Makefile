@@ -238,12 +238,16 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # The shell commands of these disks run the suite's static BusyBox: the
 # AArch64 kernel has no built-in musl dynamic linker, so Alpine's own
 # (dynamic) BusyBox starts only inside the unpacked root.
+# ALPINE_PKGS pins the x86-64 manifest of heywoodlh/vim (tag 9.2); the same
+# tag's arm64 manifest is pinned here, so the AArch64 repository has vim and xxd too.
+VIM_ARM64 := heywoodlh/vim@sha256:7a8cdf7141a5e2ae30a603c7e6051b532fea39df819a9c29e9ee5e270dbb1e06
+
 $(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh $(B)/compat/busybox $(B)/compat/runc tools/ocipull.sh \
     $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys \
-    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun | $(B)/compat
-	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) \
+    $(B)/compat/bastioc1 $(B)/compat/z3 $(B)/compat/tcc $(B)/compat/musl/lib/libc.a $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun $(B)/compat/gdb.tar $(B)/compat/cmake.whl | $(B)/compat
+	COMPAT_ARCH=aarch64 test/compat/alpinedisk.py $@ $(B)/compat/alpine $(ALPINE_BASE) $(filter-out heywoodlh/vim@%,$(ALPINE_PKGS)) $(VIM_ARM64) --cmake-wheel $(B)/compat/cmake.whl \
 	  --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) --busybox $(B)/compat/busybox \
-	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun"
+	  --extra "$(BASTIO_TOOLS) $(B)/compat/runc tools/ocipull.sh $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys $(B)/compat/tree-sitter-c.so $(B)/compat/strace $(B)/compat/crun $(B)/compat/gdb.tar"
 
 # The tree-sitter C parser for Neovim, as the x86-64 suite builds it (the
 # top-level Makefile): the generated parser.c of the pinned npm package in a
@@ -280,6 +284,41 @@ $(B)/compat/runc: | $(B)/compat
 	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.arm64
 	echo "$(RUNC_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
+
+# gdb for the cases that debug a program in the Alpine root: the two arm64 layers
+# of the bellsoft/alpaquita-linux-gdb:16.3-musl image, packed as the top-level
+# Makefile packs the amd64 ones (see there for why): /disk/gdb.tar unpacks under
+# the root's /opt. Declared with := so the CI cache key (it hashes the ?= lines)
+# is left alone.
+GDB_REPO := bellsoft/alpaquita-linux-gdb
+GDB_LAYERS := sha256:4e37c35e973659a11a1f1ff0df2d5e4aae586089ec1d6934302355d948c191df sha256:ec3b534e1f4951e65425afb779a4b702a18b660e531f7a9338c6c16b51bc7860
+GDB_LIBS := libexpat.so.1 liblzma.so.5 libreadline.so.8 libz.so.1 libzstd.so.1 libncursesw.so.6 libpython3.14.so.1.0 libmpfr.so.6 libgmp.so.10 libdebuginfod.so.1 libstdc++.so.6 libgcc_s.so.1 libcurl.so.4 libelf.so.1 libfts.so.0 libjson-c.so.5 libbrotlicommon.so.1 libbrotlidec.so.1 libcares.so.2 libidn2.so.0 libnghttp2.so.14 libpsl.so.5 libssl.so.3 libcrypto.so.3 libunistring.so.5
+$(B)/compat/gdb.tar: | $(B)/compat
+	rm -rf $(B)/compat/src/gdb && mkdir -p $(B)/compat/src/gdb/all $(B)/compat/src/gdb/gdb/bin $(B)/compat/src/gdb/gdb/lib
+	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$(GDB_REPO):pull" | jq -r .token) && \
+	for d in $(GDB_LAYERS); do \
+	  curl -fsSL -H "Authorization: Bearer $$tok" -o $(B)/compat/src/gdb/layer.tgz https://registry-1.docker.io/v2/$(GDB_REPO)/blobs/$$d && \
+	  echo "$${d#sha256:}  $(B)/compat/src/gdb/layer.tgz" | sha256sum -c - >/dev/null && \
+	  tar xzf $(B)/compat/src/gdb/layer.tgz -C $(B)/compat/src/gdb/all --exclude='dev/*' --no-same-owner || exit 1; \
+	done
+	cd $(B)/compat/src/gdb && cp all/usr/bin/gdb gdb/bin/gdb && cp all/lib/ld-musl-aarch64.so.1 gdb/lib/ld-musl-aarch64.so.1 && ln -s ld-musl-aarch64.so.1 gdb/lib/libc.musl-aarch64.so.1 && \
+	  for l in $(GDB_LIBS); do cp -L all/usr/lib/$$l gdb/lib/$$l || exit 1; done && \
+	  cp -r all/usr/lib/python3.14 gdb/lib/python3.14 && cp -r all/usr/share/gdb gdb/share_gdb && mkdir gdb/share && mv gdb/share_gdb gdb/share/gdb && \
+	  rm -rf gdb/lib/python3.14/test gdb/lib/python3.14/idlelib gdb/lib/python3.14/tkinter gdb/lib/python3.14/turtledemo gdb/lib/python3.14/ensurepip gdb/lib/python3.14/pydoc_data gdb/lib/python3.14/lib2to3 && \
+	  find gdb/lib/python3.14 -name __pycache__ -prune -exec rm -rf {} + && \
+	  $(CROSS)strip gdb/bin/gdb gdb/lib/*.so* 2>/dev/null; true
+	tar cf $@.part -C $(B)/compat/src/gdb gdb
+	mv $@.part $@
+
+# cmake: the image the x86-64 suite takes it from has no arm64 build, so
+# alpinedisk.py makes the package from the musllinux wheel on PyPI, pinned by
+# SHA-256 (it bundles the C++ runtime it needs).
+CMAKE_WHEEL_URL := https://files.pythonhosted.org/packages/4b/13/ff769c6fc4a1e1458d3e18c7989e84cc1d374bda994d01ec900d1d3bdd44/cmake-4.4.4-py3-none-musllinux_1_2_aarch64.whl
+CMAKE_WHEEL_SHA256 := e2d98233f16b5d6b9d4673a0a724ce801fc413811befb8f0b008cbffb7a2ad63
+$(B)/compat/cmake.whl: | $(B)/compat
+	curl -fsSL -o $@.part $(CMAKE_WHEEL_URL)
+	echo "$(CMAKE_WHEEL_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	mv $@.part $@
 
 # crun, the other OCI runtime: the static arm64 binary of the upstream release
 # (the x86-64 suite's CRUN_VER), checked against a pinned SHA-256.
@@ -401,12 +440,16 @@ $(B)/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test
 $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/compat/mkdisk.py $(B)/compat/busybox
 	COMPAT_ARCH=aarch64 test/compat/nodedisk.py $@ $(NODE_IMAGE) $(B)/compat/busybox --cache $(ALPINE_CACHE)
 
-COMPAT_DISKS := $(B)/compat/disk.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
+# COMPAT_DISKS, COMPAT_LANES and COMPAT_SKIP_LANES (run.py --lanes and
+# --skip-lanes) let a CI runner build and run a part of the suite: the
+# images of its lanes, and those lanes.
+COMPAT_DISKS ?= $(B)/compat/disk.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --bastio-disk $(B)/compat/bastio.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http \
               --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
-              --node-disk $(B)/compat/node.img --out $(B)/compat
+              --node-disk $(B)/compat/node.img --out $(B)/compat \
+              $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
 compat-disks: $(B)/bastios.bin $(COMPAT_DISKS)
 

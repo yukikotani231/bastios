@@ -41,14 +41,24 @@ const DESC_WRITE: u64 = 2;            // the device writes this buffer
 const AVAIL_NO_INTERRUPT: u64 = 1;    // we poll
 
 const RING_BYTES: u64 = 12288;        // r0, r1, r2
-// How many times vq_wait looks at the used ring before it gives up on the
-// device. Each look is one memory read, so a million of them (the old
-// limit) can pass quickly enough that a completion QEMU's I/O thread
-// delivers late on a busy host becomes a disk error. This is 500 times
-// that: a slow device gets far longer to finish, and a dead one still
-// fails instead of hanging the kernel. (A bound in timer ticks would be
-// better, but ticks do not advance while a system call holds the lock.)
+// How many times a driver looks at a ring or register before it gives up
+// on the device (the network cards' drivers use it too). Each look is one
+// memory read, so a million of them (the old limit) can pass quickly
+// enough that a completion QEMU's I/O thread delivers late on a busy host
+// becomes an error. This is 500 times that: a slow device gets far longer
+// to finish, and a dead one still fails instead of hanging the kernel. (A
+// bound in timer ticks would be better, but ticks do not advance while a
+// system call holds the lock.)
 const VIO_SPINS: u64 = 500000000;
+// vq_wait's limit, for a disk command the kernel waits for: 2^36 looks.
+// 500 million was still too few once the processor really runs at speed:
+// under KVM they pass in about a second, and on a busy host a disk write
+// QEMU makes with a flush to the host's disk can take longer, so a slow
+// write came back as a failure (a file system full, an executable that
+// could not be read). Now a dead device is noticed after a minute or more,
+// which a working one, however slow, never comes near. Linux waits for a
+// virtio disk without any limit.
+const VQ_WAIT_SPINS: u64 = 68719476736;
 const ADDR_LIMIT: u64 = 0x100000000;  // legacy queues take a 32-bit page number
 
 struct Vq {
@@ -232,12 +242,12 @@ fn vq_wait(q: &mut Vq) -> bool
   ensures vq_ok(q)
 {
   let mut spins = 0;
-  while spins < VIO_SPINS && !vq_has_used(&mut q)
+  while spins < VQ_WAIT_SPINS && !vq_has_used(&mut q)
     invariant vq_ok(q)
   {
     spins = spins + 1;
   }
-  if spins == VIO_SPINS {
+  if spins == VQ_WAIT_SPINS {
     return false;
   }
   vq_next(&mut q);

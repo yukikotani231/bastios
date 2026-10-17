@@ -82,6 +82,8 @@ whoever its mode admits.
 | Shared file mappings | `mmap` refuses a writable `MAP_SHARED` mapping of a file opened without write permission, and `mprotect` refuses to make one writable later (`EACCES`). Only a file opened for writing is mapped through the page cache's own pages; from a read-only descriptor, a shared mapping is a copy, so even a mapping `mprotect` cannot see (past the `MAP_N` recorded per process) changes no one else's view of the file. The cost: such a mapping does not see later writes to the file. | `lx_mmap`, `src/linux.bastio`; `map_no_write`, `src/lxmem.bastio` |
 | Unix sockets | `bind` to a path makes a socket file there, with the checks for making any file (write and search permission on the directory) and the umask; `connect` needs write permission on that file, so its mode, owner and group say who may connect. `connect` finds the socket by the file itself, so a renamed socket file or another hard link to it still leads there. | `ux_mkfile`, `ux_may_connect`, `src/lxunix.bastio` |
 | Devices | `/dev/loop0`..`7` and `/dev/loop-control` are `rw-rw----` for root and group disk (6), and open checks it: a loop device reads and writes whatever file it is bound to. `/dev/console` is `rw--w----` for root, and open checks it. `/dev/null`, `zero`, `random`, `urandom` and `tty` are open to everyone; there are no raw disk or memory devices. | `lx_open`, `src/lxfd.bastio`; `dev_meta`, `src/lxdev.bastio` |
+| Address space layout | Each `execve` draws 128 bits from the `/dev/urandom` generator. They become the 16 bytes `AT_RANDOM` points at (what libc takes its stack-protector canary and pointer guard from), and they move the layout, as Linux's `kernel.randomize_va_space` does. Level 1: the stack (up to 512 KiB down, in steps of 16 bytes), the top of the mmap area and the dynamic linker (up to 64 GiB down), and a position-independent program (up to 16 GiB up). Level 2, the default: the program break too (up to 32 MiB above the image). Level 0, or `personality(ADDR_NO_RANDOMIZE)` (kept across `execve`), turns it off. A fixed-address program (`ET_EXEC`) cannot move. | `layout_rnd`, `src/lxdev.bastio`; `load_image`, `src/proc.bastio`; `init_stack`, `src/elf.bastio` |
+| Other users' layout | `/proc/PID/maps`, `auxv`, `mem` and `io` of a process open (`EACCES`) only for a process that could ptrace it: root, or the same real, effective, saved and file-system ids. They would give the layout away. | `proc_secret`, `src/lxprocfs.bastio`; `lx_open_tail`, `src/lxfd.bastio` |
 | Ports | binding a UDP or TCP port below 1024 is root's (`EACCES`). | `may_bind`, `src/lxsock.bastio` |
 | Native calls | Any program can raise `int 0x80`, the native ABI (`src/syscall.bastio`), a Linux program included. Its file, network, power and reboot calls check no permissions, so a process that is not root may make only the calls that touch nothing of anyone else's: console I/O, starting and waiting for its own children (which keep its ids), yielding, its pid, `SYS_INFO`'s counters, the process list, and `SYS_KILL` of a process `may_signal` allows. Everything else gives `NO_RESULT`. | `native_allowed`, `src/syscall.bastio`; `spawn`, `src/proc.bastio` |
 
@@ -126,3 +128,56 @@ Known gaps, most serious first.
    the arithmetic flags, the trap flag (which a user program may set itself)
    and the fs base from the saved context, and checks rip, rsp and the fs
    base are user addresses.
+
+## Memory protections: where they stand
+
+What the page tables enforce for a user process, and what they do not.
+
+- **Layout.** Randomized as the "Address space layout" row says, with
+  fewer bits than Linux has: the stack moves by 15 bits, the mmap area by
+  24 bits of pages (the window is 512 GiB, Linux's is 128 TiB). The vDSO
+  page still lies at a fixed place just under the stack, and so does the
+  first part of the window (a non-PIE program).
+- **No execute (NX) and W^X, on x86-64.** `EFER.NXE` is set on every
+  processor (`boot/boot.S`, `boot/ap.S`). Whether a page can run is decided
+  when its page-table entry is made, in bastiolang's prelude: a page mapped
+  writable (`pt_put_frame`, `pt_put_shared` with `w`) gets the no-execute
+  bit, a read-only one does not, and `pt_set_access` leaves the bit alone.
+  So the stack, the heap, anonymous mappings, a program's data and bss, and
+  every page fork shares copy-on-write cannot run code. `PROT_EXEC` is
+  honoured: `mmap` and `mprotect` map the page again with the bit its new
+  protection wants (`l2_protect`, `src/lxmem.bastio`), so a JIT that writes
+  code and then `mprotect`s it executable works, and `PROT_READ|PROT_WRITE`
+  after that stops the code again. The pages of an executable segment are
+  made executable after the image is copied in (`exec_pages`,
+  `src/elf.bastio`). What is not enforced yet:
+  - A page that is both writable and executable (a program asking for
+    `PROT_WRITE|PROT_EXEC`, the flat images of the built-in programs) is
+    marked in the page bitmap (`XPAGE`, `src/pages.bastio`), because the
+    entry cannot be asked; fork (copy-on-write or copying) and the copy a
+    write makes keep it. `mremap` of such a page drops the execute right.
+  - A program's text is not made read-only (only the pages shared from the
+    page cache are), and read-only data in shared pages can run code.
+  - The AArch64 port and the native backends do not set the bit.
+- **SMEP and SMAP: not needed.** The kernel runs on its own page table
+  and loads it on every entry from user mode (`trap_alias`); the user
+  pages are not in it. A kernel jump to user code, or a kernel read of a
+  user address the kernel was not asked to read, finds nothing mapped.
+  The kernel reads and writes a process's memory only through that
+  process's own tables (`src/usermem.bastio`, proved).
+- **The kernel's own pages.** The kernel image and RAM are mapped by
+  1 GiB pages, read-write and executable. A write through a kernel bug
+  could change kernel code. The proofs say the kernel makes no such write;
+  this would be a second line.
+
+## Randomness
+
+`/dev/urandom`, `/dev/random` and `getrandom` come from one ChaCha20 generator
+(`src/lxdev.bastio`) with fast key erasure. Its pool takes the time-stamp
+counter on every scheduler pass, the clocks at boot, a virtio-rng's 64 bytes
+at boot if the machine has one, and, if the processor has RDSEED or RDRAND, 64
+bytes at boot and one word every 4096 scheduler passes (`rng_hw_boot`,
+`rng_stir`; `hw_random` in `boot/smp.c`). Without one of those two
+hardware sources (a QEMU CPU model without them, an old processor, a virtual
+machine without virtio-rng) the pool's early state rests on timing jitter and
+the clock, which is an estimate of entropy and not a measured one. `test/rng_test.sh` boots with and without the instructions.
