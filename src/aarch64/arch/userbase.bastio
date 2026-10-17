@@ -12,7 +12,6 @@ const PIE_AT: u64 = 0x400000;
 // pages there stay ordinary zero pages.
 const SIGBUS_PAGES: u64 = 0;
 
-// Pages the program may write can also run code here (no no-execute marks
-// yet), so mprotect may leave a writable, executable range to be mapped when
-// touched, like a writable one.
-const LAZY_EXEC: u64 = 1;
+// A page the program may write cannot run code here (UXN), so, as on x86-64, a
+// writable, executable range is mapped at once, with the bit it needs.
+const LAZY_EXEC: u64 = 0;

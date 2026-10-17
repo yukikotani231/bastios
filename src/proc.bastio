@@ -868,7 +868,7 @@ const FAN_M: u64 = 15;               // fanotify marks per instance (an inotify 
 const FAN_MK: u64 = 12;              // a mark: the handle + 1 (0: free), its type, mask, ignored mask, flags, prefix length, then 6 words of prefix
 const FAN_Q: u64 = 32;               // events an instance queues, the overflow event included
 const FAN_EV: u64 = 5;               // an event: mask, process, handle + 1, thread, descriptor + 1 opened for its read
-const EVT_LEN: u64 = 76377;          // INO_G + 121
+const EVT_LEN: u64 = 76378;          // INO_G + 122
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or DEV_PTS + N; word 3: nonblocking (src/lxpty.bastio)
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
@@ -1080,6 +1080,7 @@ struct Kernel {
   gfx: Bytes,           // the screen for /dev/fb0: its geometry and the pixels waiting for the console pump (src/lxfb.bastio)
   mns: Buf,             // mount namespaces: each process's, and their mounts (src/lxns.bastio)
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
+  swp: Buf,             // the swap area's bookkeeping, empty without one (src/swap.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
   undo_hi: u64,         // one past the highest SEM_UNDO entry ever made (undo_find): no later one is in use (sem_exit and undo_clear stop there)
@@ -1858,6 +1859,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
     return;
   }
   map_drop_all(&mut k, pid);                 // shared file pages go back first
+  swap_drop_all(&mut k, pid);                // so do the pages it had swapped out
   vfork_give_back(&mut k, mmu, pid);         // a borrowed address space goes home
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},
