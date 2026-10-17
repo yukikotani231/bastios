@@ -420,6 +420,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ctid = c3.ctid;
     tls = c3.tls;
   }
+  if (n == LX_EXIT || n == LX_EXIT_GROUP) && pt_exit_event(&mut k, pid, a) {
+    return SWITCH;                          // PTRACE_O_TRACEEXIT: the tracer is told first
+  }
   if n == LX_EXIT && thread_only(k.procs, pid) {
     lx_thread_exit(&mut k, mmu, pid);
     return SWITCH;
@@ -661,6 +664,7 @@ fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was:
       sig_reset(&mut k.sigact, r, true);
     }
     pt_fork_event(&mut k, pid, r, 2);
+    pt_vfork_stop(&mut k, pid);
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
@@ -699,6 +703,9 @@ fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was:
         kind = 2;
       }
       pt_fork_event(&mut k, pid, r, kind);
+      if n == LX_VFORK {
+        pt_vfork_copied(&mut k, pid);
+      }
     }
     return KEEP;
   }

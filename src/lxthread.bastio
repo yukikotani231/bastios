@@ -276,6 +276,7 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
   pset(&mut k.procs, q, F_CTID, 0);
   pset(&mut k.procs, q, F_FUTEX, 0);
   pset(&mut k.procs, q, F_SIGPEND, 0);
+  rtq_clear(&mut k, q);
   pset(&mut k.procs, q, F_RESTART, 0);
   pset(&mut k.procs, q, F_STATE, FREE);
 }
@@ -441,6 +442,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
     pset(&mut k.procs, c, F_REGS + R_FSBASE, tls);
   }
   pset(&mut k.procs, c, F_SIGPEND, 0);
+  rtq_clear(&mut k, c);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_TGID, g);
   cwd_fork(&mut k.cwd, pid, c);             // starts where the creator is: a row of a thread that ended holds its old root
