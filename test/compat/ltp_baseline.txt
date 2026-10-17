@@ -2,6 +2,7 @@
 # make compat-ltp fails if one of them stops passing.
 abort01
 accept01
+accept02
 accept03
 accept4_01
 access01
