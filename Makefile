@@ -882,8 +882,18 @@ build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/co
 # The Go toolchain of the official golang:alpine image (static programs), as a
 # root under /disk/g, for go.txt. Pinned by digest, its layers kept in
 # ALPINE_CACHE like the others'. x86-64 only.
-build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/gopls
+	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --gopls build/compat/gopls
+
+# gopls, Go's language server, as a static program built on the host from the
+# pinned release (the module proxy checks every module against the checksum
+# database), for the cases that ask it about a Go program. It goes into the Go
+# disk as /usr/local/bin/gopls. x86-64 only. (The version is in
+# test/compat/images.mk.)
+build/compat/gopls: | build/compat/src
+	GOTOOLCHAIN=local GOBIN=$(CURDIR)/build/compat/src/gopls-bin CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-trimpath \
+	  go install -ldflags='-s -w' golang.org/x/tools/gopls@$(GOPLS_VER)
+	mv build/compat/src/gopls-bin/gopls $@
 
 # Python development, on a seventh disk (test/compat/pythondisk.py) for
 # python.txt: the root of the official python:alpine image (CPython, pip and
