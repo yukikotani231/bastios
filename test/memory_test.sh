@@ -5,7 +5,9 @@
 #   - the out-of-memory killer picks the process with the highest oom_score,
 #     says so on the console, and the system carries on,
 #   - oom_score_adj moves the choice, and /proc/vmstat counts the kills,
-#   - /proc/meminfo counts the cache as available.
+#   - /proc/meminfo counts the cache as available,
+#   - with a swap file on, a program bigger than the free memory runs, gets
+#     back what it wrote, and swapoff brings every page home.
 # Input is sent a line at a time, each after the prompt, as test/shell_test.sh does.
 set -u
 cd "$(dirname "$0")/.."
@@ -20,7 +22,8 @@ import os, re, select, subprocess, sys, tempfile, time
 kernel, timeout, mem, smp = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
 tmp = tempfile.TemporaryDirectory()
 img = os.path.join(tmp.name, "disk.img")
-subprocess.run([sys.executable, "test/compat/mkdisk.py", img, "mhog=build/user/mhog.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", img, "mhog=build/user/mhog.elf"], check=True,
+               env=dict(os.environ, MKDISK_FREE_MB="64"))
 
 qemu = subprocess.Popen(
     ["qemu-system-x86_64", "-kernel", kernel, "-m", mem, "-smp", smp,
@@ -76,6 +79,12 @@ run("ash")
 # Sizes follow the memory the machine has (the kernel's own use differs between backends).
 F = meminfo("MemFree") // 1024
 BIG, SMALL, TOUCH_BIG, TOUCH_ADJ = F * 11 // 20, F // 5, F * 2 // 5, F * 7 // 20
+OVER, HOLD, SECOND, HUGE = F * 7 // 5, F * 3 // 5, F * 19 // 20, F * 4
+# The swap file holds what a program needs beyond memory and a margin. It is
+# no bigger than that because the native kernel's heap is small on this
+# machine (the swap table takes 16 bytes of it for each slot).
+SWAP_MB = max(F * 2 // 3, 8)
+SWAP_KB = SWAP_MB * 1024 - 4
 
 # A hog that fits is left alone.
 t = run("/disk/mhog touch 16; echo rc=$?")
@@ -135,6 +144,36 @@ check("/proc/self/oom_score reads", re.search(r"\n\d+\n", run("cat /proc/self/oo
 n_kill = vm("oom_kill")
 announced = len(re.findall(r"Out of memory: Killed process", out.decode(errors="replace")))
 check("/proc/vmstat counts the kills", n_kill >= 3 and n_kill == announced, f"vmstat {n_kill}, console {announced}")
+# Swap: a file on the disk. A program bigger than free memory runs to the end.
+kills = vm("oom_kill")
+t = run(f"/disk/mhog mkswap {SWAP_MB} /disk/swap && /disk/mhog swapon /disk/swap; echo rc=$?")
+check("mkswap and swapon", "swap on" in t and "rc=0" in t, t)
+check("/proc/meminfo has the swap area", meminfo("SwapTotal") == SWAP_KB and meminfo("SwapFree") == SWAP_KB)
+check("/proc/swaps lists it", "swapfile" in run("cat /proc/swaps"))
+t = run("/disk/mhog swapon /disk/swap; echo rc=$?")
+check("a second swapon is refused", "failed" in t, t)
+run("/disk/mhog touch 16")
+t = run(f"/disk/mhog touch {OVER}; echo rc=$?")
+check("a program bigger than free memory runs and reads back what it wrote",
+      f"touched {OVER} MiB" in t and "rc=0" in t and "Out of memory" not in t, t)
+check("pages went out and came back", vm("pswpout") > 1000 and vm("pswpin") > 1000, f"{vm('pswpout')} {vm('pswpin')}")
+check("nothing was killed", vm("oom_kill") == kills)
+check("every slot is free again", meminfo("SwapFree") == SWAP_KB)
+# A holder is pushed out by a second program; swapoff brings it home.
+run(f"/disk/mhog hold {HOLD} & big=$!; sleep 1")
+t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
+check("a holder and a second program both fit", f"touched {SECOND} MiB" in t and "rc=0" in t and vm("oom_kill") == kills, t)
+used = meminfo("SwapTotal") - meminfo("SwapFree")
+check("the holder's pages are in the swap file", used > 1000, str(used))
+t = run("/disk/mhog swapoff /disk/swap; echo rc=$?")
+check("swapoff brings the pages back", "swap off" in t and "rc=0" in t and meminfo("SwapTotal") == 0, t)
+check("the holder is alive and whole", "bigalive" in run("kill -0 $big && echo bigalive"))
+run("kill -9 $big; sleep 1")
+# More than memory and swap together: the killer still ends the program.
+run("/disk/mhog swapon /disk/swap")
+t = run(f"/disk/mhog touch {HUGE}; echo rc=$?")
+check("a program bigger than memory and swap is killed", "Out of memory: Killed process" in t and "rc=137" in t, t)
+check("the system carries on after it", "alive" in run("echo alive") and meminfo("SwapFree") == SWAP_KB)
 qemu.kill(); qemu.wait()
 print("memory: %d failed" % fails)
 sys.exit(1 if fails else 0)

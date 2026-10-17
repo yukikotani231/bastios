@@ -684,7 +684,7 @@ const ME_W: u64 = 5;                  // words per mount
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
 // names are in k.sys), and the IPC namespace of each POSIX queue.
-const NSK_N: u64 = 12;                // kinds, per process:
+const NSK_N: u64 = 15;                // kinds, per process:
 const NSK_UTS: u64 = 0;
 const NSK_IPC: u64 = 1;
 const NSK_PID: u64 = 2;               //   the PID namespace it is in
@@ -697,6 +697,10 @@ const NSK_TIMEC: u64 = 9;            //   the time namespace its children are in
 const NSK_CGN: u64 = 7;               //   the root of its cgroup namespace: slot + 1 (0: the first namespace)
 const NSK_VP1: u64 = 10;              //   its id in the PID namespace around its own (0: that is the first)
 const NSK_VP2: u64 = 11;              //   and in the one around that
+const NSK_VP3: u64 = 12;              //   then the next ones out, up to PN_LEVELS - 1 levels around its own
+const NSK_VP4: u64 = 13;
+const NSK_VP5: u64 = 14;
+const PN_LEVELS: u64 = 6;             // PID namespaces nest this deep besides the first
 const CG_N: u64 = 128;                // cgroups in all (slot 0 is the root, always there)
 const CG_W: u64 = 140;                // words per cgroup: see CGW_*
 const CGW_USED: u64 = 0;
@@ -1073,6 +1077,7 @@ struct Kernel {
   gfx: Bytes,           // the screen for /dev/fb0: its geometry and the pixels waiting for the console pump (src/lxfb.bastio)
   mns: Buf,             // mount namespaces: each process's, and their mounts (src/lxns.bastio)
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
+  swp: Buf,             // the swap area's bookkeeping, empty without one (src/swap.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
   undo_hi: u64,         // one past the highest SEM_UNDO entry ever made (undo_find): no later one is in use (sem_exit and undo_clear stop there)
@@ -1851,6 +1856,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
     return;
   }
   map_drop_all(&mut k, pid);                 // shared file pages go back first
+  swap_drop_all(&mut k, pid);                // so do the pages it had swapped out
   vfork_give_back(&mut k, mmu, pid);         // a borrowed address space goes home
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},

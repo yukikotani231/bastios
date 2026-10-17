@@ -79,6 +79,7 @@ import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "swap.bastio";
 import "oom.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
@@ -382,6 +383,28 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     return (p + 1) % NPROC;
   }
   if v == V_ABORT {
+    let sw = swap_fault(&mut s.k, p);
+    if sw == SW_OK {
+      return p;
+    }
+    if sw == SW_BUSY {
+      return (p + 1) % NPROC;
+    }
+    if sw == SW_NOMEM {
+      // The page is in the swap file and there is no page to read it into:
+      // the same reclaim as a fault that finds no page (src/oom.bastio).
+      let oo = oom_fault(&mut s.k, &mut s.con, p, true);
+      if oo == OOM_RETRY {
+        return p;
+      }
+      if oo == OOM_WAIT {
+        return (p + 1) % NPROC;
+      }
+      if oo == OOM_SELF {
+        terminate(&mut s.k, mmu, p, death_code(SIGKILL, false));
+        return (p + 1) % NPROC;
+      }
+    }
     let lz = lazy_fault(&mut s.k, p);
     if lz == LZ_WAIT && state(s.k.procs, p) == READY {
       pset(&mut s.k.procs, p, F_STATE, DISKWAIT);
@@ -758,6 +781,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   bfree(s.k.uxb);
   free(s.k.mns);
   free(s.k.scf);
+  free(s.k.swp);
   bfree(s.k.mstr);
   pool = s.k.mem.pool;
   return 0;
