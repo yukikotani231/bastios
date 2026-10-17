@@ -86,6 +86,20 @@ def check(name, ok, text=""):
     else:
         print("FAIL", name); print(text); fails += 1
 
+def hold(line, n=1):
+    """Starts holders in the background and waits until all n have their memory
+    (a fixed sleep is too short on a slow machine: the holder is still faulting in)."""
+    seen = out.count(b"mhog: holding")
+    run(line)
+    pos = 0
+    for _ in range(seen + n):
+        i = out.find(b"mhog: holding", pos)
+        if i < 0 and read_until(b"mhog: holding", pos):
+            i = out.find(b"mhog: holding", pos)
+        if i < 0:
+            return
+        pos = i + 1
+
 def vm(key):
     m = re.search(key + r" (\d+)", run("cat /proc/vmstat"))
     return int(m.group(1)) if m else -1
@@ -141,7 +155,7 @@ check("the system carries on", "alive" in run("echo alive"))
 check("the kill is counted", vm("oom_kill") == 1)
 
 # The biggest holder dies, not the one that asked last.
-run(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1")
+hold(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1", 2)
 t = run(f"/disk/mhog touch {TOUCH_BIG}; echo rc=$?")
 m = re.search(r"Killed process \d+ \(mhog\) oom_score \d+, (\d+) kB", t)
 check("the biggest process is the victim", m and 0.9 * BIG * 1024 <= int(m.group(1)) <= 1.1 * BIG * 1024 and f"touched {TOUCH_BIG} MiB" in t, t)
@@ -150,7 +164,7 @@ check("the others live", "bigdead" in t and "smallalive" in t, t)
 run("kill -9 $small; sleep 1")
 
 # oom_score_adj: +1000 makes a small process the first choice, -1000 exempts.
-run(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1")
+hold(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1", 2)
 t = run("echo 1000 > /proc/$small/oom_score_adj; echo -1000 > /proc/$big/oom_score_adj; cat /proc/$small/oom_score_adj /proc/$big/oom_score_adj")
 check("oom_score_adj is kept", "1000\n-1000" in t, t)
 s_small = int(run("cat /proc/$small/oom_score").split()[-2]) if True else 0
@@ -181,7 +195,7 @@ check("pages went out and came back", vm("pswpout") > 1000 and vm("pswpin") > 10
 check("nothing was killed", vm("oom_kill") == kills)
 check("every slot is free again", meminfo("SwapFree") == SWAP_KB)
 # A holder is pushed out by a second program; swapoff brings it home.
-run(f"mkdir /sys/fs/cgroup/sw; echo +memory > /sys/fs/cgroup/cgroup.subtree_control; ash -c 'echo $$ > /sys/fs/cgroup/sw/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold(f"mkdir /sys/fs/cgroup/sw; echo +memory > /sys/fs/cgroup/cgroup.subtree_control; ash -c 'echo $$ > /sys/fs/cgroup/sw/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 check("a holder and a second program both fit", f"touched {SECOND} MiB" in t and "rc=0" in t and vm("oom_kill") == kills, t)
 used = meminfo("SwapTotal") - meminfo("SwapFree")
@@ -201,13 +215,13 @@ run("/disk/mhog swapon /disk/swap")
 def group_swap(g):
     return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
 run("mkdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm; echo 0 > /sys/fs/cgroup/sl/memory.swap.max; echo 2097152 > /sys/fs/cgroup/sm/memory.swap.max")
-run(f"ash -c 'echo $$ > /sys/fs/cgroup/sl/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold(f"ash -c 'echo $$ > /sys/fs/cgroup/sl/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 used = meminfo("SwapTotal") - meminfo("SwapFree")
 check("a group with memory.swap.max 0 keeps its pages in memory; the other program swaps its own",
       group_swap("sl") == 0 and f"touched {SECOND} MiB" in t and "rc=0" in t and "Out of memory" not in t, f"{group_swap('sl')} {t}")
 run("kill -9 $big; sleep 1")
-run(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") <= 2097152, f"{group_swap('sm')} {t}")
 run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm")
