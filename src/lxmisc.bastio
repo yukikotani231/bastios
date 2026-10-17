@@ -195,7 +195,7 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
 
 /// getrusage(who, usage): the user and system times (see tm_ticks) of the
 /// caller, or with RUSAGE_CHILDREN of its waited-for children; the rest
-/// is zero.
+/// is zero (ru_maxrss too, for the children).
 fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -211,6 +211,11 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
   xfer_u64(&mut k.fs.xfer, 16, st / 100);            // ru_stime
   xfer_u64(&mut k.fs.xfer, 24, st % 100 * 10000);
+  if !children {
+    // ru_maxrss in kilobytes: every page the process has counts as resident
+    // (the peak is not kept; this is the current size).
+    xfer_u64(&mut k.fs.xfer, 32, smaller(anon_count(&mut k, pid, 0, WPAGES), WPAGES) * 4);
+  }
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;
   }
@@ -858,6 +863,35 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// The last of lx_misc_call's calls (split off so the solver proves each half).
+fn lx_misc_tail(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r0: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = r0;
+  if n == LX_CAPGET {
+    r = lx_capget(&mut k, pid, a, b);
+  } else if n == LX_CAPSET {
+    r = lx_capset(&mut k, pid, a, b);
+  } else if n == LX_PRCTL || n == LX_SECCOMP {
+    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
+  } else if n == LX_MLOCK || n == LX_MUNLOCK {
+    r = lx_mlock_call(&mut k, pid, n, a, b);
+  } else if n == LX_MLOCKALL {
+    r = lx_mlockall(&mut k, pid, a);
+  } else if n == LX_MUNLOCKALL {
+    r = lx_munlockall(&mut k, pid);
+  } else if n == LX_GETRANDOM {
+    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
+    if c % 0x100000000 > 7 || c % 8 == 6 {
+      r = EINVAL;
+    } else {
+      r = lx_getrandom(&mut k, pid, a, b);
+    }
+  }
+  return r;
+}
+
 /// Writes a call's result and keeps the process running, or retries it when
 /// the disk blocks it needs are not cached yet. (Its own function so the proof
 /// of lx_misc_call's long chain of cases does not have to carry the whole kernel
@@ -871,6 +905,30 @@ fn lx_misc_done(k: &mut Kernel, pid: u64, n: u64, r: u64) -> u64
   }
   ret(&mut k.procs, pid, r);
   return KEEP;
+}
+
+/// mremap, and the locked pages follow the range (src/lxrlimit.bastio).
+fn lx_mremap_locked(k: &mut Kernel, pid: u64, a: u64, b: u64, c: u64, flags: u64, naddr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_mremap(&mut k, pid, a, b, c, flags, naddr);
+  if r < 0x8000000000000000 {
+    lock_remapped(&mut k, pid, a, b, c, r);
+  }
+  return r;
+}
+
+/// munmap, and what it unmaps is no longer locked.
+fn lx_munmap_locked(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_munmap(&mut k, pid, a, b);
+  if r == 0 {
+    lock_unmapped(&mut k, pid, a, b);
+  }
+  return r;
 }
 
 /// System call n of process pid, with its first three arguments.
@@ -900,9 +958,9 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_UNAME {
     r = lx_uname(&mut k, pid, a);
   } else if n == LX_MREMAP {
-    r = lx_mremap(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
+    r = lx_mremap_locked(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
   } else if n == LX_MUNMAP {
-    r = lx_munmap(&mut k, pid, a, b);
+    r = lx_munmap_locked(&mut k, pid, a, b);
   } else if n == LX_MPROTECT {
     r = lx_mprotect(&mut k, pid, a, b, c);
   } else if n == LX_MADVISE {
@@ -1030,25 +1088,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
         r = vpid_of(k, pid, sid_of(k.procs, p));
       }
     }
-  } else if n == LX_CAPGET {
-    r = lx_capget(&mut k, pid, a, b);
-  } else if n == LX_CAPSET {
-    r = lx_capset(&mut k, pid, a, b);
-  } else if n == LX_PRCTL || n == LX_SECCOMP {
-    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
-  } else if n == LX_MLOCK || n == LX_MUNLOCK {
-    r = lx_mlock_call(&mut k, pid, n, a, b);
-  } else if n == LX_MLOCKALL {
-    r = lx_mlockall(&mut k, pid, a);
-  } else if n == LX_MUNLOCKALL {
-    r = lx_munlockall(&mut k, pid);
-  } else if n == LX_GETRANDOM {
-    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
-    if c % 0x100000000 > 7 || c % 8 == 6 {
-      r = EINVAL;
-    } else {
-      r = lx_getrandom(&mut k, pid, a, b);
-    }
+  } else {
+    r = lx_misc_tail(&mut k, pid, n, a, b, c, r);
   }
   // Everything else (madvise, sync) succeeds doing nothing.
   assert kok(k) && con_ok(con);

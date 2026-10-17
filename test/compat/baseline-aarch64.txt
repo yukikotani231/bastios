@@ -398,6 +398,7 @@ t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
 t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
+t_inotify: a watch nobody reads does not hold its writer back: 2000 files made and removed take under 3 s
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
@@ -1210,3 +1211,4 @@ alpine: apk: install tmux, cmake and lua-language-server over HTTP
 alpine: cmake: configure, build and run a C project
 alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 alpine: vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
+alpine: gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again

@@ -84,6 +84,7 @@ import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "swap.bastio";
 import "oom.bastio";
 import "lxcow.bastio";
 import "hda.bastio";
@@ -674,6 +675,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if pt_sys_entry(&mut s.k, p, pget(s.k.procs, p, F_RESTART) != 0) {
       return (p + 1) % NPROC;               // stopped for its tracer before the call (src/lxptrace.bastio)
     }
+    if ino_throttle(&mut s.k, p) {
+      return (p + 1) % NPROC;               // (a reader of a half-full inotify queue goes first)
+    }
     ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
@@ -700,6 +704,31 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   let mut is_bus = false;
   if v == 14 {
+    // A swapped page (src/swap.bastio) is a page there but with no access: nothing below may see it first.
+    let sw = swap_fault(&mut s.k, p);
+    if sw == SW_OK {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+      return p;
+    }
+    if sw == SW_BUSY {
+      return (p + 1) % NPROC;               // a processor runs its space: try again
+    }
+    if sw == SW_NOMEM {
+      // The page is in the swap file and there is no page to read it into:
+      // the same reclaim as a fault that finds no page (src/oom.bastio).
+      let oo = oom_fault(&mut s.k, &mut s.con, p, true);
+      if oo == OOM_RETRY {
+        pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+        return p;
+      }
+      if oo == OOM_WAIT {
+        return (p + 1) % NPROC;
+      }
+      if oo == OOM_SELF {
+        terminate(&mut s.k, mmu, p, death_code(SIGKILL, false));
+        return (p + 1) % NPROC;
+      }
+    }
     let lz = lazy_fault(&mut s.k, p);
     if lz == LZ_WAIT && state(s.k.procs, p) == READY {
       // Its code page's blocks are being read: it sleeps until the disk's
@@ -878,7 +907,7 @@ fn fault_fast(s: &mut Sys, cpu: &Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u
     return Fast::Back(fpu);
   }
   pset(&mut s.k.procs, p, reg_word(R_FAULT), cpu_get(cpu, R_FAULT));
-  if !(anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
+  if swap_count(s.k, tgid_) != 0 || !(anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
     return Fast::Back(fpu);
   }
   pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
@@ -1716,6 +1745,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   bfree(sys.k.uxb);
   free(sys.k.mns);
   free(sys.k.scf);
+  free(sys.k.swp);
   bfree(sys.k.mstr);
   pool = sys.k.mem.pool;
   // Off, or a restart. QEMU's isa-debug-exit device (tests) exits at once,

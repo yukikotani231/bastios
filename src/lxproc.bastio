@@ -49,6 +49,10 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       put_fpu(&mut k.fpus, pid, Fpu::State(g));
     },
   }
+  if !swap_reach(&mut k, tgid(k.procs, pid), pid, 0, WPAGES) {
+    give_page(&mut k.mem, fpu);
+    return ENOMEM;                          // the parent's swapped pages must be back: the copy shares no slot (src/swap.bastio)
+  }
   let solo = group_alone(&mut k, pid);
   match fork_space(&mut k.mem, &mut k.spaces, pid, solo) {
     Space::Empty => {
@@ -325,6 +329,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   }
   hole_clear(&mut k, pid);                // a new window has no holes
   anon_clear(&mut k, pid);
+  swap_drop_all(&mut k, tgid(k.procs, pid));   // its swapped pages went with the old space
   lazy_set(&mut k, pid, src, hold, rn);   // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
