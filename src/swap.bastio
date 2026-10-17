@@ -691,9 +691,8 @@ fn swap_out(k: &mut Kernel, want: u64) -> u64
       let r = swap_row(&mut k, q);
       if r != 0 {
         let c = cg_resident(&mut k, r);
-        let sw = swap_count(k, q);
-        if c > sw && c - sw > best && cg_swap_room(k, q) > 0 {   // memory.swap.max
-          best = c - sw;
+        if c > best && cg_swap_room(k, q) > 0 {   // memory.swap.max
+          best = c;
           v = q;
           vr = r;
         }

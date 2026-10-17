@@ -8,30 +8,51 @@
 #   - /proc/meminfo counts the cache as available,
 #   - with a swap file on, a program bigger than the free memory runs, gets
 #     back what it wrote, and swapoff brings every page home.
+# ARCH=aarch64 runs the same checks on the AArch64 port (make ARCH=aarch64) on QEMU's
+# virt machine, with 96 MiB of RAM.
 # Input is sent a line at a time, each after the prompt, as test/shell_test.sh does.
 set -u
 cd "$(dirname "$0")/.."
-KERNEL=${KERNEL:-build/bastios.elf}
+ARCH=${ARCH:-x86_64}
+if [ "$ARCH" = aarch64 ]; then
+  KERNEL=${KERNEL:-build/aarch64/bastios.bin}
+  MEM=${MEM:-96M}
+  UPROG=build/aarch64/user/mhog.elf
+  if ! command -v qemu-system-aarch64 >/dev/null; then
+    echo "SKIP memory aarch64: needs qemu-system-aarch64"
+    [ "${AARCH64_REQUIRED:-}" = 1 ] && exit 1
+    exit 0
+  fi
+  make -f arch/aarch64/Makefile BASTIOC=build/bastioc1 -s "$UPROG" || exit 1
+else
+  KERNEL=${KERNEL:-build/bastios.elf}
+  MEM=${MEM:-64M}
+  UPROG=build/user/mhog.elf
+fi
 TIMEOUT=${TIMEOUT:-300}
-MEM=${MEM:-64M}
 SMP=${SMP:-1}
 
-python3 - "$KERNEL" "$TIMEOUT" "$MEM" "$SMP" <<'PY'
+python3 - "$KERNEL" "$TIMEOUT" "$MEM" "$SMP" "$ARCH" "$UPROG" <<'PY'
 import os, re, select, subprocess, sys, tempfile, time
 
-kernel, timeout, mem, smp = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
+kernel, timeout, mem, smp, arch, uprog = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 tmp = tempfile.TemporaryDirectory()
 img = os.path.join(tmp.name, "disk.img")
-subprocess.run([sys.executable, "test/compat/mkdisk.py", img, "mhog=build/user/mhog.elf"], check=True,
+subprocess.run([sys.executable, "test/compat/mkdisk.py", img, "mhog=" + uprog], check=True,
                env=dict(os.environ, MKDISK_FREE_MB="64"))
 
-qemu = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", mem, "-smp", smp,
-     "-display", "none", "-no-reboot", "-nic", "none",
-     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-     "-serial", "stdio", "-monitor", "none",
-     "-drive", f"file={img},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+if arch == "aarch64":
+    cmd = ["qemu-system-aarch64", "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-smp", smp, "-m", mem,
+           "-nographic", "-no-reboot", "-kernel", kernel,
+           "-drive", f"file={img},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
+           "-serial", "stdio", "-monitor", "none"]
+else:
+    cmd = ["qemu-system-x86_64", "-kernel", kernel, "-m", mem, "-smp", smp,
+           "-display", "none", "-no-reboot", "-nic", "none",
+           "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+           "-serial", "stdio", "-monitor", "none",
+           "-drive", f"file={img},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"]
+qemu = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
 out = b""
 fails = 0
@@ -175,7 +196,7 @@ run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sw")
 # More than memory and swap together: the killer still ends the program.
 run("/disk/mhog swapon /disk/swap")
 # memory.swap.max: nothing of a group at 0 goes to the swap file (the program that
-# wants more memory is killed instead, as there is nothing else to swap);
+# wants more memory swaps its own pages instead);
 # a group with a small limit gets no more into the swap file than that.
 def group_swap(g):
     return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
@@ -183,7 +204,8 @@ run("mkdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm; echo 0 > /sys/fs/cgroup/sl/memor
 run(f"ash -c 'echo $$ > /sys/fs/cgroup/sl/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 used = meminfo("SwapTotal") - meminfo("SwapFree")
-check("a group with memory.swap.max 0 keeps its pages in memory", group_swap("sl") == 0 and "Out of memory: Killed process" in t, f"{group_swap('sl')} {t}")
+check("a group with memory.swap.max 0 keeps its pages in memory; the other program swaps its own",
+      group_swap("sl") == 0 and f"touched {SECOND} MiB" in t and "rc=0" in t and "Out of memory" not in t, f"{group_swap('sl')} {t}")
 run("kill -9 $big; sleep 1")
 run(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
