@@ -404,6 +404,20 @@ int main(void) {
         else fail("got %d of %d events, %d overflows, poll timed out %d, read errno %d", got, n, over, timedout, e);
     }
 
+    EXPECT("a watch nobody reads does not hold its writer back: 2000 files made and removed take under 3 s", ({
+        struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+        int fd = inotify_init1(IN_NONBLOCK);
+        mkdir("in_idle", 0755);
+        inotify_add_watch(fd, "in_idle", IN_DELETE | IN_CREATE);
+        for (int i = 0; i < 2000; i++) {
+            char path[64]; snprintf(path, sizeof path, "in_idle/%d", i);
+            int f = open(path, O_CREAT | O_WRONLY, 0644); if (f >= 0) close(f);
+            unlink(path);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        close(fd); rmdir("in_idle");
+        (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < 3000; }));
+
     unlink("in_late");
     unlink("in_f");
     rmdir("in_d");
