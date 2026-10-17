@@ -21,11 +21,32 @@ def main():
                 # One line per thread (innermost call first, the watchdog
                 # itself left out), short enough for the lane's report.
                 print("HANG %s: no end after %d s" % (name, HANG_SECONDS), flush=True)
+                # asyncio's tasks: where each coroutine is suspended, the call
+                # the event loop is waiting for.
+                aio = sys.modules.get("asyncio.tasks")
+                for t in list(getattr(aio, "_scheduled_tasks", [])):
+                    chain, c = [], t.get_coro()
+                    while c is not None:
+                        fr = getattr(c, "cr_frame", None) or getattr(c, "gi_frame", None)
+                        chain.append("%s:%d" % (getattr(c, "__qualname__", "?"), fr.f_lineno if fr else -1))
+                        c = getattr(c, "cr_await", None) or getattr(c, "gi_yieldfrom", None)
+                    print("task: %s" % " > ".join(chain), flush=True)
+                # Children of this process and their states: a subprocess the
+                # loop waits for may have ended without the loop being told.
+                me = str(os.getpid())
+                for d in os.listdir("/proc"):
+                    try:
+                        st = open("/proc/%s/stat" % d).read()
+                        rest = st[st.rindex(")") + 2:].split()
+                        if d.isdigit() and rest[1] == me:
+                            print("child %s: state %s" % (d, rest[0]), flush=True)
+                    except (OSError, ValueError):
+                        pass
                 for tid, frame in sys._current_frames().items():
                     if tid == threading.get_ident():
                         continue
                     calls = []
-                    while frame and len(calls) < 7:
+                    while frame and len(calls) < 3:
                         calls.append("%s:%d %s" % (os.path.basename(frame.f_code.co_filename), frame.f_lineno, frame.f_code.co_name))
                         frame = frame.f_back
                     print("thread %d: %s" % (tid & 0xffff, " < ".join(calls)), flush=True)

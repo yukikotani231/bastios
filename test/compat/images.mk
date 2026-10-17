@@ -25,6 +25,14 @@ PODMAN_IMAGE ?= mgoltzsche/podman@sha256:86e6ecde27e86140a20fa16dcc03cc1e6715053
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # gopls, the Go language server, built from this release (Makefile: build/compat/gopls).
 GOPLS_VER := v0.20.0
+# rust-analyzer, Rust's language server, from the Rust release the rust image holds
+# (the musl build of the rust-analyzer component, pinned by the SHA-256 of its
+# tar.gz in that release's manifest, https://static.rust-lang.org/dist/channel-rust-1.99.0.toml).
+RUST_ANALYZER_URL    := https://static.rust-lang.org/dist/2026-10-01/rust-analyzer-1.99.0-x86_64-unknown-linux-musl.tar.gz
+RUST_ANALYZER_SHA256 := 9c135328ac82c90b6e2b801f679f75cf6e9fa4ff77a4486106b839e529e67f51
+# The standard library's source (rust-src), which rust-analyzer reads, from the same release.
+RUST_SRC_URL    := https://static.rust-lang.org/dist/2026-10-01/rust-src-1.99.0.tar.gz
+RUST_SRC_SHA256 := 82b978093b33c71bcbe69005b92181bfb76d3d0e434ef303e637812e21badcd7
 # The tree-sitter C parser for Neovim (npm package, pinned by version and SHA-256).
 TREESITTER_C_VER    := 0.24.1
 TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
