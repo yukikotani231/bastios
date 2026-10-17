@@ -1599,3 +1599,4 @@ t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
 t_inotify: two hundred and fifty timerfds at once
 t_timens: an offset that overflows the clock is ERANGE
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
+t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
