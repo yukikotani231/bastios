@@ -146,3 +146,90 @@ fn nav_fcode(n: u64) -> u64
   }
   return 24;
 }
+
+/// The Linux key code (input-event-codes.h) of the key that the PS/2 set-1
+/// code c names after an 0xE0 prefix, or 0 for a key without one here.
+/// Without the prefix, set-1 codes 1 to 88 are the Linux key codes.
+fn evkey_ext(c: u64) -> u64
+  ensures result < 256
+{
+  if c == 0x48 {
+    return 103;                             // KEY_UP
+  } else if c == 0x50 {
+    return 108;                             // KEY_DOWN
+  } else if c == 0x4B {
+    return 105;                             // KEY_LEFT
+  } else if c == 0x4D {
+    return 106;                             // KEY_RIGHT
+  } else if c == 0x47 {
+    return 102;                             // KEY_HOME
+  } else if c == 0x4F {
+    return 107;                             // KEY_END
+  } else if c == 0x49 {
+    return 104;                             // KEY_PAGEUP
+  } else if c == 0x51 {
+    return 109;                             // KEY_PAGEDOWN
+  } else if c == 0x52 {
+    return 110;                             // KEY_INSERT
+  } else if c == 0x53 {
+    return 111;                             // KEY_DELETE
+  } else if c == 0x1C {
+    return 96;                              // KEY_KPENTER
+  } else if c == 0x1D {
+    return 97;                              // KEY_RIGHTCTRL
+  } else if c == 0x38 {
+    return 100;                             // KEY_RIGHTALT
+  } else if c == 0x35 {
+    return 98;                              // KEY_KPSLASH
+  } else if c == 0x5B {
+    return 125;                             // KEY_LEFTMETA
+  } else if c == 0x5C {
+    return 126;                             // KEY_RIGHTMETA
+  } else if c == 0x5D {
+    return 127;                             // KEY_COMPOSE
+  }
+  return 0;
+}
+
+/// The Linux key code of the modifier in bit b (0 to 7) of a HID boot
+/// report's first byte: Ctrl, Shift, Alt and the Meta key, left then right.
+fn evkey_mod(b: u64) -> u64
+  ensures result < 128
+{
+  if b == 0 {
+    return 29;                              // KEY_LEFTCTRL
+  } else if b == 1 {
+    return 42;                              // KEY_LEFTSHIFT
+  } else if b == 2 {
+    return 56;                              // KEY_LEFTALT
+  } else if b == 3 {
+    return 125;                             // KEY_LEFTMETA
+  } else if b == 4 {
+    return 97;                              // KEY_RIGHTCTRL
+  } else if b == 5 {
+    return 54;                              // KEY_RIGHTSHIFT
+  } else if b == 6 {
+    return 100;                             // KEY_RIGHTALT
+  }
+  return 126;                               // KEY_RIGHTMETA
+}
+
+/// The Linux key codes (input-event-codes.h) of HID usages 0x04 to 0x52,
+/// each plus 32 (a space is no key).
+fn evkey_table() -> Str {
+  return ">PN@2ABC7DEFRQ8903?46O1M5L\"#$%&'()*+<!./Y,-:;KKGHISTUZ[\\]^_`abcdwx   ";
+}
+
+/// The Linux key code of HID usage u, or 0 for a key without one here.
+fn evkey_usb(u: u64) -> u64
+  ensures result < 128
+{
+  let m = evkey_table();
+  if u >= 4 && u - 4 < slen(m) {
+    let c = cast[u64](sget(m, u - 4));
+    if c >= 32 && c < 128 {
+      return c - 32;
+    }
+  }
+  return 0;
+}
