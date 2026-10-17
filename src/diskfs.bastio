@@ -86,6 +86,7 @@ import "core/bytes.bastio";
 const DSLOTS: u64 = 262144;           // directory entries, at most (16384 directory blocks: 512 named by the superblock, the rest by extension blocks)
 const BATCH_MAX: u64 = 32;               // blocks a batch of writes makes before it commits (disk_write)
 const OB_MAX: u64 = 40;               // blocks it replaces: at most one per block it makes, and room for a write's five
+const PD_MAX: u64 = 8;                // directory blocks whose entries wait for a commit (ent_lazy)
 const BATCH_TICKS: u64 = 10;          // ticks (10 ms each) a batch waits for more writes before disk_pump commits it
 const DENT: u64 = 256;
 const DIR_BYTES: u64 = 67108864;      // DSLOTS * DENT: the most the directory takes in memory
@@ -161,6 +162,9 @@ struct DiskFs {
   ob: Buf,              // the blocks the batch replaced: the disk still names them (on of OB_MAX)
   on: u64,
   pt: u64,              // the tick the batch began
+  pd: Buf,              // the directory blocks holding entries changed in memory only (ent_lazy), pdn of PD_MAX: they go to the disk with the next commit
+  pdn: u64,
+  ppt: u64,             // the tick the first of them was noted
   tick: u64,            // the last tick disk_pump was given
   used: Bits,           // a set bit for each block in use, one per block of the disk (at most MAX_BLOCKS)
   blocks: u64,          // blocks on the disk, at most MAX_BLOCKS
@@ -180,7 +184,7 @@ spec fn disk_ok(d: &DiskFs) -> bool {
   blk_ok(d.dev) && d.plo <= PLO_MAX && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK && blen(d.sp) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
-    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS
+    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS && len(d.pd) == PD_MAX && d.pdn <= PD_MAX
     && (blen(d.ix) == 0 || blen(d.ix) == IX_BYTES) && d.ixn <= IX_CELLS
 }
 
@@ -335,7 +339,7 @@ fn disk_pump(d: &mut DiskFs, now: u64) -> bool
 {
   let mut moved = false;
   d.tick = now;
-  if d.pw != 0 && now >= d.pt && now - d.pt >= BATCH_TICKS {
+  if (d.pw != 0 && now >= d.pt && now - d.pt >= BATCH_TICKS) || (d.pw == 0 && d.pdn != 0 && now >= d.ppt && now - d.ppt >= BATCH_TICKS) {
     let keep = d.txn;
     disk_commit(&mut d);
     d.txn = keep;
@@ -906,7 +910,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
-    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, tick: 0,
+    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, ppt: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
@@ -1098,6 +1102,7 @@ fn disk_unmount_now(d: DiskFs) -> Blk
   bfree(d.data);
   free(d.pb);
   free(d.ob);
+  free(d.pd);
   bits_free(d.used);
   return d.dev;
 }
@@ -1575,7 +1580,13 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
-  disk_drain(&mut d);                 // queued writes reach the disk first
+  // A new file's entry waits for the next commit (ent_lazy). A directory or
+  // a link is written at once: a directory must be on the disk before the
+  // entries inside it, and a link before it names a file.
+  let lazy = !dir && link >= DSLOTS;
+  if !lazy {
+    disk_drain(&mut d);               // queued writes reach the disk first
+  }
   let end = from + n;
   let mut k = end;
   while k > from && bget(name, k - 1) != 47
@@ -1598,8 +1609,11 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
   while i < DSLOTS
     invariant i <= DSLOTS && disk_ok(d)
   {
-    if i == d.slots && !dir_grow(&mut d) {
-      return DSLOTS;                    // the directory is full, or so is the disk
+    if i == d.slots {
+      disk_drain(&mut d);               // the new block is written in place
+      if !dir_grow(&mut d) {
+        return DSLOTS;                  // the directory is full, or so is the disk
+      }
     }
     if i != DTOP && !dent_used(d, i) {
       dent_zero(&mut d, i, 0, DENT);
@@ -1624,7 +1638,13 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         dent_setb(&mut d, i, E_NAME + j, bget(name, k + j));
         j = j + 1;
       }
-      if !ent_flush(&mut d, i) {
+      let mut written = false;
+      if lazy {
+        written = ent_lazy(&mut d, i);
+      } else {
+        written = ent_flush(&mut d, i);
+      }
+      if !written {
         dent_setb(&mut d, i, E_KIND, 0);
         return DSLOTS;
       }
@@ -2146,6 +2166,45 @@ fn set_big(d: &mut DiskFs) -> bool
   return true;
 }
 
+/// Entry i has changed in memory, and a change of this kind does not wait
+/// for the disk: its directory block is queued with the next commit (or
+/// when disk_pump finds it BATCH_TICKS old), together with the batch's, so
+/// a file created, given an owner and a mode and then written costs the
+/// disk one commit, not a sector write for each step. A power cut before
+/// that leaves the entry as it was. False if the entry cannot be put there
+/// and the sector write failed.
+fn ent_lazy(d: &mut DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  let db = i * DENT / BLOCK;
+  if db >= d.dcap || d.q.dead || dir_block(d, db) == 0 {
+    disk_drain(&mut d);
+    return ent_flush(&mut d, i);
+  }
+  let mut j = 0;
+  while j < d.pdn
+    invariant j <= d.pdn && d.pdn <= PD_MAX && disk_ok(d)
+  {
+    if get(d.pd, j) == db {
+      return true;
+    }
+    j = j + 1;
+  }
+  if d.pdn >= PD_MAX {
+    disk_drain(&mut d);
+  }
+  if d.pdn >= PD_MAX {
+    return false;
+  }
+  if d.pdn == 0 {
+    d.ppt = d.tick;
+  }
+  d.pd = set(d.pd, d.pdn, db);
+  d.pdn = d.pdn + 1;
+  return true;
+}
+
 /// Queues the commit of the batch (nothing if there is none). False, with
 /// nothing changed, if the queue has no room for it yet. On true the
 /// transaction's number is in d.txn.
@@ -2153,15 +2212,15 @@ fn disk_commit(d: &mut DiskFs) -> bool
   requires disk_ok(d)
   ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
 {
-  if d.pw == 0 {
+  if d.pw == 0 && d.pdn == 0 {
     return true;
   }
-  if !dq_fits(d.q, 1, d.pn + d.on + 4) {
+  if !dq_fits(d.q, 1 + d.pdn, d.pn + d.on + d.pdn + 4) {
     return false;
   }
-  let ent = d.pw - 1;
   let n = d.pn;
   let m = d.on;
+  let np = d.pdn;
   let mut ok = true;
   let mut j = 0;
   while j < n
@@ -2170,10 +2229,29 @@ fn disk_commit(d: &mut DiskFs) -> bool
     ok = dq_queue_held(&mut d.q, get(d.pb, j)) && ok;
     j = j + 1;
   }
+  let mut skip = DIR_BLOCKS;            // the batch entry's block, not queued twice
+  if d.pw != 0 {
+    ok = ok && dq_flush(&mut d.q);
+    let db = (d.pw - 1) * DENT / BLOCK;
+    let dbn = dir_block(d, db);
+    ok = ok && dbn != 0 && db < d.dcap && dq_put(&mut d.q, dbn, d.dir, db * BLOCK, false);
+    skip = db;
+  }
+  j = 0;
+  while j < np
+    invariant j <= np && np == d.pdn && np <= PD_MAX && disk_ok(d)
+  {
+    let pb = get(d.pd, j);
+    if pb != skip {
+      let mut pbn = 0;
+      if pb < d.dcap {
+        pbn = dir_block(d, pb);
+      }
+      ok = ok && pbn != 0 && dq_put(&mut d.q, pbn, d.dir, pb * BLOCK, false);
+    }
+    j = j + 1;
+  }
   ok = ok && dq_flush(&mut d.q);
-  let db = ent * DENT / BLOCK;
-  let dbn = dir_block(d, db);
-  ok = ok && dbn != 0 && db < d.dcap && dq_put(&mut d.q, dbn, d.dir, db * BLOCK, false) && dq_flush(&mut d.q);
   j = 0;
   while j < m
     invariant j <= m && m == d.on && m <= OB_MAX && disk_ok(d)
@@ -2185,6 +2263,7 @@ fn disk_commit(d: &mut DiskFs) -> bool
   d.pn = 0;
   d.on = 0;
   d.pw = 0;
+  d.pdn = 0;
   if !ok || t == 0 {
     dq_kill(&mut d.q);                // dq_fits said there was room: not reached
     return true;
@@ -2199,14 +2278,14 @@ fn settle_batch(d: &mut DiskFs)
   requires disk_ok(d)
   ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
 {
-  if d.pw == 0 {
+  if d.pw == 0 && d.pdn == 0 {
     return;
   }
   let keep = d.txn;
   let blocks0 = d.blocks;
   let slots0 = d.slots;
   let mut spins = 0;
-  while d.pw != 0 && spins < DQ_SPINS + 2 * NQ + 2
+  while (d.pw != 0 || d.pdn != 0) && spins < DQ_SPINS + 2 * NQ + 2
     invariant disk_ok(d) && d.blocks == blocks0 && d.slots == slots0
   {
     if disk_commit(&mut d) {
@@ -2223,11 +2302,12 @@ fn settle_batch(d: &mut DiskFs)
     }
     spins = spins + 1;
   }
-  if d.pw != 0 {
+  if d.pw != 0 || d.pdn != 0 {
     dq_kill(&mut d.q);
     d.pw = 0;
     d.pn = 0;
     d.on = 0;
+    d.pdn = 0;
   }
   d.txn = keep;
 }
@@ -2239,7 +2319,7 @@ fn disk_sync(d: &mut DiskFs)
   requires disk_ok(d)
   ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
 {
-  if d.pw != 0 {
+  if d.pw != 0 || d.pdn != 0 {
     settle_batch(&mut d);
   }
   if d.q.next > 1 && d.q.done < d.q.next - 1 {
@@ -2730,7 +2810,6 @@ fn disk_set_owner(d: &mut DiskFs, i: u64, uid: u64, gid: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && uid < OWN_ID_MAX && gid < OWN_ID_MAX
   ensures disk_ok(d)
 {
-  disk_drain(&mut d);                 // queued writes reach the disk first
   if !dent_used(d, i) {
     return false;
   }
@@ -2739,7 +2818,7 @@ fn disk_set_owner(d: &mut DiskFs, i: u64, uid: u64, gid: u64) -> bool
     return true;                      // as it is already: nothing to write
   }
   dent_set(&mut d, i, E_MODE, w);
-  return ent_flush(&mut d, i);
+  return ent_lazy(&mut d, i);
 }
 
 /// Entry i's modification time, in seconds.
@@ -2755,7 +2834,6 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
   ensures disk_ok(d)
 {
-  disk_drain(&mut d);                 // queued writes reach the disk first
   if !dent_used(d, i) {
     return false;
   }
@@ -2774,5 +2852,5 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
   }
   dent_set(&mut d, i, E_MODE, m1);
   dent_set(&mut d, i, E_MTIME, t1);
-  return ent_flush(&mut d, i);
+  return ent_lazy(&mut d, i);
 }
