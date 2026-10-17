@@ -797,14 +797,17 @@ def main():
     # installs runs that case too; such a shared case is counted from the
     # lane it belongs to. The group stays alpine.
     #   alpine   the cases up to the install of Neovim, but the container
-    #            cases, then Python's and Node's (they install what they
-    #            need, but Neovim, for the python-lsp-server case);
+    #            cases;
     #   alpine2  the container cases: they need nothing else the other cases
     #            install. The bridged-network cases stay where they are: the
     #            package they install brings libraries the other cases
     #            already put on the disk, and without them its download
     #            through the container's network outlasts the case's timeout.
-    #            Then Vim's case, which installs what it needs;
+    #            Then Vim's case, Python's and Node's (they install what they
+    #            need, but Neovim, for the python-lsp-server case). After the
+    #            alpine lane's cases, python3's download over HTTP stalls
+    #            under KVM on x86-64 (not yet understood), so they stay out
+    #            of that lane;
     #   alpine3  the install of tmux, cmake and lua-language-server and the
     #            cases after it (they use Neovim and gcc too), but Python's
     #            and Node's;
@@ -827,16 +830,16 @@ def main():
     vim = [alpine[at["vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it"]]]
     py = alpine[at["apk: free the disk, then install python3 over HTTP"]:
                 at["node: Alpine's Node (V8 with its JIT) runs a script that gets hot"] + 1]
-    alpine1 = [c for c in alpine[:nvim_at] if c not in containers + vim] + nvim_gcc[:1] + py
+    alpine1 = [c for c in alpine[:nvim_at] if c not in containers + vim]
     alpine5 = alpine_setup + [c for c in alpine[nvim_at:tools_at] if c not in containers + vim]
-    alpine2 = alpine_setup + containers + vim
+    alpine2 = alpine_setup + containers + vim + nvim_gcc[:1] + py
     alpine3 = alpine_setup + nvim_gcc + [c for c in alpine[tools_at:] if c not in containers + py]
     alpine4 = alpine_setup + nvim_gcc + [alpine[tools_at]]
     # Each lane's cases, by the key its results come back under, and the
     # lane each case belongs to.
     alpine_parts = {"alpine": alpine1, "alpine#2": alpine2, "alpine#5": alpine5, "alpine#3": alpine3, "alpine#4": alpine4}
     alpine_owner = {}
-    for k in ["alpine", "alpine#2", "alpine#5", "alpine#3", "alpine#4"]:
+    for k in ["alpine", "alpine#5", "alpine#2", "alpine#3", "alpine#4"]:
         for c in alpine_parts[k]:
             alpine_owner.setdefault(c[0], k)
     alpine_lanes = ["alpine", "alpine2", "alpine3", "alpine4", "alpine5"]
