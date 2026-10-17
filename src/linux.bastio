@@ -2053,13 +2053,30 @@ fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u6
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  let r = writev_run(&mut con, &mut k, pid, fd, iov, cnt);
+  if r != DISK_RETRY {
+    pset(&mut k.procs, pid, F_WDONE, 0);    // nothing left to restart
+  }
+  return r;
+}
+
+/// The body of do_writev. If the disk lags after some bytes, the count so
+/// far is kept in F_WDONE (twice it, as lx_write_call keeps it) and the
+/// call restarts: the bytes done are skipped over in the iovecs.
+fn writev_run(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
   if cnt > IOV_MAX {
     return EINVAL;
   }
   if iov > USER_BASE + USER_SIZE {
     return EFAULT;
   }
-  let mut total = 0;
+  let wd = smaller(pget(k.procs, pid, F_WDONE) / 2, READ_MAX * 64);
+  pset(&mut k.procs, pid, F_WDONE, 0);
+  let mut skip = wd;
+  let mut total = wd;
   let mut i = 0;
   while i < cnt
     invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE && con_ok(con)
@@ -2073,6 +2090,13 @@ fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u6
     }
     // A file write moves at most XFER bytes at once: go round until done.
     let mut done = 0;
+    if skip >= size.v {
+      done = size.v;
+      skip = skip - size.v;
+    } else {
+      done = skip;
+      skip = 0;
+    }
     while done < size.v
       invariant done <= size.v && kok(k) && total <= TOTAL_MAX && con_ok(con)
       invariant base.v <= USER_BASE + USER_SIZE
@@ -2082,6 +2106,10 @@ fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u6
         return lx_fail_or(total, EFAULT);       // past the window: base + done faults
       }
       let w = lx_write_fd(&mut con, &mut k, pid, fd, base.v + done, left);
+      if w == DISK_RETRY && total > 0 && total <= READ_MAX * 64 {
+        pset(&mut k.procs, pid, F_WDONE, total * 2);
+        return DISK_RETRY;                      // restart for the rest
+      }
       if w > left || w > USER_SIZE {
         return lx_fail_or(total, w);            // an error
       }

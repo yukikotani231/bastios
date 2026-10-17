@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <sys/personality.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -833,6 +834,24 @@ int main(void) {
            ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == 0;
            ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
            close(s);
+           ok; }));
+    EXPECT("pwrite and writev: a file takes the whole count, however far the file grows", ({
+           int fd = open("cf_pwhole", O_RDWR | O_CREAT | O_TRUNC, 0644);
+           static char big[100000];
+           memset(big, 'p', sizeof big);
+           int ok = fd >= 0;
+           for (int i = 0; ok && i < 60; i++) {
+               off_t at = (off_t)i * 70001 + 3;
+               size_t n = 33757 + (size_t)i * 1000;
+               ok = pwrite(fd, big, n, at) == (ssize_t)n;
+           }
+           ok = ok && pwrite(fd, big, sizeof big, 30000000) == (ssize_t)sizeof big;
+           for (int i = 0; ok && i < 40; i++) {
+               struct iovec v[3] = { { big, 20000 + (size_t)i * 500 }, { big + 30000, 1 }, { big + 40000, 46873 } };
+               size_t n = v[0].iov_len + 1 + 46873;
+               ok = lseek(fd, (off_t)i * 80000 + 7, SEEK_SET) >= 0 && writev(fd, v, 3) == (ssize_t)n;
+           }
+           close(fd); unlink("cf_pwhole");
            ok; }));
     return done();
 }
