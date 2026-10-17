@@ -449,9 +449,9 @@ t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
 t_inotify: thirty-two epoll instances
-t_inotify: sixty timerfds at once
-t_inotify: thirty inotify instances at once
-t_inotify: thirty named pipes open at once
+t_inotify: two hundred and fifty timerfds at once
+t_inotify: sixty inotify instances at once
+t_inotify: a hundred and twenty named pipes open at once
 t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
 t_inotify: a watch nobody reads does not hold its writer back: 2000 files made and removed take under 3 s
 t_ioprio: a child inherits it

@@ -329,38 +329,38 @@ int main(void) {
     for (int i = 0; i < 32; i++)
         close(eps[i]);
 
-    /* timerfd: sixty at once. */
-    int tfd[60], ntf = 0;
-    for (int i = 0; i < 60; i++) {
+    /* timerfd: two hundred and fifty at once. */
+    int tfd[250], ntf = 0;
+    for (int i = 0; i < 250; i++) {
         tfd[i] = timerfd_create(CLOCK_MONOTONIC, 0);
         ntf += tfd[i] >= 0;
     }
-    EXPECT("sixty timerfds at once", ntf == 60);
-    for (int i = 0; i < 60; i++)
+    EXPECT("two hundred and fifty timerfds at once", ntf == 250);
+    for (int i = 0; i < 250; i++)
         close(tfd[i]);
 
-    /* inotify instances: thirty at once. */
-    int ino[30], nino = 0;
-    for (int i = 0; i < 30; i++) {
+    /* inotify instances: sixty at once. */
+    int ino[60], nino = 0;
+    for (int i = 0; i < 60; i++) {
         ino[i] = inotify_init1(IN_NONBLOCK);
         nino += ino[i] >= 0;
     }
-    EXPECT("thirty inotify instances at once", nino == 30);
-    for (int i = 0; i < 30; i++)
+    EXPECT("sixty inotify instances at once", nino == 60);
+    for (int i = 0; i < 60; i++)
         if (ino[i] >= 0)
             close(ino[i]);
 
-    /* named pipes: thirty open at once. */
-    int ff[30], nff = 0;
-    for (int i = 0; i < 30; i++) {
+    /* named pipes: a hundred and twenty open at once. */
+    int ff[120], nff = 0;
+    for (int i = 0; i < 120; i++) {
         char nm[16];
         snprintf(nm, sizeof nm, "in_fifo%d", i);
         unlink(nm);
         ff[i] = mkfifo(nm, 0600) == 0 ? open(nm, O_RDONLY | O_NONBLOCK) : -1;
         nff += ff[i] >= 0;
     }
-    EXPECT("thirty named pipes open at once", nff == 30);
-    for (int i = 0; i < 30; i++) {
+    EXPECT("a hundred and twenty named pipes open at once", nff == 120);
+    for (int i = 0; i < 120; i++) {
         char nm[16];
         snprintf(nm, sizeof nm, "in_fifo%d", i);
         if (ff[i] >= 0)
