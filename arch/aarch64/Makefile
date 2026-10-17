@@ -104,6 +104,11 @@ $(B)/user/mtest.elf: user/lxtest-aarch64.c | $(B)/user
 	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 \
 	  -Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@ $<
 
+# mhog (test/memory_test.sh) is an ordinary glibc program too.
+$(B)/user/mhog.elf: user/mhog.c | $(B)/user
+	$(ACC) -O1 -fno-pic -no-pie -static -Wl,-z,max-page-size=0x1000 -Wl,-Ttext-segment=0x400000 \
+	  -Wl,--build-id=none -Wl,--no-warn-rwx-segments -o $@ $<
+
 # The vDSO (user/vdso-aarch64.c): a tiny shared object the kernel copies onto
 # one page of every Linux process, with the clock from byte 0xF80 of it. The
 # whole file must fit below the signal return trampoline at 0xF00.

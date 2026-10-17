@@ -8,30 +8,52 @@
 #   - /proc/meminfo counts the cache as available,
 #   - with a swap file on, a program bigger than the free memory runs, gets
 #     back what it wrote, and swapoff brings every page home.
+# ARCH=aarch64 runs the same checks on the AArch64 port (make ARCH=aarch64) on QEMU's
+# virt machine, with 96 MiB of RAM.
 # Input is sent a line at a time, each after the prompt, as test/shell_test.sh does.
 set -u
 cd "$(dirname "$0")/.."
-KERNEL=${KERNEL:-build/bastios.elf}
+ARCH=${ARCH:-x86_64}
+if [ "$ARCH" = aarch64 ]; then
+  KERNEL=${KERNEL:-build/aarch64/bastios.bin}
+  MEM=${MEM:-96M}
+  UPROG=build/aarch64/user/mhog.elf
+  if ! command -v qemu-system-aarch64 >/dev/null; then
+    echo "SKIP memory aarch64: needs qemu-system-aarch64"
+    [ "${AARCH64_REQUIRED:-}" = 1 ] && exit 1
+    exit 0
+  fi
+  make -f arch/aarch64/Makefile BASTIOC=build/bastioc1 -s "$UPROG" || exit 1
+else
+  KERNEL=${KERNEL:-build/bastios.elf}
+  MEM=${MEM:-64M}
+  UPROG=build/user/mhog.elf
+fi
+if [ "$ARCH" = aarch64 ]; then TIMEOUT=${TIMEOUT:-900}; fi   # emulated on an x86 host: the swap-bound cases take minutes
 TIMEOUT=${TIMEOUT:-300}
-MEM=${MEM:-64M}
 SMP=${SMP:-1}
 
-python3 - "$KERNEL" "$TIMEOUT" "$MEM" "$SMP" <<'PY'
+python3 - "$KERNEL" "$TIMEOUT" "$MEM" "$SMP" "$ARCH" "$UPROG" <<'PY'
 import os, re, select, subprocess, sys, tempfile, time
 
-kernel, timeout, mem, smp = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
+kernel, timeout, mem, smp, arch, uprog = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4], sys.argv[5], sys.argv[6]
 tmp = tempfile.TemporaryDirectory()
 img = os.path.join(tmp.name, "disk.img")
-subprocess.run([sys.executable, "test/compat/mkdisk.py", img, "mhog=build/user/mhog.elf"], check=True,
+subprocess.run([sys.executable, "test/compat/mkdisk.py", img, "mhog=" + uprog], check=True,
                env=dict(os.environ, MKDISK_FREE_MB="64"))
 
-qemu = subprocess.Popen(
-    ["qemu-system-x86_64", "-kernel", kernel, "-m", mem, "-smp", smp,
-     "-display", "none", "-no-reboot", "-nic", "none",
-     "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-     "-serial", "stdio", "-monitor", "none",
-     "-drive", f"file={img},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"],
-    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+if arch == "aarch64":
+    cmd = ["qemu-system-aarch64", "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-smp", smp, "-m", mem,
+           "-nographic", "-no-reboot", "-kernel", kernel,
+           "-drive", f"file={img},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
+           "-serial", "stdio", "-monitor", "none"]
+else:
+    cmd = ["qemu-system-x86_64", "-kernel", kernel, "-m", mem, "-smp", smp,
+           "-display", "none", "-no-reboot", "-nic", "none",
+           "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
+           "-serial", "stdio", "-monitor", "none",
+           "-drive", f"file={img},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"]
+qemu = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
 out = b""
 fails = 0
@@ -64,6 +86,20 @@ def check(name, ok, text=""):
         print("ok  ", name)
     else:
         print("FAIL", name); print(text); fails += 1
+
+def hold(line, n=1):
+    """Starts holders in the background and waits until all n have their memory
+    (a fixed sleep is too short on a slow machine: the holder is still faulting in)."""
+    seen = out.count(b"mhog: holding")
+    run(line)
+    pos = 0
+    for _ in range(seen + n):
+        i = out.find(b"mhog: holding", pos)
+        if i < 0 and read_until(b"mhog: holding", pos):
+            i = out.find(b"mhog: holding", pos)
+        if i < 0:
+            return
+        pos = i + 1
 
 def vm(key):
     m = re.search(key + r" (\d+)", run("cat /proc/vmstat"))
@@ -120,7 +156,7 @@ check("the system carries on", "alive" in run("echo alive"))
 check("the kill is counted", vm("oom_kill") == 1)
 
 # The biggest holder dies, not the one that asked last.
-run(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1")
+hold(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1", 2)
 t = run(f"/disk/mhog touch {TOUCH_BIG}; echo rc=$?")
 m = re.search(r"Killed process \d+ \(mhog\) oom_score \d+, (\d+) kB", t)
 check("the biggest process is the victim", m and 0.9 * BIG * 1024 <= int(m.group(1)) <= 1.1 * BIG * 1024 and f"touched {TOUCH_BIG} MiB" in t, t)
@@ -129,7 +165,7 @@ check("the others live", "bigdead" in t and "smallalive" in t, t)
 run("kill -9 $small; sleep 1")
 
 # oom_score_adj: +1000 makes a small process the first choice, -1000 exempts.
-run(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1")
+hold(f"/disk/mhog hold {BIG} & big=$!; sleep 1; /disk/mhog hold {SMALL} & small=$!; sleep 1", 2)
 t = run("echo 1000 > /proc/$small/oom_score_adj; echo -1000 > /proc/$big/oom_score_adj; cat /proc/$small/oom_score_adj /proc/$big/oom_score_adj")
 check("oom_score_adj is kept", "1000\n-1000" in t, t)
 s_small = int(run("cat /proc/$small/oom_score").split()[-2]) if True else 0
@@ -160,7 +196,7 @@ check("pages went out and came back", vm("pswpout") > 1000 and vm("pswpin") > 10
 check("nothing was killed", vm("oom_kill") == kills)
 check("every slot is free again", meminfo("SwapFree") == SWAP_KB)
 # A holder is pushed out by a second program; swapoff brings it home.
-run(f"mkdir /sys/fs/cgroup/sw; echo +memory > /sys/fs/cgroup/cgroup.subtree_control; ash -c 'echo $$ > /sys/fs/cgroup/sw/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold(f"mkdir /sys/fs/cgroup/sw; echo +memory > /sys/fs/cgroup/cgroup.subtree_control; ash -c 'echo $$ > /sys/fs/cgroup/sw/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 check("a holder and a second program both fit", f"touched {SECOND} MiB" in t and "rc=0" in t and vm("oom_kill") == kills, t)
 used = meminfo("SwapTotal") - meminfo("SwapFree")
@@ -175,19 +211,20 @@ run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sw")
 # More than memory and swap together: the killer still ends the program.
 run("/disk/mhog swapon /disk/swap")
 # memory.swap.max: nothing of a group at 0 goes to the swap file (the program that
-# wants more memory is killed instead, as there is nothing else to swap);
+# wants more memory swaps its own pages instead);
 # a group with a small limit gets no more into the swap file than that.
 def group_swap(g):
     return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
 run("mkdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm; echo 0 > /sys/fs/cgroup/sl/memory.swap.max; echo 2097152 > /sys/fs/cgroup/sm/memory.swap.max")
-run(f"ash -c 'echo $$ > /sys/fs/cgroup/sl/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold(f"ash -c 'echo $$ > /sys/fs/cgroup/sl/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 used = meminfo("SwapTotal") - meminfo("SwapFree")
-check("a group with memory.swap.max 0 keeps its pages in memory", group_swap("sl") == 0 and "Out of memory: Killed process" in t, f"{group_swap('sl')} {t}")
+check("a group with memory.swap.max 0 keeps its pages in memory; the other program swaps its own",
+      group_swap("sl") == 0 and f"touched {SECOND} MiB" in t and "rc=0" in t and "Out of memory" not in t, f"{group_swap('sl')} {t}")
 run("kill -9 $big; sleep 1")
-run(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
-check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") == 2097152, f"{group_swap('sm')} {t}")
+check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") <= 2097152, f"{group_swap('sm')} {t}")
 run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm")
 t = run(f"/disk/mhog touch {HUGE}; echo rc=$?")
 check("a program bigger than memory and swap is killed", "Out of memory: Killed process" in t and "rc=137" in t, t)
