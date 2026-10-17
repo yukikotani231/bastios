@@ -40,3 +40,7 @@ TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b
 # strace for AArch64, built from source (arch/aarch64/Makefile).
 STRACE_VER := 6.11
 STRACE_SHA256 := 83262583a3529f02c3501aa8b8ac772b4cbc03dc934e98bab6e4883626e283a5
+# Eclipse JDT LS (jdtls), the Java language server: a milestone, the last one
+# that runs on the JDK 21 of the Java disk (1.62 wants Java 25).
+JDTLS_URL    := https://download.eclipse.org/jdtls/milestones/1.61.0/jdt-language-server-1.61.0-202609031315.tar.gz
+JDTLS_SHA256 := 338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64
