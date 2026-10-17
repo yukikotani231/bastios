@@ -41,6 +41,8 @@ system. Without `/dev/kvm`, `bench/run.py` downloads the kernel with
 | pipebw | 64 KiB writes through a pipe to a reader |
 | tcplat, tcpbw | the same over TCP on 127.0.0.1 |
 
+CI's `bench-kvm` job runs the same table under KVM on every push to main (GitHub's hosted runners offer `/dev/kvm`) and puts it in the job summary, so a figure there is free of TCG's software-TLB costs; the tables below are TCG.
+
 `make bench-workloads` adds whole-program workloads and `make bench-net` a TCP comparison over a network card (see Results).
 
 `bench/prof.py -- COMMAND` shows where the time goes for one command on

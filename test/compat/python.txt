@@ -47,6 +47,10 @@ $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q jinja2 
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0
 
+== python: asyncio and ProcessPoolExecutor, which hang now and then under KVM (pyprogs/stdlib.py, group concurrency)
+$ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem concurrency 2>&1 | grep -v "^ok "'
+failed: 0
+
 == pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q numpy cryptography lxml pillow pyyaml greenlet psutil orjson cffi 2>&1 | tail -n 3; cd /root && wget -q -O wheels.py HOSTURL/pyprogs/wheels.py && python wheels.py 2>&1 | tail -n 12'
 numpy 2.5.4 1134.0 8.0 72.878 [1, 2, 3]

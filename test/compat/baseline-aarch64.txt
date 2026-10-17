@@ -1310,3 +1310,293 @@ alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 alpine: vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
 alpine: gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again
 alpine: sshd: Alpine's OpenSSH server takes a public-key login from its own client
+t_aslr: a program starts itself and reports its layout
+t_aslr: the stack moves between runs
+t_aslr: the mmap area moves between runs
+t_aslr: the program break moves between runs
+t_aslr: a program linked at a fixed address stays where it is
+t_aslr: the break starts at a random distance above the image
+t_aslr: every address is page-plausible and in user space
+t_aslr: the stack is above the mmap area and the break below it
+t_aslr: the AT_RANDOM bytes differ between runs
+t_aslr: the AT_RANDOM bytes use all of their 16 bytes
+t_aslr: a fork child keeps its parent's layout
+t_aslr: personality ADDR_NO_RANDOMIZE fixes the layout across execve
+t_aslr: randomize_va_space 0 fixes the layout, 2 brings the movement back
+t_aslr: randomize_va_space 1 moves everything but the break's distance
+t_aslr: a randomized program still runs: heap, big mmap, threads of data
+t_core: a null write ends the child with SIGSEGV
+t_dev: loop8 .. loop31 all bind
+t_dev: loop31 is block device 7:31
+t_dev: /sys/block/loop31/size
+t_dev: /sys/block/loop17 is its own
+t_dev: the free ones are loop0 .. loop7
+t_dev: loop32 does not exist
+t_dev: loop08 does not exist
+t_dev: /sys/block/loop32 does not exist
+t_devcg: a cgroup directory opens
+t_devcg: a program that does not end in exit is EINVAL
+t_devcg: a backward jump is EINVAL
+t_devcg: a device program loads
+t_devcg: attaching to a descriptor that is no cgroup is EBADF or EINVAL
+t_devcg: nothing filters before the attach
+t_devcg: attach with ALLOW_MULTI
+t_devcg: the process in the cgroup sees only 1:3
+t_devcg: a process outside the cgroup is not filtered
+t_devcg: detach
+t_devcg: after the detach everything opens
+t_devcg: a link attaches the program
+t_devcg: the link filters
+t_devcg: closing the link detaches the program
+t_devcg: a query of a cgroup with no program finds none
+t_devcg: a query finds the attached program
+t_devcg: a program is reopened by its id
+t_devcg: an unknown id is ENOENT
+t_devcg: a query with no room for every id is ENOSPC
+t_devcg: detaching the second program
+t_devcg: closing the link empties the query
+t_devcg: a child cgroup is filtered by its parent's program
+t_devcg: the cgroup goes away with its program attached or not
+t_fdshare: a descriptor the child opens is open in the parent
+t_fdshare: a descriptor the child closes is closed in the parent
+t_fdshare: after unshare(CLONE_FILES) the child's changes stay with it
+t_fdshare: close_range with CLOSE_RANGE_UNSHARE closes only the caller's copy
+t_fdshare: kcmp(KCMP_FILES) tells sharing processes from the rest
+t_fdshare: /proc/PID/fd/N of a process that shares the table reads the shared descriptors
+t_fdshare: execve gives the program a table of its own
+t_fdshare: unshare(CLONE_FILES) is EMFILE past nr_open
+t_fdshare: a working directory the child sets is the parent's
+t_fdshare: a umask the child sets is the parent's
+t_fdshare: after unshare(CLONE_FS) the child's chdir stays with it
+t_fdshare: kcmp(KCMP_FS) says processes that share a working directory do
+t_inotify: max_user_instances is writable and reads back
+t_inotify: two forks in a row get different pids
+t_inotify: pid_max is writable, kept and bounded
+t_inotify: sixty watches on one instance
+t_inotify: thirty-two epoll instances
+t_inotify: two hundred descriptors on one epoll instance
+t_inotify: the last one is the one reported
+t_inotify: thirty inotify instances at once
+t_inotify: thirty named pipes open at once
+t_ipc: splice from an empty pipe into a read-only, O_PATH or non-writable descriptor fails at once
+t_isol: another user's memory map, auxv, mem and io are hidden
+t_ltp2: locked pages: msync(MS_INVALIDATE) is EBUSY and madvise(MADV_DONTNEED) EINVAL, until munlock
+t_ltp2: locked pages: unmapping or mapping over them unlocks them
+t_ltp2: splice from a pipe into a Unix socket and into a TCP connection delivers the bytes
+t_ltp2: SIGBUS: a mapped page past the end of the file is a bus error
+t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
+t_ltp2: SIGBUS: a forked child gets it too
+t_ltp2: SIGBUS: a file cut under a mapping takes the pages past the new end
+t_ltp2: rename: a directory moved from under the working directory leaves it in the moved directory
+t_ltp2: mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt
+t_ltp2: madvise: a range with a munmapped page in it is ENOMEM, one without is not
+t_mem: twelve shared file mappings are all written back
+t_misc: core_pattern and nr_open read, drop_caches takes 3 and refuses 9
+t_more: getrusage self reports a maximum resident size
+t_more: /proc/PID/status has VmRSS and the context switch counts
+t_more: /proc/meminfo has Active, Inactive and Shmem
+t_more: SIOCETHTOOL on a socket is EOPNOTSUPP
+t_nsioctl: NS_GET_NSTYPE gives the CLONE_NEW* flag of the namespace
+t_nsioctl: the first user namespace owns the first UTS namespace
+t_nsioctl: the first user namespace has no owner and no parent
+t_nsioctl: the first PID namespace has no parent
+t_nsioctl: a UTS namespace has no parent
+t_nsioctl: only a user namespace has an owner uid
+t_nsioctl: the first user namespace is owned by uid 0
+t_nsioctl: an ordinary descriptor says ENOTTY
+t_nsioctl: the descriptor NS_GET_USERNS returns is close-on-exec
+t_nsioctl: the owner of a user namespace its creator has no map for is 65534
+t_nsioctl: from inside a user namespace its parent is out of reach
+t_nsioctl: the children's PID namespace has the first one as its parent
+t_nsioctl: from inside a PID namespace its parent is out of reach
+t_nsioctl: an inner user namespace's parent is the outer one, seen from outside only
+t_nsioctl: a PID namespace made inside another has that one as its parent
+t_nsmany: 24 UTS namespaces at once, each with its own name
+t_nsmany: and 24 more once those are gone
+t_nsmany: 24 PID namespaces at once
+t_nsmany: PID namespaces nest six deep, and no deeper
+t_nsmany: 24 IPC namespaces at once
+t_nsmany: 60 tmpfs mounts at once, each with its own files
+t_nx: a mapping moved by mremap and made executable runs
+t_nx: code runs from a read-write-execute mapping
+t_nx: code on the stack does not run
+t_nx: code on the heap does not run
+t_nx: code in a data array does not run
+t_nx: code in a read-write mapping does not run
+t_nx: code in a shared read-write mapping does not run
+t_nx: mprotect(PROT_EXEC) after writing makes the code run
+t_nx: mprotect(PROT_EXEC) on a shared mapping makes the code run
+t_nx: mprotect to read-write-execute keeps the code running
+t_nx: mprotect back to read-write stops the code
+t_nx: a fork child's copy-on-write stack stays no-execute
+t_openat2: NO_XDEV inside /sys/fs/cgroup opens
+t_openat2: NO_XDEV inside /sys/fs/cgroup: a missing file is ENOENT
+t_openat2: NO_XDEV inside a mount of a container's root opens
+t_pidapi: clone3 with CLONE_PIDFD returns a pidfd
+t_pidapi: the pidfd is close-on-exec
+t_pidapi: poll on a running child's pidfd says nothing
+t_pidapi: waitid(P_PIDFD, WNOHANG) of a running child returns 0 with si_pid 0
+t_pidapi: poll on the pidfd of a child that exits says POLLIN
+t_pidapi: epoll on the pidfd of an ended child
+t_pidapi: waitid(P_PIDFD, WNOWAIT) reads the status and leaves the zombie
+t_pidapi: waitid(P_PIDFD) reaps it
+t_pidapi: a second waitid(P_PIDFD) is ECHILD
+t_pidapi: pidfd_send_signal to the reaped child is ESRCH
+t_pidapi: pidfd_open with PIDFD_NONBLOCK sets O_NONBLOCK
+t_pidapi: waitid on a non-blocking pidfd with nothing to report is EAGAIN
+t_pidapi: pidfd_send_signal with a siginfo of the right signal
+t_pidapi: a child killed by the signal is reported as CLD_KILLED with its signal
+t_pidapi: pidfd_open of a pid with no process is ESRCH
+t_pidapi: pidfd_open of pid 0 is EINVAL
+t_pidapi: pidfd_open of a zombie works and waitid reaps it
+t_pidapi: pidfd_getfd copies the child's descriptor, close-on-exec
+t_pidapi: pidfd_getfd with flags is EINVAL
+t_pidapi: pidfd_getfd of a closed descriptor is EBADF
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at two addresses fill both
+t_pidapi: clone3 with an exit signal above 255 is EINVAL
+t_pidapi: clone3 with a size below 64 is EINVAL
+t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd
+t_pidapi: waitid(P_PIDFD) on it reports the child's status
+t_pidapi: pidfd_open with PIDFD_THREAD on the caller works
+t_pidapi: pidfd_send_signal with PIDFD_SIGNAL_THREAD_GROUP to itself
+t_pidapi: pidfd_send_signal with PIDFD_SIGNAL_THREAD and PIDFD_SIGNAL_PROCESS_GROUP together is EINVAL
+t_pidfdinfo: clone with CLONE_PIDFD: ids and credentials of a running child
+t_pidfdinfo: clone3 with CLONE_PIDFD: ids and credentials of a running child
+t_pidfdinfo: the exit status is there once the child has been reaped
+t_pidfdinfo: and while it is still a zombie
+t_pidfdinfo: a child a signal ended has the signal in its status
+t_pidfdinfo: a reaped child is ESRCH unless the exit status is asked for
+t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
+t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
+t_proc: sysctl somaxconn reads 4096
+t_proc: sysctl overcommit_memory reads 0
+t_proc: sysctl max_map_count reads 65530
+t_proc: sysctl cap_last_cap reads 40
+t_proc: sysctl ip_local_port_range has two numbers
+t_proc: writing a sysctl number reads back
+t_proc: a sysctl number rejects text
+t_proc: keys root_maxkeys reads 200 and a larger value reads back
+t_proc: a read-only sysctl is not opened for writing
+t_proc: a sysctl file is a regular file
+t_proc: /proc lists sys
+t_proc: /proc/sys is a directory
+t_proc: /proc/sys/net/core is a directory
+t_proc: a directory under /proc/sys that is not there is ENOENT
+t_proc: every file listed under /proc/sys opens
+t_proc: /proc/sys/vm lists swappiness
+t_proc: oom_score reads a number
+t_proc: oom_score_adj starts at 0
+t_proc: loginuid is unset
+t_proc: coredump_filter reads its default
+t_proc: cpuset is the root
+t_proc: oom_score_adj reads back a negative value
+t_proc: a child inherits oom_score_adj
+t_proc: oom_score_adj above 1000 is EINVAL
+t_proc: oom_score_adj rejects text
+t_proc: oom_score_adj can be set back to 0
+t_proc: /proc/self lists oom_score_adj
+t_proc: auxv carries AT_HWCAP and AT_HWCAP2 (a C library's ifuncs read them before it has a thread pointer), AT_PAGESZ, and ends in AT_NULL
+t_proc: getauxval finds AT_HWCAP without setting errno
+t_ptrace: PTRACE_SEIZE attaches without stopping the tracee
+t_ptrace: PTRACE_INTERRUPT stops it with PTRACE_EVENT_STOP and SIGTRAP
+t_ptrace: a seized tracee resumed with PTRACE_CONT runs to its end
+t_ptrace: a sleeping seized tracee is stopped by PTRACE_INTERRUPT
+t_ptrace: it can be resumed and then killed
+t_ptrace: /proc/self/mem reads and writes the program's own memory
+t_ptrace: /proc/PID/mem reads and writes another process's memory
+t_pty: IUTF8 can be set
+t_pty: erasing a wide character echoes whole erasures
+t_pty: erasing a two-byte character takes back one cell
+t_pty: with IUTF8 erase takes whole characters
+t_pty: IUTF8 can be cleared
+t_pty: without IUTF8 erase takes one byte
+t_pty: sixty-four pseudo-terminal pairs at once, the 65th fails
+t_pty: each pair carries its own bytes
+t_pty: every slave is a device of its own
+t_rootro: unshare a mount namespace
+t_rootro: bind the rootfs onto itself
+t_rootro: make the bind private
+t_rootro: remount it with no change
+t_rootro: mount /proc below it
+t_rootro: mount a tmpfs on /dev below it
+t_rootro: mount sysfs below it
+t_rootro: remount /sys read-only
+t_rootro: remount the rootfs read-only through its descriptor
+t_rootro: a file cannot be created in it before the pivot
+t_rootro: pivot_root(".", ".") into it
+t_rootro: umount2 of "." again fails with EINVAL
+t_rootro: chdir to the new root
+t_rootro: make the new root private
+t_rootro: a file cannot be created in the new root
+t_rootro: nor a file in the root directory itself
+t_rootro: nor a directory
+t_sock2: SCM_RIGHTS passes several descriptors in one message
+t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
+t_sock2: bytes sent before a message with descriptors are read first, and leave the descriptors for the recvmsg
+t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
+t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
+t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
+t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
+t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
+t_sys: the names are written through /proc/sys/kernel/hostname and domainname
+t_sys: splice reads a /proc file into a pipe
+t_sys: cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there
+t_sys: memory.high, low, min, swap.max and stat read back what a runtime writes
+t_sysv: shmat and shmdt in a loop reuse the address space
+t_sysv: shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL
+t_sysv: msgmni is written: that many queues, then ENOSPC
+t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
+t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
+t_sysv: 32 attachments in one process, the 33rd is EMFILE
+t_sysv: a 24 MiB segment is shared by a second view and a child; past 32 MiB is EINVAL
+t_sysv: 512 SEM_UNDO adjustments in one process, all undone at exit
+t_time: TZ=JST-9 is nine hours ahead
+t_time: TZ with a DST rule
+t_time: and outside the DST period
+t_time: a zone file is written
+t_time: TZ naming a zone file reads it
+t_timens: the time links name the first namespace, and NS_GET_NSTYPE says CLONE_NEWTIME
+t_timens: the first namespace's offsets are frozen
+t_timens: unshare moves the children only: they read the written offsets
+t_timens: the offsets are frozen once a process is in the namespace
+t_timens: a clock other than monotonic or boottime, or a bad time, is EINVAL
+t_timens: an offset may be negative
+t_timens: an absolute clock_nanosleep waits on the shifted clock
+t_timens: an absolute timerfd waits on the shifted clock
+t_timens: sysinfo and /proc/uptime show the shifted boot time
+t_timens: setns to the first time namespace undoes the shift
+t_timens: setns with a different type is EINVAL
+t_timens: /proc/PID/timens_offsets reads back what was written
+t_userns: a process may chown its own pipe to itself, not to others
+t_userns: an unprivileged process may raise its hard descriptor limit
+t_userns: /dev/full reads zeros and writes ENOSPC
+t_userns: the first ids of a user namespace are set from one register
+t_userns: uid_map takes text that ends in a NUL
+t_userns: a process maps the user namespace it has just made itself
+t_userns: a user namespace is made inside another and mapped through it
+t_userns: whoever made a user namespace joins it with setns, and not the first one
+t_userns: the root of a user namespace joins a PID namespace it made and its children start there, an outsider cannot
+t_userns: an unprivileged user cannot setns, not even into the namespaces it is in
+t_userns: root of a user namespace joins the mount, UTS, IPC and network namespaces it made, not the first mount or IPC one
+t_userns: and the mount namespace of a process in a user namespace it made
+t_userns: the root of a user namespace joins the UTS and network namespaces a user namespace inside it made
+t_userns: and a user namespace inside has none over the UTS and mount namespaces of the one around it
+t_userns: /proc/PID and the files in it belong to the mapped user of their process
+t_userns: a directory descriptor reads back from the new root after pivot_root
+t_userns: the root of a user namespace brings loopback up in a network namespace of its own
+t_userns: and not in the first one
+t_userns: nor in one that another user namespace made
+t_userns: nor mounts in a mount namespace that another user namespace made
+t_userns: nor sets the hostname of a UTS namespace that another user namespace made
+t_userns: statfs of /proc/self/fd/N answers for the file N holds
+t_userns: the root of a user namespace mounts in a mount namespace of its own
+t_userns: and not without one
+t_userns: the root of a user namespace gives up capabilities
+t_userns: a user namespace made inside one mounts in a mount namespace of its own
+t_userns: an unprivileged user mounts nothing
+t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
+t_inotify: two hundred and fifty timerfds at once
+t_timens: an offset that overflows the clock is ERANGE
+t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
+t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
