@@ -585,6 +585,47 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   return r;
 }
 
+/// pwrite64 as write(2) is (lx_write_call): a file takes a count whole. If
+/// the disk lags after some pieces, what was written is kept in F_WDONE and
+/// the call restarts, from the argument registers, for the rest.
+fn lx_pwrite64(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, off: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let wd = smaller(pget(k.procs, pid, F_WDONE) / 2, READ_MAX * 64);
+  pset(&mut k.procs, pid, F_WDONE, wd * 2);
+  let mut r = lx_pio(&mut con, &mut k, pid, true, fd, va, n, off);
+  let missed = pget(k.procs, pid, F_WDONE) % 2 == 1;
+  pset(&mut k.procs, pid, F_WDONE, wd * 2);
+  if missed && r > 0 && r < n && n <= READ_MAX * 64 && va <= 0xFFFFFFFFFFFFFFFF - r && off < 0x4000000000000000 {
+    pset(&mut k.procs, pid, F_WDONE, (wd + r) * 2);
+    pset(&mut k.procs, pid, F_REGS + R_RSI, va + r);
+    pset(&mut k.procs, pid, F_REGS + R_RDX, n - r);
+    pset(&mut k.procs, pid, F_REGS + R_R10, off + r);
+    return DISK_RETRY;
+  }
+  if wd > 0 && r != DISK_RETRY {
+    if r <= n && n <= 1099511627776 {
+      r = r + wd;
+    } else {
+      r = wd;                           // an error after progress reports the progress
+    }
+    pset(&mut k.procs, pid, F_WDONE, 0);
+  }
+  return r;
+}
+
+/// pread64 or pwrite64 as a system call.
+fn lx_pio_call(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64, n: u64, off: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if write {
+    return lx_pwrite64(&mut con, &mut k, pid, fd, va, n, off);
+  }
+  return lx_pio(&mut con, &mut k, pid, false, fd, va, n, off);
+}
+
 /// ftruncate(fd, size): sets the length of a file open for writing,
 /// cutting it or adding zeros; its offset stays.
 fn lx_ftruncate(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> u64
@@ -954,7 +995,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   let mut r = 0;
   if n == LX_PREAD64 || n == LX_PWRITE64 {
-    r = lx_pio(&mut con, &mut k, pid, n == LX_PWRITE64, a, b, c, r10);
+    r = lx_pio_call(&mut con, &mut k, pid, n == LX_PWRITE64, a, b, c, r10);
   } else if n == LX_UNAME {
     r = lx_uname(&mut k, pid, a);
   } else if n == LX_MREMAP {
