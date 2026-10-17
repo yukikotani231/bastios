@@ -1,13 +1,40 @@
 """Exercises the parts of the Python standard library that lean on the
 operating system, one check per line: "ok NAME" or "FAIL NAME: error".
 Run by python.txt on BastiOS; the same file runs on Linux for comparison."""
-import os, sys, time, threading, tempfile, shutil, subprocess, socket, select, selectors, signal, mmap, fcntl, resource, struct, zlib, io
+import warnings, os, sys, time, threading, tempfile, shutil, subprocess, socket, select, selectors, signal, mmap, fcntl, resource, struct, zlib, io, faulthandler
+
+# A check that has not ended after this many seconds is a hang: the script
+# names it, dumps every thread's stack and exits, so a lost wake-up costs
+# a minute and not the lane's whole timeout.
+HANG_SECONDS = 90
+
+# The watchdog is a thread, so every fork would warn about forking a
+# multi-threaded process; the checks fork on purpose.
+warnings.simplefilter("ignore")
 
 def main():
     failed = []
 
     def check(name):
         def deco(f):
+            def hang():
+                # One line per thread (innermost call first, the watchdog
+                # itself left out), short enough for the lane's report.
+                print("HANG %s: no end after %d s" % (name, HANG_SECONDS), flush=True)
+                for tid, frame in sys._current_frames().items():
+                    if tid == threading.get_ident():
+                        continue
+                    calls = []
+                    while frame and len(calls) < 7:
+                        calls.append("%s:%d %s" % (os.path.basename(frame.f_code.co_filename), frame.f_lineno, frame.f_code.co_name))
+                        frame = frame.f_back
+                    print("thread %d: %s" % (tid & 0xffff, " < ".join(calls)), flush=True)
+                faulthandler.dump_traceback(file=sys.stdout, all_threads=True)
+                sys.stdout.flush()
+                os._exit(3)
+            watchdog = threading.Timer(HANG_SECONDS, hang)
+            watchdog.daemon = True
+            watchdog.start()
             try:
                 f()
                 print("ok", name)
@@ -17,6 +44,7 @@ def main():
                 while tb.tb_next:
                     tb = tb.tb_next
                 print("FAIL %s: %s: %s (%s:%d)" % (name, type(e).__name__, str(e)[:120], os.path.basename(tb.tb_frame.f_code.co_filename), tb.tb_lineno))
+            watchdog.cancel()
             sys.stdout.flush()
             return f
         return deco

@@ -55,3 +55,17 @@ func main() { println(1) }
 == go: go test
 $ bb mkdir -p /disk/g/work/t; bb printf 'package t\nfunc Add(a, b int) int { return a + b }\n' > /disk/g/work/t/t.go; bb printf 'package t\nimport "testing"\nfunc TestAdd(t *testing.T) { if Add(2, 3) != 5 { t.Fatal("no") } }\n' > /disk/g/work/t/t_test.go; bb printf 'module t\ngo 1.24\n' > /disk/g/work/t/go.mod; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GO111MODULE=off GOFLAGS=-p=1; GO111MODULE=on bb chroot /disk/g /usr/local/go/bin/go -C /work/t test -vet=off ./... 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//'
 ok  	t
+
+== go: gopls reports a type error
+$ bb mkdir -p /disk/g/work/ls; bb printf 'module ls\ngo 1.24\n' > /disk/g/work/ls/go.mod; bb printf 'package main\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tvar s string = add(1, 2)\n\t_ = s\n}\n' > /disk/g/work/ls/main.go; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GOPATH=/tmp/gp PATH=/usr/local/go/bin:/usr/local/bin; bb chroot /disk/g /usr/local/bin/gopls check /work/ls/main.go 2>&1 | bb sed 's/^[^:]*://'
+6:17-26: cannot use add(1, 2) (value of type int) as string value in variable declaration
+
+== go: gopls finds the definition of a function
+$ export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GOPATH=/tmp/gp PATH=/usr/local/go/bin:/usr/local/bin; bb printf 'package main\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tprintln(add(1, 2))\n}\n' > /disk/g/work/ls/main.go; bb chroot /disk/g /usr/local/bin/gopls definition /work/ls/main.go:6:11 2>&1 | bb sed 's/^[^:]*://'
+3:6-9: defined here as func add(a int, b int) int
+
+== go: gopls formats a file
+$ bb printf 'package main\nfunc main(){println(1)}\n' > /disk/g/work/ls/f.go; bb chroot /disk/g /usr/local/bin/gopls format /work/ls/f.go 2>&1 | bb head -4
+package main
+
+func main() { println(1) }

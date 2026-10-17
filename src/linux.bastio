@@ -2710,9 +2710,10 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // (docs/security.md). Such a copy does not see later writes to the file.
   let cached = sh && !anon && f != NO_FILE && can_write;
   // Private writable anonymous memory gets its pages when first touched
-  // (src/lxanon.bastio), unless MAP_POPULATE or MAP_LOCKED asks for them
-  // now.
-  let lazy = anon && !sh && prot / 2 % 2 == 1 && prot / 4 % 2 == 0 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
+  // (src/lxanon.bastio), executable or not, unless MAP_POPULATE or
+  // MAP_LOCKED asks for them now.
+  let lazy = anon && !sh && prot / 2 % 2 == 1 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
+  let x = prot / 4 % 2 == 1;
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {
@@ -2732,7 +2733,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     fixed_taken(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !cached && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !(lazy && anon_add_x(&mut k, pid, at / 4096, at / 4096 + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
@@ -2740,7 +2741,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // Where addr asks, if nothing is there (mmap_hint, src/lxmem.bastio).
     let hp = mmap_hint(&mut k, pid, addr, pages);
     if hp < STACK_FIRST {
-      if !reserve && !(lazy && anon_add(&mut k, pid, hp, hp + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
+      if !reserve && !(lazy && anon_add_x(&mut k, pid, hp, hp + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
         hole_add(&mut k, pid, hp, hp + pages);
         return ENOMEM;
       }
@@ -2749,7 +2750,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
-      if !reserve && !(lazy && anon_add(&mut k, pid, h, h + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+      if !reserve && !(lazy && anon_add_x(&mut k, pid, h, h + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
@@ -2768,7 +2769,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // mapped when an mprotect makes them usable (lx_mprotect), and touching
     // it before that faults, as on Linux. Shared memory is mapped now and
     // hidden (read_only), so the pages mprotect uncovers are the shared ones.
-    if !reserve && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
+    if !reserve && !(lazy && anon_add_x(&mut k, pid, at / 4096, at / 4096 + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);

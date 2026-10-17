@@ -122,7 +122,7 @@ const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/
 const FDI_DIRS: u64 = 0x1800;           // DIR_PROC + FDI_DIRS + pid: /proc/PID/fdinfo
 const SYSD: u64 = 0x1400;              // DIR_PROC + SYSD + j: /proc/sys and its directories (src/lxsysctl.bastio)
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
-const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
+const LOOP_SYS: u64 = 10;              // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio, queue/logical_block_size, queue/dma_alignment
 const SY_PX: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
 const SY_FI: u64 = SY_PX + NPROC * PXF_N;   // after those: /proc/P/fdinfo/FD at P * LXNFD + FD
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
@@ -762,6 +762,12 @@ fn loop_sys_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, at, n, "loop/dio") {
     return base + 7;
   }
+  if xfer_is(x, at, n, "queue/logical_block_size") {
+    return base + 8;
+  }
+  if xfer_is(x, at, n, "queue/dma_alignment") {
+    return base + 9;
+  }
   return 0;
 }
 
@@ -805,8 +811,12 @@ fn loop_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
     v = flags / 4 % 2;
   } else if a == 6 {
     v = flags / 8 % 2;
-  } else {
+  } else if a == 7 {
     v = flags / 16 % 2;
+  } else if a == 8 {
+    v = 512;                                // the sector size of every device here
+  } else {
+    v = 511;                                // buffers for the device need 512-byte alignment
   }
   let e = put_n(&mut o, 0, v);
   return put_c(&mut o, e, 10);
