@@ -1440,6 +1440,7 @@ t_timens: the first namespace's offsets are frozen
 t_timens: the offsets are frozen once a process is in the namespace
 t_timens: the time links name the first namespace, and NS_GET_NSTYPE says CLONE_NEWTIME
 t_timens: unshare moves the children only: they read the written offsets
+t_timens: an offset that overflows the clock is ERANGE
 t_userns: /dev/full reads zeros and writes ENOSPC
 t_userns: a process may chown its own pipe to itself, not to others
 t_userns: an unprivileged process may raise its hard descriptor limit
