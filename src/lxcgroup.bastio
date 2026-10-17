@@ -986,9 +986,9 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if f >= 18 && f <= 21 {
-    // memory.high, low, min and swap.max: kept as written. Only memory.max
-    // is enforced; with no reclaim and no swap there is nothing for these
-    // to hold back or to protect.
+    // memory.high, low and min: kept as written. Only memory.max and
+    // memory.swap.max are enforced; with no reclaim there is nothing for the
+    // others to hold back or to protect.
     let v = cg_get(k, s, CGW_MHIGH + f - 18);
     if v == 0 && f != 19 && f != 20 {
       return put_s(&mut o, 0, "max\n");
@@ -1089,6 +1089,37 @@ fn cg_swap_current(k: &Kernel, s: u64) -> u64
     q = q + 1;
   }
   return pages * 4096;
+}
+
+/// How many more pages the swap file may take from process q: the room left
+/// under the tightest memory.swap.max of its group and the ones above it
+/// (a limit of "max" leaves all of the window).
+fn cg_swap_room(k: &Kernel, q: u64) -> u64
+  requires kok(k) && q < NPROC
+  ensures result <= WPAGES
+{
+  let mut room = WPAGES;
+  let mut c = cg_of(k, q);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && room <= WPAGES && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_MHIGH + 3);
+    if lim != 0 && lim <= CG_BIG {
+      let cur = cg_swap_current(k, c);
+      if cur >= lim - 1 {
+        room = 0;
+      } else {
+        room = smaller(room, (lim - 1 - cur) / 4096);
+      }
+    }
+    if c == 0 {
+      return room;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return room;
 }
 
 /// Has a task of cgroup s or below a SIGKILL it has not yet died of?
