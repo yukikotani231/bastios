@@ -1,0 +1,26 @@
+# The Python packages the Python lane (python.txt) installs, from PyPI,
+# pinned by SHA-256: FILE URL SHA256. pythondisk.py fetches them into a
+# wheelhouse, which run.py serves at HOSTURL/wheels/ (pip's --find-links).
+# The wheels are pure Python; markupsafe is a source distribution with a C
+# extension (setuptools builds it with gcc); the jinja2 source distribution
+# is the real project whose test suite the lane runs.
+pytest-9.1.1-py3-none-any.whl https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl 37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c
+iniconfig-2.3.1-py3-none-any.whl https://files.pythonhosted.org/packages/56/43/4ca9e49d27a1fcf6bece6f6aec0ea46bb9112489b93d4b688fb415457bdb/iniconfig-2.3.1-py3-none-any.whl 9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7
+packaging-26.3-py3-none-any.whl https://files.pythonhosted.org/packages/63/34/ba1c580383c9eada3711951fef0795c80b829a078d72188184bcab9dd527/packaging-26.3-py3-none-any.whl d7193f7c8e4e93f444fde0262bf90af30e16fa0ad0ad44cb553c87339b23cd1c
+pluggy-1.7.0-py3-none-any.whl https://files.pythonhosted.org/packages/40/9e/2b38731e0fc536806f16490e1a12d7f0dc2a1235aa8cc07bcc75416a7daa/pluggy-1.7.0-py3-none-any.whl 7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec
+pygments-2.21.0-py3-none-any.whl https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl 2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9
+setuptools-84.0.0-py3-none-any.whl https://files.pythonhosted.org/packages/95/9c/c510029fc6ef33a6275cd2c5d3cecd6613dfd6aa401d57c54f1c18852ccf/setuptools-84.0.0-py3-none-any.whl 51a52592b3b99e102b609654876bd65f19f999935166d1352678931132b0c670
+markupsafe-3.0.3.tar.gz https://files.pythonhosted.org/packages/7e/99/7690b6d4034fffd95959cbe0c02de8deb3098cc577c67bb6a24fe5d7caa7/markupsafe-3.0.3.tar.gz 722695808f4b6457b320fdc131280796bdceb04ab50fe1795cd540799ebe1698
+jinja2-3.1.6-py3-none-any.whl https://files.pythonhosted.org/packages/62/a1/3d680cbfd5f4b8f15abc1d571870c5fc3e594bb582bc3b64ea099db13e56/jinja2-3.1.6-py3-none-any.whl 85ece4451f492d0c13c5dd7c13a64681a86afae63a5f347908daf103ce6d2f67
+jinja2-3.1.6.tar.gz https://files.pythonhosted.org/packages/df/bf/f7da0350254c0ed7c72f3e33cef02e048281fec7ecec5f032d4aac52226b/jinja2-3.1.6.tar.gz 0137fb05990d35f1275a587e9aee6d56da821fc83491a0fb838183be43f66d6d
+# Binary wheels for musl (the manylinux ones need glibc), real extension modules.
+numpy-2.5.4-cp314-cp314-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/f3/92/a77b5061b1b3e2643928c37976d79ee173e1b171ed158b7a3c61056b41bc/numpy-2.5.4-cp314-cp314-musllinux_1_2_x86_64.whl 4e263278bfb5ee6409db8aedbc4cc32973b1b82bc1e8d3c668551d04d83a7e37
+cryptography-50.0.2-cp311-abi3-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/68/e3/f2298d3bb55e0c4a91841ec4d01b3f020ba8c5fbf15ccdcc6dcf03f97025/cryptography-50.0.2-cp311-abi3-musllinux_1_2_x86_64.whl 85d0d9a31b9098e98534226d5686b47264b95e62ce459dc2e62fdfc809f9fe93
+cffi-2.1.1-cp314-cp314-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/81/10/5dc0e7bdd18e22107054288283380fc97a06ae3f1656a106908d666a3c88/cffi-2.1.1-cp314-cp314-musllinux_1_2_x86_64.whl 5c58fe613dc5e5336357eff555824a314d8e43282600435c8d1cb6a7a2fedd13
+pycparser-3.11-py3-none-any.whl https://files.pythonhosted.org/packages/90/11/0e6f11117525ff0eec40ebac3d313376f102df93ca44ad9e893ee85e4f89/pycparser-3.11-py3-none-any.whl 51d5a8ba2be0bbe440b99d2112604c95bbbc3c2748a64260186c541e1729cd80
+lxml-6.1.3-cp314-cp314-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/f5/89/32f5de69a0a31f30e6164981851f87b37ecb2c4ee838e504b88d49d4818e/lxml-6.1.3-cp314-cp314-musllinux_1_2_x86_64.whl c59e4265608da6a041f54646ecc0c9ecdbb19aaf14c4c684bb6c2114998cc415
+pillow-12.3.0-cp314-cp314-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/f0/f4/68c491844841ede6bed70189546b3ee9731cf9f2cbad396faff5e1ccba45/pillow-12.3.0-cp314-cp314-musllinux_1_2_x86_64.whl 23aceaa007d6172b02c277f0cd359c79492bbb14f7072b4ede9fbcaf20648130
+pyyaml-6.0.3-cp314-cp314-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/d7/ce/af88a49043cd2e265be63d083fc75b27b6ed062f5f9fd6cdc223ad62f03e/pyyaml-6.0.3-cp314-cp314-musllinux_1_2_x86_64.whl 5190d403f121660ce8d1d2c1bb2ef1bd05b5f68533fc5c2ea899bd15f4399b35
+greenlet-3.5.6-cp314-cp314-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/f6/40/143bdbb20a516628cb15074ae52ed17d850b450292609c7a6fccac6dbece/greenlet-3.5.6-cp314-cp314-musllinux_1_2_x86_64.whl 8b27df301f56e3b3d2298095c8f7d6b68f2521f6b1693e901fa039bdbae34424
+psutil-7.2.2-cp36-abi3-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/04/78/0acd37ca84ce3ddffaa92ef0f571e073faa6d8ff1f0559ab1272188ea2be/psutil-7.2.2-cp36-abi3-musllinux_1_2_x86_64.whl b58fabe35e80b264a4e3bb23e6b96f9e45a3df7fb7eed419ac0e5947c61e47cc
+orjson-3.13.0-cp314-cp314-musllinux_1_2_x86_64.whl https://files.pythonhosted.org/packages/23/b3/12b1af9b87ff9fa0aaf4e5724c87672b30bb5de76f275f7fac64e8219c1b/orjson-3.13.0-cp314-cp314-musllinux_1_2_x86_64.whl 08bf722f923d2100bc5e5a5dcf72c656db557049c1bea26582fdd5dd9d5395a1

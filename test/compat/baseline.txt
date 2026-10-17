@@ -452,6 +452,7 @@ t_inotify: sixty timerfds at once
 t_inotify: thirty inotify instances at once
 t_inotify: thirty named pipes open at once
 t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
+t_inotify: a watch nobody reads does not hold its writer back: 2000 files made and removed take under 3 s
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
@@ -750,6 +751,11 @@ t_more: fstatat with AT_SYMLINK_NOFOLLOW
 t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
+t_more: getrusage self reports a maximum resident size
+t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
+t_more: /proc/PID/status has VmRSS and the context switch counts
+t_more: /proc/meminfo has Active, Inactive and Shmem
+t_more: SIOCETHTOOL on a socket is EOPNOTSUPP
 t_more: ioctl FIOCLEX and FIONCLEX
 t_more: ioctl FIONBIO makes a read EAGAIN
 t_more: memfd_create
@@ -1256,6 +1262,7 @@ t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65t
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
 t_sys: a cgroup namespace roots the tree
+t_sys: cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max kills the biggest process of a group that passes it
@@ -1395,6 +1402,15 @@ go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+python: python: unpack the root, chroot into it, run python3
+python: apk: install gcc, musl-dev, binutils and make over HTTP
+python: gcc: build a C program and run it
+python: python: venv and pip
+python: pip: install pytest and its dependencies from the host's web server
+python: pip: build a C extension from source (setuptools, gcc) and import it
+python: pytest: the whole test suite of a real project (Jinja2's)
+python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
+python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
 java: java: version
 java: java: compile and run a program
