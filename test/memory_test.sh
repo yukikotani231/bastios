@@ -80,6 +80,11 @@ run("ash")
 F = meminfo("MemFree") // 1024
 BIG, SMALL, TOUCH_BIG, TOUCH_ADJ = F * 11 // 20, F // 5, F * 2 // 5, F * 7 // 20
 OVER, HOLD, SECOND, HUGE = F * 7 // 5, F * 3 // 5, F * 19 // 20, F * 4
+# The swap file holds what a program needs beyond memory and a margin. It is
+# no bigger than that because the native kernel's heap is small on this
+# machine (the swap table takes 16 bytes of it for each slot).
+SWAP_MB = max(F * 2 // 3, 8)
+SWAP_KB = SWAP_MB * 1024 - 4
 
 # A hog that fits is left alone.
 t = run("/disk/mhog touch 16; echo rc=$?")
@@ -141,9 +146,9 @@ announced = len(re.findall(r"Out of memory: Killed process", out.decode(errors="
 check("/proc/vmstat counts the kills", n_kill >= 3 and n_kill == announced, f"vmstat {n_kill}, console {announced}")
 # Swap: a file on the disk. A program bigger than free memory runs to the end.
 kills = vm("oom_kill")
-t = run("/disk/mhog mkswap 24 /disk/swap && /disk/mhog swapon /disk/swap; echo rc=$?")
+t = run(f"/disk/mhog mkswap {SWAP_MB} /disk/swap && /disk/mhog swapon /disk/swap; echo rc=$?")
 check("mkswap and swapon", "swap on" in t and "rc=0" in t, t)
-check("/proc/meminfo has the swap area", meminfo("SwapTotal") == 24572 and meminfo("SwapFree") == 24572)
+check("/proc/meminfo has the swap area", meminfo("SwapTotal") == SWAP_KB and meminfo("SwapFree") == SWAP_KB)
 check("/proc/swaps lists it", "swapfile" in run("cat /proc/swaps"))
 t = run("/disk/mhog swapon /disk/swap; echo rc=$?")
 check("a second swapon is refused", "failed" in t, t)
@@ -153,7 +158,7 @@ check("a program bigger than free memory runs and reads back what it wrote",
       f"touched {OVER} MiB" in t and "rc=0" in t and "Out of memory" not in t, t)
 check("pages went out and came back", vm("pswpout") > 1000 and vm("pswpin") > 1000, f"{vm('pswpout')} {vm('pswpin')}")
 check("nothing was killed", vm("oom_kill") == kills)
-check("every slot is free again", meminfo("SwapFree") == 24572)
+check("every slot is free again", meminfo("SwapFree") == SWAP_KB)
 # A holder is pushed out by a second program; swapoff brings it home.
 run(f"/disk/mhog hold {HOLD} & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
@@ -168,7 +173,7 @@ run("kill -9 $big; sleep 1")
 run("/disk/mhog swapon /disk/swap")
 t = run(f"/disk/mhog touch {HUGE}; echo rc=$?")
 check("a program bigger than memory and swap is killed", "Out of memory: Killed process" in t and "rc=137" in t, t)
-check("the system carries on after it", "alive" in run("echo alive") and meminfo("SwapFree") == 24572)
+check("the system carries on after it", "alive" in run("echo alive") and meminfo("SwapFree") == SWAP_KB)
 qemu.kill(); qemu.wait()
 print("memory: %d failed" % fails)
 sys.exit(1 if fails else 0)
