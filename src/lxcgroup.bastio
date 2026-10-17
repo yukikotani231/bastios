@@ -18,7 +18,7 @@
 // pids.current, memory.max, memory.current and memory.events, memory.stat,
 // memory.high, memory.low, memory.min and memory.swap.max (kept as written,
 // not enforced), the cpuset controller's cpuset.cpus and cpuset.mems (a list
-// of processors, kept as written, not enforced, and their .effective files), memory.swap.current (0), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
+// of processors, kept as written, not enforced, and their .effective files), memory.swap.current (the pages swapped out), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
 // (threads too) fail with EAGAIN once the group or one above it holds that
 // many tasks, and so does moving a process in.
 //
@@ -1003,7 +1003,8 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if f == 22 {
-    return put_s(&mut o, 0, "0\n");            // no swap
+    let a = put_n(&mut o, 0, cg_swap_current(k, s));
+    return put_c(&mut o, a, 10);
   }
   if f == 24 || f == 26 {
     return cg_cpuset_text(k, s, f == 26, &mut o);
@@ -1065,6 +1066,25 @@ fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
   {
     if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) {
       pages = pages + cg_resident(&mut k, q);
+    }
+    q = q + 1;
+  }
+  return pages * 4096;
+}
+
+/// memory.swap.current of cgroup s: the bytes of the processes in it and
+/// below it that are in the swap file (each address space counted once).
+fn cg_swap_current(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+  ensures result <= 0x100000000000000
+{
+  let mut pages = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && pages <= (q - 1) * WPAGES && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) {
+      pages = pages + smaller(swap_count(k, q), WPAGES);
     }
     q = q + 1;
   }
