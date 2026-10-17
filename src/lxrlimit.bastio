@@ -467,13 +467,70 @@ fn lock_pages(k: &mut Kernel, pid: u64, from: u64, to: u64, lock: bool) -> u64
   return 0;
 }
 
-/// A MAP_LOCKED mapping of n bytes: counted as locked.
-fn lock_mapped(k: &mut Kernel, pid: u64, n: u64)
+/// A MAP_LOCKED mapping of n bytes at addr: counted as locked, and its
+/// pages kept as locked (madvise and msync look at them).
+fn lock_mapped(k: &mut Kernel, pid: u64, addr: u64, n: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   let held = smaller(rl_word(k, pid, RLW_LOCKED), USER_SIZE);
-  rl_put(&mut k, pid, RLW_LOCKED, held + smaller((smaller(n, USER_SIZE) + 4095) / 4096 * 4096, USER_SIZE));
+  let r = win_range(addr, smaller(n, USER_SIZE));
+  if n == 0 || r == 18446744073709551615 {
+    rl_put(&mut k, pid, RLW_LOCKED, held + smaller((smaller(n, USER_SIZE) + 4095) / 4096 * 4096, USER_SIZE));
+    return;
+  }
+  let from = r / 4294967296;
+  let to = r % 4294967296;
+  let added = (to - from) - lr_covered(k, pid, from, to);
+  rl_put(&mut k, pid, RLW_LOCKED, held + added * 4096);
+  lr_add(&mut k, pid, from, to);
+}
+
+/// Addr .. addr + n is not mapped as it was (munmap, MAP_FIXED over it,
+/// the part mremap gave up): whatever of it was locked is not any more.
+fn lock_unmapped(k: &mut Kernel, pid: u64, addr: u64, n: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = win_range(addr, smaller(n, USER_SIZE));
+  if n == 0 || r == 18446744073709551615 {
+    return;
+  }
+  let from = r / 4294967296;
+  let to = r % 4294967296;
+  if lr_covered(k, pid, from, to) != 0 {
+    lock_pages(&mut k, pid, from, to, false);
+  }
+}
+
+/// mremap of from_va .. from_va + oldlen to newlen bytes, which returned `res`: a
+/// locked range stays locked where it went, and the part given up is not.
+fn lock_remapped(k: &mut Kernel, pid: u64, from_va: u64, oldlen: u64, newlen: u64, res: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = win_range(from_va, smaller(oldlen, USER_SIZE));
+  if oldlen == 0 || r == 18446744073709551615 {
+    return;
+  }
+  let from = r / 4294967296;
+  let to = r % 4294967296;
+  if lr_covered(k, pid, from, to) == 0 {
+    return;
+  }
+  if res == from_va {
+    if newlen < oldlen && oldlen <= USER_SIZE && newlen <= USER_SIZE {
+      let keep = (newlen + 4095) / 4096 * 4096;
+      if keep < oldlen {
+        lock_unmapped(&mut k, pid, from_va + keep, oldlen - keep);
+      }
+    }
+    return;
+  }
+  lock_unmapped(&mut k, pid, from_va, oldlen);
+  if res < 0x8000000000000000 {
+    lock_mapped(&mut k, pid, res, smaller(oldlen, newlen));
+  }
 }
 
 /// mlockall(flags): MCL_CURRENT counts every mapped page as locked.

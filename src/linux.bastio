@@ -354,6 +354,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
   }
+  swap_args(&mut k, pid);                   // pages the arguments point at come back from swap (src/swap.bastio)
   let was = pget(k.procs, pid, F_RESTART);  // a timed wait keeps its deadline here
   pset(&mut k.procs, pid, F_RESTART, 0);
   let mut a = pget(k.procs, pid, F_REGS + R_RDI);
@@ -619,8 +620,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
     }
     let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
-    if flags & 0x2000 != 0 && r < 0x8000000000000000 {
-      lock_mapped(&mut k, pid, b);          // MAP_LOCKED
+    if r < 0x8000000000000000 {
+      if flags / MAP_FIXED % 2 == 1 {
+        lock_unmapped(&mut k, pid, r, b);   // what was locked there is replaced
+      }
+      if flags & 0x2000 != 0 {
+        lock_mapped(&mut k, pid, r, b);     // MAP_LOCKED
+      }
     }
     ret(&mut k.procs, pid, r);
     return KEEP;
@@ -811,6 +817,9 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
 {
   if is_sys_call(n) {
     return lx_sys_call(&mut k, pid, n, a, b);
+  }
+  if is_swap_call(n) {
+    return lx_swap_call(&mut k, pid, n, a, b);
   }
   if is_prio_call(n) {
     ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));

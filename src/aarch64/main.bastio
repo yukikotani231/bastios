@@ -79,6 +79,7 @@ import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "swap.bastio";
 import "oom.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
@@ -340,6 +341,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if pt_sys_entry(&mut s.k, p, pget(s.k.procs, p, F_RESTART) != 0) {
       return (p + 1) % NPROC;               // stopped for its tracer before the call (src/lxptrace.bastio)
     }
+    if ino_throttle(&mut s.k, p) {
+      return (p + 1) % NPROC;               // (a reader of a half-full inotify queue goes first)
+    }
     ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
@@ -378,7 +382,30 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     return (p + 1) % NPROC;
   }
+  let mut is_bus = false;
   if v == V_ABORT {
+    let sw = swap_fault(&mut s.k, p);
+    if sw == SW_OK {
+      return p;
+    }
+    if sw == SW_BUSY {
+      return (p + 1) % NPROC;
+    }
+    if sw == SW_NOMEM {
+      // The page is in the swap file and there is no page to read it into:
+      // the same reclaim as a fault that finds no page (src/oom.bastio).
+      let oo = oom_fault(&mut s.k, &mut s.con, p, true);
+      if oo == OOM_RETRY {
+        return p;
+      }
+      if oo == OOM_WAIT {
+        return (p + 1) % NPROC;
+      }
+      if oo == OOM_SELF {
+        terminate(&mut s.k, mmu, p, death_code(SIGKILL, false));
+        return (p + 1) % NPROC;
+      }
+    }
     let lz = lazy_fault(&mut s.k, p);
     if lz == LZ_WAIT && state(s.k.procs, p) == READY {
       pset(&mut s.k.procs, p, F_STATE, DISKWAIT);
@@ -387,6 +414,21 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       if state(s.k.procs, p) == DISKWAIT {
         return (p + 1) % NPROC;
       }
+      return p;
+    }
+    // A page past a mapped file's end (src/lxmem.bastio). If the file has
+    // grown to cover it the instruction runs again; a second fault at the
+    // same place is not this one's doing, and goes on to the handlers below.
+    let bva = pget(s.k.procs, p, reg_word(R_FAULT));
+    let brip = pget(s.k.procs, p, reg_word(R_PC)) % 4611686018427387904 + 1;
+    let mut bus = 0;
+    if pget(s.k.procs, p, F_FAULT_RIP) != brip || pget(s.k.procs, p, F_FAULT_VA) != bva {
+      bus = bus_fault(&mut s.k, p);
+    }
+    is_bus = bus == 2;
+    if bus == 1 {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, brip);
+      pset(&mut s.k.procs, p, F_FAULT_VA, bva);
       return p;
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) {
@@ -424,7 +466,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   } else if v == 1 {
     sig = SIGTRAP;                          // a single step (src/lxptrace.bastio)
     pt_stepped(&mut s.k, p);
-  } else if v == 17 {
+  } else if v == 17 || is_bus {
     sig = SIGBUS;
   }
   let addr = pget(s.k.procs, p, reg_word(R_FAULT));
@@ -432,7 +474,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   // is unmapped (SEGV_MAPERR, BUS_ADRALN and TRAP_BRKPT are all 1), except
   // as set below for a protection fault.
   let mut code = 1;
-  if sig == SIGILL {
+  if sig == SIGILL || is_bus {
     code = 2;
   } else if sig == SIGSEGV {
     // SEGV_ACCERR (2) for a page the access is not allowed on: a data or
@@ -777,6 +819,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   bfree(s.k.uxb);
   free(s.k.mns);
   free(s.k.scf);
+  free(s.k.swp);
   bfree(s.k.mstr);
   pool = s.k.mem.pool;
   return 0;
