@@ -1748,6 +1748,7 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
     }
   }
   if advice == MADV_DONTNEED {
+    swap_forget(&mut k, tgid(k.procs, pid), from, to);   // the swapped pages are dropped with the rest
     let mut p = from;
     while p < to
       invariant from <= p && p <= to && to <= WPAGES && kok(k)
