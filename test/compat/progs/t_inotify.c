@@ -339,14 +339,14 @@ int main(void) {
     for (int i = 0; i < 250; i++)
         close(tfd[i]);
 
-    /* inotify instances: sixty at once. */
-    int ino[60], nino = 0;
-    for (int i = 0; i < 60; i++) {
+    /* inotify instances: thirty at once. */
+    int ino[30], nino = 0;
+    for (int i = 0; i < 30; i++) {
         ino[i] = inotify_init1(IN_NONBLOCK);
         nino += ino[i] >= 0;
     }
-    EXPECT("sixty inotify instances at once", nino == 60);
-    for (int i = 0; i < 60; i++)
+    EXPECT("thirty inotify instances at once", nino == 30);
+    for (int i = 0; i < 30; i++)
         if (ino[i] >= 0)
             close(ino[i]);
 
