@@ -59,12 +59,13 @@ def load_tests(ltp, only, skip, suites=()):
     progs, dirs = {}, {}
     names = ["syscalls", *suites]
     for suite in names:
-        for root, _, files in os.walk(os.path.join(ltp, "testcases", "kernel", suite)):
-            for f in sorted(files):
-                p = os.path.join(root, f)
-                if os.access(p, os.X_OK) and "." not in f and is_elf(p) and f not in progs:
-                    progs[f] = p
-                    dirs.setdefault(root, []).append(f)
+        for base in (os.path.join(ltp, "testcases", "kernel", suite), os.path.join(ltp, "testcases", suite)):
+            for root, _, files in os.walk(base):
+                for f in sorted(files):
+                    p = os.path.join(root, f)
+                    if os.access(p, os.X_OK) and "." not in f and is_elf(p) and f not in progs:
+                        progs[f] = p
+                        dirs.setdefault(root, []).append(f)
     entries = []
     for suite in names:
         for line in open(os.path.join(ltp, "runtest", suite)):
