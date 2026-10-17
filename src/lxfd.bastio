@@ -1344,6 +1344,9 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if dev == DEV_KEYEV {
+    return keyev_open(&mut k, pid, flags);  // src/lxkeyev.bastio
+  }
   if dev == DEV_MICE {
     return mice_open(&mut k, pid, flags);   // src/lxmouse.bastio
   }
