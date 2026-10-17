@@ -853,5 +853,21 @@ int main(void) {
            }
            close(fd); unlink("cf_pwhole");
            ok; }));
+    EXPECT("F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor", ({
+           int pf[2];
+           int ok = pipe(pf) == 0;
+           sigset_t set;
+           sigemptyset(&set); sigaddset(&set, SIGUSR1);
+           sigprocmask(SIG_BLOCK, &set, NULL);
+           ok = ok && fcntl(pf[0], F_SETOWN, getpid()) == 0 && fcntl(pf[0], F_SETSIG, SIGUSR1) == 0;
+           ok = ok && fcntl(pf[0], F_SETFL, O_ASYNC) == 0;
+           ok = ok && write(pf[1], "x", 1) == 1;
+           siginfo_t si;
+           memset(&si, 0, sizeof si);
+           struct timespec to = { 2, 0 };
+           ok = ok && sigtimedwait(&set, &si, &to) == SIGUSR1;
+           ok = ok && si.si_code == POLL_IN && si.si_fd == pf[0] && si.si_band == (POLLIN | POLLRDNORM);
+           close(pf[0]); close(pf[1]);
+           ok; }));
     return done();
 }
