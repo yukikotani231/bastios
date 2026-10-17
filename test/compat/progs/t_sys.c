@@ -173,6 +173,38 @@ static int cgroup_ns(void) {
     return ok;
 }
 
+/* cpuset.cpus and cpuset.mems: a list of processors is kept as written and
+ * read back, one the machine does not have is EINVAL, and the effective list
+ * is the nearest group's that set one. */
+static int cgroup_cpuset(void) {
+    if (!put("/sys/fs/cgroup/cgroup.subtree_control", "+cpuset")) return 0;
+    if (mkdir("/sys/fs/cgroup/cgs", 0755) != 0) return 0;
+    int ok = 0;
+    char buf[256];
+    do {
+        if (!slurp("/sys/fs/cgroup/cgs/cpuset.cpus", buf, sizeof buf) || strcmp(buf, "\n") != 0) { errno = 1001; break; }
+        if (!put("/sys/fs/cgroup/cgs/cpuset.cpus", "0\n")) { errno = 1002; break; }
+        if (!slurp("/sys/fs/cgroup/cgs/cpuset.cpus", buf, sizeof buf) || strcmp(buf, "0\n") != 0) { errno = 1003; break; }
+        if (put("/sys/fs/cgroup/cgs/cpuset.cpus", "9999")) { errno = 1004; break; }
+        if (put("/sys/fs/cgroup/cgs/cpuset.cpus", "0,")) { errno = 1005; break; }
+        if (put("/sys/fs/cgroup/cgs/cpuset.cpus", "x")) { errno = 1006; break; }
+        if (!put("/sys/fs/cgroup/cgs/cpuset.mems", "0")) { errno = 1007; break; }
+        if (put("/sys/fs/cgroup/cgs/cpuset.mems", "1")) { errno = 1008; break; }
+        if (!slurp("/sys/fs/cgroup/cgs/cpuset.mems.effective", buf, sizeof buf) || strcmp(buf, "0\n") != 0) { errno = 1009; break; }
+        if (!slurp("/sys/fs/cgroup/cgs/cgroup.controllers", buf, sizeof buf) || !strstr(buf, "cpuset")) { errno = 1010; break; }
+        if (mkdir("/sys/fs/cgroup/cgs/sub", 0755) != 0) { errno = 1011; break; }
+        int e = slurp("/sys/fs/cgroup/cgs/sub/cpuset.cpus.effective", buf, sizeof buf) && strcmp(buf, "0\n") == 0;
+        rmdir("/sys/fs/cgroup/cgs/sub");
+        if (!e) { errno = 1012; break; }
+        ok = 1;
+    } while (0);
+    int saved = errno;
+    ok = rmdir("/sys/fs/cgroup/cgs") == 0 && ok;
+    put("/sys/fs/cgroup/cgroup.subtree_control", "-cpuset");
+    if (!ok) errno = saved;
+    return ok;
+}
+
 /* The other memory files a runtime writes: memory.high, memory.low,
  * memory.min and memory.swap.max read back what was written ("max" and 0 as
  * they start), memory.swap.current is 0 and memory.stat counts the pages the
@@ -638,6 +670,7 @@ int main(void) {
     EXPECT("adjtimex reads and sets", adjust());
     EXPECT("not root: EPERM", not_root());
     EXPECT("a cgroup namespace roots the tree", cgroup_ns());
+    EXPECT("cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there", cgroup_cpuset());
     EXPECT("memory.high, low, min, swap.max and stat read back what a runtime writes", cgroup_mem_files());
     EXPECT("memory.max kills the biggest process of a group that passes it", cgroup_mem());
     EXPECT("seccomp USER_NOTIF: a supervisor answers a call", notifier());

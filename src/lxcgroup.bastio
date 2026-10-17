@@ -17,7 +17,8 @@
 // cgroup.type, cgroup.stat, cgroup.max.descendants, pids.max and
 // pids.current, memory.max, memory.current and memory.events, memory.stat,
 // memory.high, memory.low, memory.min and memory.swap.max (kept as written,
-// not enforced), memory.swap.current (0), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
+// not enforced), the cpuset controller's cpuset.cpus and cpuset.mems (a list
+// of processors, kept as written, not enforced, and their .effective files), memory.swap.current (0), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
 // (threads too) fail with EAGAIN once the group or one above it holds that
 // many tasks, and so does moving a process in.
 //
@@ -53,7 +54,7 @@
 import "lxuser.bastio";
 
 const CG_ROOT_LEN: u64 = 13;               // "sys/fs/cgroup"
-const CG_ALL: u64 = 7;                     // controllers: cpu 1, memory 2, pids 4
+const CG_ALL: u64 = 15;                    // controllers: cpu 1, memory 2, pids 4, cpuset 8
 const CG_BIG: u64 = 0x0100000000000000;    // limits read from a write stay below it
 
 /// Word w of cgroup slot s in k.mns.
@@ -560,7 +561,19 @@ fn cgf_name(f: u64) -> Str {
   if f == 22 {
     return "memory.swap.current";
   }
-  return "memory.stat";
+  if f == 23 {
+    return "memory.stat";
+  }
+  if f == 24 {
+    return "cpuset.cpus";
+  }
+  if f == 25 {
+    return "cpuset.mems";
+  }
+  if f == 26 {
+    return "cpuset.cpus.effective";
+  }
+  return "cpuset.mems.effective";
 }
 
 /// Which control file x[a..b] names, or CGF_N.
@@ -582,7 +595,7 @@ fn cgf_at(x: &Bytes, a: u64, b: u64) -> u64
 
 /// Whether root may write control file f.
 fn cgf_writable(f: u64) -> bool {
-  return f == 0 || f == 2 || f == 4 || f == 6 || f == 8 || f == 10 || f == 13 || f == 14 || f == 16 || (f >= 18 && f <= 21);
+  return f == 0 || f == 2 || f == 4 || f == 6 || f == 8 || f == 10 || f == 13 || f == 14 || f == 16 || (f >= 18 && f <= 21) || f == 24 || f == 25;
 }
 
 /// Does cgroup s have the name x[a..b]?
@@ -801,7 +814,14 @@ fn put_ctrls(o: &mut Bytes, at: u64, bits: u64) -> u64
 {
   let mut a = at;
   let mut first = true;
+  if bits & 8 != 0 {
+    a = put_s(&mut o, a, "cpuset");
+    first = false;
+  }
   if bits & 1 != 0 {
+    if !first {
+      a = put_c(&mut o, a, 32);
+    }
     a = put_s(&mut o, a, "cpu");
     first = false;
   }
@@ -984,6 +1004,17 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
   }
   if f == 22 {
     return put_s(&mut o, 0, "0\n");            // no swap
+  }
+  if f == 24 || f == 26 {
+    return cg_cpuset_text(k, s, f == 26, &mut o);
+  }
+  if f == 25 || f == 27 {
+    // One memory node. cpuset.mems is what was written; the effective
+    // list is that of the nearest group that set one, else node 0.
+    if f == 25 && cg_get(k, s, CGW_CSM) == 0 {
+      return put_s(&mut o, 0, "\n");
+    }
+    return put_s(&mut o, 0, "0\n");
   }
   if f == 23 {
     // The pages mapped are anonymous memory here: there is no page cache
@@ -1492,6 +1523,8 @@ fn cg_write_sub(k: &mut Kernel, s: u64, n: u64) -> u64
         b = 2;
       } else if xfer_is(k.fs.xfer, i + 1, e, "pids") {
         b = 4;
+      } else if xfer_is(k.fs.xfer, i + 1, e, "cpuset") {
+        b = 8;
       }
       if b == 0 {
         return EINVAL;                      // io and the rest: not here
@@ -1535,6 +1568,133 @@ fn comp_end_ws(x: &Bytes, a: u64, n: u64) -> u64
   return e;
 }
 
+/// "0" or "0-N" for the k.cpus processors.
+fn put_all_cpus(o: &mut Bytes, at: u64, ncpu: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_c(&mut o, at, 48);
+  if ncpu > 1 {
+    a = put_c(&mut o, a, 45);
+    a = put_n(&mut o, a, ncpu - 1);
+  }
+  return a;
+}
+
+/// cpuset.cpus of group s (what was written, a blank line for none), or with
+/// effective the list of the nearest group at or above s that set one, else
+/// all the processors. No processor is kept from a process by it: the list
+/// is only kept and read back.
+fn cg_cpuset_text(k: &Kernel, s: u64, effective: bool, o: &mut Bytes) -> u64
+  requires kok(k) && s < CG_N && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut c = s;
+  let mut i = 0;
+  if effective {
+    while c != 0 && cg_get(k, c, CGW_CSL) == 0 && i < CG_N
+      invariant c < CG_N && i <= CG_N && kok(k)
+    {
+      c = cg_parent(k, c);
+      i = i + 1;
+    }
+  }
+  let l = cg_get(k, c, CGW_CSL);
+  if l == 0 {
+    if !effective {
+      return put_s(&mut o, 0, "\n");
+    }
+    let a = put_all_cpus(&mut o, 0, k.cpus);
+    return put_c(&mut o, a, 10);
+  }
+  let mut a = 0;
+  let mut j = 0;
+  while j + 1 < l && j < CS_MAX
+    invariant j <= CS_MAX && a <= PROC_OUT && blen(o) == PROC_OUT && c < CG_N && kok(k)
+  {
+    a = put_c(&mut o, a, cast[u8](cg_get(k, c, CGW_CST + j) % 256));
+    j = j + 1;
+  }
+  return put_c(&mut o, a, 10);
+}
+
+/// Whether x[at..n] is a list of processors "0-3,5" naming only processors
+/// below limit.
+fn cs_list_ok(x: &Bytes, at: u64, n: u64, limit: u64) -> bool
+  requires n <= blen(x) && at <= n
+{
+  let mut pos = at;
+  let mut steps = 0;
+  while pos < n && steps < 64
+    invariant at <= pos && pos <= n && n <= blen(x) && steps <= 64
+  {
+    let a = num_at(x, pos, n);
+    if !a.ok || a.v >= limit || a.at <= pos {
+      return false;
+    }
+    let mut p = a.at;
+    if p < n && bget(x, p) == 45 {
+      let b = num_at(x, p + 1, n);
+      if !b.ok || b.v < a.v || b.v >= limit || b.at <= p {
+        return false;
+      }
+      p = b.at;
+    }
+    if p < n {
+      if bget(x, p) != 44 || p + 1 >= n {
+        return false;
+      }
+      p = p + 1;
+    }
+    pos = p;
+    steps = steps + 1;
+  }
+  return pos >= n;
+}
+
+/// Write of cpuset.cpus (f 24) or cpuset.mems (f 25) of s: the n bytes in
+/// the transfer buffer. Kept as text; mems names the one node, 0.
+fn cg_write_cpuset(k: &mut Kernel, s: u64, f: u64, n: u64) -> u64
+  requires kok(k) && s < CG_N && n <= 64
+  ensures kok(k)
+{
+  let mut m = n;
+  while m > 0 && (bget(k.fs.xfer, m - 1) == 10 || bget(k.fs.xfer, m - 1) == 32 || bget(k.fs.xfer, m - 1) == 9)
+    invariant m <= n && n <= 64 && kok(k)
+  {
+    m = m - 1;
+  }
+  if m > CS_MAX {
+    return EINVAL;
+  }
+  let mut limit = k.cpus;
+  if f == 25 {
+    limit = 1;
+  }
+  if !cs_list_ok(k.fs.xfer, 0, m, limit) {
+    return EINVAL;
+  }
+  if f == 25 {
+    cg_put(&mut k, s, CGW_CSM, m + 1);
+    if m == 0 {
+      cg_put(&mut k, s, CGW_CSM, 0);
+    }
+    return n;
+  }
+  let mut j = 0;
+  while j < m
+    invariant j <= m && m <= CS_MAX && s < CG_N && kok(k)
+  {
+    cg_put(&mut k, s, CGW_CST + j, cast[u64](bget(k.fs.xfer, j)));
+    j = j + 1;
+  }
+  cg_put(&mut k, s, CGW_CSL, m + 1);
+  if m == 0 {
+    cg_put(&mut k, s, CGW_CSL, 0);
+  }
+  return n;
+}
+
 /// write(2) to control file d by process pid: n bytes at va. Returns n or
 /// -errno.
 fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
@@ -1558,6 +1718,9 @@ fn cg_write(k: &mut Kernel, pid: u64, d: u64, va: u64, n: u64) -> u64
       return e;
     }
     return n;
+  }
+  if f == 24 || f == 25 {
+    return cg_write_cpuset(&mut k, s, f, n);
   }
   let b = big_at(k.fs.xfer, 0, n);
   let be = big_end(k.fs.xfer, 0, n);
@@ -1709,6 +1872,8 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_PARENT, par.slot);
   cg_put(&mut k, free, CGW_PIDS, 0);
   cg_put(&mut k, free, CGW_MEM, 0);
+  cg_put(&mut k, free, CGW_CSL, 0);
+  cg_put(&mut k, free, CGW_CSM, 0);
   cg_put(&mut k, free, CGW_MHIGH, 0);
   cg_put(&mut k, free, CGW_MLOW, 0);
   cg_put(&mut k, free, CGW_MMIN, 0);
