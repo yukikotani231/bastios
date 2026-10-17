@@ -1255,6 +1255,7 @@ t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65t
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
 t_sys: a cgroup namespace roots the tree
+t_sys: cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max kills the biggest process of a group that passes it
