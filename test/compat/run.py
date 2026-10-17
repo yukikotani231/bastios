@@ -761,7 +761,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "debian", "node", "go", "java", "rust", "python", "podman"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "rust", "python", "podman"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -799,8 +799,8 @@ def main():
     # (ocipull.sh's), and a lane that needs a package another lane's case
     # installs runs that case too; such a shared case is counted from the
     # lane it belongs to. The group stays alpine.
-    #   alpine   the cases up to the install of tmux, cmake and
-    #            lua-language-server, but the container cases and Vim's;
+    #   alpine   the cases up to the install of Neovim, but the container
+    #            cases;
     #   alpine2  the container cases: they need nothing else the other cases
     #            install. The bridged-network cases stay where they are: the
     #            package they install brings libraries the other cases
@@ -810,31 +810,36 @@ def main():
     #   alpine3  the install of tmux, cmake and lua-language-server and the
     #            cases after it (they use Neovim and gcc too), but cmake's;
     #   alpine4  cmake's case, after that install, and the programs on the
-    #            terminal (alpine_tty.txt: Neovim, gcc, make and tmux).
+    #            terminal (alpine_tty.txt: Neovim, gcc, make and tmux);
+    #   alpine5  the install of Neovim and the cases after it, up to the
+    #            install of tmux, cmake and lua-language-server, but the
+    #            container cases and Vim's (Neovim, gcc, gdb and strace).
     # The lanes are cut so that each takes about as long as the others
     # under emulation on aarch64 (CI runs alpine and alpine2 on one runner,
-    # alpine3 and alpine4 on another).
+    # alpine5 on a second, alpine3 and alpine4 on a third).
     at = {c[0]: i for i, c in enumerate(alpine)}
     alpine_setup = alpine[:3]
     nvim_gcc = [alpine[at["apk: install neovim over HTTP"]],
                 alpine[at["apk: install gcc and the C library's headers over HTTP"]]]
     tools_at = at["apk: install tmux, cmake and lua-language-server over HTTP"]
+    nvim_at = at["apk: install neovim over HTTP"]
     containers = [c for c in alpine[3:] if c[0].startswith("container:")
                   and "joins a network namespace" not in c[0]]
     vim = [alpine[at["vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it"]]]
     cmake = [alpine[at["cmake: configure, build and run a C project"]]]
-    alpine1 = [c for c in alpine[:tools_at] if c not in containers + vim]
+    alpine1 = [c for c in alpine[:nvim_at] if c not in containers + vim]
+    alpine5 = alpine_setup + [c for c in alpine[nvim_at:tools_at] if c not in containers + vim]
     alpine2 = alpine_setup + containers + vim
     alpine3 = alpine_setup + nvim_gcc + [c for c in alpine[tools_at:] if c not in containers + cmake]
     alpine4 = alpine_setup + nvim_gcc + [alpine[tools_at]] + cmake
     # Each lane's cases, by the key its results come back under, and the
     # lane each case belongs to.
-    alpine_parts = {"alpine": alpine1, "alpine#2": alpine2, "alpine#3": alpine3, "alpine#4": alpine4}
+    alpine_parts = {"alpine": alpine1, "alpine#2": alpine2, "alpine#5": alpine5, "alpine#3": alpine3, "alpine#4": alpine4}
     alpine_owner = {}
-    for k in ["alpine", "alpine#2", "alpine#3", "alpine#4"]:
+    for k in ["alpine", "alpine#2", "alpine#5", "alpine#3", "alpine#4"]:
         for c in alpine_parts[k]:
             alpine_owner.setdefault(c[0], k)
-    alpine_lanes = ["alpine", "alpine2", "alpine3", "alpine4"]
+    alpine_lanes = ["alpine", "alpine2", "alpine3", "alpine4", "alpine5"]
     if args.registry_image and any(map(lane_chosen, alpine_lanes)):
         web.add_registry(args.registry_image)
     env = Host(os.path.abspath(args.host), web) if args.host else None
@@ -943,6 +948,10 @@ def main():
                                             ("alpine-tty", "programs on the terminal in Alpine",
                                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])],
                           "384M"))
+        if lane_chosen("alpine5"):
+            disk = os.path.join(args.out, "alpine-run5.img")
+            shutil.copyfile(args.alpine_disk, disk)
+            lanes.append(("alpine5", disk, [("alpine#5", "Neovim, gcc and the debuggers in Alpine", applets_lane(alpine5, 300))], "384M"))
     if args.debian_disk and lane_chosen("debian"):
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
