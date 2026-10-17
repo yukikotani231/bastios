@@ -46,15 +46,23 @@ const SIGWINCH: u64 = 28;
 // A sender word (k.sigsave) at or above this says the signal came from a
 // processor exception at the address it holds less FAULT_MARK.
 const FAULT_MARK: u64 = 0x8000000000000000;
-const FAULT_BUS: u64 = 0x4000000000000000;   // in a fault word: the exception is a SIGBUS (si_code BUS_ADRERR)
 // The sender word of a pending signal (k.sigsave): the sender's pid in the low 10 bits (below 1024, past
 // NPROC), SW_QUEUE when sigqueue carried a value (kept in value_at).
 const SW_PID: u64 = 1024;
 const SW_QUEUE: u64 = 1024;
+const SW_VAL: u64 = 2048;
+const CHLD_MARK: u64 = 0x10000000000000;   // 2^52: a SIGCHLD from a child's change of state: si_code in CHLD_CODE, si_status in SW_VAL
+const CHLD_CODE: u64 = 0x100000000000;     // 2^44: three bits of si_code (CLD_EXITED .. CLD_CONTINUED)
+const TIMER_MARK: u64 = 0x20000000000000;  // 2^53: from a POSIX timer (with SW_QUEUE): si_code SI_TIMER, si_pid the timer's id
+const FAULT_CODE: u64 = 0x1000000000000;   // 2^48: in a fault word, si_code (a byte) times this, then the address (below)
 const MESGQ_MARK: u64 = 0x4000000000000;   // 2^50: a sender word from a message queue (post_mesgq)
 const TKILL_MARK: u64 = 0x8000000000000;   // 2^51: from tkill or tgkill (si_code SI_TKILL, si_pid the sender's group)
+const RTQ_N: u64 = 32;                        // queued instances of real-time signals per process, beyond the pending ones
+const RTQ_AT: u64 = 129;                      // where the queue starts in a k.sigsave row: its count, then the entries (a sender word and a value each)
+const RTQ_SIG: u64 = 0x40000000000000;        // 2^54: an entry's signal times this, plus its sender word; its value is the next word
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
+const SA_NOCLDWAIT: u64 = 2;
 const SA_RESTART: u64 = 0x10000000;
 const SA_NODEFER: u64 = 0x40000000;
 const SA_RESETHAND: u64 = 0x80000000;
@@ -130,6 +138,15 @@ fn jc_set(k: &mut Kernel, p: u64, v: u64)
   k.sys = set(k.sys, SYS_JC + p, v);
 }
 
+/// The sender word of a SIGCHLD from `child`: si_code `code` (CLD_EXITED 1,
+/// CLD_KILLED 2, CLD_DUMPED 3, CLD_TRAPPED 4, CLD_STOPPED 5, CLD_CONTINUED
+/// 6) and si_status `status`.
+fn chld_word(child: u64, code: u64, status: u64) -> u64
+  requires child < NPROC
+{
+  return child + CHLD_MARK + CHLD_CODE * (code % 8) + SW_VAL * (status % 65536);
+}
+
 /// Process p stopped or continued: its parent hears of it.
 fn jc_tell(k: &mut Kernel, p: u64)
   requires kok(k) && 1 <= p && p < NPROC
@@ -143,7 +160,15 @@ fn jc_tell(k: &mut Kernel, p: u64)
     pset(&mut k.procs, par, F_STATE, READY);  // its wait4 or waitid looks again
   }
   if sa_get(k.sigact, par, SIGCHLD, 1) & SA_NOCLDSTOP == 0 && is_linux(k.procs, par) {
-    post_from(&mut k, par, SIGCHLD, p);
+    let w = jc_get(k, p);
+    let mut word = chld_word(p, 6, SIGCONT);
+    if w / JC_STOP % 2 == 1 {
+      word = chld_word(p, 5, w % 256);
+      if tr_tracer(k, p) == par + 1 {
+        word = chld_word(p, 4, w % 256);
+      }
+    }
+    post_raw(&mut k, par, SIGCHLD, word, 0, false);
   }
 }
 
@@ -165,7 +190,7 @@ fn tr_tell(k: &mut Kernel, p: u64)
     pset(&mut k.procs, tr, F_STATE, READY);
   }
   if is_linux(k.procs, tr) {
-    post_from(&mut k, tr, SIGCHLD, p);
+    post_raw(&mut k, tr, SIGCHLD, chld_word(p, 4, jc_get(k, p) % 256), 0, false);
   }
 }
 
@@ -240,6 +265,14 @@ fn jc_stop(k: &mut Kernel, p: u64, s: u64)
 {
   pset(&mut k.procs, p, F_STATE, STOPPED);
   jc_set(&mut k, p, s + JC_STOP + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
+  let w = tr_get(k, p);
+  if w % 65536 != 0 && tr_opt(w) / 512 % 2 == 1 {
+    // A seized tracee's group-stop is a ptrace-stop too, reported as
+    // PTRACE_EVENT_STOP with the stop signal; PTRACE_LISTEN keeps it a group-stop.
+    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_STOP * TS_EV);
+    tr_put(&mut k, p, tr_make(w % 65536, tr_att(w), 1, 0, s, tr_opt(w)));
+    tr_tell(&mut k, p);
+  }
   jc_tell(&mut k, p);
 }
 
@@ -287,6 +320,44 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
+  post_w(&mut k, p, s, 0);
+}
+
+/// post_sig with the sender word of its siginfo (see info_from). A real-time
+/// signal that is pending already is queued behind it, as on Linux, with
+/// its own word; a standard one is merged into the pending one.
+fn post_w(k: &mut Kernel, p: u64, s: u64, word: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  post_wv(&mut k, p, s, word, 0);
+}
+
+/// post_w with the 64-bit sigval a queued signal carries (sigqueue, a timer).
+fn post_wv(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let st = state(k.procs, p);
+  let listen = s == SIGCONT && st == STOPPED && tr_stopped(tr_get(k, p)) == 0 && tr2_get(k, p) / TS_LISTEN % 2 == 1;
+  post_raw(&mut k, p, s, word, value, listen);
+  if listen {
+    // PTRACE_LISTEN: SIGCONT ends the group-stop with an event stop (SIGTRAP and
+    // PTRACE_EVENT_STOP), and the tracer resumes the tracee from there.
+    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_STOP * TS_EV);
+    tr_stop(&mut k, p, 5);
+  }
+}
+
+/// post_w without the event stop of a listening tracee: the form the
+/// notifications to a parent or tracer (SIGCHLD, which tr_stop itself sends)
+/// use, so that a ptrace-stop does not lead back into itself. `listen` says
+/// that p is in a group-stop its tracer listens to: SIGCONT does not continue
+/// it then.
+fn post_raw(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64, listen: bool)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
   let st = state(k.procs, p);
   let blocked = has_sig(pget(k.procs, p, F_SIGMASK), s) && s != SIGKILL;
   if st == FREE || st == ZOMBIE {
@@ -296,7 +367,9 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   // pending stops; a stop signal drops a pending SIGCONT.
   if s == SIGCONT {
     pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) & !(sbit(SIGSTOP) | sbit(SIGTSTP) | sbit(SIGTTIN) | sbit(SIGTTOU)));
-    if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 {
+    if listen {
+      // no continuing: post_w ends the stop
+    } else if st == STOPPED && tr_stopped(tr_get(k, p)) == 0 {
       pset(&mut k.procs, p, F_STATE, READY);
       jc_set(&mut k, p, JC_CONT + jc_get(k, p) / JC_EXECED % 2 * JC_EXECED);
       jc_tell(&mut k, p);
@@ -313,8 +386,13 @@ fn post_sig(k: &mut Kernel, p: u64, s: u64)
   if sig_ignored(k.sigact, sr, s) && !blocked && tr_tracer(k, p) == 0 {
     return;                                 // a traced process stops for it, as on Linux
   }
-  pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
-  wset(&mut k.sigsave, sender_at(p, s), 0);     // the kernel, unless post_from says
+  if s >= 32 && has_sig(pget(k.procs, p, F_SIGPEND), s) {
+    rtq_push(&mut k, p, s, word, value);        // behind the pending one; a full queue drops it
+  } else {
+    pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+    wset(&mut k.sigsave, sender_at(p, s), word);    // 0: the kernel, unless post_from says
+    wset(&mut k.sigsave, value_at(p, s), value);
+  }
   // A timed wait tries again even for a blocked signal: sigtimedwait may
   // be waiting for it.
   if (!blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT || st == SOCKWAIT)) || st == TIMEWAIT {
@@ -341,6 +419,98 @@ fn sig_wake_now(k: &mut Kernel, p: u64)
   }
 }
 
+/// The real-time signal queue of process p (the tail of its k.sigsave row):
+/// the instances of a signal beyond the one that is pending, oldest first,
+/// each a sender word plus its signal times RTQ_SIG, then its value.
+fn rtq_count(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result <= RTQ_N
+{
+  return smaller(wget(k.sigsave, p * SIGSAVE_ROW + RTQ_AT), RTQ_N);
+}
+
+fn rtq_clear(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT, 0);
+}
+
+/// Queues another instance of s behind the pending one. False if the queue
+/// is full (RTQ_N entries), when the instance is lost.
+fn rtq_push(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64) -> bool
+  requires kok(k) && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  let n = rtq_count(k, p);
+  if n >= RTQ_N {
+    return false;
+  }
+  wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT + 1 + 2 * n, word % RTQ_SIG + s * RTQ_SIG);
+  wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT + 2 + 2 * n, value);
+  wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT, n + 1);
+  return true;
+}
+
+/// Signal s was taken (delivered, waited for, read from a signalfd): the
+/// oldest instance queued behind it becomes the pending one.
+fn rtq_refill(k: &mut Kernel, p: u64, s: u64)
+  requires kok(k) && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  if s < 32 {
+    return;
+  }
+  let n = rtq_count(k, p);
+  let base = p * SIGSAVE_ROW + RTQ_AT + 1;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= RTQ_N && kok(k)
+  {
+    let e = wget(k.sigsave, base + 2 * i);
+    if e / RTQ_SIG == s {
+      let v = wget(k.sigsave, base + 2 * i + 1);
+      let mut j = i;
+      while j + 1 < n
+        invariant j <= n && n <= RTQ_N && kok(k)
+      {
+        wset(&mut k.sigsave, base + 2 * j, wget(k.sigsave, base + 2 * j + 2));
+        wset(&mut k.sigsave, base + 2 * j + 1, wget(k.sigsave, base + 2 * j + 3));
+        j = j + 1;
+      }
+      wset(&mut k.sigsave, base - 1, n - 1);
+      pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+      wset(&mut k.sigsave, sender_at(p, s), e % RTQ_SIG);
+      wset(&mut k.sigsave, value_at(p, s), v);
+      return;
+    }
+    i = i + 1;
+  }
+}
+
+/// Drops every queued instance of s (its action became SIG_IGN).
+fn rtq_purge(k: &mut Kernel, p: u64, s: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = rtq_count(k, p);
+  let base = p * SIGSAVE_ROW + RTQ_AT + 1;
+  let mut i = 0;
+  let mut o = 0;
+  while i < n
+    invariant i <= n && o <= i && n <= RTQ_N && kok(k)
+  {
+    let e = wget(k.sigsave, base + 2 * i);
+    if e / RTQ_SIG != s {
+      wset(&mut k.sigsave, base + 2 * o, e);
+      wset(&mut k.sigsave, base + 2 * o + 1, wget(k.sigsave, base + 2 * i + 1));
+      o = o + 1;
+    }
+    i = i + 1;
+  }
+  wset(&mut k.sigsave, base - 1, o);
+}
+
 /// Where k.sigsave keeps who sent process p's pending signal s.
 fn sender_at(p: u64, s: u64) -> u64
   requires p < NPROC && 1 <= s && s <= NSIG
@@ -363,8 +533,7 @@ fn post_from(k: &mut Kernel, p: u64, s: u64, from: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
-  post_sig(&mut k, p, s);
-  wset(&mut k.sigsave, sender_at(p, s), from);
+  post_w(&mut k, p, s, from);
 }
 
 /// post_from with a value (sigqueue): the siginfo says SI_QUEUE and
@@ -375,9 +544,7 @@ fn post_queued(k: &mut Kernel, p: u64, s: u64, from: u64, value: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG && from < NPROC
   ensures kok(k)
 {
-  post_sig(&mut k, p, s);
-  wset(&mut k.sigsave, sender_at(p, s), from + SW_QUEUE);
-  wset(&mut k.sigsave, value_at(p, s), value);
+  post_wv(&mut k, p, s, from + SW_QUEUE, value);
 }
 
 /// post_queued from a message queue (mq_notify): si_code SI_MESGQ.
@@ -385,9 +552,7 @@ fn post_mesgq(k: &mut Kernel, p: u64, s: u64, from: u64, value: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG && from < NPROC
   ensures kok(k)
 {
-  post_sig(&mut k, p, s);
-  wset(&mut k.sigsave, sender_at(p, s), from + SW_QUEUE + MESGQ_MARK);
-  wset(&mut k.sigsave, value_at(p, s), value);
+  post_wv(&mut k, p, s, from + SW_QUEUE + MESGQ_MARK, value);
 }
 
 /// Writes the parts of a siginfo at `at` in b that come from a sender
@@ -398,14 +563,19 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
   ensures blen(b) == old(blen(b))
 {
   if word >= FAULT_MARK {
-    // A processor exception (fault_caught): si_code SEGV_MAPERR (BUS_ADRERR
-    // for a SIGBUS), si_addr.
-    bset(&mut b, at + 8, cast[u8](1 + (word - FAULT_MARK) / FAULT_BUS % 2));
-    xfer_u64(&mut b, at + 16, (word - FAULT_MARK) % FAULT_BUS);
+    // A processor exception (fault_caught): its si_code and si_addr.
+    bset(&mut b, at + 8, cast[u8]((word - FAULT_MARK) / FAULT_CODE % 256));
+    xfer_u64(&mut b, at + 16, (word - FAULT_MARK) % FAULT_CODE);
     return;
   }
   bset(&mut b, at + 16, cast[u8](word % 256));          // si_pid
   bset(&mut b, at + 17, cast[u8](word / 256 % 4));
+  if word / CHLD_MARK % 2 == 1 {
+    bset(&mut b, at + 8, cast[u8](word / CHLD_CODE % 8));     // si_code: CLD_*
+    bset(&mut b, at + 24, cast[u8](word / SW_VAL % 256));     // si_status
+    bset(&mut b, at + 25, cast[u8](word / SW_VAL / 256 % 256));
+    return;
+  }
   if word / TKILL_MARK % 2 == 1 {
     // glibc's SIGSETXID handler (setgid and friends in a threaded program)
     // ignores a signal that is not SI_TKILL from its own process.
@@ -421,6 +591,8 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
     {
       if i == 0 && word / MESGQ_MARK % 2 == 1 {
         bset(&mut b, at + 8, cast[u8](253));             // si_code: SI_MESGQ
+      } else if i == 0 && word / TIMER_MARK % 2 == 1 {
+        bset(&mut b, at + 8, cast[u8](254));             // si_code: SI_TIMER
       } else {
         bset(&mut b, at + 8 + i, cast[u8](255));         // si_code: SI_QUEUE
       }
@@ -498,8 +670,26 @@ fn child_ended(k: &mut Kernel, p: u64, child: u64)
   if xs != 0 {
     sig = xs - 1;                           // clone's exit_signal; 0 sends nothing
   }
+  let mut word = child;
+  if child < NPROC {
+    let code = pget(k.procs, child, F_CODE);
+    if code >= SIG_DEATH {
+      word = chld_word(child, 2 + code / 128 % 2, code % 128);   // CLD_KILLED, or CLD_DUMPED with a core file
+    } else {
+      word = chld_word(child, 1, code);                          // CLD_EXITED
+    }
+  }
   if sig != 0 && sig < 65 && is_linux(k.procs, t) {
-    post_from(&mut k, t, sig, child);
+    post_w(&mut k, t, sig, word);
+  }
+  // SIGCHLD ignored, or SA_NOCLDWAIT: the child is reaped at once, and
+  // wait fails with ECHILD once none is left.
+  if sig == SIGCHLD && child < NPROC && child != t && state(k.procs, child) == ZOMBIE && tr_get(k, child) % 65536 == 0 && pget(k.procs, child, F_PARENT) == p && is_linux(k.procs, t) {
+    let sr = sig_row(&mut k, t);
+    if sa_get(k.sigact, sr, SIGCHLD, 0) == SIG_IGN || sa_get(k.sigact, sr, SIGCHLD, 1) & SA_NOCLDWAIT != 0 {
+      tm_reap(&mut k, p, child);
+      pset(&mut k.procs, child, F_STATE, FREE);
+    }
   }
 }
 
@@ -674,6 +864,7 @@ fn lx_sigaction(k: &mut Kernel, pid: u64, s: u64, act: u64, oact: u64) -> u64
     sa_set(&mut k.sigact, pid, s, 3, nm);
     if sig_ignored(k.sigact, pid, s) {
       pset(&mut k.procs, pid, F_SIGPEND, pget(k.procs, pid, F_SIGPEND) & !sbit(s));
+      rtq_purge(&mut k, pid, s);
     }
   }
   return 0;
@@ -765,17 +956,21 @@ fn lx_tgkill(k: &mut Kernel, pid: u64, tgid: u64, tid: u64, s: u64) -> u64
   if t < NPROC && state(k.procs, t) != FREE && may_signal(k, pid, t, s) && sigpending_full(k, t, s) {
     return EAGAIN;
   }
-  let r = lx_kill(&mut k, pid, t, s);
-  if r == 0 && s != 0 && t < NPROC && 1 <= t && state(k.procs, t) != FREE && state(k.procs, t) != ZOMBIE {
-    let g = tgid(k.procs, pid);
-    if g < NPROC {
-      wset(&mut k.sigsave, sender_at(t, s), g + TKILL_MARK);
-    }
-  }
-  return r;
+  let g = tgid(k.procs, pid);
+  return lx_kill_w(&mut k, pid, t, s, g + TKILL_MARK, true);
 }
 
 fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  return lx_kill_w(&mut k, pid, target, s, pid, false);
+}
+
+/// lx_kill with the sender word of the siginfo; `thread` aims a signal at
+/// one thread (tkill) instead of the process, where it goes to a thread
+/// that does not block it.
+fn lx_kill_w(k: &mut Kernel, pid: u64, target: u64, s: u64, word: u64, thread: bool) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
@@ -794,14 +989,14 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
     while p < NPROC
       invariant 1 <= p && p <= NPROC && kok(k)
     {
-      let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p);
+      let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p) && tgid(k.procs, p) == p;
       let seen = nsk_of(k, NSK_PID, pid) == 0 || vp_in(k, p, nsk_of(k, NSK_PID, pid)) != 0;
       if live && seen && ((all && p != pid) || (!all && pgid_of(k.procs, p) == g)) {
         hit = true;
         if may_signal(k, pid, p, s) {
           sent = true;
           if s != 0 {
-            post_from(&mut k, p, s, pid);
+            post_proc_w(&mut k, p, s, pid);
           }
         }
       }
@@ -822,7 +1017,11 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
     return EPERM;
   }
   if s != 0 && state(k.procs, target) != ZOMBIE {   // a zombie takes it and drops it, as on Linux
-    post_from(&mut k, target, s, pid);
+    if thread {
+      post_w(&mut k, target, s, word);
+    } else {
+      post_proc_w(&mut k, target, s, word);
+    }
   }
   return 0;
 }
@@ -937,7 +1136,13 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   } else if n == LX_RT_SIGPROCMASK {
     r = lx_sigprocmask(&mut k, pid, a, b, c);
   } else if n == LX_KILL {
-    r = lx_kill(&mut k, pid, a, b);
+    // The pid is an int: a negative one (a process group) reaches a system
+    // call from AArch64 as a 32-bit value with the upper half zero.
+    let mut who = a;
+    if a >= 0x80000000 && a <= 0xFFFFFFFF {
+      who = wrap_add(a, 0xFFFFFFFF00000000);
+    }
+    r = lx_kill(&mut k, pid, who, b);
   } else if n == LX_TKILL {
     r = lx_tgkill(&mut k, pid, 0, a, b);
   } else if n == LX_TGKILL {
@@ -1000,7 +1205,7 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
       pset(&mut k.procs, p, F_SIGPEND, pend & !sbit(s));
       let w = tr_get(k, p);
       if w % 65536 != 0 && s != SIGKILL {
-        if tr_skip(w) == 0 {
+        if tr_skip(w) == 0 && (s == 5 || tr2_get(k, p) / TS_XEV % 2 == 0) {
           let t = tr2_get(k, p);
           if pget(k.procs, p, F_RESTART) != 0 && t % 2 == 1 && t / TS_NOENT % 2 == 0 && t / TS_ENTRY % 2 == 0 && t / TS_EXIT % 2 == 0 && t / TS_CUT % 2 == 0 {
             // A call that waits is cut short by this signal: as on Linux, the
@@ -1027,6 +1232,9 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
         return false;                       // not run until SIGCONT
       }
       if s == SIGKILL || (h == SIG_DFL && !dfl_ignores(s)) {
+        if pt_death_event(&mut k, p, s) {
+          return false;                     // the exit event first
+        }
         let dumped = core_dump(&mut k, p, s);
         terminate(&mut k, mmu, p, death_code(s, dumped));
         return false;
@@ -1046,6 +1254,7 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
           pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(SIGSEGV));
           return lx_deliver(&mut k, mmu, p);
         }
+        rtq_refill(&mut k, p, s);           // the next instance of a real-time signal
         return true;                        // one handler at a time
       }
     }
@@ -1059,23 +1268,29 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
 /// pending, with the faulting address `addr` for its siginfo, and returns
 /// true. Otherwise the exception ends p, as Linux's forced signal would.
 /// Returning from the handler runs the instruction again, as on Linux.
-fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64) -> bool
+fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64, code: u64) -> bool
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
   let h = sa_get(k.sigact, p, s, 0);
   let masked = has_sig(pget(k.procs, p, F_SIGMASK), s);
-  // A traced process stops for the signal, handler or not (src/lxptrace.bastio).
-  let traced = tr_tracer(k, p) != 0 && !masked;
+  // A traced process stops for the signal, handler or not, even a blocked
+  // one: as on Linux a processor exception forces its signal (a single step
+  // inside musl's raise runs with every signal blocked)
+  // (src/lxptrace.bastio).
+  let traced = tr_tracer(k, p) != 0;
   if (h == SIG_DFL || h == SIG_IGN || masked) && !traced {
     return false;
   }
-  pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
-  let mut bus = 0;
-  if s == SIGBUS {
-    bus = FAULT_BUS;
+  if masked {
+    pset(&mut k.procs, p, F_SIGMASK, pget(k.procs, p, F_SIGMASK) & !sbit(s));
   }
-  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + bus + addr % FAULT_BUS);
+  pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+  let mut si_code = code;
+  if s == SIGBUS {
+    si_code = 2;                            // BUS_ADRERR
+  }
+  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + (si_code % 256) * FAULT_CODE + addr % FAULT_CODE);
   return true;
 }
 
