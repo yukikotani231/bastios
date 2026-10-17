@@ -617,8 +617,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
     }
     let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
-    if flags & 0x2000 != 0 && r < 0x8000000000000000 {
-      lock_mapped(&mut k, pid, b);          // MAP_LOCKED
+    if r < 0x8000000000000000 {
+      if flags / MAP_FIXED % 2 == 1 {
+        lock_unmapped(&mut k, pid, r, b);   // what was locked there is replaced
+      }
+      if flags & 0x2000 != 0 {
+        lock_mapped(&mut k, pid, r, b);     // MAP_LOCKED
+      }
     }
     ret(&mut k.procs, pid, r);
     return KEEP;
