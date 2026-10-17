@@ -144,6 +144,15 @@ instructions on both. Where BastiOS is behind:
   flush into the next one's leading flush, and queueing the entry-sector
   writes. That is a large change to the proofs and the crash tests for at
   most a fifth of the time, so it is not done.
+  What was done instead: a new file's entry and a chown, chmod or utimes of
+  a file no longer write their sector and wait (each after draining the
+  queue); the entry's directory block is queued with the next commit
+  (`ent_lazy`), so a file created, given its owner, mode and times and
+  written costs one commit. Host writes for the 500-file root went from 2249
+  to 1329, and `untar` from a median of 1.4 s to 1.05 s over six runs each
+  (the host is noisy: single runs ranged 1.1 to 1.8 s before the change);
+  `apk` improved by about 5%. Directories and hard links are still written
+  at once, so a directory is on the disk before the entries in it.
 - `scan` (2.4x in the table) was profiled on a different machine from the
   table's, where a warm run took 0.54 s: the guest's own time is mostly
   `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
