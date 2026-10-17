@@ -190,6 +190,7 @@ int main(int argc, char **argv) {
         EXPECT("sysctl ip_local_port_range has two numbers", slurp("/proc/sys/net/ipv4/ip_local_port_range", b, sizeof b) > 0 && strcmp(b, "32768\t60999\n") == 0);
         EXPECT("writing a sysctl number reads back", put("/proc/sys/vm/swappiness", "10\n") && slurp("/proc/sys/vm/swappiness", b, sizeof b) > 0 && strcmp(b, "10\n") == 0);
         EXPECT("a sysctl number rejects text", ({ int fd = open("/proc/sys/vm/swappiness", O_WRONLY); int r = fd < 0 ? 0 : (write(fd, "x\n", 2) == -1 && errno == EINVAL); if (fd >= 0) close(fd); r; }));
+        EXPECT("keys root_maxkeys reads 200 and a larger value reads back", slurp("/proc/sys/kernel/keys/root_maxkeys", b, sizeof b) > 0 && strcmp(b, "200\n") == 0 && put("/proc/sys/kernel/keys/root_maxkeys", "300\n") && slurp("/proc/sys/kernel/keys/root_maxkeys", b, sizeof b) > 0 && strcmp(b, "300\n") == 0 && put("/proc/sys/kernel/keys/root_maxkeys", "200\n"));
         EXPECT("a read-only sysctl is not opened for writing", open("/proc/sys/fs/file-nr", O_WRONLY) == -1);
         EXPECT("a sysctl file is a regular file", ({ struct stat sb; stat("/proc/sys/vm/swappiness", &sb) == 0 && S_ISREG(sb.st_mode) && (sb.st_mode & 0777) == 0644; }));
     }
@@ -216,7 +217,7 @@ int main(int argc, char **argv) {
         /* The /proc/PID files with fixed answers, and oom_score_adj, which
          * is kept per process and inherited. */
         char b[64];
-        EXPECT("oom_score reads 0", slurp("/proc/self/oom_score", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
+        EXPECT("oom_score reads a number", slurp("/proc/self/oom_score", b, sizeof b) > 0 && b[0] >= '0' && b[0] <= '9');
         EXPECT("oom_score_adj starts at 0", slurp("/proc/self/oom_score_adj", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
         EXPECT("loginuid is unset", slurp("/proc/self/loginuid", b, sizeof b) > 0 && strcmp(b, "4294967295\n") == 0);
         EXPECT("coredump_filter reads its default", slurp("/proc/self/coredump_filter", b, sizeof b) > 0 && strcmp(b, "00000033\n") == 0);

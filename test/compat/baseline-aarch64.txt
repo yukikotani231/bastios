@@ -88,6 +88,7 @@ busybox: diff
 busybox: du
 busybox: echo
 busybox: env
+busybox: lang
 busybox: expr
 busybox: find
 busybox: free
@@ -261,7 +262,7 @@ t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
 t_fanotify: a child's event comes to its directory
-t_fanotify: a class other than notification is refused
+t_fanotify: the content classes are accepted, both at once are refused, and a permission mask is refused
 t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
 t_fanotify: a mark on a missing file is ENOENT
 t_fanotify: a mark with no operation is EINVAL
@@ -396,6 +397,7 @@ t_inotify: removing it twice is EINVAL
 t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
+t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
@@ -630,7 +632,8 @@ t_mem: FUTEX_WAKE on an unmapped word is EFAULT
 t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED file mapped by two processes
 t_mem: MAP_SHARED file mapping across fork
-t_mem: a writable MAP_SHARED mapping is written back after twenty read-only ones
+t_mem: a writable MAP_SHARED mapping is written back after seventy read-only ones
+t_mem: forty writable MAP_SHARED mappings are each written back
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
@@ -664,6 +667,7 @@ t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_misc: /etc/passwd
 t_misc: /proc/diskstats opens
+t_misc: /proc/diskstats has the disk's line with its counts
 t_misc: /proc/meminfo
 t_misc: /proc/modules opens
 t_misc: /proc/net is a directory
@@ -744,6 +748,8 @@ t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
+t_net: IPV6_V6ONLY reads back
+t_net: IPV6_V6ONLY: an IPv6-only listener and an IPv4 one share a port
 t_net: SO_REUSEADDR
 t_net: TCP bind/listen
 t_net: TCP loopback connect/accept
@@ -752,10 +758,13 @@ t_net: TCP_NODELAY
 t_net: UDP bind port 0
 t_net: UDP loopback
 t_net: UDP socket
+t_net: a dual-stack listener cannot take it
 t_net: getaddrinfo localhost
+t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_net: ping6 ::1 (raw ICMPv6 socket)
 t_newer: O_PATH: fchmod is EBADF
 t_newer: O_PATH: fstat works
 t_newer: O_PATH: read is EBADF
@@ -1040,6 +1049,7 @@ t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
 t_sig2: 24 processes at once
+t_sig2: sigqueue carries a 64-bit sigval whole
 t_sig2: SA_ONSTACK runs on the alternate stack
 t_sig2: SA_RESETHAND runs the handler once
 t_sig2: SA_RESTART does not restart epoll_wait
