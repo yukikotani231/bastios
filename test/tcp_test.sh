@@ -503,6 +503,12 @@ def check(ok, what):
     print(("ok  " if ok else "FAIL"), what, flush=True)
     if MON_PATH:
         mon_nic()
+        if not ok:
+            # Frames waiting in the ring at a failure: still there 2 s later
+            # means the guest is not taking them, else they were in flight.
+            until(lambda: False, 2)
+            print("DEBUG nic again after 2 s:", flush=True)
+            mon_nic()
     fails += not ok
 
 def pattern(n, salt):
