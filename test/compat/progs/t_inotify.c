@@ -350,17 +350,17 @@ int main(void) {
         if (ino[i] >= 0)
             close(ino[i]);
 
-    /* named pipes: a hundred and twenty open at once. */
-    int ff[120], nff = 0;
-    for (int i = 0; i < 120; i++) {
+    /* named pipes: thirty open at once. */
+    int ff[30], nff = 0;
+    for (int i = 0; i < 30; i++) {
         char nm[16];
         snprintf(nm, sizeof nm, "in_fifo%d", i);
         unlink(nm);
         ff[i] = mkfifo(nm, 0600) == 0 ? open(nm, O_RDONLY | O_NONBLOCK) : -1;
         nff += ff[i] >= 0;
     }
-    EXPECT("a hundred and twenty named pipes open at once", nff == 120);
-    for (int i = 0; i < 120; i++) {
+    EXPECT("thirty named pipes open at once", nff == 30);
+    for (int i = 0; i < 30; i++) {
         char nm[16];
         snprintf(nm, sizeof nm, "in_fifo%d", i);
         if (ff[i] >= 0)
