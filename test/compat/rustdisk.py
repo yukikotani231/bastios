@@ -6,7 +6,7 @@ library, and Alpine's gcc and musl, which rustc links with), as a tar file
 under /disk/r, make the device nodes, chroot into it and build and run Rust
 programs.
 
-    rustdisk.py OUT.img IMAGE BUSYBOX --cache DIR
+    rustdisk.py OUT.img IMAGE BUSYBOX --cache DIR [--rust-analyzer FILE --rust-src TGZ]
 
 IMAGE is a Docker Hub image, NAME@sha256:DIGEST (the Makefile pins
 rust:alpine). Its layers are fetched and cached as alpinedisk.py does it (in
@@ -30,6 +30,11 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
+    extra = {}
+    for opt in ("--rust-analyzer", "--rust-src"):
+        if opt in args:
+            extra[opt] = args[args.index(opt) + 1]
+            del args[args.index(opt):args.index(opt) + 2]
     out, image, busybox = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "rust")
     cache = cache or work
@@ -45,10 +50,30 @@ def main():
                 t.addfile(ti, io.BytesIO(body))
             else:
                 t.addfile(ti)
+    disks = [f"busybox={busybox}", f"root.tar={tar}"]
+    if extra:
+        # rust-analyzer and the standard library's source (which it reads to
+        # know the types of String, Vec and the rest) are a second tar file, to
+        # unpack over the root: a file on the disk is at most 1 GiB, and the
+        # root's tar is close to it.
+        dest = "usr/local/rustup/toolchains/1.99.0-x86_64-unknown-linux-musl/"
+        ra = os.path.join(work, "ra.tar")
+        with tarfile.open(ra, "w") as t, tarfile.open(extra["--rust-src"], "r:gz") as s:
+            ti = tarfile.TarInfo("usr/local/cargo/bin/rust-analyzer")
+            ti.mode, ti.size = 0o755, os.path.getsize(extra["--rust-analyzer"])
+            with open(extra["--rust-analyzer"], "rb") as f:
+                t.addfile(ti, f)
+            for ti in s:
+                parts = ti.name.split("/", 2)
+                if len(parts) < 3 or ti.islnk():
+                    continue
+                ti.name = dest + parts[2]
+                t.addfile(ti, s.extractfile(ti) if ti.isfile() else None)
+        disks.append(f"ra.tar={ra}")
     if RUSTC not in files:
         sys.exit(f"rustdisk: {image} has no {RUSTC}")
     env = dict(os.environ, MKDISK_FREE_MB="1300")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
-                               f"busybox={busybox}", f"root.tar={tar}"], env)
+                               *disks], env)
 
 main()
