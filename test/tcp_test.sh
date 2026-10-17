@@ -405,12 +405,14 @@ qemu_bin = "qemu-system-x86_64"
 if card == "ena":
     qemu_bin = os.environ.get("QEMU_ENA", "build/qemu-ena/bin/qemu-system-x86_64")
 
+MON_PATH = "/tmp/tcp_test_mon.%d" % os.getpid() if os.environ.get("MON") else None
+MON_ARG = ("unix:%s,server,nowait" % MON_PATH) if MON_PATH else "none"
 link = Link()
 net = Net(link)
 qemu = subprocess.Popen(
-    [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", "2",
+    [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", os.environ.get("SMP", "2"),
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-     "-serial", "stdio", "-monitor", "none",
+     "-serial", "stdio", "-monitor", MON_ARG,
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
                 f"remote.type=inet,remote.host=127.0.0.1,remote.port={link.port}",
      "-device", f"{card},netdev=n0"],
@@ -446,9 +448,67 @@ def type_line(line):
     qemu.stdin.write(line.encode() + b"\r")
     qemu.stdin.flush()
 
+def mon_cmd(cmd):
+    """One HMP command on the debug monitor (MON=1), its output."""
+    import socket as _s
+    m = _s.socket(_s.AF_UNIX)
+    m.settimeout(2)
+    m.connect(MON_PATH)
+    buf = b""
+    try:
+        while b"(qemu)" not in buf:
+            buf += m.recv(4096)
+        m.sendall(cmd.encode() + b"\n")
+        buf = b""
+        while buf.count(b"(qemu)") < 1:
+            buf += m.recv(4096)
+    except Exception as e:
+        buf += b" [%s]" % str(e).encode()
+    m.close()
+    return buf.decode(errors="replace")
+
+def mon_nic():
+    """The card's counters and ring pointers, read through the monitor."""
+    import re
+    pci = mon_cmd("info pci")
+    m = re.search(r"8086:100e.*?BAR0: 32 bit memory at (0x[0-9a-f]+)", pci, re.S)
+    if not m:
+        m = re.search(r"BAR0: 32 bit memory at (0x[0-9a-f]+)", pci)
+    if not m:
+        print("DEBUG nic: no BAR0 in", pci[:300].replace("\n", " | "), flush=True)
+        return
+    bar = int(m.group(1), 16)
+    regs = [("RDH", 0x2810), ("RDT", 0x2818), ("RCTL", 0x100), ("IMS", 0xD0), ("GPRC", 0x4074),
+            ("MPC", 0x4010), ("RNBC", 0x40A0), ("GPTC", 0x4080), ("STATUS", 0x8)]
+    got = []
+    for name, off in regs:
+        r = mon_cmd("xp /1wx 0x%x" % (bar + off))
+        v = re.search(r": (0x[0-9a-f]+)", r)
+        got.append("%s=%s" % (name, v.group(1) if v else "?"))
+    print("DEBUG nic:", " ".join(got), flush=True)
+    r = mon_cmd("xp /1wx 0x%x" % (bar + 0x2800))
+    v = re.search(r": (0x[0-9a-f]+)", r)
+    if v:
+        # The eight receive descriptors: the status byte (bit 0 = DD, a frame
+        # waiting for the guest) and the length of each.
+        d = mon_cmd("xp /32wx %s" % v.group(1))
+        words = [int(w, 16) for line in d.splitlines() if re.match(r"\s*[0-9a-f]+:", line)
+                 for w in re.findall(r"0x([0-9a-f]{8})", line.split(":", 1)[1])]
+        ring = ["%d:st=%02x,len=%d" % (i, words[4 * i + 3] & 0xff, words[4 * i + 2] & 0xffff)
+                for i in range(min(8, len(words) // 4))]
+        print("DEBUG ring:", " ".join(ring), flush=True)
+
 def check(ok, what):
     global fails
     print(("ok  " if ok else "FAIL"), what, flush=True)
+    if MON_PATH:
+        mon_nic()
+        if not ok:
+            # Frames waiting in the ring at a failure: still there 2 s later
+            # means the guest is not taking them, else they were in flight.
+            until(lambda: False, 2)
+            print("DEBUG nic again after 2 s:", flush=True)
+            mon_nic()
     fails += not ok
 
 def pattern(n, salt):
@@ -493,6 +553,9 @@ def echo_run(name, data, setup, secs=60):
           f"{name}: {len(data)} bytes echoed intact")
     if not finished:
         print(f"     state {p.state}, got {len(p.got)} of {len(data)}, una {p.una} max {p.max}")
+        t0 = p.log[0][0] if p.log else 0
+        for tt, s in p.log[-60:]:
+            print("DEBUG  %.3f fl=%d seq=%d ack=%d len=%d wnd=%d" % (tt - t0, s["flags"], s["seq"], s["ack"], len(s["data"]), s["wnd"]))
         until(lambda: b"bastios> " in out[mark:], 20)
     net.peer = None
     return p
@@ -695,6 +758,12 @@ link.in_rule = lambda f: 0
 syns = [s for _, s in srv.log if s["flags"] & SYN]
 check(finished and b"hello from the host" in out[mark:] and bytes(srv.got) == b"hi\n",
       f"connecting out: SYN sent again after a loss ({len(syns)} seen), reply read")
+if not (finished and len(syns) <= 2):
+    t0 = srv.log[0][0] if srv.log else 0
+    print("DEBUG connecting out: srv.log (t, flags, seq, ack, len)")
+    for tt, s in srv.log:
+        print("DEBUG  %.3f %s %s %s %d" % (tt - t0, s["flags"], s["seq"], s.get("ack"), len(s["data"])))
+    print("DEBUG out:", bytes(out[mark:])[-300:])
 check(syns and all(k in syns[0]["opts"] for k in (2, 3, 4)),
       "connecting out: the SYN offers an MSS, window scaling and SACK (and nothing is scaled when we do not)")
 net.peer = None
