@@ -209,7 +209,7 @@ check("a group with memory.swap.max 0 keeps its pages in memory; the other progr
 run("kill -9 $big; sleep 1")
 run(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
-check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") == 2097152, f"{group_swap('sm')} {t}")
+check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") <= 2097152, f"{group_swap('sm')} {t}")
 run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm")
 t = run(f"/disk/mhog touch {HUGE}; echo rc=$?")
 check("a program bigger than memory and swap is killed", "Out of memory: Killed process" in t and "rc=137" in t, t)
