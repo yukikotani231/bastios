@@ -188,6 +188,7 @@ jobs:
       - if: steps.want.outputs.run == 'true'
         name: Run the benchmarks
         run: |
+          mkdir -p build/bench
           bench/run.py --smp 2 --runs 3 --out build/bench/kvm.json | tee build/bench/kvm.md
           { echo '### bench/run.py under KVM'; echo; cat build/bench/kvm.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: always() && steps.want.outputs.run == 'true'
