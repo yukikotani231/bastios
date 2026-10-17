@@ -117,6 +117,7 @@ const G_A0: u64 = 118;                         // the call's first argument (the
 const G_PID: u64 = 119;
 const G_FANM: u64 = 120;
 const G_COOL: u64 = 121;                       // no call waits for a reader before this time (ns): the last wait found none
+const G_PROG: u64 = 122;                       // events queued in all when the wait began: a reader that took some is making progress
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -884,15 +885,40 @@ fn ino_throttle(k: &mut Kernel, pid: u64) -> bool
   }
   let r = pget(k.procs, pid, F_RESTART);
   if r >= 2 && r - 2 <= k.ns {
-    iput(&mut k, INO_G + G_COOL, sat_add(k.ns, INO_COOL));
+    // The wait is over. If the readers took no events meanwhile, nobody is
+    // reading; if they took some, a slow one is (it may start only at the
+    // next timer tick), and the next call waits again.
+    if ino_queued(k) >= iget(k, INO_G + G_PROG) {
+      iput(&mut k, INO_G + G_COOL, sat_add(k.ns, INO_COOL));
+    }
     return false;
   }
   let mut dl = sat_add(k.ns, INO_WAIT);
   if r >= 2 {
     dl = r - 2;
+  } else {
+    iput(&mut k, INO_G + G_PROG, ino_queued(k));
   }
   wait_until(&mut k, pid, n, dl);
   return true;
+}
+
+/// Events queued in all instances.
+fn ino_queued(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k) && n <= i * 0x100000
+  {
+    let b = ino_base(i);
+    if iget(k, b) != 0 {
+      n = n + smaller(iget(k, b + 2), 0x100000);
+    }
+    i = i + 1;
+  }
+  return n;
 }
 
 /// Whether some inotify or fanotify instance has half its queue full. The
