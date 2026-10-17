@@ -1178,7 +1178,7 @@ fn nr_open(k: &Kernel) -> u64
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 41;
+const NPROGS: u64 = 42;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1304,6 +1304,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 40 {
     return "mserial";
+  }
+  if i == 41 {
+    return "mkeyev";
   }
   return "(file)";                    // a program loaded from a file
 }
