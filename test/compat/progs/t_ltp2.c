@@ -821,5 +821,18 @@ int main(void) {
            ok = ok && madvise(m, 3 * 4096, MADV_NORMAL) == -1 && errno == ENOMEM;
            munmap(m, 2 * 4096);
            ok; }));
+    EXPECT("IPv4 multicast: leaving a group never joined is EADDRNOTAVAIL, a join then a leave works", ({
+           int s = socket(AF_INET, SOCK_DGRAM, 0);
+           struct ip_mreq m;
+           m.imr_multiaddr.s_addr = htonl(0xe0000123);
+           m.imr_interface.s_addr = htonl(INADDR_ANY);
+           int ok = s >= 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, 3) == -1 && errno == EINVAL;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m) == 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
+           close(s);
+           ok; }));
     return done();
 }

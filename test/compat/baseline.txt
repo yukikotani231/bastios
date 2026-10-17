@@ -600,6 +600,7 @@ t_ltp2: rename: a directory moved from under the working directory leaves it in 
 t_ltp2: locked pages: msync(MS_INVALIDATE) is EBUSY and madvise(MADV_DONTNEED) EINVAL, until munlock
 t_ltp2: locked pages: unmapping or mapping over them unlocks them
 t_ltp2: splice from a pipe into a Unix socket and into a TCP connection delivers the bytes
+t_ltp2: IPv4 multicast: leaving a group never joined is EADDRNOTAVAIL, a join then a leave works
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
@@ -1539,6 +1540,8 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a compile error is reported
+rust: rust: rust-analyzer reports its version
+rust: rust: rust-analyzer finds a type error in a crate
 podman: podman: unpack the image root and set it up
 podman: podman: version
 podman: podman: import a root and run a container as root
