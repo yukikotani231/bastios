@@ -14,7 +14,7 @@ Packages are installed from a repository served over HTTP from the host, because
 
 | Area | What runs | Where it is checked |
 | --- | --- | --- |
-| Editing | Neovim 0.11 over a serial or SSH terminal and inside `tmux`: editing and saving, undo files, `:terminal`, `:make` with the quickfix list, `:grep` with ripgrep, the LSP client against `lua-language-server` and `python-lsp-server` (on Alpine's python3), tree-sitter highlighting for C, `vim.system`, file watchers, a small plugin manager that clones with git | `test/compat/alpine.txt`, `alpine_tty.txt` |
+| Editing | Neovim 0.11 over a serial or SSH terminal and inside `tmux`: editing and saving, undo files, `:terminal`, `:make` with the quickfix list, `:grep` with ripgrep, the LSP client against `lua-language-server`, `python-lsp-server` (on Alpine's python3) and `gopls` (with the Go toolchain unpacked under the Alpine root), tree-sitter highlighting for C, `vim.system`, file watchers, a small plugin manager that clones with git | `test/compat/alpine.txt`, `alpine_tty.txt` |
 | C | gcc (with `cc1`, `as`, `ld`), tcc, GNU make, cmake; the edit, build and run loop from inside Neovim | `alpine.txt`, `alpine_tty.txt`, `dev.txt` |
 | Bastio | bastioc1 with Z3 and tcc on the machine: edit a program, prove it, build it, run it; an edit that breaks a proof is rejected | `bastio.txt`, `alpine_tty.txt` |
 | Debugging | `strace` (following children and attaching to a running process), `gdb` (breakpoints in PIE programs, attach, threads, core files) over `ptrace`, and Neovim's Termdebug plugin driving gdb over MI | `alpine.txt` |
@@ -25,7 +25,7 @@ Packages are installed from a repository served over HTTP from the host, because
 
 ## Limits to know about
 
-- There is no clangd: the only suitable image is larger than the Alpine disk has room for. Neovim's LSP client is exercised against `lua-language-server` and `python-lsp-server`.
+- There is no clangd: the only suitable image is larger than the Alpine disk has room for. Neovim's LSP client is exercised against `lua-language-server`, `python-lsp-server` and `gopls`.
 - Everything is measured under QEMU's software emulation in CI, so timing-sensitive checks are flaky under load; [performance.md](performance.md) has the numbers that exist.
 - The suite runs cmake, the Go, Rust and Java toolchains on x86-64 only; their images have no AArch64 build in it.
 - Kernel limits that matter to development (processes, open files, address space, files per disk) are in the README's Status section.
