@@ -908,8 +908,14 @@ build/compat/python.img: test/compat/pythondisk.py test/compat/pythondeps.txt te
 # The JDK of the official eclipse-temurin alpine image, as a tar file the cases
 # unpack, for java.txt. Pinned by digest, its layers kept in ALPINE_CACHE like
 # the others'. x86-64 only.
-build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/jdtls.tgz
+	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --jdtls build/compat/jdtls.tgz
+
+# Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
+# Java disk as /opt/jdtls.
+build/compat/jdtls.tgz: | build/compat/src
+	curl -fsSL -o $@ $(JDTLS_URL)
+	echo "$(JDTLS_SHA256)  $@" | sha256sum -c - >/dev/null
 
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
 # gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
@@ -974,8 +980,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
-# Besides runtest/syscalls: the pseudo-terminal and the namespace (container) tests.
-LTP_SUITES ?= --suite pty --suite containers
+# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests.
+LTP_SUITES ?= --suite pty --suite containers --suite cve
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -999,6 +1005,7 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
+	$(MAKE) -C build/ltp/testcases/cve -s -k || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs
