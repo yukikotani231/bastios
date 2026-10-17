@@ -184,7 +184,7 @@ spec fn disk_ok(d: &DiskFs) -> bool {
   blk_ok(d.dev) && d.plo <= PLO_MAX && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK && blen(d.sp) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
-    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS && len(d.pd) == PD_MAX && d.pdn <= PD_MAX
+    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS
     && (blen(d.ix) == 0 || blen(d.ix) == IX_BYTES) && d.ixn <= IX_CELLS
 }
 
@@ -2183,18 +2183,18 @@ fn ent_lazy(d: &mut DiskFs, i: u64) -> bool
     return ent_flush(&mut d, i);
   }
   let mut j = 0;
-  while j < d.pdn
-    invariant j <= d.pdn && d.pdn <= PD_MAX && disk_ok(d)
+  while j < d.pdn && j < len(d.pd)
+    invariant j <= len(d.pd) && disk_ok(d)
   {
     if get(d.pd, j) == db {
       return true;
     }
     j = j + 1;
   }
-  if d.pdn >= PD_MAX {
+  if d.pdn >= PD_MAX || d.pdn >= len(d.pd) {
     disk_drain(&mut d);
   }
-  if d.pdn >= PD_MAX {
+  if d.pdn >= PD_MAX || d.pdn >= len(d.pd) {
     return false;
   }
   if d.pdn == 0 {
@@ -2215,12 +2215,15 @@ fn disk_commit(d: &mut DiskFs) -> bool
   if d.pw == 0 && d.pdn == 0 {
     return true;
   }
-  if !dq_fits(d.q, 1 + d.pdn, d.pn + d.on + d.pdn + 4) {
+  let mut np = d.pdn;
+  if np > PD_MAX || np > len(d.pd) {
+    np = 0;                           // (not reached: ent_lazy keeps pdn within pd)
+  }
+  if !dq_fits(d.q, 1 + np, d.pn + d.on + np + 4) {
     return false;
   }
   let n = d.pn;
   let m = d.on;
-  let np = d.pdn;
   let mut ok = true;
   let mut j = 0;
   while j < n
@@ -2239,7 +2242,7 @@ fn disk_commit(d: &mut DiskFs) -> bool
   }
   j = 0;
   while j < np
-    invariant j <= np && np == d.pdn && np <= PD_MAX && disk_ok(d)
+    invariant j <= np && np <= PD_MAX && np <= len(d.pd) && disk_ok(d)
   {
     let pb = get(d.pd, j);
     if pb != skip {
