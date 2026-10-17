@@ -1376,7 +1376,6 @@ t_inotify: sixty watches on one instance
 t_inotify: thirty-two epoll instances
 t_inotify: two hundred descriptors on one epoll instance
 t_inotify: the last one is the one reported
-t_inotify: sixty timerfds at once
 t_inotify: thirty inotify instances at once
 t_inotify: thirty named pipes open at once
 t_ipc: splice from an empty pipe into a read-only, O_PATH or non-writable descriptor fails at once
@@ -1597,3 +1596,5 @@ t_userns: the root of a user namespace gives up capabilities
 t_userns: a user namespace made inside one mounts in a mount namespace of its own
 t_userns: an unprivileged user mounts nothing
 t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
+t_inotify: two hundred and fifty timerfds at once
+t_timens: an offset that overflows the clock is ERANGE
