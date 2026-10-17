@@ -16,7 +16,7 @@
 #include <time.h>
 
 static volatile int got, depth, maxdepth, order[16], nord;
-static volatile char *where;
+static volatile char *volatile where;
 #pragma GCC diagnostic ignored "-Wdangling-pointer"
 static volatile int onstack, sival, sicode;
 static sigjmp_buf jb;
