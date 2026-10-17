@@ -148,6 +148,11 @@ int main(void) {
         EXPECT("a bad descriptor is EBADF", fgetxattr(-1, "user.a", v, sizeof v) == -1 && errno == EBADF);
         EXPECT("a bad name pointer is EFAULT", getxattr("cx_h", (const char *)1, v, sizeof v) == -1 && errno == EFAULT);
         EXPECT("the attributes of a removed file do not come back", setxattr("cx_h", "user.z", "z", 1, 0) == 0 && unlink("cx_h") == 0 && open("cx_h", O_RDWR | O_CREAT, 0644) >= 0 && listxattr("cx_h", l, sizeof l) == 0);
+        EXPECT("a file holds 200 attributes, each read back (the table had 32)", ({ int f = open("cx_m", O_RDWR | O_CREAT, 0644), n, r = f >= 0; char nm[16], b[2];
+               for (n = 0; n < 200 && r; n++) { snprintf(nm, sizeof nm, "user.m%d", n); b[0] = 'a' + n % 26; r = fsetxattr(f, nm, b, 1, XATTR_CREATE) == 0; }
+               for (n = 0; n < 200 && r; n++) { snprintf(nm, sizeof nm, "user.m%d", n); r = fgetxattr(f, nm, b, sizeof b) == 1 && b[0] == 'a' + n % 26; }
+               r = r && fsetxattr(f, "user.m200", "z", 1, XATTR_CREATE) == 0 && flistxattr(f, NULL, 0) > 0;
+               close(f); unlink("cx_m"); r; }));
         unlink("cx_h");
         unlink("cx_s");
         rmdir("cx_d");

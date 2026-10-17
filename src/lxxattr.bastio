@@ -20,8 +20,6 @@ const LX_SETXATTR: u64 = 188;            // 188 .. 199: set, get, list,
 const LX_FREMOVEXATTR: u64 = 199;        // remove, each as path, l-path, fd
 const EOPNOTSUPP_X: u64 = 18446744073709551521;  // 2^64 - 95
 const ENODATA_X: u64 = 18446744073709551555;     // 2^64 - 61
-const XA_N: u64 = 32;                    // attributes in the table (SYS_XA, XAB in src/proc.bastio)
-const XA_ROW: u64 = 320;                 // bytes per attribute in k.mstr from XAB: name, then value
 const XA_NAME: u64 = 64;                 // name bytes (with a NUL, for listxattr)
 const XA_VAL: u64 = 256;                 // the most value bytes
 const XA_VOFF: u64 = 64;                 // where the value starts in a row
@@ -314,13 +312,14 @@ fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
     return 0;
   }
   let mut total = 0;
+  let mut big = false;
   let mut e = 0;
   while e < XA_N
-    invariant e <= XA_N && total <= e * XA_NAME && kok(k)
+    invariant e <= XA_N && total < XFER && kok(k)
   {
     if get(k.sys, SYS_XA + 3 * e) == h + 1 {
       let nl = get(k.sys, SYS_XA + 3 * e + 1);
-      if nl < XA_NAME {
+      if nl < XA_NAME && total + nl + 1 < XFER {
         let mut i = 0;
         while i < nl
           invariant i <= nl && nl < XA_NAME && total + nl < XFER && e < XA_N && kok(k)
@@ -330,9 +329,14 @@ fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
         }
         bset(&mut k.fs.xfer, total + nl, 0);
         total = total + nl + 1;
+      } else if nl < XA_NAME {
+        big = true;                   // the names do not fit the transfer buffer
       }
     }
     e = e + 1;
+  }
+  if big {
+    return E2BIG;
   }
   if size == 0 {
     return total;

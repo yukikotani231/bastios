@@ -393,6 +393,7 @@ t_file: read back
 t_file: readlink
 t_file: readv
 t_file: removexattr of a missing name is ENODATA
+t_file: a file holds 200 attributes, each read back (the table had 32)
 t_file: removexattr removes one
 t_file: rename
 t_file: rename over existing
