@@ -241,7 +241,15 @@ def qemu_cpu(g):
 def measure(g, test, d):
     """One run: (host ns per op, guest ns per op, ops) or a skip reason.
     For "idle", "host" is instead the host CPU QEMU used, in percent of
-    the time the guest slept."""
+    the time the guest slept, less what starting the program cost."""
+    base = 0.0
+    if test == "idle":
+        # The program's own start (reading it from the disk) costs CPU too,
+        # more on some systems than the sleep: a run that sleeps 1 ms is
+        # that cost alone, and is taken off.
+        c = qemu_cpu(g)
+        g.run(f"{g.exe} -d {d} idle=1")
+        base = qemu_cpu(g) - c
     cpu0 = qemu_cpu(g)
     at, text = g.run(f"{g.exe} -d {d} {'filewrite fileread' if test == 'fileread' else test}")
     if text is None:
@@ -260,8 +268,8 @@ def measure(g, test, d):
     ops, guest = int(e.group(1)), int(e.group(2))
     host = (t1 - t0) * 1e9
     if test == "idle":
-        # Taken over the whole command, so starting the program counts too.
-        return {"host": 100 * (qemu_cpu(g) - cpu0) * 1e9 / guest, "guest": guest, "ops": ops}
+        # Taken over the whole command, less the start-up cost measured above.
+        return {"host": 100 * max(qemu_cpu(g) - cpu0 - base, 0) * 1e9 / guest, "guest": guest, "ops": ops}
     # Lines that came in one read have one host time; a run that short is
     # timed by the guest.
     if host < 50e6 or ICOUNT:
