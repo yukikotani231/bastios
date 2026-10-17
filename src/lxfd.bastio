@@ -1428,6 +1428,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if nd == DEV_TTY {
       return fd_install_console(&mut k, pid);
     }
+    if nd == DEV_PTMX {
+      return pty_open_master(&mut k, pid, flags);   // a /dev/ptmx made by mknod in a chroot
+    }
     if nd == DEV_NONE {
       return ENXIO;
     }
