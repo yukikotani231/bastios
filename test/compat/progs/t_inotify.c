@@ -329,14 +329,14 @@ int main(void) {
     for (int i = 0; i < 32; i++)
         close(eps[i]);
 
-    /* timerfd: sixty at once. */
-    int tfd[60], ntf = 0;
-    for (int i = 0; i < 60; i++) {
+    /* timerfd: two hundred and fifty at once. */
+    int tfd[250], ntf = 0;
+    for (int i = 0; i < 250; i++) {
         tfd[i] = timerfd_create(CLOCK_MONOTONIC, 0);
         ntf += tfd[i] >= 0;
     }
-    EXPECT("sixty timerfds at once", ntf == 60);
-    for (int i = 0; i < 60; i++)
+    EXPECT("two hundred and fifty timerfds at once", ntf == 250);
+    for (int i = 0; i < 250; i++)
         close(tfd[i]);
 
     /* inotify instances: thirty at once. */

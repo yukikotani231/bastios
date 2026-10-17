@@ -845,7 +845,7 @@ const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none ye
 const OF_EVENT: u64 = 8;              // an eventfd: x the counter; word 3: nonblocking + 2 * semaphore (src/lxevent.bastio)
 const OF_TIMER: u64 = 9;              // a timerfd: x the timer; word 3: nonblocking
 const OF_EPOLL: u64 = 10;             // an epoll instance: x the instance; word 3: nonblocking
-const TFD_N: u64 = 64;                // timerfds, in k.evt from 0: TFD_STRIDE words each
+const TFD_N: u64 = 256;               // timerfds, in k.evt from 0: TFD_STRIDE words each
 const TFD_STRIDE: u64 = 4;
 const TFD_MAYCANCEL: u64 = 2;         // word 0: 1 (in use), plus this (TFD_TIMER_CANCEL_ON_SET)
 const TFD_CANCELED: u64 = 4;          // plus this once the wall clock was set
@@ -853,10 +853,10 @@ const EP_N: u64 = 32;                 // epoll instances, in k.evt from EP_AT: E
 const EP_FDS: u64 = 256;              // descriptors one epoll instance watches
 const EP_ENTRY: u64 = 4;              // fd + 1 (0: empty), its description, events, data
 const EP_STRIDE: u64 = 1025;          // 1 + EP_FDS * EP_ENTRY
-const EP_AT: u64 = 256;               // TFD_N * TFD_STRIDE
-const FIFO_N: u64 = 32;               // open named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
+const EP_AT: u64 = 1024;              // TFD_N * TFD_STRIDE
+const FIFO_N: u64 = 128;              // open named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
 const FIFO_STRIDE: u64 = 2;           // the FIFO's file handle + 1 (0: free), its pipe + 1
-const FIFO_AT: u64 = 33056;           // EP_AT + EP_N * EP_STRIDE
+const FIFO_AT: u64 = 33824;           // EP_AT + EP_N * EP_STRIDE
 const INO_N: u64 = 32;                // inotify instances, in k.evt from INO_AT: INO_STRIDE words each (src/lxinotify.bastio)
 const INO_W: u64 = 64;                // watches per instance
 const INO_WAT: u64 = 3;               // a watch: the handle + 1 (0: free), its mask, its descriptor
@@ -865,13 +865,13 @@ const INO_NAMEW: u64 = 32;            // words of an event's name: 8 bytes each
 const INO_EV: u64 = 36;               // an event: wd, mask, cookie, name length, then INO_NAMEW words
 const INO_HEAD: u64 = 4;              // in use, the next watch descriptor, events queued, the first
 const INO_STRIDE: u64 = 1348;         // INO_HEAD + INO_W * INO_WAT + INO_Q * INO_EV
-const INO_AT: u64 = 33120;            // FIFO_AT + FIFO_N * FIFO_STRIDE
-const INO_G: u64 = 76256;            // INO_AT + INO_N * INO_STRIDE: what all instances share
+const INO_AT: u64 = 34080;            // FIFO_AT + FIFO_N * FIFO_STRIDE
+const INO_G: u64 = 77216;            // INO_AT + INO_N * INO_STRIDE: what all instances share
 const FAN_M: u64 = 15;               // fanotify marks per instance (an inotify instance's slot: src/lxinotify.bastio)
 const FAN_MK: u64 = 12;              // a mark: the handle + 1 (0: free), its type, mask, ignored mask, flags, prefix length, then 6 words of prefix
 const FAN_Q: u64 = 32;               // events an instance queues, the overflow event included
 const FAN_EV: u64 = 5;               // an event: mask, process, handle + 1, thread, descriptor + 1 opened for its read
-const EVT_LEN: u64 = 76379;          // INO_G + 123
+const EVT_LEN: u64 = 77339;           // INO_G + 123
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or DEV_PTS + N; word 3: nonblocking (src/lxpty.bastio)
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
@@ -1173,7 +1173,7 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -1482,6 +1482,40 @@ fn zgrow(t: &mut Buf, n: u64) -> bool
   t = nt;
   free(prev);
   return true;
+}
+
+/// Word at of the event tables k.evt (timerfds, epoll, FIFOs, inotify); 0
+/// where the table has not grown that far yet.
+fn evg(k: &Kernel, at: u64) -> u64
+  requires kok(k)
+{
+  if at < len(k.evt) {
+    return get(k.evt, at);
+  }
+  return 0;
+}
+
+/// Sets word at of k.evt. The first store of a non-zero word allocates the
+/// whole table (in steps, the freed smaller tables would fragment a heap
+/// with an exact-size free list). Nothing is stored when memory runs out.
+fn evs(k: &mut Kernel, at: u64, v: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if at >= EVT_LEN {
+    return;
+  }
+  if at >= len(k.evt) {
+    if v == 0 {
+      return;                              // a zero word is already what reads give
+    }
+    if !zgrow(&mut k.evt, EVT_LEN) {
+      return;
+    }
+  }
+  if at < len(k.evt) {
+    k.evt = set(k.evt, at, v);
+  }
 }
 
 /// A FREE process id for a new process, or 0 if there is none. When every
