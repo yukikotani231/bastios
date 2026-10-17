@@ -1610,3 +1610,4 @@ apps: wget: an IPv6 loopback server
 apps: nc: a raw HTTP request to the host
 apps: netns: a new network namespace has only lo, down
 apps: netns: a veth pair on a bridge; ping across, wget out through masquerade
+t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor

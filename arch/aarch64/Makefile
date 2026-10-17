@@ -324,10 +324,8 @@ GDB_LAYERS := sha256:4e37c35e973659a11a1f1ff0df2d5e4aae586089ec1d6934302355d948c
 GDB_LIBS := libexpat.so.1 liblzma.so.5 libreadline.so.8 libz.so.1 libzstd.so.1 libncursesw.so.6 libpython3.14.so.1.0 libmpfr.so.6 libgmp.so.10 libdebuginfod.so.1 libstdc++.so.6 libgcc_s.so.1 libcurl.so.4 libelf.so.1 libfts.so.0 libjson-c.so.5 libbrotlicommon.so.1 libbrotlidec.so.1 libcares.so.2 libidn2.so.0 libnghttp2.so.14 libpsl.so.5 libssl.so.3 libcrypto.so.3 libunistring.so.5
 $(B)/compat/gdb.tar: | $(B)/compat
 	rm -rf $(B)/compat/src/gdb && mkdir -p $(B)/compat/src/gdb/all $(B)/compat/src/gdb/gdb/bin $(B)/compat/src/gdb/gdb/lib
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$(GDB_REPO):pull" | jq -r .token) && \
 	for d in $(GDB_LAYERS); do \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o $(B)/compat/src/gdb/layer.tgz https://registry-1.docker.io/v2/$(GDB_REPO)/blobs/$$d && \
-	  echo "$${d#sha256:}  $(B)/compat/src/gdb/layer.tgz" | sha256sum -c - >/dev/null && \
+	  test/compat/hubblob.sh $(GDB_REPO) $$d $(B)/compat/src/gdb/layer.tgz && \
 	  tar xzf $(B)/compat/src/gdb/layer.tgz -C $(B)/compat/src/gdb/all --exclude='dev/*' --no-same-owner || exit 1; \
 	done
 	cd $(B)/compat/src/gdb && cp all/usr/bin/gdb gdb/bin/gdb && cp all/lib/ld-musl-aarch64.so.1 gdb/lib/ld-musl-aarch64.so.1 && ln -s ld-musl-aarch64.so.1 gdb/lib/libc.musl-aarch64.so.1 && \
