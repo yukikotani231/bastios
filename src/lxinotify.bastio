@@ -157,14 +157,14 @@ fn lx_inotify_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> 
 fn iget(k: &Kernel, at: u64) -> u64
   requires kok(k) && at < EVT_LEN
 {
-  return get(k.evt, at);
+  return evg(k, at);
 }
 
 fn iput(k: &mut Kernel, at: u64, v: u64)
   requires kok(k) && at < EVT_LEN
   ensures kok(k)
 {
-  k.evt = set(k.evt, at, v);
+  evs(&mut k, at, v);
 }
 
 /// Word f of instance i.

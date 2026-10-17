@@ -1423,45 +1423,45 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
     }
     a = put_c(&mut o, a, 10);
   }
-  if d.kind == K_INOTIFY && d.x < INO_N && get(k.evt, INO_AT + d.x * INO_STRIDE) != 2 {
+  if d.kind == K_INOTIFY && d.x < INO_N && evg(k, INO_AT + d.x * INO_STRIDE) != 2 {
     let mut w = 0;
     while w < INO_W
       invariant w <= INO_W && a <= PROC_OUT && blen(o) == PROC_OUT && d.x < INO_N && kok(k)
     {
       let at = INO_AT + d.x * INO_STRIDE + INO_HEAD + w * INO_WAT;
-      let hv = get(k.evt, at);
+      let hv = evg(k, at);
       if hv != 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
         a = put_s(&mut o, a, "inotify wd:");
-        a = put_n(&mut o, a, get(k.evt, at + 2));
+        a = put_n(&mut o, a, evg(k, at + 2));
         a = put_s(&mut o, a, " ino:");
         a = put_x(&mut o, a, hv);                  // the handle: what stat calls the inode is this plus INO_FILES
         a = put_s(&mut o, a, " sdev:00000001 mask:");
-        a = put_x(&mut o, a, get(k.evt, at + 1));
+        a = put_x(&mut o, a, evg(k, at + 1));
         a = put_s(&mut o, a, " ignored_mask:0\n");
       }
       w = w + 1;
     }
   }
-  if d.kind == K_INOTIFY && d.x < INO_N && get(k.evt, INO_AT + d.x * INO_STRIDE) == 2 {
+  if d.kind == K_INOTIFY && d.x < INO_N && evg(k, INO_AT + d.x * INO_STRIDE) == 2 {
     let mut m = 0;
     while m < FAN_M
       invariant m <= FAN_M && a <= PROC_OUT && blen(o) == PROC_OUT && d.x < INO_N && kok(k)
     {
       let at = INO_AT + d.x * INO_STRIDE + 6 + m * FAN_MK;     // the mark (fm_at in src/lxinotify.bastio)
-      let hv = get(k.evt, at);
-      if hv != 0 && get(k.evt, at + 1) == 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
+      let hv = evg(k, at);
+      if hv != 0 && evg(k, at + 1) == 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
         a = put_s(&mut o, a, "fanotify ino:");
         a = put_x(&mut o, a, hv);
         a = put_s(&mut o, a, " sdev:00000001 mflags:");
-        if get(k.evt, at + 4) % 2 == 1 {
+        if evg(k, at + 4) % 2 == 1 {
           a = put_s(&mut o, a, "40");
         } else {
           a = put_s(&mut o, a, "0");
         }
         a = put_s(&mut o, a, " mask:");
-        a = put_h(&mut o, a, get(k.evt, at + 2));
+        a = put_h(&mut o, a, evg(k, at + 2));
         a = put_s(&mut o, a, " ignored_mask:");
-        a = put_h(&mut o, a, get(k.evt, at + 3));
+        a = put_h(&mut o, a, evg(k, at + 3));
         a = put_c(&mut o, a, 10);
       }
       m = m + 1;
