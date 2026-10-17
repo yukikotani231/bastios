@@ -10,7 +10,7 @@ local id = vim.lsp.start({
   cmd_env = {
     PATH = "/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin",
     HOME = "/root", GOCACHE = "/tmp/gc", GOPATH = "/tmp/gp",
-    GOTOOLCHAIN = "local", GOFLAGS = "-p=1", CGO_ENABLED = "0",
+    GOTOOLCHAIN = "local", GOMEMLIMIT = "300MiB", GOFLAGS = "-p=1", CGO_ENABLED = "0",
   },
   root_dir = "/root/goproj",
 }, { bufnr = buf })
