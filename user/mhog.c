@@ -1,8 +1,9 @@
 /*
  * A memory hog for the out-of-memory tests (test/memory_test.sh).
  *
- *   mhog touch MIB    map MIB MiB of anonymous memory and write every page
- *   mhog hold MIB     the same, then sleep until killed
+ *   mhog touch MIB    map MIB MiB of anonymous memory and write every page,
+ *                     read them back, then grow the stack by 128 KiB
+ *   mhog hold MIB     map and write MIB MiB, then sleep until killed
  *   mhog cache MIB [F]  write a MIB MiB file F (default /tmp/mhog.cache)
  *   mhog mapfile MIB F  map MIB MiB of file F shared and read every page: the
  *                     kernel's page cache holds them afterwards
@@ -26,6 +27,15 @@ static unsigned long arg_mib(int argc, char **argv) {
     return argc > 2 ? strtoul(argv[2], 0, 10) : 1;
 }
 
+/* Calls n deep, each call with 16 KiB of stack it writes: with memory full,
+ * the stack grows into pages the kernel has to find (from swap). */
+static int deep(int n) {
+    volatile unsigned char b[16384];
+    b[0] = (unsigned char)n;
+    b[sizeof b - 1] = (unsigned char)n;
+    return n ? deep(n - 1) + b[0] : b[sizeof b - 1];
+}
+
 static int grab(unsigned long mib, int verify) {
     unsigned long len = mib << 20;
     unsigned char *p = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -43,6 +53,10 @@ static int grab(unsigned long mib, int verify) {
                 printf("mhog: page %lu changed\n", i >> 12);
                 return 1;
             }
+        if (deep(8) != 36) {
+            printf("mhog: the stack lost a write\n");
+            return 1;
+        }
     }
     return 0;
 }

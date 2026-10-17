@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <sys/personality.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -833,6 +834,40 @@ int main(void) {
            ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == 0;
            ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
            close(s);
+           ok; }));
+    EXPECT("pwrite and writev: a file takes the whole count, however far the file grows", ({
+           int fd = open("cf_pwhole", O_RDWR | O_CREAT | O_TRUNC, 0644);
+           static char big[100000];
+           memset(big, 'p', sizeof big);
+           int ok = fd >= 0;
+           for (int i = 0; ok && i < 60; i++) {
+               off_t at = (off_t)i * 70001 + 3;
+               size_t n = 33757 + (size_t)i * 1000;
+               ok = pwrite(fd, big, n, at) == (ssize_t)n;
+           }
+           ok = ok && pwrite(fd, big, sizeof big, 30000000) == (ssize_t)sizeof big;
+           for (int i = 0; ok && i < 40; i++) {
+               struct iovec v[3] = { { big, 20000 + (size_t)i * 500 }, { big + 30000, 1 }, { big + 40000, 46873 } };
+               size_t n = v[0].iov_len + 1 + 46873;
+               ok = lseek(fd, (off_t)i * 80000 + 7, SEEK_SET) >= 0 && writev(fd, v, 3) == (ssize_t)n;
+           }
+           close(fd); unlink("cf_pwhole");
+           ok; }));
+    EXPECT("F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor", ({
+           int pf[2];
+           int ok = pipe(pf) == 0;
+           sigset_t set;
+           sigemptyset(&set); sigaddset(&set, SIGUSR1);
+           sigprocmask(SIG_BLOCK, &set, NULL);
+           ok = ok && fcntl(pf[0], F_SETOWN, getpid()) == 0 && fcntl(pf[0], F_SETSIG, SIGUSR1) == 0;
+           ok = ok && fcntl(pf[0], F_SETFL, O_ASYNC) == 0;
+           ok = ok && write(pf[1], "x", 1) == 1;
+           siginfo_t si;
+           memset(&si, 0, sizeof si);
+           struct timespec to = { 2, 0 };
+           ok = ok && sigtimedwait(&set, &si, &to) == SIGUSR1;
+           ok = ok && si.si_code == POLL_IN && si.si_fd == pf[0] && si.si_band == (POLLIN | POLLRDNORM);
+           close(pf[0]); close(pf[1]);
            ok; }));
     return done();
 }

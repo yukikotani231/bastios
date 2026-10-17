@@ -57,6 +57,14 @@ NOTE = re.compile(r"\[pid \d+: Linux system call (\d+) not implemented\]")
 KILLNOTE = re.compile(r"\[pid \d+ \(.*\): .*killed\]$|\[fault diag: ")
 
 
+def clip(text, head=300, tail=450):
+    """The start and the end of a failing check's output: the start says what
+    went wrong first, the end says how it finished."""
+    if len(text) <= head + tail:
+        return text
+    return text[:head] + " ... " + text[-tail:]
+
+
 def syscall_names():
     names = {}
     for line in open(os.path.join(HERE, "syscalls.txt")):
@@ -298,7 +306,7 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
-AARCH64_APPS = ("lua", "qjs", "sqlite3")
+AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns")
 
 
 class Guest:
@@ -621,7 +629,7 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
     if status is None:
         return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps(clip("\n".join(body))) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
 
 
@@ -637,7 +645,7 @@ def run_on_host(name, cmd, expected, timeout):
     while body and not body[-1]:
         body.pop()
     ok = body == expected
-    detail = "" if ok else "got " + json.dumps("\n".join(body)[:700]) + ", expected " + json.dumps("\n".join(expected))
+    detail = "" if ok else "got " + json.dumps(clip("\n".join(body))) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": []}
 
 
@@ -948,10 +956,12 @@ def main():
                                             ("alpine-tty", "programs on the terminal in Alpine",
                                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])],
                           "384M"))
+        # alpine5 has 1G: gopls loads the Go standard library for a hover, and
+        # at 384M the kernel now and then killed it (Neovim printed "Killed").
         if lane_chosen("alpine5"):
             disk = os.path.join(args.out, "alpine-run5.img")
             shutil.copyfile(args.alpine_disk, disk)
-            lanes.append(("alpine5", disk, [("alpine#5", "Neovim, gcc and the debuggers in Alpine", applets_lane(alpine5, 300))], "384M"))
+            lanes.append(("alpine5", disk, [("alpine#5", "Neovim, gcc and the debuggers in Alpine", applets_lane(alpine5, 300))], "1G"))
     if args.debian_disk and lane_chosen("debian"):
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
