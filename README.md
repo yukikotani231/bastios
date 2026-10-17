@@ -91,7 +91,7 @@ make compat     # the Linux compatibility suite; writes build/compat/report.md
 
 `make test` also checks the sessions in this README, [Getting started](docs/getting-started.md) and [Using BastiOS](docs/using.md) (`test/guide_test.py`). Set `BASTIOC0=/path/to/bastioc0` if bastiolang is not next to this checkout.
 
-The kernel is built by bastioc1, bastiolang's compiler written in Bastio, through C: the compiler proves each file, writes C, and `cc` compiles it. The first build makes bastioc1 itself with bastiolang's bootstrap compiler, `bastioc0`, into `build/bastioc1`. `make NATIVE=1` uses bastioc1's native backend instead, which writes x86-64 assembly and takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`, but its code is about ten times larger, so it is not the default yet.
+The kernel is built by bastioc1, bastiolang's compiler written in Bastio, through C: the compiler proves each file, writes C, and `cc` compiles it. The first build makes bastioc1 itself with bastiolang's bootstrap compiler, `bastioc0`, into `build/bastioc1`. `make NATIVE=1` uses bastioc1's native backend instead, which writes x86-64 assembly and takes the C compiler out of the trusted base for Bastio code; BastiOS built that way passes `make test`, but its code is about ten times larger, so it is not the default yet. `make ARCH=aarch64 NATIVE=1` does the same for the AArch64 port's Bastio user programs (its kernel still goes through C).
 
 ## What is trusted
 

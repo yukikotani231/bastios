@@ -50,6 +50,14 @@ build/bastioc1: build/bastioc1.c
 UPROGS := sh hello spin true
 UBINS := $(UPROGS:%=$(B)/user/%.bin)
 
+# Which backend built the Bastio user programs, rewritten only when it
+# changes, so that switching NATIVE rebuilds them.
+UBACKEND := $(if $(filter 1,$(NATIVE)),native,c)
+$(B)/user.backend: FORCE | $(B)/user
+	@echo $(UBACKEND) | cmp -s - $@ || echo $(UBACKEND) > $@
+.PHONY: FORCE
+FORCE:
+
 $(B)/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | $(B)/user
 	$(BASTIOC) --lib $(BASTIOLIB) --target user --arch aarch64 -o $@ $<
 
@@ -68,6 +76,24 @@ $(B)/user/%.elf: $(B)/user/start.o $(B)/user/%.o $(B)/user/libc.o user/user-aarc
 
 $(B)/user/%.bin: $(B)/user/%.elf
 	$(AOBJCOPY) -O binary $< $@
+
+# NATIVE=1 builds the Bastio user programs with bastioc1's AArch64 backend
+# (writes assembly, no C compiler between the proved code and the machine
+# code, only the assembler and linker) and links them without the C support
+# functions, which nothing calls.
+ifeq ($(NATIVE),1)
+$(UPROGS:%=$(B)/user/%.s): $(B)/user/%.s: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) $(B)/user.backend | $(B)/user
+	$(BASTIOC) --lib $(BASTIOLIB) --target user --arch aarch64 --backend native --emit-asm -o $@ $<
+
+$(UPROGS:%=$(B)/user/%.o): $(B)/user/%.o: $(B)/user/%.s
+	$(CROSS)as -o $@ $<
+
+$(UPROGS:%=$(B)/user/%.elf): $(B)/user/%.elf: $(B)/user/start.o $(B)/user/%.o user/user-aarch64.ld
+	$(ALD) -nostdlib -static -z max-page-size=0x1000 -T user/user-aarch64.ld --build-id=none --no-warn-rwx-segments \
+	  -o $@ $(B)/user/start.o $(B)/user/$*.o
+else
+$(UPROGS:%=$(B)/user/%.c): $(B)/user.backend
+endif
 
 # Linux arm64 programs: ordinary ELF executables, linked at the start of the
 # user window with no libc (mhello is the table's name for the first).
