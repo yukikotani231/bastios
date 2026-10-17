@@ -89,7 +89,7 @@ fn ptimer_tick(k: &mut Kernel)
         } else {
           k.alarms = set(k.alarms, pt_at(p, t, 3), over);
           if 1 <= s && s <= NSIG {
-            post_proc_w(&mut k, p, s, t + TIMER_MARK + SW_QUEUE + SW_VAL * (get(k.alarms, pt_at(p, t, 2)) / 65536 % 0x100000000));
+            post_proc_wv(&mut k, p, s, t + TIMER_MARK + SW_QUEUE, get(k.alarms, pt_at(p, t, 2)) / 65536 % 0x100000000);
           }
         }
       }

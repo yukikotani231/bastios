@@ -67,9 +67,9 @@ int main(void) {
            c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0; }) && ({ char c = 0; pread(fd, &c, 1, 2) == 1 && c == 'X'; }));
     EXPECT("MAP_SHARED file mapping across fork", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0)) != MAP_FAILED &&
            ({ pid_t c = fork(); c == 0 ? (q[3] = 'F', _exit(0), 0) : c > 0 && waitpid(c, &st, 0) == c && q[3] == 'F'; }));
-    EXPECT("a writable MAP_SHARED mapping is written back after twenty read-only ones", ({
+    EXPECT("a writable MAP_SHARED mapping is written back after seventy read-only ones", ({
                int ok = 1;
-               for (int i = 0; i < 20; i++) {
+               for (int i = 0; i < 70; i++) {
                    int r = open("cm_f", O_RDONLY);
                    ok &= r >= 0 && mmap(0, 4096, PROT_READ, MAP_SHARED, r, 0) != MAP_FAILED;
                    if (r >= 0) close(r);
@@ -81,6 +81,27 @@ int main(void) {
                char c = 0;
                ok &= g >= 0 && pread(g, &c, 1, 5) == 1 && c == 'W';
                if (g >= 0) { close(g); unlink("cm_g"); }
+               ok; }));
+    EXPECT("forty writable MAP_SHARED mappings are each written back", ({
+               int ok = 1;
+               char *m[40];
+               int g[40];
+               char name[16];
+               for (int i = 0; i < 40; i++) {
+                   snprintf(name, sizeof name, "cm_w%d", i);
+                   g[i] = open(name, O_RDWR | O_CREAT | O_TRUNC, 0644);
+                   m[i] = g[i] >= 0 && ftruncate(g[i], 4096) == 0 ? mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, g[i], 0) : MAP_FAILED;
+                   ok &= m[i] != MAP_FAILED;
+                   if (m[i] != MAP_FAILED) m[i][i] = 'a' + i % 26;
+               }
+               for (int i = 0; i < 40; i++) {
+                   if (m[i] != MAP_FAILED) ok &= munmap(m[i], 4096) == 0;
+                   char c = 0;
+                   ok &= g[i] >= 0 && pread(g[i], &c, 1, i) == 1 && c == 'a' + i % 26;
+                   if (g[i] >= 0) close(g[i]);
+                   snprintf(name, sizeof name, "cm_w%d", i);
+                   unlink(name);
+               }
                ok; }));
     {
         /* Two processes that map the file on their own share its pages,
@@ -319,6 +340,22 @@ int main(void) {
            }
            if (sf >= 0) close(sf);
            unlink("mem_shared");
+           ok; }));
+    EXPECT("mprotect makes 300 MiB of a PROT_NONE reservation writable (and executable where writable pages can run code: AArch64), more than the machine has: only touched pages count", ({
+#ifdef __x86_64__
+           int rwx = PROT_READ | PROT_WRITE;   /* x86-64 maps an executable range at once (NX) */
+#else
+           int rwx = PROT_READ | PROT_WRITE | PROT_EXEC;
+#endif
+           size_t sz = 300u << 20;
+           char *r = mmap(0, 512u << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+           int ok = r != MAP_FAILED && mprotect(r, sz, rwx) == 0;
+           if (ok) {
+               r[0] = 1; r[sz / 2] = 2; r[sz - 1] = 3;
+               ok = r[0] == 1 && r[sz / 2] == 2 && r[sz - 1] == 3 && r[4096] == 0;
+               ok = ok && mprotect(r + 4096, 8192, PROT_NONE) == 0 && mprotect(r + 4096, 8192, PROT_READ | PROT_WRITE) == 0 && r[4096] == 0;
+               ok = ok && munmap(r, 512u << 20) == 0;
+           }
            ok; }));
     return done();
 }

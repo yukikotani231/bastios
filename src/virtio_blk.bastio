@@ -30,12 +30,6 @@ const REQ_DATA: u64 = 512;
 const VIO_SECTOR: u64 = 512;
 const VIO_BLOCK: u64 = 4096;
 
-/// A data page for the blocks after the first of a batched read.
-enum Extra {
-  None,
-  Page(Dma),
-}
-
 struct Virtio {
   io: Vt,
   q: Vq,

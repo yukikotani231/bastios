@@ -75,7 +75,6 @@ const RLIMIT_STACK: u64 = 3;
 const RLIMIT_NOFILE: u64 = 7;
 const RLIMIT_CORE: u64 = 4;
 const RLIM_NLIMITS: u64 = 16;
-const NR_OPEN: u64 = 1048576;          // Linux's default /proc/sys/fs/nr_open
 const STACK_BYTES: u64 = 8388608;     // STACK_PAGES pages
 const PR_SET_NAME: u64 = 15;
 const PR_GET_NAME: u64 = 16;
@@ -196,7 +195,7 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
 
 /// getrusage(who, usage): the user and system times (see tm_ticks) of the
 /// caller, or with RUSAGE_CHILDREN of its waited-for children; the rest
-/// is zero.
+/// is zero (ru_maxrss too, for the children).
 fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -212,6 +211,11 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
   xfer_u64(&mut k.fs.xfer, 16, st / 100);            // ru_stime
   xfer_u64(&mut k.fs.xfer, 24, st % 100 * 10000);
+  if !children {
+    // ru_maxrss in kilobytes: every page the process has counts as resident
+    // (the peak is not kept; this is the current size).
+    xfer_u64(&mut k.fs.xfer, 32, smaller(anon_count(&mut k, pid, 0, WPAGES), WPAGES) * 4);
+  }
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;
   }
@@ -604,6 +608,7 @@ fn lx_ftruncate(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> u64
   if !vfs_truncate(&mut k.fs, &mut k.mem, d.x, size) {
     return EINVAL;                          // not open for writing, too long, or the disk failed
   }
+  bus_shrink(&mut k, row_file(k.fs, d.x));  // mappings of the cut-off part: SIGBUS
   return 0;
 }
 
@@ -647,6 +652,7 @@ fn lx_truncate(k: &mut Kernel, pid: u64, path: u64, size: u64) -> u64
   if !ok {
     return EINVAL;
   }
+  bus_shrink(&mut k, vfs_lookup(&mut k.fs, n));
   return 0;
 }
 
@@ -857,6 +863,21 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// Writes a call's result and keeps the process running, or retries it when
+/// the disk blocks it needs are not cached yet. (Its own function so the proof
+/// of lx_misc_call's long chain of cases does not have to carry the whole kernel
+/// invariant through this last step.)
+fn lx_misc_done(k: &mut Kernel, pid: u64, n: u64, r: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -1036,9 +1057,5 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   // Everything else (madvise, sync) succeeds doing nothing.
   assert kok(k) && con_ok(con);
-  if r == DISK_RETRY {
-    return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
-  }
-  ret(&mut k.procs, pid, r);
-  return KEEP;
+  return lx_misc_done(&mut k, pid, n, r);
 }

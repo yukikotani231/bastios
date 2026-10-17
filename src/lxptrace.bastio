@@ -888,7 +888,7 @@ fn lx_ptrace(k: &mut Kernel, pid: u64, req0: u64, p0: u64, addr: u64, data: u64)
     if sig != 5 && 1 <= sig && sig <= NSIG {
       // The siginfo the signal was sent with: its sender, SI_TKILL, the
       // address of a fault, a queued value (the word of src/lxsig.bastio).
-      info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(p, sig)));
+      info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(p, sig)), wget(k.sigsave, value_at(p, sig)));
     }
     return lx_put_out(&mut k, pid, data, 128);
   }

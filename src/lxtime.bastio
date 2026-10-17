@@ -378,8 +378,14 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_DEV && is_pty_dev(f.x) {
     return pty_bits(k, f.x);                // src/lxpty.bastio
   }
+  if f.kind == K_DEV && f.x == DEV_KEYEV {
+    return keyev_bits(k);                   // src/lxkeyev.bastio
+  }
   if f.kind == K_DEV && f.x == DEV_MICE {
     return mice_bits(k);                    // src/lxmouse.bastio
+  }
+  if f.kind == K_DEV && f.x == DEV_SER {
+    return ser_bits(k);                     // src/lxserial.bastio
   }
   if f.kind == K_SECCOMP && f.x < SC_N {
     return sc_bits(k, f.x);                 // src/lxseccomp.bastio
@@ -660,6 +666,14 @@ fn post_proc_w(k: &mut Kernel, p: u64, s: u64, word: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
+  post_proc_wv(&mut k, p, s, word, 0);
+}
+
+/// post_proc_w with the sigval that goes with it (a POSIX timer's).
+fn post_proc_wv(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
   let mut at = p;
   if has_sig(pget(k.procs, p, F_SIGMASK), s) {
     let g = tgid(k.procs, p);
@@ -684,7 +698,7 @@ fn post_proc_w(k: &mut Kernel, p: u64, s: u64, word: u64)
       at = l;
     }
   }
-  post_w(&mut k, at, s, word);
+  post_wv(&mut k, at, s, word, value);
 }
 
 /// On a timer tick, with k.ns just read: sends SIGALRM to each process
@@ -908,7 +922,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           i = i + 1;
         }
         bset(&mut k.fs.xfer, 0, cast[u8](s));
-        info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(pid, s)));   // si_pid, si_value
+        info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(pid, s)), wget(k.sigsave, value_at(pid, s)));   // si_pid, si_value
         if wget(k.sigsave, sender_at(pid, s)) < FAULT_MARK && nsk_of(k, NSK_PID, pid) != 0 {
           xfer_u64(&mut k.fs.xfer, 16, vpid_of(k, pid, wget(k.sigsave, sender_at(pid, s)) % SW_PID));
         }

@@ -47,7 +47,7 @@ const SIGWINCH: u64 = 28;
 // processor exception at the address it holds less FAULT_MARK.
 const FAULT_MARK: u64 = 0x8000000000000000;
 // The sender word of a pending signal (k.sigsave): the sender's pid in the low 10 bits (below 1024, past
-// NPROC), SW_QUEUE when sigqueue carried a value, the value times SW_VAL above it.
+// NPROC), SW_QUEUE when sigqueue carried a value (kept in value_at).
 const SW_PID: u64 = 1024;
 const SW_QUEUE: u64 = 1024;
 const SW_VAL: u64 = 2048;
@@ -58,8 +58,8 @@ const FAULT_CODE: u64 = 0x1000000000000;   // 2^48: in a fault word, si_code (a 
 const MESGQ_MARK: u64 = 0x4000000000000;   // 2^50: a sender word from a message queue (post_mesgq)
 const TKILL_MARK: u64 = 0x8000000000000;   // 2^51: from tkill or tgkill (si_code SI_TKILL, si_pid the sender's group)
 const RTQ_N: u64 = 32;                        // queued instances of real-time signals per process, beyond the pending ones
-const RTQ_AT: u64 = 65;                       // where the queue starts in a k.sigsave row: its count, then the entries
-const RTQ_SIG: u64 = 0x40000000000000;        // 2^54: an entry's signal times this, plus its sender word
+const RTQ_AT: u64 = 129;                      // where the queue starts in a k.sigsave row: its count, then the entries (a sender word and a value each)
+const RTQ_SIG: u64 = 0x40000000000000;        // 2^54: an entry's signal times this, plus its sender word; its value is the next word
 const SIG_DFL: u64 = 0;
 const SIG_IGN: u64 = 1;
 const SA_NOCLDWAIT: u64 = 2;
@@ -168,7 +168,7 @@ fn jc_tell(k: &mut Kernel, p: u64)
         word = chld_word(p, 4, w % 256);
       }
     }
-    post_raw(&mut k, par, SIGCHLD, word, false);
+    post_raw(&mut k, par, SIGCHLD, word, 0, false);
   }
 }
 
@@ -190,7 +190,7 @@ fn tr_tell(k: &mut Kernel, p: u64)
     pset(&mut k.procs, tr, F_STATE, READY);
   }
   if is_linux(k.procs, tr) {
-    post_raw(&mut k, tr, SIGCHLD, chld_word(p, 4, jc_get(k, p) % 256), false);
+    post_raw(&mut k, tr, SIGCHLD, chld_word(p, 4, jc_get(k, p) % 256), 0, false);
   }
 }
 
@@ -330,9 +330,17 @@ fn post_w(k: &mut Kernel, p: u64, s: u64, word: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
+  post_wv(&mut k, p, s, word, 0);
+}
+
+/// post_w with the 64-bit sigval a queued signal carries (sigqueue, a timer).
+fn post_wv(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
   let st = state(k.procs, p);
   let listen = s == SIGCONT && st == STOPPED && tr_stopped(tr_get(k, p)) == 0 && tr2_get(k, p) / TS_LISTEN % 2 == 1;
-  post_raw(&mut k, p, s, word, listen);
+  post_raw(&mut k, p, s, word, value, listen);
   if listen {
     // PTRACE_LISTEN: SIGCONT ends the group-stop with an event stop (SIGTRAP and
     // PTRACE_EVENT_STOP), and the tracer resumes the tracee from there.
@@ -346,7 +354,7 @@ fn post_w(k: &mut Kernel, p: u64, s: u64, word: u64)
 /// use, so that a ptrace-stop does not lead back into itself. `listen` says
 /// that p is in a group-stop its tracer listens to: SIGCONT does not continue
 /// it then.
-fn post_raw(k: &mut Kernel, p: u64, s: u64, word: u64, listen: bool)
+fn post_raw(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64, listen: bool)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
@@ -379,10 +387,11 @@ fn post_raw(k: &mut Kernel, p: u64, s: u64, word: u64, listen: bool)
     return;                                 // a traced process stops for it, as on Linux
   }
   if s >= 32 && has_sig(pget(k.procs, p, F_SIGPEND), s) {
-    rtq_push(&mut k, p, s, word);               // behind the pending one; a full queue drops it
+    rtq_push(&mut k, p, s, word, value);        // behind the pending one; a full queue drops it
   } else {
     pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
     wset(&mut k.sigsave, sender_at(p, s), word);    // 0: the kernel, unless post_from says
+    wset(&mut k.sigsave, value_at(p, s), value);
   }
   // A timed wait tries again even for a blocked signal: sigtimedwait may
   // be waiting for it.
@@ -412,7 +421,7 @@ fn sig_wake_now(k: &mut Kernel, p: u64)
 
 /// The real-time signal queue of process p (the tail of its k.sigsave row):
 /// the instances of a signal beyond the one that is pending, oldest first,
-/// each a sender word plus its signal times RTQ_SIG.
+/// each a sender word plus its signal times RTQ_SIG, then its value.
 fn rtq_count(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
   ensures result <= RTQ_N
@@ -429,7 +438,7 @@ fn rtq_clear(k: &mut Kernel, p: u64)
 
 /// Queues another instance of s behind the pending one. False if the queue
 /// is full (RTQ_N entries), when the instance is lost.
-fn rtq_push(k: &mut Kernel, p: u64, s: u64, word: u64) -> bool
+fn rtq_push(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64) -> bool
   requires kok(k) && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
@@ -437,7 +446,8 @@ fn rtq_push(k: &mut Kernel, p: u64, s: u64, word: u64) -> bool
   if n >= RTQ_N {
     return false;
   }
-  wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT + 1 + n, word % RTQ_SIG + s * RTQ_SIG);
+  wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT + 1 + 2 * n, word % RTQ_SIG + s * RTQ_SIG);
+  wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT + 2 + 2 * n, value);
   wset(&mut k.sigsave, p * SIGSAVE_ROW + RTQ_AT, n + 1);
   return true;
 }
@@ -457,18 +467,21 @@ fn rtq_refill(k: &mut Kernel, p: u64, s: u64)
   while i < n
     invariant i <= n && n <= RTQ_N && kok(k)
   {
-    let e = wget(k.sigsave, base + i);
+    let e = wget(k.sigsave, base + 2 * i);
     if e / RTQ_SIG == s {
+      let v = wget(k.sigsave, base + 2 * i + 1);
       let mut j = i;
       while j + 1 < n
         invariant j <= n && n <= RTQ_N && kok(k)
       {
-        wset(&mut k.sigsave, base + j, wget(k.sigsave, base + j + 1));
+        wset(&mut k.sigsave, base + 2 * j, wget(k.sigsave, base + 2 * j + 2));
+        wset(&mut k.sigsave, base + 2 * j + 1, wget(k.sigsave, base + 2 * j + 3));
         j = j + 1;
       }
       wset(&mut k.sigsave, base - 1, n - 1);
       pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
       wset(&mut k.sigsave, sender_at(p, s), e % RTQ_SIG);
+      wset(&mut k.sigsave, value_at(p, s), v);
       return;
     }
     i = i + 1;
@@ -487,9 +500,10 @@ fn rtq_purge(k: &mut Kernel, p: u64, s: u64)
   while i < n
     invariant i <= n && o <= i && n <= RTQ_N && kok(k)
   {
-    let e = wget(k.sigsave, base + i);
+    let e = wget(k.sigsave, base + 2 * i);
     if e / RTQ_SIG != s {
-      wset(&mut k.sigsave, base + o, e);
+      wset(&mut k.sigsave, base + 2 * o, e);
+      wset(&mut k.sigsave, base + 2 * o + 1, wget(k.sigsave, base + 2 * i + 1));
       o = o + 1;
     }
     i = i + 1;
@@ -505,6 +519,15 @@ fn sender_at(p: u64, s: u64) -> u64
   return p * SIGSAVE_ROW + s;
 }
 
+/// Where k.sigsave keeps the 64-bit sigval that came with p's pending
+/// signal s (sigqueue), after the NSIG sender words.
+fn value_at(p: u64, s: u64) -> u64
+  requires p < NPROC && 1 <= s && s <= NSIG
+  ensures result < SIGSAVE_LEN
+{
+  return p * SIGSAVE_ROW + NSIG + s;
+}
+
 /// post_sig, from process `from` (for the siginfo's si_pid).
 fn post_from(k: &mut Kernel, p: u64, s: u64, from: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
@@ -514,13 +537,14 @@ fn post_from(k: &mut Kernel, p: u64, s: u64, from: u64)
 }
 
 /// post_from with a value (sigqueue): the siginfo says SI_QUEUE and
-/// carries the low 32 bits of `value` (sival_int; a sival_ptr loses its
-/// upper half). The sender word holds from + SW_QUEUE + SW_VAL * value.
+/// carries `value` whole (a sival_ptr in a randomized address space can
+/// sit above 4 GiB). The sender word holds from + SW_QUEUE; the value is in
+/// value_at.
 fn post_queued(k: &mut Kernel, p: u64, s: u64, from: u64, value: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG && from < NPROC
   ensures kok(k)
 {
-  post_w(&mut k, p, s, from + SW_QUEUE + SW_VAL * (value % 0x100000000));
+  post_wv(&mut k, p, s, from + SW_QUEUE, value);
 }
 
 /// post_queued from a message queue (mq_notify): si_code SI_MESGQ.
@@ -528,13 +552,13 @@ fn post_mesgq(k: &mut Kernel, p: u64, s: u64, from: u64, value: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG && from < NPROC
   ensures kok(k)
 {
-  post_w(&mut k, p, s, from + SW_QUEUE + SW_VAL * (value % 0x100000000) + MESGQ_MARK);
+  post_wv(&mut k, p, s, from + SW_QUEUE + MESGQ_MARK, value);
 }
 
 /// Writes the parts of a siginfo at `at` in b that come from a sender
 /// word (see post_queued): si_pid, and for a queued signal si_code
 /// SI_QUEUE (-1), or SI_MESGQ (-3) with MESGQ_MARK, and si_value.
-fn info_from(b: &mut Bytes, at: u64, word: u64)
+fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
   requires at + 32 <= blen(b)
   ensures blen(b) == old(blen(b))
 {
@@ -572,9 +596,9 @@ fn info_from(b: &mut Bytes, at: u64, word: u64)
       } else {
         bset(&mut b, at + 8 + i, cast[u8](255));         // si_code: SI_QUEUE
       }
-      bset(&mut b, at + 24 + i, cast[u8](word / SW_VAL / pow256(i) % 256));
       i = i + 1;
     }
+    xfer_u64(&mut b, at + 24, value);
   }
 }
 
@@ -966,7 +990,7 @@ fn lx_kill_w(k: &mut Kernel, pid: u64, target: u64, s: u64, word: u64, thread: b
       invariant 1 <= p && p <= NPROC && kok(k)
     {
       let live = state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE && is_linux(k.procs, p) && tgid(k.procs, p) == p;
-      let seen = nsk_of(k, NSK_PID, pid) == 0 || nsk_of(k, NSK_PID, p) == nsk_of(k, NSK_PID, pid);
+      let seen = nsk_of(k, NSK_PID, pid) == 0 || vp_in(k, p, nsk_of(k, NSK_PID, pid)) != 0;
       if live && seen && ((all && p != pid) || (!all && pgid_of(k.procs, p) == g)) {
         hit = true;
         if may_signal(k, pid, p, s) {
@@ -1262,7 +1286,11 @@ fn fault_caught(k: &mut Kernel, p: u64, s: u64, addr: u64, code: u64) -> bool
     pset(&mut k.procs, p, F_SIGMASK, pget(k.procs, p, F_SIGMASK) & !sbit(s));
   }
   pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
-  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + (code % 256) * FAULT_CODE + addr % FAULT_CODE);
+  let mut si_code = code;
+  if s == SIGBUS {
+    si_code = 2;                            // BUS_ADRERR
+  }
+  wset(&mut k.sigsave, sender_at(p, s), FAULT_MARK + (si_code % 256) * FAULT_CODE + addr % FAULT_CODE);
   return true;
 }
 
@@ -1295,6 +1323,26 @@ fn call_done(k: &mut Kernel, pid: u64)
   } else {
     pset(&mut k.procs, pid, F_ASLEEP, 1);
   }
+}
+
+/// True if a child of process p has ended and not yet been waited for: a
+/// wait4 that a signal interrupts then finds it when it runs again, as on
+/// Linux, where the child is looked for before the signal is.
+fn has_zombie_child(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);
+  let mut c = 1;
+  while c < cap
+    invariant 1 <= c && cap <= NPROC && kok(k)
+  {
+    if state(k.procs, c) == ZOMBIE && child_of_group(k.procs, c, p) {
+      return true;
+    }
+    c = c + 1;
+  }
+  return false;
 }
 
 /// Builds the signal frame for signal s on process p's stack and points p
@@ -1333,7 +1381,7 @@ fn enter_handler(k: &mut Kernel, p: u64, s: u64) -> bool
   let swapped = waiting && (call == LX_PPOLL || call == LX_PSELECT6 || call == 281 || call == 441) && wget(k.sigsave, p * SIGSAVE_ROW) & MASK_SWAPPED != 0;   // epoll_pwait, epoll_pwait2
   let suspended = waiting && call == LX_RT_SIGSUSPEND || swapped;
   let pausing = call == LX_PAUSE || suspended || never_restarts(call);
-  let reaping = (call == LX_WAIT4 || call == LX_WAITID) && s == SIGCHLD;
+  let reaping = (call == LX_WAIT4 || call == LX_WAITID) && (s == SIGCHLD || has_zombie_child(&mut k, p));
   if waiting && (flags & SA_RESTART == 0 || pausing) && !reaping {
     let rip = pget(k.procs, p, F_REGS + R_RIP);
     if rip <= 0xFFFFFFFFFFFFFFF0 {

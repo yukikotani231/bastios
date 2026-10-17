@@ -56,11 +56,15 @@ def main():
     ap.add_argument("--mem", default="512M")
     ap.add_argument("--top", type=int, default=40)
     ap.add_argument("--perf", default="")
+    ap.add_argument("--prog", default="", help="profile this C file (built as /disk/<name>) instead of osbench")
     ap.add_argument("cmd", nargs="+")
     args = ap.parse_args()
     perf = find_perf(args.perf)
     addrs, names = symbols(args.elf)
     osbench = bench.build_osbench()
+    if args.prog:
+        osbench = os.path.join(bench.B, os.path.splitext(os.path.basename(args.prog))[0])
+        bench.sh(os.environ.get("MUSLCC", "musl-gcc"), "-static-pie", "-O2", "-o", osbench, args.prog)
     ns = argparse.Namespace(accel="tcg", cpu="", mem=args.mem, smp=args.smp, kernel=args.kernel)
     line = " ".join(args.cmd)
     with tempfile.TemporaryDirectory() as tmp:

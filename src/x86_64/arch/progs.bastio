@@ -111,12 +111,36 @@ fn prog_image(i: u64) -> Str {
   if i == 35 {
     return include_bytes("../../../build/user/mproc.elf");
   }
+  if i == 36 {
+    return include_bytes("../../../build/user/mfb.elf");
+  }
+  if i == 37 {
+    return include_bytes("../../../build/user/bwm.elf");
+  }
+  if i == 38 {
+    return include_bytes("../../../build/user/bhello.elf");
+  }
+  if i == 39 {
+    return include_bytes("../../../build/user/bterm.elf");
+  }
+  if i == 40 {
+    return include_bytes("../../../build/user/mserial.elf");
+  }
   return include_bytes("../../../build/user/fault.bin");
 }
 
 /// Whether the vDSO page holds an ELF image for AT_SYSINFO_EHDR to point at.
 fn vdso_is_elf() -> bool {
   return true;
+}
+
+/// AT_HWCAP and AT_HWCAP2: empty on x86-64 (a C library reads CPUID itself).
+fn hwcap() -> u64 {
+  return 0;
+}
+
+fn hwcap2() -> u64 {
+  return 0;
 }
 
 /// Fills the vDSO page: the image, then the clock it reads.

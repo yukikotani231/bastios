@@ -34,7 +34,7 @@ asked only for what the cache lacks, so a cache kept outside the build
 directory (ALPINE_CACHE in the Makefile) spares Docker Hub's rate limit
 on fresh checkouts; a 429 from it is waited out and retried.
 """
-import base64, gzip, hashlib, http.client, io, json, os, re, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.request
+import base64, zipfile, gzip, hashlib, http.client, io, json, os, re, shutil, subprocess, sys, tarfile, time, urllib.error, urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 # The guest's processor (COMPAT_ARCH, as run.py's --arch): apk's name for it
@@ -196,8 +196,10 @@ PKGINFO = [("P", "pkgname"), ("V", "pkgver"), ("T", "pkgdesc"), ("U", "url"),
 LISTS = [("D", "depend"), ("p", "provides"), ("r", "replaces"), ("i", "install_if")]
 
 def gz(b):
+    # Level 6, not gzip's default 9: on the 1.7 GB the images' packages
+    # hold, 9 takes about 3.5 times as long for 1% less.
     o = io.BytesIO()
-    with gzip.GzipFile(fileobj=o, mode="wb", mtime=0) as f:
+    with gzip.GzipFile(fileobj=o, mode="wb", mtime=0, compresslevel=6) as f:
         f.write(b)
     return o.getvalue()
 
@@ -298,6 +300,51 @@ def package(files, p, kept=({}, {})):
     cgz = gz(tar(control, cut=True))
     return cgz, cgz + dgz
 
+# cmake for AArch64. The image the x86-64 suite takes cmake from has no arm64
+# build, and Alpine's mirrors are not reachable from every machine, so the
+# package is made here from the `cmake` wheel on PyPI (musllinux, aarch64): the
+# binaries, their bundled C++ runtime and the Modules and Templates, with the
+# Help pages left out (see PRUNE). It installs under /opt/cmake, which keeps the
+# wheel's layout (the binaries find ../../cmake.libs and ../share by their own
+# path), and puts wrappers for cmake and ctest in /usr/bin.
+WHEEL_KEEP = ("cmake/data/bin/cmake", "cmake/data/bin/ctest", "cmake/data/share/cmake-", "cmake.libs/")
+
+def wheel_package(path):
+    """The cmake wheel at path as a package: (package dict, files, kept)."""
+    z = zipfile.ZipFile(path)
+    info = [n for n in z.namelist() if n.endswith(".dist-info/METADATA")][0]
+    ver = info.split("/")[0][:-len(".dist-info")].split("-", 1)[1]
+    files, p = {}, {"P": "cmake", "V": ver + "-r0", "T": "CMake, from the PyPI wheel", "A": ARCH,
+                    "t": "1760140800", "L": "BSD-3-Clause", "U": "https://cmake.org", "o": "cmake",
+                    "m": "BastiOS", "D": "", "p": "cmd:cmake=" + ver, "C": "cmake" + ver, "dirs": [], "files": []}
+    dirs = set()
+    def add(dest, ti, body, acl):
+        d, n = dest.rsplit("/", 1)
+        for i in range(1, d.count("/") + 2):
+            dirs.add("/".join(d.split("/")[:i]))
+        files[dest] = (ti, body)
+        p["files"].append([d, n, acl])
+    size = 0
+    for info in z.infolist():
+        n = info.filename
+        if info.is_dir() or not n.startswith(WHEEL_KEEP):
+            continue
+        dest = "opt/cmake/" + n
+        if "/Help/" in n:
+            continue
+        body = z.read(n)
+        size += len(body)
+        mode = "0:0:755" if n.startswith(("cmake/data/bin/", "cmake.libs/")) else None
+        add(dest, tarfile.TarInfo(dest), body, mode)
+    # Wrappers, not links: musl takes a program's $ORIGIN from the name it was
+    # started by, not from where a link leads, and cmake finds its libraries by it.
+    for tool in ("cmake", "ctest"):
+        body = f"#!/bin/sh\nexec /opt/cmake/cmake/data/bin/{tool} \"$@\"\n".encode()
+        add("usr/bin/" + tool, tarfile.TarInfo("usr/bin/" + tool), body, "0:0:755")
+    p["I"] = str(size)
+    p["dirs"] = [[d, None] for d in sorted(dirs)]
+    return p, files, ({}, {})
+
 # Small packages made here, to test what apk does around the files: a
 # dependency, an upgrade with a version constraint, the install, upgrade
 # and deinstall scripts (each appends to /var/log/bt.log), a trigger on a
@@ -362,7 +409,7 @@ def write_repo(o, pkgs, index=""):
     with open(os.path.join(o, "APKINDEX.tar.gz"), "wb") as f:
         f.write(gz(tar([(ti, index.encode())])))
 
-def repository(images, cache, o):
+def repository(images, cache, o, extra=()):
     """Writes every package the images hold to directory o, with an
     APKINDEX.tar.gz. Returns how many packages it got."""
     index, seen = "", set()
@@ -382,6 +429,15 @@ def repository(images, cache, o):
                 f.write(apk)
             index += "".join(f"{k}:{e[k]}\n" for k in "CPVASITULomtckDpri" if k in e) + "\n"
         del files
+    for p, files, kept in extra:
+        cgz, apk = package(files, p, kept)
+        e = dict(p)
+        e["C"] = "Q1" + base64.b64encode(hashlib.sha1(cgz).digest()).decode()
+        e["S"] = str(len(apk))
+        with open(os.path.join(o, f"{p['P']}-{p['V']}.apk"), "wb") as f:
+            f.write(apk)
+        index += "".join(f"{k}:{e[k]}\n" for k in "CPVASITULomtckDpri" if e.get(k)) + "\n"
+        seen.add((p["P"], p["V"]))
     ti = tarfile.TarInfo("APKINDEX")
     ti.size, ti.mode = len(index.encode()), 0o644
     with open(os.path.join(o, "APKINDEX.tar.gz"), "wb") as f:
@@ -436,6 +492,10 @@ def main():
     if "--busybox" in args:
         busybox = args[args.index("--busybox") + 1]
         del args[args.index("--busybox"):args.index("--busybox") + 2]
+    wheel = []
+    if "--cmake-wheel" in args:
+        wheel = [wheel_package(args[args.index("--cmake-wheel") + 1])]
+        del args[args.index("--cmake-wheel"):args.index("--cmake-wheel") + 2]
     extra = []
     if "--extra" in args:
         extra = args[args.index("--extra") + 1].split()
@@ -456,7 +516,7 @@ def main():
     with open(os.path.join(work, "busybox"), "wb") as f:
         f.write(open(busybox, "rb").read() if busybox else rootfs["bin/busybox"][1])
     http = os.path.join(work, "http")
-    n = repository(images, cache, http)
+    n = repository(images, cache, http, wheel)
     have = set()
     for p in installed(rootfs["lib/apk/db/installed"][1]):
         have.update([p["P"]] + [re.split(r"[<>=~]", x, maxsplit=1)[0] for x in p.get("p", "").split()])

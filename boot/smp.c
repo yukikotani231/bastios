@@ -786,6 +786,29 @@ void bst_smp_init(void) {
 extern uint64_t bst_boot_cmdline(uint64_t i);              /* multiboot.c */
 extern uint64_t bst_boot_region(uint64_t n, uint64_t f);
 extern uint64_t bst_boot_framebuffer(uint64_t f);
+/* The processor's own random number generator: RDSEED (conditioned entropy)
+ * where there is one, else RDRAND, each tried a few times as Intel advises.
+ * Bit 0 of the answer to i = 0 says RDSEED is there, bit 1 RDRAND; for
+ * i >= 1 the answer is a word from one of them, or 0 if it gave none. Both
+ * instructions are used only after CPUID says they exist. The kernel mixes
+ * the words into its own pool and trusts nothing to them alone. */
+static uint64_t hw_random(uint64_t i) {
+    uint32_t r[4];
+    cpuid(0, 0, r);
+    uint32_t max = r[0];
+    int seed = 0, rand = 0;
+    if (max >= 7) { cpuid(7, 0, r); seed = (r[1] >> 18) & 1; }
+    if (max >= 1) { cpuid(1, 0, r); rand = (r[2] >> 30) & 1; }
+    if (i == 0) return (uint64_t)seed | (uint64_t)rand << 1;
+    uint64_t v = 0;
+    unsigned char ok = 0;
+    for (int t = 0; seed && t < 16 && !ok; t++)
+        __asm__ volatile ("rdseed %0; setc %1" : "=r"(v), "=qm"(ok) : : "cc");
+    for (int t = 0; !ok && rand && t < 10; t++)
+        __asm__ volatile ("rdrand %0; setc %1" : "=r"(v), "=qm"(ok) : : "cc");
+    return ok ? v : 0;
+}
+
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
     switch (what) {
     case 0: return bst_boot_cmdline(i);                    /* a byte, or 256 */
@@ -811,6 +834,7 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         return t && mapped(t, 36) ? rd32(t) : 0;           /* its signature, 0 if out of reach */
     }
     case 9: return bst_boot_framebuffer(i);                /* the framebuffer, anywhere: as boot_fb */
+    case 12: return hw_random(i);                          /* RDSEED / RDRAND: 0 what there is, else a word */
     }
     return 0;
 }
