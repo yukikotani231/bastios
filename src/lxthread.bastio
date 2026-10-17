@@ -230,7 +230,6 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   swap_words(&mut k.holes, h * HOLE_N * 2, p * HOLE_N * 2, HOLE_N * 2);
   swap_words(&mut k.lazy, h * LZ_W, p * LZ_W, LZ_W);
   swap_words(&mut k.anon, h * AN_N * 2, p * AN_N * 2, AN_N * 2);
-  swap_words(&mut k.anon, an_xat(h), an_xat(p), 1);
   swap_words(&mut k.alarms, PT_BASE + h * PT_N * PT_W, PT_BASE + p * PT_N * PT_W, PT_N * PT_W);
   return true;
 }

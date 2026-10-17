@@ -393,14 +393,6 @@ fn an_at(p: u64, i: u64, f: u64) -> u64
   return (p * AN_N + i) * 2 + f;
 }
 
-/// The word of process p in k.anon whose bit i says whether the pages of
-/// record i may also run code.
-fn an_xat(p: u64) -> u64
-  requires p < NPROC
-  ensures result < ANON_LEN
-{
-  return NPROC * AN_N * 2 + p;
-}
 
 /// Word i of an, or 0 past its end.
 fn an_get(an: &Buf, i: u64) -> u64 {
@@ -420,7 +412,7 @@ fn anon_covers(an: &Buf, pid: u64, q: u64) -> bool
     invariant i <= AN_N && pid < NPROC
   {
     let first1 = an_get(an, an_at(pid, i, 0));
-    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < an_get(an, an_at(pid, i, 1)) {
+    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < an_get(an, an_at(pid, i, 1)) % AN_X {
       return true;
     }
     i = i + 1;
@@ -439,8 +431,9 @@ fn anon_exec(an: &Buf, pid: u64, q: u64) -> bool
     invariant i <= AN_N && pid < NPROC
   {
     let first1 = an_get(an, an_at(pid, i, 0));
-    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < an_get(an, an_at(pid, i, 1)) {
-      return (an_get(an, an_xat(pid)) >> i) % 2 == 1;
+    let w = an_get(an, an_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < w % AN_X {
+      return w / AN_X == 1;
     }
     i = i + 1;
   }
@@ -458,7 +451,7 @@ fn anon_end(an: &Buf, pid: u64, q: u64) -> u64
     invariant i <= AN_N && pid < NPROC && q < WPAGES
   {
     let first1 = an_get(an, an_at(pid, i, 0));
-    let pages = an_get(an, an_at(pid, i, 1));
+    let pages = an_get(an, an_at(pid, i, 1)) % AN_X;
     if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < pages && pages <= WPAGES - (first1 - 1) {
       return first1 - 1 + pages;
     }
@@ -479,7 +472,7 @@ fn anon_after(an: &Buf, pid: u64, q: u64) -> u64
     invariant i <= AN_N && pid < NPROC && best <= WPAGES
   {
     let first1 = an_get(an, an_at(pid, i, 0));
-    let pages = an_get(an, an_at(pid, i, 1));
+    let pages = an_get(an, an_at(pid, i, 1)) % AN_X;
     if first1 != 0 && first1 - 1 > q && first1 - 1 < best && pages != 0 {
       best = first1 - 1;
     }
