@@ -382,6 +382,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     return (p + 1) % NPROC;
   }
+  let mut is_bus = false;
   if v == V_ABORT {
     let sw = swap_fault(&mut s.k, p);
     if sw == SW_OK {
@@ -413,6 +414,21 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       if state(s.k.procs, p) == DISKWAIT {
         return (p + 1) % NPROC;
       }
+      return p;
+    }
+    // A page past a mapped file's end (src/lxmem.bastio). If the file has
+    // grown to cover it the instruction runs again; a second fault at the
+    // same place is not this one's doing, and goes on to the handlers below.
+    let bva = pget(s.k.procs, p, reg_word(R_FAULT));
+    let brip = pget(s.k.procs, p, reg_word(R_PC)) % 4611686018427387904 + 1;
+    let mut bus = 0;
+    if pget(s.k.procs, p, F_FAULT_RIP) != brip || pget(s.k.procs, p, F_FAULT_VA) != bva {
+      bus = bus_fault(&mut s.k, p);
+    }
+    is_bus = bus == 2;
+    if bus == 1 {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, brip);
+      pset(&mut s.k.procs, p, F_FAULT_VA, bva);
       return p;
     }
     if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) {
@@ -450,15 +466,26 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   } else if v == 1 {
     sig = SIGTRAP;                          // a single step (src/lxptrace.bastio)
     pt_stepped(&mut s.k, p);
-  } else if v == 17 {
+  } else if v == 17 || is_bus {
     sig = SIGBUS;
   }
   let addr = pget(s.k.procs, p, reg_word(R_FAULT));
-  // The siginfo's si_code: ILL_ILLOPN (2) for a bad opcode, else the address
-  // is unmapped (SEGV_MAPERR, BUS_ADRALN and TRAP_BRKPT are all 1).
+  // The siginfo's si_code: ILL_ILLOPN (2) for a bad opcode, BUS_ADRERR (2) for
+  // a page past a file's end, SEGV_ACCERR (2) for a page the access is not
+  // allowed on (a permission fault, or an address inside the mmap area that a
+  // PROT_NONE reservation holds), else the address is unmapped (SEGV_MAPERR,
+  // BUS_ADRALN and TRAP_BRKPT are all 1).
   let mut code = 1;
-  if sig == SIGILL {
+  if sig == SIGILL || is_bus {
     code = 2;
+  } else if v == V_ABORT {
+    let st = pget(s.k.procs, p, reg_word(34)) % 64;
+    let low = pget(s.k.procs, p, F_MMAP);
+    if st >= 0x0d && st <= 0x0f {
+      code = 2;
+    } else if addr >= USER_BASE && low <= STACK_FIRST * 4096 && addr >= low && addr < STACK_FIRST * 4096 && !hole_within(s.k, p, addr / 4096, addr / 4096 + 1) {
+      code = 2;                             // inside the mmap area: a PROT_NONE reservation maps no pages
+    }
   }
   if fault_caught(&mut s.k, p, sig, addr, code) {
     return (p + 1) % NPROC;
