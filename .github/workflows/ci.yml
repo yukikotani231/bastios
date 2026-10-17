@@ -136,6 +136,69 @@ jobs:
           AARCH64_REQUIRED: 1
           BASTIOC0: bastiolang/stage0/target/release/bastioc0
           BASTIOLIB: bastiolang
+  # bench/run.py under KVM: BastiOS and Linux (Ubuntu's generic kernel) in the
+  # same QEMU machine, one core of each test per run. GitHub's hosted runners
+  # offer /dev/kvm, so the figures are not the software-TLB artefacts of
+  # TCG (docs/performance.md), and the table goes to the job summary. It runs
+  # on every push to main, and on a pull request that touches bench/, this
+  # job or tools/ci-kvm.sh; for any other pull request it only says so.
+  bench-kvm:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: want
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = push ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+          if git diff --name-only "$BASE" "$GITHUB_SHA" | grep -qE '^bench/|^tools/ci-kvm\.sh$|^\.github/workflows/ci\.yml$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "bench-kvm: nothing under bench/ changed, skipped" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - if: steps.want.outputs.run == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - if: steps.want.outputs.run == 'true'
+        run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+      - if: steps.want.outputs.run == 'true'
+        run: cd bastiolang/stage0 && cargo build --release --locked
+      - if: steps.want.outputs.run == 'true'
+        name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: |
+            proof-x86-64-
+            proof-
+          path: build/proof-cache
+      - if: steps.want.outputs.run == 'true'
+        run: make build/bastios.elf BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - if: steps.want.outputs.run == 'true'
+        run: tools/ci-kvm.sh
+      - if: steps.want.outputs.run == 'true'
+        name: Run the benchmarks
+        run: |
+          mkdir -p build/bench
+          bench/run.py --smp 2 --runs 3 --out build/bench/kvm.json | tee build/bench/kvm.md
+          { echo '### bench/run.py under KVM'; echo; cat build/bench/kvm.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: always() && steps.want.outputs.run == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: bench-kvm
+          path: |
+            build/bench/kvm.json
+            build/bench/kvm.md
+          if-no-files-found: ignore
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
   # the model's sources). The `test` job skips these boots; here they run

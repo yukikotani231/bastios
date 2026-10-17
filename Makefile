@@ -974,6 +974,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
+# Besides runtest/syscalls: the pseudo-terminal and the namespace (container) tests.
+LTP_SUITES ?= --suite pty --suite containers
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -995,16 +997,18 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/lib -s
 	$(MAKE) -C build/ltp/libs -s
 	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs
 # (25 boots, three at a time; about 10 minutes on four processors). Fails
 # only if a test in ltp_baseline.txt stops passing.
 compat-ltp: build/bastios.elf build/ltp/.built
-	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
 
 compat-ltp-baseline: build/bastios.elf build/ltp/.built
-	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
 
 # Not part of `make test`: the same micro-benchmarks (bench/osbench.c) on
 # BastiOS and on Linux in the same QEMU machine, side by side; see
