@@ -1,7 +1,7 @@
 // Extended attributes, kept in memory. No file system here stores them, so
 // they live in a small table keyed by the file layer handle of the file
 // (the handle names the file, not the path: a hard link or a rename does
-// not lose them). XA_N attributes in all, each a name of at most
+// not lose them). XA_N (256) attributes in all, each a name of at most
 // XA_NAME - 1 bytes and a value of at most XA_VAL bytes; the table is
 // emptied by a reboot like the files are not, so it is a stand-in, not
 // persistence. A handle's attributes go with its last name (xa_gone, called
@@ -20,7 +20,7 @@ const LX_SETXATTR: u64 = 188;            // 188 .. 199: set, get, list,
 const LX_FREMOVEXATTR: u64 = 199;        // remove, each as path, l-path, fd
 const EOPNOTSUPP_X: u64 = 18446744073709551521;  // 2^64 - 95
 const ENODATA_X: u64 = 18446744073709551555;     // 2^64 - 61
-const XA_N: u64 = 32;                    // attributes in the table (SYS_XA, XAB in src/proc.bastio)
+const XA_N: u64 = 256;                   // attributes in the table (SYS_XA, XAB in src/proc.bastio)
 const XA_ROW: u64 = 320;                 // bytes per attribute in k.mstr from XAB: name, then value
 const XA_NAME: u64 = 64;                 // name bytes (with a NUL, for listxattr)
 const XA_VAL: u64 = 256;                 // the most value bytes
@@ -305,7 +305,8 @@ fn xa_get(k: &mut Kernel, pid: u64, h: u64, nm: &Bytes, nl: u64, va: u64, size: 
 }
 
 /// listxattr: h's names, each followed by a NUL, to user address va (size
-/// bytes), or their total length if size is 0.
+/// bytes), or their total length if size is 0. E2BIG if the names are more
+/// than one call moves (XFER bytes).
 fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -316,11 +317,14 @@ fn xa_list(k: &mut Kernel, pid: u64, h: u64, va: u64, size: u64) -> u64
   let mut total = 0;
   let mut e = 0;
   while e < XA_N
-    invariant e <= XA_N && total <= e * XA_NAME && kok(k)
+    invariant e <= XA_N && total < XFER && kok(k)
   {
     if get(k.sys, SYS_XA + 3 * e) == h + 1 {
       let nl = get(k.sys, SYS_XA + 3 * e + 1);
       if nl < XA_NAME {
+        if total + nl + 1 >= XFER {
+          return E2BIG;                    // the names are more than one call moves
+        }
         let mut i = 0;
         while i < nl
           invariant i <= nl && nl < XA_NAME && total + nl < XFER && e < XA_N && kok(k)
