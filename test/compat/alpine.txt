@@ -44,6 +44,10 @@ curl
 less
 openssh-keygen
 
+== apk: STRESS install and remove python3 eight times, dumping the network when a download stalls
+$ for i in 1 2 3 4 5 6 7 8; do bb rm -f /apk.rc /apk.log; (bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 >/apk.log 2>&1; echo $? >/apk.rc) & n=0; while [ ! -e /apk.rc ] && [ $n -lt 120 ]; do bb sleep 1; n=$((n+1)); done; if [ -e /apk.rc ]; then echo "round $i: $n s, status $(bb cat /apk.rc)"; else echo "STALL round $i after $n s"; bb tail -n 2 /apk.log; for r in 1 2; do echo TCP$r; bb cat /proc/net/tcp | bb cut -c1-110; echo DEV$r; bb cat /proc/net/dev | bb tail -n +3 | bb tr -s ' '; bb sleep 3; done; bb ps | bb tail -n 8; echo ENDSTALL; break; fi; bb chroot /disk/a /sbin/apk del -q --no-progress python3 >/dev/null 2>&1; done; echo done
+done
+
 == git: commit, log and diff
 $ bb chroot /disk/a /bin/sh -lc 'cd /root && git init -q --template= r && cd r && git config user.name a && git config user.email a@b && printf "a\nb\n" > f && git add f && git commit -qm one && printf "a\nc\n" > f && git commit -qam two && git --no-pager log --format=%s && git diff --stat HEAD~1 | cat'
 two
