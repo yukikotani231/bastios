@@ -30,6 +30,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 
 #include "bwmproto.h"
@@ -540,6 +541,21 @@ static const char kmap[]  = "\0\033" "1234567890-=\177\tqwertyuiop[]\r\0asdfghjk
 static const char kmaps[] = "\0\033" "!@#$%^&*()_+\177\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
 static int k_shift, k_ctrl, k_caps;
 
+/* Auto-repeat is done here, since the key events carry only presses and
+ * releases: the last key pressed repeats after 400 ms, then every 40 ms,
+ * until it is released. */
+#define REPEAT_FIRST_MS 400
+#define REPEAT_NEXT_MS  40
+static unsigned rep_code;
+static long long rep_due;                 /* when the next repeat is due, in ms; valid while rep_code != 0 */
+
+static long long now_ms(void)
+{
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
+}
+
 /* The bytes a key press makes (at most 4) in out; returns how many. */
 static int key_bytes(unsigned code, char *out)
 {
@@ -682,7 +698,12 @@ int main(int argc, char **argv)
             icli[i] = -1;
             if (clis[i].fd >= 0) { icli[i] = np; p[np++] = (struct pollfd){ clis[i].fd, POLLIN, 0 }; }
         }
-        if (poll(p, np, -1) < 0 && errno != EINTR)
+        int wait = -1;
+        if (rep_code) {
+            long long d = rep_due - now_ms();
+            wait = d < 0 ? 0 : (int)d;
+        }
+        if (poll(p, np, wait) < 0 && errno != EINTR)
             break;
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
@@ -717,9 +738,23 @@ int main(int argc, char **argv)
                         for (int j = 0; j < m; j++)
                             if (type_byte(top, out[j]))
                                 running = 0;
+                        if (m > 0 && ev[i].value == 1 && out[0] != 17 && out[0] != 20) {
+                            rep_code = code;
+                            rep_due = now_ms() + REPEAT_FIRST_MS;
+                        }
                     }
+                    if (!down && code == rep_code)
+                        rep_code = 0;
                 }
             }
+        }
+        if (rep_code && now_ms() >= rep_due) {
+            char out[4];
+            int m = key_bytes(rep_code, out);
+            for (int j = 0; j < m; j++)
+                if (type_byte(top, out[j]))
+                    running = 0;
+            rep_due += REPEAT_NEXT_MS;
         }
         if (ils >= 0 && (p[ils].revents & POLLIN)) {
             int c;

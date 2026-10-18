@@ -592,6 +592,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # A key held down repeats (bwm does it, the events have none).
+            monitor("sendkey z 2500")
+            time.sleep(1.2)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any("zzzzzzzzzz" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) a key held down repeats in the terminal window")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            time.sleep(2)                                   # let go of the key before the next one
+            monitor("sendkey ctrl-u")
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
