@@ -1268,6 +1268,64 @@ fn lx_open_orphan(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
   return fd;
 }
 
+/// open of the built-in program "bin/NAME" (the first n bytes of the transfer
+/// buffer) for reading: a RAM file without a name that holds the program's
+/// bytes, so open, read and mmap see what exec runs. It is a copy; a write
+/// to /bin stays ENOENT.
+fn lx_open_bin(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && 4 < n && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let prog = bin_prog(k.fs.xfer, n);
+  if prog >= NPROGS {
+    return ENOENT;
+  }
+  if fd_free(k, pid, 0) >= LXNFD || !row_free(k, pid) {
+    return EMFILE;
+  }
+  let img = prog_image(prog);
+  let total = slen(img);
+  let t = sat_add(k.ns, prog);
+  let nm = memfd_name(&mut k, pid, t);
+  if vfs_lookup(&mut k.fs, nm) != NO_FILE {
+    return EAGAIN;                          // a name in use: try again
+  }
+  let row = vfs_open(&mut k.fs, &mut k.mem, 0, FD_POOL, O_READ + O_WRITE + O_CREATE, nm);
+  if row == NO_FD || row >= FD_POOL {
+    return ENOSPC;
+  }
+  let f = vfs_row_file(k.fs, row);
+  let n2 = memfd_name(&mut k, pid, t);
+  vfs_unlink(&mut k.fs, &mut k.mem, n2);    // the file lives as long as a row holds it
+  let mut off = 0;
+  let mut ok = f < NFILES;
+  while ok && off < total
+    invariant off <= total && kok(k)
+  {
+    let mut c = total - off;
+    if c > XFER {
+      c = XFER;
+    }
+    let mut i = 0;
+    while i < c
+      invariant i <= c && c <= XFER && off + c <= total && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, sget(img, off + i));
+      i = i + 1;
+    }
+    if vfs_write(&mut k.fs, &mut k.mem, row, c) != c {
+      ok = false;
+    }
+    off = off + c;
+  }
+  let mut fd = ENOMEM;
+  if ok && f < NFILES {
+    fd = lx_open_orphan(&mut k, pid, f, flags);
+  }
+  vfs_close(&mut k.fs, &mut k.mem, row);
+  return fd;
+}
+
 /// lx_open_n, once the permission checks are done: /proc files, devices
 /// and nodes.
 fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
@@ -1393,6 +1451,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   ensures kok(k)
 {
   let fh = vfs_lookup(&mut k.fs, n);
+  if fh == NO_FILE && n > 4 && xfer_bin(k.fs.xfer) && flags % 4 == 0 && flags & (LO_CREAT + LO_TRUNC + LO_PATH + LO_DIRECTORY) == 0 {
+    return lx_open_bin(&mut k, pid, n, flags);
+  }
   let fm = vfs_meta(&mut k.fs, fh);
   if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 && flags & LO_PATH == 0 {
     return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio); O_PATH holds it, and connect follows /proc/self/fd/N to it

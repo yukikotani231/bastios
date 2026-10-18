@@ -284,7 +284,10 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
-  let w = tcp_send_xfer(&mut k, pid, fd, got, more);
+  // A piece with more of the same call behind it is sent corked, so the
+  // pieces go out as full segments and not one short segment each; the
+  // last piece is sent as the caller said.
+  let w = tcp_send_xfer(&mut k, pid, fd, got, more || got < n);
   if w != got {
     return w;
   }
@@ -298,13 +301,22 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
     if c == NO_RESULT || c == 0 {
       go = false;                           // as a short write
     } else {
-      let r = tcp_send_xfer(&mut k, pid, fd, c, more);
+      let last = total + c >= n || total + c > TCP_RING - XFER;
+      let r = tcp_send_piece(&mut k, pid, fd, c, more || !last, !last);
       if r > c {
         go = false;                         // full, or an error: say it next time
       } else {
         total = total + r;
         go = r == c;
       }
+    }
+  }
+  if !more && total < n {
+    // Stopped before the last piece: the pieces sent so far were corked, but
+    // nothing follows to uncork the short segment that may be left.
+    let tk2 = tk_look(k, pid, fd);
+    if tk2.err == 0 && tk2.mode == TM_CONN {
+      tcp_cork(&mut k.nic, tk2.t, false);
     }
   }
   return total;
@@ -318,6 +330,17 @@ fn tcp_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  return tcp_send_piece(&mut k, pid, fd, n, more, false);
+}
+
+/// tcp_send_xfer; with `mid`, as a piece in the middle of one call (the
+/// pieces of lx_tcp_send), the buffers of the card were fed and the cork was
+/// set by the piece before, so neither is done again: each costs about as
+/// much as the copy of the piece does.
+fn tcp_send_piece(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool, mid: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   let tk = tk_look(k, pid, fd);
   if tk.err != 0 {
     return tk.err;
@@ -328,8 +351,10 @@ fn tcp_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool) -> u64
   if n == 0 {
     return 0;
   }
-  nic_feed(&mut k.nic, &mut k.mem);
-  tcp_cork(&mut k.nic, tk.t, more);
+  if !mid {
+    nic_feed(&mut k.nic, &mut k.mem);
+    tcp_cork(&mut k.nic, tk.t, more);
+  }
   let w = tcp_send(&mut k.nic, tk.t, k.fs.xfer, n);
   if w == NO_SOCK {
     return EPIPE;
