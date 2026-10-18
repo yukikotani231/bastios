@@ -42,6 +42,7 @@ system. Without `/dev/kvm`, `bench/run.py` downloads the kernel with
 | tcplat, tcpbw | the same over TCP on 127.0.0.1 |
 
 CI's `bench-kvm` job runs the same table under KVM on every push to main (GitHub's hosted runners offer `/dev/kvm`) and puts it in the job summary, so a figure there is free of TCG's software-TLB costs; the tables below are TCG.
+On a pull request that touches `bench/`, `boot/` or `src/` the job also builds the pull request's base and runs `bench/ab.py`, which boots the two kernels by turns (five rounds, three runs of each test per boot) and prints the ratio of their times: one shared host moves by more than a typical change makes, so two tables from two jobs cannot say which kernel is faster, but rounds that alternate can, and the spread of the rounds says how far to trust a ratio.
 
 `make bench-workloads` adds whole-program workloads and `make bench-net` a TCP comparison over a network card (see Results).
 
