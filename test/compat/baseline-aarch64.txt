@@ -365,6 +365,7 @@ t_file: utime
 t_file: write
 t_file: writev
 t_file: a write of many unaligned blocks is not short
+t_file: two hundred attributes on one file
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
@@ -1616,6 +1617,12 @@ apps: nc: a raw HTTP request to the host
 apps: netns: a new network namespace has only lo, down
 apps: netns: a veth pair on a bridge; ping across, wget out through masquerade
 t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
+t_ltp2: a process signal every thread blocks goes to the first thread that unblocks it
+t_ltp2: lstat of /proc/self/fd/N is a link
+t_ltp2: lstat of /proc/self/task/TID/fd/N is a link
+t_ltp2: lstat of /proc/self/task/TID/ns/mnt and /proc/self/task/TID/status
+t_ltp2: lstat of a /proc/self/task/TID/fd directory
+t_ltp2: stat of /proc/self/task/TID/fdinfo/N
 bastio: bastio-lsp: a type error from bastioc1 becomes a diagnostic
 bastio: bastio-lsp: formatting
 bastio: bastio-lsp: go to definition
