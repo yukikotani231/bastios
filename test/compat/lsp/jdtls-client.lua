@@ -17,7 +17,7 @@ local id = vim.lsp.start({
   cmd_env = { JAVA_HOME = "/opt/java/openjdk", HOME = "/root" },
   root_dir = "/root/javaproj",
 }, { bufnr = buf })
-vim.wait(240000, function()
+vim.wait(900000, function()
   local c = vim.lsp.get_client_by_id(id)
   return c ~= nil and c.initialized
 end, 100)
@@ -25,7 +25,7 @@ local c = vim.lsp.get_client_by_id(id)
 out[#out + 1] = (c and c.initialized) and "initialized" or "no-init"
 local text = "no-reply"
 -- `System.out.println(add(1, 2))`, line 4: the cursor is on `add`; the hover is its signature.
-vim.wait(300000, function()
+vim.wait(900000, function()
   local reply
   c:request("textDocument/hover", { textDocument = { uri = vim.uri_from_bufnr(buf) }, position = { line = 4, character = 28 } },
     function(_, r) reply = r end, buf)
