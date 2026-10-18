@@ -986,6 +986,7 @@ int main(void) {
            unlink("/tmp/mflags/null");
            umount("/tmp/mflags");
            rmdir("/tmp/mflags");
+           ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;
            int fd = open("/bin/cat", O_RDONLY);
