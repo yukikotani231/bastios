@@ -1372,6 +1372,7 @@ posix-mq_close_3-1
 posix-mq_close_3-2
 posix-mq_close_3-3
 posix-mq_close_4-1
+posix-mq_close_2-1
 posix-mq_getattr_2-1
 posix-mq_getattr_2-2
 posix-mq_getattr_3-1
@@ -1682,6 +1683,7 @@ posix-pthread_kill_2-1
 posix-pthread_kill_3-1
 posix-pthread_kill_7-1
 posix-pthread_kill_8-1
+posix-sigwait_6-1
 posix-pthread_mutex_destroy_1-1
 posix-pthread_mutex_destroy_2-1
 posix-pthread_mutex_destroy_2-2
