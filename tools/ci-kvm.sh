@@ -34,7 +34,10 @@ sudo udevadm control --reload-rules
 sudo udevadm trigger --name-match=kvm
 dir="${RUNNER_TEMP:-/tmp}/kvm-bin"
 mkdir -p "$dir"
-qemu=$(command -v qemu-system-x86_64)
+# Ask for QEMU without our own directory on the PATH: a second run in the same
+# job (the pcid-kvm job runs this twice) would otherwise find the first wrapper
+# and make the new one exec itself.
+qemu=$(PATH=$(printf %s "$PATH" | tr : '\n' | grep -vxF "$dir" | paste -sd:) command -v qemu-system-x86_64)
 if [ -n "${CI_KVM_PCID:-}" ]; then
     # Every argument after -cpu gets +pcid; -append pcid goes last.
     cat >"$dir/qemu-system-x86_64" <<EOF
