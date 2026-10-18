@@ -1618,3 +1618,10 @@ bastio: bastio-lsp: hover shows the signature and the doc comment
 bastio: bastiofmt: --check names an unformatted file
 bastio: bastiofmt: formats the compiler's parser, and the result is formatted
 bastio: bastiofmt: lays a line out
+dev: make: a project of two files
+dev: make: parallel jobs
+dev: make: rebuilds only what changed
+dev: tcc: a compile error
+dev: tcc: arguments, exit status, an executable file
+dev: tcc: hello
+dev: tcc: the library (malloc, qsort, files, strings)
