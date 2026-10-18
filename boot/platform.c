@@ -92,9 +92,8 @@ uint64_t bst_pcid_on;
 
 /* Whether the processors have RDFSBASE and WRFSBASE (CPUID.7:EBX bit 0). If
  * so bst_cpu_enter turns CR4.FSGSBASE on and the trap path reads and writes
- * the user's FS base with them, which are cheaper than RDMSR and WRMSR (a
- * system call round trip is about 5% shorter under KVM). Otherwise it uses
- * the MSR. */
+ * the user's FS base with them: cheaper than RDMSR and WRMSR (a system call
+ * is about 5% shorter under KVM). Otherwise it uses the MSR. */
 uint64_t bst_fsgsbase;
 
 void bst_platform_init(void) {
