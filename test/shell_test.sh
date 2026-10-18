@@ -310,7 +310,7 @@ steps = [
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
     # 450 connections to ourselves at once is 900 in the kernel's table (it
     # held 32, then 240), and 250 UDP sockets at once (32 before).
-    ("mtcp many 450", b"mtcp: 450 connections and 250 udp sockets, 16 queued", b"\n# "),
+    ("mtcp many 450", b"mtcp: 450 connections and 250 udp sockets, 64 queued", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the

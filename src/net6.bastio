@@ -399,7 +399,7 @@ fn v6_in(n: &mut Net, flen: u64)
 fn raw6_slot(n: &Net, s: u64) -> u64
   requires net_ok(n) && s < SOCKS
   ensures result <= RXQ
-  ensures result < RXQ ==> (s + 1) * RXQ * UDP_MAX <= blen(n.dq)
+  ensures result < RXQ ==> (s + 1) * RXQ * UDP_MAX <= blen(n.dq) && (s + 1) * RXQ * SLOT_W <= len(n.dm)
 {
   let count = sk_get(n, s, S_COUNT);
   if udp_slot_ok(n, s) && sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP6 && sk_get(n, s, S_NS) == n.ns && count < RXQ {
@@ -423,9 +423,9 @@ fn raw6_deliver(n: &mut Net, plen: u64, src: u64, hops: u64)
     let count = sk_get(n, s, S_COUNT);
     if slot < RXQ && count < RXQ {
       bcopy(&mut n.dq, (s * RXQ + slot) * UDP_MAX, n.pkt, 54, plen);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, src);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, hops);   // the "port" of a raw message: its hop limit
+      dm_set(&mut n, s, slot, 0, plen);
+      dm_set(&mut n, s, slot, 1, src);
+      dm_set(&mut n, s, slot, 2, hops);   // the "port" of a raw message: its hop limit
       sk_set(&mut n, s, S_COUNT, count + 1);
     }
     s = s + 1;
@@ -453,9 +453,9 @@ fn raw6_local(n: &mut Net, ip: u64, buf: &Bytes, size: u64) -> u64
       let at = (s * RXQ + slot) * UDP_MAX;
       bcopy(&mut n.dq, at, buf, 0, size);
       bset(&mut n.dq, at, cast[u8](ICMP6_ECHO_REPLY));
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, size);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, ip);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 64);
+      dm_set(&mut n, s, slot, 0, size);
+      dm_set(&mut n, s, slot, 1, ip);
+      dm_set(&mut n, s, slot, 2, 64);
       sk_set(&mut n, s, S_COUNT, count + 1);
     }
     s = s + 1;
