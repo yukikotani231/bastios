@@ -1611,3 +1611,10 @@ apps: nc: a raw HTTP request to the host
 apps: netns: a new network namespace has only lo, down
 apps: netns: a veth pair on a bridge; ping across, wget out through masquerade
 t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
+bastio: bastio-lsp: a type error from bastioc1 becomes a diagnostic
+bastio: bastio-lsp: formatting
+bastio: bastio-lsp: go to definition
+bastio: bastio-lsp: hover shows the signature and the doc comment
+bastio: bastiofmt: --check names an unformatted file
+bastio: bastiofmt: formats the compiler's parser, and the result is formatted
+bastio: bastiofmt: lays a line out
