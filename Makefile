@@ -607,6 +607,18 @@ build/compat/jsontools.tar: test/compat/lsp/json/package.json test/compat/lsp/js
 	tar -cf $@.part -C build/compat/src/json node_modules --transform 's,^node_modules,opt/jsonls/node_modules,' --owner=0 --group=0
 	mv $@.part $@
 
+# The Bash language server (bash-language-server) with the JavaScript packages
+# it loads, as a tar file to unpack under the Alpine root (opt/bashls/node_modules)
+# for the case that runs it under Alpine's node with Neovim's LSP client. Pinned
+# by test/compat/lsp/bash/package-lock.json, like jsontools.tar. x86-64 only.
+build/compat/bashtools.tar: test/compat/lsp/bash/package.json test/compat/lsp/bash/package-lock.json | build/compat/src
+	rm -rf build/compat/src/bash && mkdir build/compat/src/bash
+	cp test/compat/lsp/bash/package.json test/compat/lsp/bash/package-lock.json build/compat/src/bash/
+	cd build/compat/src/bash && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null
+	rm -rf build/compat/src/bash/node_modules/.bin
+	tar -cf $@.part -C build/compat/src/bash node_modules --transform 's,^node_modules,opt/bashls/node_modules,' --owner=0 --group=0
+	mv $@.part $@
+
 # python-lsp-server and the pure-Python packages it needs, as a tar file for
 # the case that runs it under Alpine's python3 with Neovim's LSP client. The
 # wheels come from PyPI, each pinned by SHA-256 in test/compat/pylsp.py, and are
@@ -882,10 +894,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar build/compat/jsontools.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar build/compat/jsontools.tar build/compat/bashtools.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar build/compat/jsontools.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar build/compat/jsontools.tar build/compat/bashtools.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
