@@ -330,7 +330,7 @@ change to its mapping. The option is off by default because it can only be
 tested under KVM (QEMU's TCG has no PCID): the `pcid-kvm` job in CI checks
 that CR4.PCIDE follows the command line, runs the memory, process, thread,
 signal, ptrace, IPC and file programs of the compat suite with PCIDs on, and
-prints the system call time both ways in its summary. A later step could keep
+compares the benchmarks with and without PCIDs on the same kernel, booted by turns (`bench/ab.py --append-b pcid`), in its summary. A later step could keep
 the user table's translations too (a PCID per address space, flushed when
 `bst_pt_take` or `bst_pt_set_access` changed an entry), which needs the
 prelude's generation count to cover permission changes.
