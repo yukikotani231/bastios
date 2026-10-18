@@ -141,6 +141,66 @@ static int bwm_create_shm(int fd, unsigned w, unsigned h, const char *title, uin
     return r.id;
 }
 
+/* Says that the window can be resized: bwm may now send BWM_RESIZE. */
+static int bwm_resizable(int fd, int id)
+{
+    struct bwm_resizable r = { (uint32_t)id };
+    return bwm_send(fd, BWM_RESIZABLE, &r, sizeof r);
+}
+
+/* Answers a BWM_RESIZE: the window's contents are now w * h pixels. */
+static int bwm_resized(int fd, int id, unsigned w, unsigned h)
+{
+    struct bwm_resized r = { (uint32_t)id, w, h };
+    return bwm_send(fd, BWM_RESIZED, &r, sizeof r);
+}
+
+/* The same for a shared window: new memory for its w * h pixels goes to
+ * bwm, and *pix points to it (the old memory is unmapped, old_len bytes).
+ * Returns 0, or -1 with the old pixels still in place. */
+static int bwm_resized_shm(int fd, int id, unsigned w, unsigned h, uint32_t **pix, size_t old_len)
+{
+    size_t len = (size_t)w * h * 4;
+    int mf = memfd_create("bwm-window", MFD_CLOEXEC);
+    if (mf < 0)
+        return -1;
+    void *m = MAP_FAILED;
+    if (ftruncate(mf, len) == 0)
+        m = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_SHARED, mf, 0);
+    if (m == MAP_FAILED) {
+        close(mf);
+        return -1;
+    }
+    struct bwm_resized r = { (uint32_t)id, w, h };
+    struct bwm_hdr hd = { BWM_RESIZED, sizeof r };
+    char msg[sizeof hd + sizeof r];
+    memcpy(msg, &hd, sizeof hd);
+    memcpy(msg + sizeof hd, &r, sizeof r);
+    struct iovec iov = { msg, sizeof msg };
+    union { char b[CMSG_SPACE(sizeof(int))]; struct cmsghdr a; } u;
+    memset(&u, 0, sizeof u);
+    struct msghdr mh;
+    memset(&mh, 0, sizeof mh);
+    mh.msg_iov = &iov;
+    mh.msg_iovlen = 1;
+    mh.msg_control = u.b;
+    mh.msg_controllen = sizeof u.b;
+    struct cmsghdr *cm = CMSG_FIRSTHDR(&mh);
+    cm->cmsg_level = SOL_SOCKET;
+    cm->cmsg_type = SCM_RIGHTS;
+    cm->cmsg_len = CMSG_LEN(sizeof(int));
+    memcpy(CMSG_DATA(cm), &mf, sizeof(int));
+    ssize_t n = sendmsg(fd, &mh, 0);
+    close(mf);
+    if (n != (ssize_t)sizeof msg) {
+        munmap(m, len);
+        return -1;
+    }
+    munmap(*pix, old_len);
+    *pix = m;
+    return 0;
+}
+
 /* Tells bwm that the rectangle (x, y, w, h) of a shared window changed. */
 static int bwm_damage(int fd, int id, unsigned x, unsigned y, unsigned w, unsigned h)
 {

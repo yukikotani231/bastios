@@ -471,7 +471,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bhello: mouse 78 50 1", mark)
             print(("ok  " if good else "FAIL"), f"({name}) a click inside the window reaches the client, in its own coordinates")
             fails += not good
-            monitor("mouse_move 114 -60", "mouse_button 1", "mouse_button 0")
+            # The grip at the corner of the frame: dragging it 100 right and 60
+            # down asks the client for a 300 x 160 window, which it paints again.
+            monitor("mouse_move 120 45", "mouse_button 1", "mouse_move 100 60", "mouse_button 0")
+            good = until(b"bhello: resized 300 160", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(100, 200) == (0, 255, 0) and at(350, 200) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) dragging the grip resizes the window and the client paints it again")
+            fails += not good
+            monitor("mouse_move -6 -165", "mouse_button 1", "mouse_button 0")
             good = until(b"bhello: closed", mark)
             time.sleep(0.5)
             w, h, px = screendump()
@@ -500,6 +509,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             w, h, px = screendump()
             good = good and at(80, 100) == (255, 255, 0) and at(260, 100) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) a change in the shared pixels shows after the client says where")
+            fails += not good
+            monitor("mouse_move -242 -199", "mouse_button 1", "mouse_move 100 60", "mouse_button 0")
+            good = until(b"bhello: resized 300 160", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(100, 200) == (255, 255, 0) and at(350, 200) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a shared window is resized with new shared memory")
             fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)

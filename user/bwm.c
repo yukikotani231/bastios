@@ -62,6 +62,9 @@ struct fix_info {
 #define MAX_COLS 80
 #define MAX_ROWS 40
 #define MAXWIN 16
+#define GRIP 14                          /* the resize grip at the corner of a frame */
+#define MIN_CW 64
+#define MIN_CH 32
 #define MAXCLI 8
 #define RXCAP (BWM_MAX_PAYLOAD + 64)
 
@@ -80,6 +83,9 @@ struct win {
     uint32_t *shm;                       /* the client's memory file, mapped, when it gave one */
     size_t shm_len;
     uint32_t *pix;                       /* a client's contents: (w - 2 * BORDER) * (h - TITLE_H - BORDER) */
+    int resizable;                       /* has a grip */
+    int pend;                            /* a BWM_RESIZE has been sent and not answered */
+    int want_cw, want_ch;                /* the size of the contents the pointer is asking for */
     int cols, rows, cx, cy;
     char text[MAX_ROWS][MAX_COLS];
 };
@@ -87,6 +93,8 @@ static struct win pool[MAXWIN];
 static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
 static int nz;
 static int next_id = 1;
+static struct win *sizing;               /* the window whose grip is held */
+static int sox, soy;                     /* from the pointer to the corner of the frame, when it was taken */
 
 struct cli {
     int fd;                              /* -1 when free */
@@ -151,6 +159,7 @@ static struct win *win_new(int x, int y, int cw, int ch, const char *title, int 
         w->used = 1;
         w->id = next_id++;
         w->cli = cli;
+        w->resizable = cli < 0;
         w->x = x; w->y = y;
         w->w = cw + 2 * BORDER;
         w->h = ch + TITLE_H + BORDER;
@@ -181,6 +190,8 @@ static void win_free(struct win *w)
     if (w->shm)
         munmap(w->shm, w->shm_len);
     w->shm = NULL;
+    if (sizing == w)
+        sizing = NULL;
     w->used = 0;
 }
 
@@ -215,6 +226,18 @@ static void win_say(struct win *w, const char *s)
         win_put(w, *s);
 }
 
+static void draw_grip(const struct win *w)
+{
+    uint32_t c = rgb(120, 120, 140);
+    int x1 = w->x + w->w - BORDER - 1, y1 = w->y + w->h - BORDER - 1;
+    for (int k = 4; k <= 12; k += 4)
+        for (int j = 0; j < k; j++) {
+            int px = x1 - j, py = y1 - (k - 1 - j);
+            if (px >= 0 && py >= 0 && px < (int)W && py < (int)H)
+                scene[py * W + px] = c;
+        }
+}
+
 static void draw_win(const struct win *w, int focused)
 {
     uint32_t bar = focused ? rgb(40, 90, 200) : rgb(110, 110, 120);
@@ -235,6 +258,8 @@ static void draw_win(const struct win *w, int focused)
                     scene[py * W + px] = w->pix[y * cw + x];
             }
         }
+        if (w->resizable)
+            draw_grip(w);
         return;
     }
     fill(scene, bx, by, w->x + w->w - BORDER, w->y + w->h - BORDER, w->body);
@@ -245,6 +270,8 @@ static void draw_win(const struct win *w, int focused)
     if (focused)
         fill(scene, bx + 4 + w->cx * CELL_W, by + 4 + w->cy * CELL_H + CELL_H - 3,
              bx + 4 + (w->cx + 1) * CELL_W, by + 4 + w->cy * CELL_H + CELL_H - 1, rgb(10, 10, 10));
+    if (w->resizable)
+        draw_grip(w);
 }
 
 static void draw_scene(void)
@@ -332,6 +359,44 @@ static void raise_win(struct win *w)
 }
 
 /* ---- clients ---- */
+
+static void to_client(int cli, uint32_t type, const void *p, uint32_t len);
+
+static void clamp_size(int *cw, int *ch)
+{
+    if (*cw < MIN_CW) *cw = MIN_CW;
+    if (*ch < MIN_CH) *ch = MIN_CH;
+    if (*cw > (int)W - 2 * BORDER) *cw = W - 2 * BORDER;
+    if (*ch > (int)H - TITLE_H - BORDER) *ch = H - TITLE_H - BORDER;
+}
+
+/* Gives a window the size its grip is asking for: at once if bwm keeps its
+ * contents, else by asking the program, one request at a time. */
+static void request_size(struct win *w)
+{
+    int cw = w->want_cw, ch = w->want_ch;
+    clamp_size(&cw, &ch);
+    if (cw == cw_of(w) && ch == ch_of(w))
+        return;
+    if (w->cli < 0) {
+        touch_win(w);
+        w->w = cw + 2 * BORDER;
+        w->h = ch + TITLE_H + BORDER;
+        w->cols = (cw - 8) / CELL_W;
+        w->rows = (ch - 8) / CELL_H;
+        if (w->cols > MAX_COLS) w->cols = MAX_COLS;
+        if (w->rows > MAX_ROWS) w->rows = MAX_ROWS;
+        if (w->cols < 1) w->cols = 1;
+        if (w->rows < 1) w->rows = 1;
+        if (w->cx >= w->cols) w->cx = w->cols - 1;
+        if (w->cy >= w->rows) w->cy = w->rows - 1;
+        touch_win(w);
+    } else if (!w->pend) {
+        struct bwm_resize r = { (uint32_t)w->id, (uint32_t)cw, (uint32_t)ch };
+        to_client(w->cli, BWM_RESIZE, &r, sizeof r);
+        w->pend = 1;
+    }
+}
 
 static void to_client(int cli, uint32_t type, const void *p, uint32_t len)
 {
@@ -457,6 +522,55 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
             touch_win(w);
             win_free(w);
         }
+    } else if (type == BWM_RESIZABLE && len == sizeof(struct bwm_resizable)) {
+        struct bwm_resizable r;
+        memcpy(&r, p, sizeof r);
+        struct win *w = by_id(i, r.id);
+        if (w) {
+            w->resizable = 1;
+            touch_win(w);
+        }
+    } else if (type == BWM_RESIZED && len == sizeof(struct bwm_resized)) {
+        struct bwm_resized r;
+        memcpy(&r, p, sizeof r);
+        int mf = clis[i].pend_fd;
+        clis[i].pend_fd = -1;
+        struct win *w = by_id(i, r.id);
+        int ok = w && w->pend && r.w >= MIN_CW && r.h >= MIN_CH && r.w <= W - 2 * BORDER && r.h <= H - TITLE_H - BORDER
+                 && (w->shm ? mf >= 0 : mf < 0);
+        void *m = MAP_FAILED;
+        size_t need = (size_t)r.w * r.h * 4;
+        if (ok && w->shm) {
+            struct stat st;
+            if (fstat(mf, &st) == 0 && st.st_size >= 0 && (size_t)st.st_size >= need)
+                m = mmap(NULL, need, PROT_READ, MAP_SHARED, mf, 0);
+            ok = m != MAP_FAILED;
+        }
+        uint32_t *np = ok ? calloc((size_t)r.w * r.h, 4) : NULL;
+        if (mf >= 0)
+            close(mf);
+        if (!np) {
+            if (m != MAP_FAILED)
+                munmap(m, need);
+            drop_client(i);                                /* an answer that cannot be right */
+            return;
+        }
+        for (size_t k = 0; k < (size_t)r.w * r.h; k++)
+            np[k] = w->body;
+        touch_win(w);
+        free(w->pix);
+        w->pix = np;
+        if (w->shm) {
+            munmap(w->shm, w->shm_len);
+            w->shm = m;
+            w->shm_len = need;
+        }
+        w->w = r.w + 2 * BORDER;
+        w->h = r.h + TITLE_H + BORDER;
+        w->pend = 0;
+        touch_win(w);
+        if (sizing == w)
+            request_size(w);                               /* the pointer may have moved on */
     } else if (type == BWM_SETTITLE && len == sizeof(struct bwm_settitle)) {
         struct bwm_settitle t;
         memcpy(&t, p, sizeof t);
@@ -818,6 +932,7 @@ int main(int argc, char **argv)
                     gx = mx - under->x;
                     gy = my - under->y;
                     int on_close = my < under->y + TITLE_H && mx >= under->x + under->w - BORDER - CLOSE_W && mx < under->x + under->w - BORDER - 2;
+                    int on_grip = under->resizable && mx >= under->x + under->w - GRIP && my >= under->y + under->h - GRIP;
                     if (on_close) {
                         if (under->cli >= 0) {
                             struct bwm_close cl = { (uint32_t)under->id };
@@ -833,14 +948,25 @@ int main(int argc, char **argv)
                             touch_all();
                         }
                         drag = my < under->y + TITLE_H ? under : NULL;
+                        if (on_grip) {
+                            sizing = under;
+                            sox = under->x + under->w - mx;
+                            soy = under->y + under->h - my;
+                            drag = NULL;
+                        }
                     }
                 } else if (!down) {
                     drag = NULL;
+                    sizing = NULL;
                 }
                 if (drag && down) {
                     touch_win(drag);
                     drag->x = mx - gx; drag->y = my - gy;
                     touch_win(drag);
+                } else if (sizing && down) {
+                    sizing->want_cw = mx + sox - sizing->x - 2 * BORDER;
+                    sizing->want_ch = my + soy - sizing->y - TITLE_H - BORDER;
+                    request_size(sizing);
                 } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || (m[0] & 7) != (buttons & 7))) {
                     struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), m[0] & 7u };
                     if (under == z[nz - 1])
