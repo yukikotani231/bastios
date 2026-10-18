@@ -4,7 +4,7 @@
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
  * closes the window, and what is typed goes to the focused window. Ctrl-T
- * starts a terminal (bterm), Alt-Tab brings up the window at the bottom and Ctrl-Q
+ * starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
  * ends bwm (the console comes back when /dev/fb0 closes).
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
@@ -677,7 +677,7 @@ static long long now_ms(void)
 static long long quit_due;                /* when to end without the ^Q; 0 until Ctrl-Q came as an event */
 static int tty_q;                         /* the ^Q came first */
 
-/* The bytes a key press makes (at most 4) in out; returns how many. */
+/* The bytes a key press makes (at most 6) in out; returns how many. */
 static int key_bytes(unsigned code, char *out)
 {
     static const struct { unsigned code; char final; } nav[] = {
@@ -686,6 +686,16 @@ static int key_bytes(unsigned code, char *out)
         if (nav[i].code == code) {
             out[0] = 27; out[1] = '['; out[2] = nav[i].final;
             return 3;
+        }
+    static const struct { unsigned code; const char *seq; } fkey[] = {
+        { 59, "\033OP" }, { 60, "\033OQ" }, { 61, "\033OR" }, { 62, "\033OS" },
+        { 63, "\033[15~" }, { 64, "\033[17~" }, { 65, "\033[18~" }, { 66, "\033[19~" },
+        { 67, "\033[20~" }, { 68, "\033[21~" }, { 87, "\033[23~" }, { 88, "\033[24~" } };
+    for (unsigned i = 0; i < sizeof fkey / sizeof fkey[0]; i++)
+        if (fkey[i].code == code) {
+            size_t n = strlen(fkey[i].seq);
+            memcpy(out, fkey[i].seq, n);
+            return (int)n;
         }
     if (code == 111) { memcpy(out, "\033[3~", 4); return 4; }        /* Delete */
     if (code == 104) { memcpy(out, "\033[5~", 4); return 4; }        /* Page Up */
@@ -869,13 +879,19 @@ int main(int argc, char **argv)
                         k_alt = down;
                     } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
                         if (nz > 1) {
-                            raise_win(z[0]);
+                            if (k_shift) {                              /* the other way: the top one goes to the bottom */
+                                struct win *t = z[nz - 1];
+                                memmove(&z[1], &z[0], (nz - 1) * sizeof z[0]);
+                                z[0] = t;
+                            } else {
+                                raise_win(z[0]);
+                            }
                             touch_all();
                         }
                     } else if (code == 58 && down) {
                         k_caps = !k_caps;
                     } else if (down) {
-                        char out[4];
+                        char out[8];
                         int m = key_bytes(code, out);
                         for (int j = 0; j < m; j++)
                             if (type_byte(top, out[j]))
@@ -893,7 +909,7 @@ int main(int argc, char **argv)
         if (quit_due && (tty_q || now_ms() >= quit_due))
             running = 0;
         if (rep_code && now_ms() >= rep_due) {
-            char out[4];
+            char out[8];
             int m = key_bytes(rep_code, out);
             for (int j = 0; j < m; j++)
                 if (type_byte(top, out[j]))
