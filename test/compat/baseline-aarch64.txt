@@ -1649,3 +1649,5 @@ apps: python: the language and the standard library
 apps: python: threads, subprocess and asyncio
 apps: python: urllib from the host
 tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
+tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
+tty: micropython: REPL line editing and history
