@@ -1665,3 +1665,4 @@ alpine: nvim: the LSP client talks to TypeScript's language server and gets a ho
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
+alpine: nvim: the LSP client talks to the YAML language server under node and gets a diagnostic and the file's symbols
