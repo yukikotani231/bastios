@@ -2269,7 +2269,7 @@ fn dk_symlink(d: &mut DiskFs, pc: &mut PCache, mem: &mut Mem, h0: u64, x: &mut B
   }
   pc_forget(&mut pc, &mut mem, h0 + e);
   xfer_shift(&mut x, n, m);
-  if !disk_set_meta(&mut d, e, mode, NO_DISK_FILE) || disk_write_wait(&mut d, e, x, m, now) != m {
+  if !disk_set_meta(&mut d, e, mode, NO_DISK_FILE) || disk_write_soon(&mut d, e, x, m, now) != m {
     disk_remove(&mut d, e);
     return false;
   }
