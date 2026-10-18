@@ -297,6 +297,12 @@ bst_cpu_enter:
          * the process, and the process's table with every munmap and mprotect). */
         cmpq    $0, CORE_KCR3(%rsi)
         jne     4f
+        cmpq    $0, bst_fsgsbase(%rip)
+        je      6f
+        mov     %cr4, %rdx
+        bts     $16, %rdx                       /* FSGSBASE: the trap path uses rdfsbase and wrfsbase */
+        mov     %rdx, %cr4
+6:
         movabs  $bst_kernel_pml4, %rax
         cmpq    $0, bst_pcid_on(%rip)
         je      5f
@@ -348,10 +354,15 @@ bst_cpu_enter:
         cmp     %rcx, %rax
         jbe     3f
         xor     %eax, %eax
-3:      mov     %rax, %rdx
+3:      cmpq    $0, bst_fsgsbase(%rip)
+        je      7f
+        wrfsbase %rax
+        jmp     8f
+7:      mov     %rax, %rdx
         shr     $32, %rdx
         mov     $0xC0000100, %ecx       /* FS_BASE */
         wrmsr
+8:
 
         mov     $UDATA, %ax
         mov     %ax, %ds
@@ -572,10 +583,15 @@ trap_common:
         mov     152(%rsp), %rax; mov %rax, 17*8(%rdi)
         mov     128(%rsp), %rax; mov %rax, 18*8(%rdi)
         mov     %cr2, %rax;      mov %rax, 19*8(%rdi)
-        mov     $0xC0000100, %ecx       /* FS_BASE */
+        cmpq    $0, bst_fsgsbase(%rip)
+        je      9f
+        rdfsbase %rax
+        jmp     10f
+9:      mov     $0xC0000100, %ecx       /* FS_BASE */
         rdmsr
         shl     $32, %rdx
-        or      %rdx, %rax;      mov %rax, 20*8(%rdi)
+        or      %rdx, %rax
+10:     mov     %rax, 20*8(%rdi)
         mov     120(%rsp), %rax
         mov     CORE_KRSP(%rdi), %rsp
         pop     %r15

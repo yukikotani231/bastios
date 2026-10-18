@@ -60,6 +60,7 @@ tests=(
   "iso|e|test/iso_test.sh"
   "install|e|test/install_test.sh"
   "nmi|c|test/nmi_test.sh"
+  "fsbase|c|test/fsbase_test.py"
   "stackguard|c|test/stackguard_test.sh"
   "memory|c|test/memory_test.sh"
   "rng|c|test/rng_test.sh"

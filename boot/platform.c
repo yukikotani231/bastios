@@ -90,11 +90,25 @@ static int cmdline_has(const char *w) {
  * bst_cpu_enter). Read by bst_cpu_enter on each processor. */
 uint64_t bst_pcid_on;
 
+/* Whether the processors have RDFSBASE and WRFSBASE (CPUID.7:EBX bit 0). If
+ * so bst_cpu_enter turns CR4.FSGSBASE on and the trap path reads and writes
+ * the user's FS base with them: RDMSR and WRMSR cost a trap round trip about
+ * a tenth of its time. Otherwise it uses the MSR. */
+uint64_t bst_fsgsbase;
+
 void bst_platform_init(void) {
     alias_init();
     uint32_t a = 1, b, c = 0, d;
     __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
     bst_pcid_on = (c >> 17 & 1) && cmdline_has("pcid");
+    a = 0;
+    __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    if (a >= 7) {
+        a = 7;
+        c = 0;
+        __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+        bst_fsgsbase = b & 1;
+    }
 
     /* Each processor's task state segment is set up by bst_core_init (smp.c). */
 
