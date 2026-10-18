@@ -331,12 +331,6 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             mark = len(out)
             q.stdin.write(b"exit\r"); q.stdin.flush()
             until(b"bastios> ", mark)
-            # The first line typed after ash leaves is not run once ash has
-            # read event0 here (cause not found yet), so the next test starts
-            # with an empty one.
-            time.sleep(1)
-            q.stdin.write(b"\r"); q.stdin.flush()
-            time.sleep(1)
         mon.close()
     if ok and not diag and not usb and not nvme and not stick:
         # /dev/fb0 (user/mfb.c): a program draws on the screen, and the

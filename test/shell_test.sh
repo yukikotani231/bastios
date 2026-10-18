@@ -1248,7 +1248,12 @@ session("virtio", True, [
     ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
     ("bhello", b"bhello: no window server", b"\n# "),
     ("bterm", b"bterm: no window server", b"\n# "),
+    # A reader of the key events that is killed while it waits leaves its
+    # registers behind in the process table; the line typed after ash ends
+    # must still reach the native shell, not be taken for the dead reader's.
+    ("cat /dev/input/event0 > /tmp/evk & kill $!; echo ended", b"ended", b"\n# "),
     ("exit", b""),
+    ("hello", b"hello from user mode, pid "),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is
