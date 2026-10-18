@@ -306,7 +306,10 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
-AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns")
+AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython")
+# The tty.txt cases left out on AArch64: python is not built there yet, and
+# a MicroPython REPL that is sent Ctrl-D under a heavy host load does not exit.
+AARCH64_TTY_SKIP = ("python", "micropython")
 
 
 class Guest:
@@ -864,7 +867,8 @@ def main():
                                                        if ARCH == "x86_64" or n.split(":")[0] in AARCH64_APPS]))
         if not args.host:
             g.append(("ssh", "logging in over SSH", lambda e: [run_applet(e, n, c, x, 60, bb) for n, c, x in sshc]))
-        g.append(("tty", "programs on the terminal", lambda e: [run_tty(e, n, p, k, c, x, 30, bb) for n, p, k, c, x in tty]))
+        g.append(("tty", "programs on the terminal", lambda e: [run_tty(e, n, p, k, c, x, 30, bb) for n, p, k, c, x in tty
+                                                       if ARCH == "x86_64" or n.split(":")[0] not in AARCH64_TTY_SKIP]))
         if args.groups:
             keep = args.groups.split(",")
             g = [x for x in g if x[0] in keep or (x[0] in args.programs and "progs" in keep)]
