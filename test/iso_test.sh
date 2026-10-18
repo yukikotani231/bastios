@@ -534,6 +534,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         until(b"# ", mark)
         q.stdin.write(b"kill $!\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-T starts a terminal window without a client on the command line.
+        mark = len(out)
+        q.stdin.write(b"bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey ctrl-t")
+            good = until(b"bterm: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-T in bwm starts a terminal window")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
