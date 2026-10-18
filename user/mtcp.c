@@ -177,7 +177,7 @@ static int loop(unsigned long total)
     return got == total && bad == 0 ? 0 : 1;
 }
 
-#define MANY_MAX 200
+#define MANY_MAX 480
 
 /* N connections open at once to ourselves, then UDP sockets side by side:
  * the kernel's tables of connections and sockets hold more than a handful. */
@@ -189,7 +189,7 @@ static int many(int n)
     int l = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(9101) };
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 128) != 0)
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 512) != 0)
         return fail("listen");
     for (int i = 0; i < n; i++) {
         cl[i] = socket(AF_INET, SOCK_STREAM, 0);
