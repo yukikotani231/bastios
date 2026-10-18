@@ -19,3 +19,16 @@ posix-sigpause_4-1 hangs
 # Needs a page cache that drops pages while the test runs: preadv2 with RWF_NOWAIT must meet an evicted page and answer EAGAIN. Files here live in memory, so it never does and the test runs out its 60 s.
 preadv203 needs an evictable page cache
 preadv203_64 needs an evictable page cache
+
+# The file system stress tests (runtest/fs) that run out their time limit: each costs 30 s, or a 60 s timeout.
+gf06 time-limited, 30 s
+gf07 time-limited, 30 s
+gf08 time-limited, 30 s
+gf09 time-limited, 30 s
+gf10 time-limited, 24 s
+gf11 time-limited, 24 s
+gf16 hangs
+gf17 hangs
+gf20 hangs
+gf23 hangs
+gf26 hangs

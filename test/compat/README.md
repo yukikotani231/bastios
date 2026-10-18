@@ -209,7 +209,8 @@ unsupported (`TCONF`: it needs something this system does not claim to
 have, such as a kernel config or a block device), hang (interrupted after
 `--timeout` seconds) or crash. `--only REGEX` runs a subset by tag.
 
-`make compat-ltp` also runs LTP's pseudo-terminal, namespace (container) and
+`make compat-ltp` also runs LTP's file system stress tests (`runtest/fs`: growfiles,
+ftest, stream), its pseudo-terminal, namespace (container) and
 CVE regression tests, and the Open POSIX Test Suite's conformance tests
 (`--suite posix`; about 1,600 programs named after an interface and an
 assertion, such as `posix-sigaction_1-1`). Those exit 0 for a pass, 1 for a
