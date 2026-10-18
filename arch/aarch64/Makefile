@@ -469,6 +469,29 @@ $(B)/compat/bastiofmt.c $(B)/compat/bastio-lsp.c: $(B)/compat/%.c: $(BASTIOC) $(
 $(B)/compat/bastiofmt $(B)/compat/bastio-lsp: $(B)/compat/%: $(B)/compat/%.c
 	$(ACC) -O2 -w -static -no-pie -s $(ULFLAGS) -o $@ $<
 
+# GNU make as a static glibc program, cross-built, for the development disk
+# (test/compat/dev.txt). Its sources come from its GitHub mirror and gnulib's;
+# bootstrapping them needs autoconf, automake, autopoint and texinfo.
+GMAKE_GIT     ?= https://github.com/mirror/make
+GMAKE_TAG     ?= 4.4.1
+GNULIB_GIT    ?= https://github.com/coreutils/gnulib
+GNULIB_TAG    ?= stable-202301
+
+$(B)/compat/make: | $(B)/compat
+	rm -rf $(B)/compat/src/make $(B)/compat/src/gnulib && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(GMAKE_TAG) $(GMAKE_GIT) $(B)/compat/src/make
+	git clone -q --depth 1 --branch $(GNULIB_TAG) $(GNULIB_GIT) $(B)/compat/src/gnulib
+	cd $(B)/compat/src/make && ./bootstrap --no-git --gnulib-srcdir=../gnulib --skip-po >/dev/null && \
+	  CC="$(ACC)" CFLAGS="-O2" LDFLAGS="-static -no-pie $(ULFLAGS)" ./configure -q --host=aarch64-linux-gnu --disable-nls --without-guile
+	$(MAKE) -C $(B)/compat/src/make -s >/dev/null
+	$(CROSS)strip -o $@ $(B)/compat/src/make/make
+
+# The development disk (test/compat/dev.txt): tcc, make and the C runtime tcc
+# finds under /disk/c, listed the way the Bastio disk's is.
+$(B)/compat/dev.img: $(B)/compat/tcc $(B)/compat/make $(B)/compat/musl/lib/libc.a test/compat/devdisk.sh test/compat/dev_headers.c test/compat/mkdisk.py
+	DEV_DEPCC=gcc DEV_DEPMODE=-E DEV_CLIBS="crt1.o crti.o crtn.o libc.a" test/compat/devdisk.sh $@ $(B)/compat/tcc $(B)/compat/make \
+	  $(CURDIR)/$(TCC_SRC) $(MUSL_ROOT)/include $(MUSL_ROOT)/lib
+
 # The mkdisk.py arguments for the toolchain: the headers are listed by this
 # machine's compiler (tcc cannot run here), the C runtime is musl's static one.
 BASTIO_TOOLS = $(shell BASTIO_DEPCC=gcc BASTIO_DEPMODE=-E BASTIO_CLIBS="crt1.o crti.o crtn.o libc.a" test/compat/bastiotools.sh \
@@ -492,9 +515,9 @@ $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/com
 # COMPAT_DISKS, COMPAT_LANES and COMPAT_SKIP_LANES (run.py --lanes and
 # --skip-lanes) let a CI runner build and run a part of the suite: the
 # images of its lanes, and those lanes.
-COMPAT_DISKS ?= $(B)/compat/disk.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
+COMPAT_DISKS ?= $(B)/compat/disk.img $(B)/compat/dev.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
 COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
-              --disk $(B)/compat/disk.img --bastio-disk $(B)/compat/bastio.img --alpine-disk $(B)/compat/alpine.img \
+              --disk $(B)/compat/disk.img --dev-disk $(B)/compat/dev.img --bastio-disk $(B)/compat/bastio.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http \
               --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
               --node-disk $(B)/compat/node.img --out $(B)/compat \
