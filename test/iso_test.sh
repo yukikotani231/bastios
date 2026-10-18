@@ -438,6 +438,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = once != before and thrice == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Tab cycles the windows")
             fails += not good
+            monitor("sendkey alt-tab", "sendkey alt-shift-tab")
+            w, h, back = screendump()
+            good = back == before
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
+            fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")
@@ -576,6 +581,32 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The task bar: its Term button starts a terminal window, and a click
+        # on the button of that window (the top one already) changes nothing.
+        mark = len(out)
+        q.stdin.write(b"bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            monitor("mouse_move -484 372", "mouse_button 1", "mouse_button 0")
+            good = until(b"bterm: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the Term button of the task bar starts a terminal window")
+        fails += not good
+        if good:
+            time.sleep(1.5)
+            w, h, before = screendump()
+            monitor("mouse_move 60 0", "mouse_button 1", "mouse_button 0")
+            time.sleep(0.5)
+            w, h, after = screendump()
+            good = before[:w * 3 * 740] == after[:w * 3 * 740]       # above the bar, where the pointer is
+            print(("ok  " if good else "FAIL"), f"({name}) a click on the button of the top window changes nothing")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
@@ -597,7 +628,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             # The alternate screen (what vi uses): alt is drawn over a blank
             # screen, and leaving it brings the shell's screen back.
-            keys = {" ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
+            keys = {"-": "minus", " ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
             def typed(text):
                 monitor(*[f"sendkey {keys.get(c, 'shift-' + c.lower() if c.isupper() else c)}" for c in text], "sendkey ret")
             typed("printf '\\033[?1049halt\\n'")
@@ -630,6 +661,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             time.sleep(2)                                   # let go of the key before the next one
             monitor("sendkey ctrl-u")
+            # Function keys give the sequences a VT100 program expects:
+            # F1 (ESC O P) and F5 (ESC [ 1 5 ~) and the line's end are nine
+            # bytes, which wc -c counts.
+            monitor(*[f"sendkey {c}" for c in "wc"], "sendkey spc", "sendkey minus", "sendkey c")
+            time.sleep(0.5)
+            monitor("sendkey ret", "sendkey f1", "sendkey f5", "sendkey ret", "sendkey ctrl-d")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "9" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) function keys reach the terminal as escape sequences")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             # The grip makes the terminal 60 x 20 cells: the window shrinks
             # (the wallpaper shows where it was), the shell gets SIGWINCH and still answers.
             typed("trap 'echo winched' WINCH")
