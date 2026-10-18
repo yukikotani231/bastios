@@ -266,8 +266,10 @@ $(B)/compat/sqlite3: | $(B)/compat
 	$(APPCC) -DSQLITE_THREADSAFE=0 -DSQLITE_OMIT_LOAD_EXTENSION -o $@ \
 	  $(B)/compat/src/sqlite/shell.c $(B)/compat/src/sqlite/sqlite3.c -lm
 
-$(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox
+# Dropbear and the keys of the ssh group (test/compat/ssh.txt) go on this disk
+# too; the host client and key generator are built further down.
+$(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
 
 # Alpine Linux for AArch64 (test/compat/alpine.txt), from the same pinned
 # Docker Hub images as the x86-64 suite's, their arm64 layers: the minirootfs
@@ -516,7 +518,7 @@ $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/com
 # --skip-lanes) let a CI runner build and run a part of the suite: the
 # images of its lanes, and those lanes.
 COMPAT_DISKS ?= $(B)/compat/disk.img $(B)/compat/dev.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
-COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps --kernel $(B)/bastios.bin \
+COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps,ssh --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --dev-disk $(B)/compat/dev.img --bastio-disk $(B)/compat/bastio.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http \
               --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \
