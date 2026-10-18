@@ -8,6 +8,8 @@
  * names, madvise, timerfd flags and ETXTBSY. */
 #include <mqueue.h>
 #include <sys/mount.h>
+#include <sys/statfs.h>
+#include <sys/sysmacros.h>
 #include <sys/prctl.h>
 #include "compat.h"
 #include <fcntl.h>
@@ -960,6 +962,31 @@ int main(void) {
            pthread_join(t, 0);
            long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
            kick_hits == 100 && ms < 600; }));
+    EXPECT("a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them", ({
+           int ok = mkdir("/tmp/mflags", 0755) == 0 || errno == EEXIST;
+           ok = ok && mount("none", "/tmp/mflags", "tmpfs", MS_NOEXEC | MS_NOSUID | MS_NODEV, 0) == 0;
+           struct statfs sf;
+           ok = ok && statfs("/tmp/mflags", &sf) == 0 && (sf.f_flags & 15) == 14;
+           int fd = open("/tmp/mflags/x", O_CREAT | O_WRONLY, 0755);
+           ok = ok && fd >= 0 && write(fd, "x", 1) == 1;
+           if (fd >= 0) close(fd);
+           char *av[] = { "/tmp/mflags/x", 0 };
+           execve("/tmp/mflags/x", av, 0);
+           ok = ok && errno == EACCES;
+           ok = ok && mknod("/tmp/mflags/null", S_IFCHR | 0666, makedev(1, 3)) == 0;
+           ok = ok && open("/tmp/mflags/null", O_RDWR) < 0 && errno == EACCES;
+           ok = ok && mount("none", "/tmp/mflags", "tmpfs", MS_REMOUNT, 0) == 0;
+           ok = ok && statfs("/tmp/mflags", &sf) == 0 && (sf.f_flags & 15) == 0;
+           fd = open("/tmp/mflags/null", O_RDWR);
+           ok = ok && fd >= 0;
+           if (fd >= 0) close(fd);
+           execve("/tmp/mflags/x", av, 0);
+           ok = ok && errno != EACCES;
+           unlink("/tmp/mflags/x");
+           unlink("/tmp/mflags/null");
+           umount("/tmp/mflags");
+           rmdir("/tmp/mflags");
+           ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;
            int fd = open("/bin/cat", O_RDONLY);
