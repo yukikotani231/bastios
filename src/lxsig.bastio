@@ -1133,6 +1133,40 @@ fn lx_sigaltstack(k: &mut Kernel, pid: u64, ss: u64, oss: u64) -> u64
   return 0;
 }
 
+/// A thread that has just unblocked signals takes the ones the thread group
+/// leader holds pending: post_proc_wv parks a process-directed signal there
+/// when every thread blocks it (a sender woken from inside the handler of
+/// the same signal finds the receiver still masking it), and Linux keeps
+/// that signal in the process-wide queue for whichever thread unblocks it
+/// first. Standard signals only; a signal sent to the leader alone with tkill
+/// would be taken here too, which only a program that unblocks it in another
+/// thread can see.
+fn sig_adopt(k: &mut Kernel, p: u64)
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  let l = tgid(k.procs, p);
+  if l == p || l == 0 || state(k.procs, l) == FREE || state(k.procs, l) == ZOMBIE {
+    return;
+  }
+  let take = pget(k.procs, l, F_SIGPEND) & pget(k.procs, l, F_SIGMASK) & !pget(k.procs, p, F_SIGMASK) & 0xFFFFFFFF;
+  if take == 0 {
+    return;
+  }
+  let mut s = 1;
+  while s < 32
+    invariant 1 <= s && s <= 32 && kok(k)
+  {
+    if has_sig(take, s) && !has_sig(pget(k.procs, p, F_SIGPEND), s) {
+      pset(&mut k.procs, l, F_SIGPEND, pget(k.procs, l, F_SIGPEND) & !sbit(s));
+      pset(&mut k.procs, p, F_SIGPEND, pget(k.procs, p, F_SIGPEND) | sbit(s));
+      wset(&mut k.sigsave, sender_at(p, s), wget(k.sigsave, sender_at(l, s)));
+      wset(&mut k.sigsave, value_at(p, s), wget(k.sigsave, value_at(l, s)));
+    }
+    s = s + 1;
+  }
+}
+
 /// The signal system calls. Returns KEEP, or SWITCH when the caller now
 /// has a signal to take, so it is delivered before the caller goes on.
 fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
@@ -1181,6 +1215,9 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     r = lx_sigaltstack(&mut k, pid, a, b);
   }
   ret(&mut k.procs, pid, r);
+  if n == LX_RT_SIGPROCMASK || n == LX_RT_SIGRETURN {
+    sig_adopt(&mut k, pid);
+  }
   if pget(k.procs, pid, F_SIGPEND) & !pget(k.procs, pid, F_SIGMASK) != 0 {
     return SWITCH;
   }

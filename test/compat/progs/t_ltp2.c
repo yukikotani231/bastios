@@ -95,6 +95,20 @@ static int serve_three(void) {
 static volatile int ltp2_mq_hit;
 static void ltp2_mq_fn(union sigval v) { ltp2_mq_hit = v.sival_int; }
 
+static volatile int adopt_hit;
+static void adopt_handler(int s) { (void)s; adopt_hit = 1; }
+static void *adopt_worker(void *a) {
+    sigset_t m;
+    sigemptyset(&m);
+    sigaddset(&m, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &m, 0);
+    *(volatile int *)a = 1;
+    while (*(volatile int *)a != 2) usleep(1000);
+    pthread_sigmask(SIG_UNBLOCK, &m, 0);          // takes the signal every thread blocked
+    for (int i = 0; i < 2000 && !adopt_hit; i++) usleep(1000);
+    return 0;
+}
+
 int main(void) {
     setup();
     signal(SIGPIPE, SIG_IGN);
@@ -897,5 +911,20 @@ int main(void) {
            snprintf(path, sizeof path, "/proc/self/task/%d/status", (int)getpid());
            int ok = stat(path, &st) == 0;
            ok; }));
+    EXPECT("a process signal every thread blocks goes to the first thread that unblocks it", ({
+           struct sigaction sa = { .sa_handler = adopt_handler };
+           sigaction(SIGUSR1, &sa, 0);
+           sigset_t m;
+           sigemptyset(&m);
+           sigaddset(&m, SIGUSR1);
+           pthread_sigmask(SIG_BLOCK, &m, 0);
+           volatile int ready = 0;
+           pthread_t t;
+           pthread_create(&t, 0, adopt_worker, (void *)&ready);
+           while (!ready) usleep(1000);
+           kill(getpid(), SIGUSR1);
+           ready = 2;
+           pthread_join(t, 0);
+           adopt_hit == 1; }));
     return done();
 }
