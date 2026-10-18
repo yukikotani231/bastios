@@ -1651,3 +1651,11 @@ apps: python: urllib from the host
 tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
+apps: git: init, commit, log and diff
+apps: git: 300 files, a branch and a merge
+apps: git: gc, fsck and a clone through upload-pack
+apps: git: stash, revert and bisect run
+apps: ripgrep: search with line numbers, honouring .ignore
+apps: ripgrep: case-insensitive counts and file lists
+apps: ripgrep: replacement, multi-line and standard input
+apps: ripgrep: a search over many files on several threads
