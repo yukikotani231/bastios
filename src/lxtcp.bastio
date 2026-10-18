@@ -395,6 +395,42 @@ fn tcp_send_piece(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool, mid: bo
   return w;
 }
 
+/// The pieces of a read after its first, `done` bytes of `n` having gone to
+/// `va`: each is taken from the receive buffer into `xfer` and copied out, all
+/// under one move of the card out of its enum (as tcp_send_run). Stops when
+/// nothing more has arrived, at the end, on a reset, or when a piece cannot be
+/// written. Returns the bytes gone in all.
+fn tcp_recv_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfer: &mut Bytes, pid: u64, t: u64, va: u64, n: u64, done: u64, first: bool) -> u64
+  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && done <= TCP_RING
+  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XFER
+  ensures result <= TCP_RING
+{
+  let mut total = done;
+  match c {
+    Nic::None => {
+      c = Nic::None;
+    },
+    Nic::Up(mut nn) => {
+      let mut more = first;
+      while more && va < 0x800000000000 && total < n && total <= TCP_RING - XFER
+        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && total <= TCP_RING && net_ok(nn)
+      {
+        let r = tcp_read(&mut nn, t, &mut xfer, smaller(n - total, XFER), false);
+        if r == 0 || r > XFER {
+          more = false;                     // nothing more yet, the end, or reset: say it next time
+        } else if copy_to_user(&mut spaces, &mut m, an, pid, va + total, xfer, r) != r {
+          more = false;                     // as a short read
+        } else {
+          total = total + r;
+          more = r == XFER;
+        }
+      }
+      c = Nic::Up(nn);
+    },
+  }
+  return total;
+}
+
 /// read / recv on a connection: the bytes that arrived (left there with
 /// peek), 0 at the end, SK_WAIT (or -EAGAIN when nonblocking) while none
 /// have.
@@ -427,21 +463,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     return EFAULT;
   }
   // More than one transfer buffer's worth, while more has arrived.
-  let mut total = got;
-  let mut more = got == XFER && !peek;
-  while more && buf < 0x800000000000 && total < n && total <= TCP_RING - XFER
-    invariant kok(k) && pid < NPROC && total <= TCP_RING
-  {
-    let r = tcp_recv(&mut k.nic, tk.t, &mut k.fs.xfer, smaller(n - total, XFER), false);
-    if r == 0 || r > XFER {
-      more = false;                         // nothing more yet, the end, or reset: say it next time
-    } else if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, k.fs.xfer, r) != r {
-      more = false;                         // as a short read
-    } else {
-      total = total + r;
-      more = r == XFER;
-    }
-  }
+  let total = tcp_recv_run(&mut k.nic, &mut k.spaces, &mut k.mem, k.anon, &mut k.fs.xfer, pid, tk.t, buf, n, got, got == XFER && !peek);
   return total;
 }
 
