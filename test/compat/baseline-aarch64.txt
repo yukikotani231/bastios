@@ -1644,3 +1644,10 @@ tty: micropython: REPL line editing and history
 tty: stty: the terminal is in canonical mode again after an editor
 tty: utf-8: erase takes back a whole character on the console
 tty: vi: edit and save a file
+apps: python: files, shutil and tempfile
+apps: python: http.server and urllib over loopback
+apps: python: multiprocessing
+apps: python: the language and the standard library
+apps: python: threads, subprocess and asyncio
+apps: python: urllib from the host
+tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
