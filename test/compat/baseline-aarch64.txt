@@ -1393,6 +1393,9 @@ t_ltp2: rename: a directory moved from under the working directory leaves it in 
 t_ltp2: mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt
 t_ltp2: madvise: a range with a munmapped page in it is ENOMEM, one without is not
 t_mem: twelve shared file mappings are all written back
+t_mem: a page touched before munmap faults after it
+t_mem: a page written before mprotect(PROT_READ) faults on the next write
+t_mem: a page read before munmap and mapped again at its address is a fresh zero page
 t_misc: core_pattern and nr_open read, drop_caches takes 3 and refuses 9
 t_more: getrusage self reports a maximum resident size
 t_more: /proc/PID/status has VmRSS and the context switch counts
