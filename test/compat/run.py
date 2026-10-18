@@ -1014,6 +1014,8 @@ def main():
     # The groups the chosen lanes hold, whatever becomes of them: a lane that
     # dies part way loses its checks, it does not drop them.
     held = {k for l in lanes for k, _, _ in l[2]}
+    if args.groups:  # only the groups asked for are held to the baseline
+        held &= set(args.groups.split(","))
     # With some of the Alpine lanes left out, the cases none of the chosen
     # ones runs are not held to the baseline.
     alpine_left = set()
@@ -1067,7 +1069,7 @@ def main():
     if os.path.exists(base):
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
         lost = sorted(i for i in set(want) - set(ids) - alpine_left
-                      if not (args.lanes or args.skip_lanes) or i.split(": ", 1)[0] in held)
+                      if not (args.lanes or args.skip_lanes or args.groups) or i.split(": ", 1)[0] in held)
         if lost:
             print("compat: REGRESSION, these checks passed before:")
             for i in lost:
