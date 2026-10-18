@@ -158,7 +158,7 @@ class WebServer:
     """A web server on the host, for HOSTURL: /hello.txt, a line,
     /mib.bin, 1 MiB whose md5 is 85bfb9943e6f0cb09f0f52679e9eac2b, and
     /repo.git, a git repository for the dumb HTTP protocol, and
-    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua, /lsp-gopls-client.lua, /lsp-ts-client.lua, /lsp-json-client.lua, /lsp-bash-client.lua, /lsp-termdebug.lua and /lsp-JdtlsClient.java, the files of the Neovim LSP, debugger and jdtls cases."""
+    /lsp-server.lua, /lsp-client.lua, /lsp-real-client.lua, /lsp-pylsp-client.lua, /lsp-gopls-client.lua, /lsp-ts-client.lua, /lsp-json-client.lua, /lsp-bash-client.lua, /lsp-yaml-client.lua, /lsp-termdebug.lua and /lsp-JdtlsClient.java, the files of the Neovim LSP, debugger and jdtls cases."""
 
     def __init__(self, tcc_src=None):
         self.dir = tempfile.mkdtemp(prefix="compat-www-")
@@ -187,7 +187,7 @@ class WebServer:
             subprocess.run(git + ["clone", "-q", "--bare", work, bare], capture_output=True)
             subprocess.run(git + ["update-server-info"], cwd=bare, capture_output=True)
             shutil.rmtree(work)
-        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "gopls-client.lua", "ts-client.lua", "json-client.lua", "bash-client.lua", "termdebug.lua", "JdtlsClient.java"):
+        for name in ("server.lua", "client.lua", "real-client.lua", "pylsp-client.lua", "gopls-client.lua", "ts-client.lua", "json-client.lua", "bash-client.lua", "yaml-client.lua", "termdebug.lua", "JdtlsClient.java"):
             shutil.copy(os.path.join(os.path.dirname(os.path.abspath(__file__)), "lsp", name),
                         os.path.join(self.dir, "lsp-" + name))
         add_aports(self.dir, tcc_src)
@@ -307,10 +307,8 @@ def with_bb(cmd, bb):
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
 AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython", "python", "git", "ripgrep", "perl")
-# The tty.txt cases left out on AArch64: a MicroPython REPL still sometimes
-# stays open on CI after its keys (the harness waits for the prompt, but the
-# runner is slower than any pause), so they are not held to the baseline.
-AARCH64_TTY_SKIP = ("micropython",)
+# The tty.txt cases left out on AArch64 (none now).
+AARCH64_TTY_SKIP = ()
 
 
 class Guest:
