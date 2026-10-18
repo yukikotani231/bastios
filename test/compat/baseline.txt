@@ -940,6 +940,7 @@ t_nx: code on the stack does not run
 t_nx: code runs from a read-write-execute mapping
 t_nx: mprotect back to read-write stops the code
 t_nx: mprotect to read-write-execute keeps the code running
+t_nx: a read-write-execute page emptied with MADV_DONTNEED still runs code
 t_nx: mprotect(PROT_EXEC) after writing makes the code run
 t_nx: mprotect(PROT_EXEC) on a shared mapping makes the code run
 t_openat2: /proc/self/exe opens the program
@@ -1662,3 +1663,4 @@ t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the de
 java: java: Eclipse JDT LS, the language server, finds a type error and answers a hover
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
+alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
