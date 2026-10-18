@@ -348,10 +348,16 @@ bst_cpu_enter:
         cmp     %rcx, %rax
         jbe     3f
         xor     %eax, %eax
-3:      mov     %rax, %rdx
+3:      mov     %rax, %rbx
+        bts     $63, %rbx               /* canonical bases never have bit 63: 0 in CORE_FSB means unknown */
+        cmp     CORE_FSB(%rsi), %rbx
+        je      6f                      /* the register holds it already: the same process comes back */
+        mov     %rbx, CORE_FSB(%rsi)
+        mov     %rax, %rdx
         shr     $32, %rdx
         mov     $0xC0000100, %ecx       /* FS_BASE */
         wrmsr
+6:
 
         mov     $UDATA, %ax
         mov     %ax, %ds
@@ -576,6 +582,8 @@ trap_common:
         rdmsr
         shl     $32, %rdx
         or      %rdx, %rax;      mov %rax, 20*8(%rdi)
+        bts     $63, %rax
+        mov     %rax, CORE_FSB(%rdi)    /* what the register holds, for bst_cpu_enter */
         mov     120(%rsp), %rax
         mov     CORE_KRSP(%rdi), %rsp
         pop     %r15
