@@ -208,6 +208,8 @@ def boot(osname, args, osbench, tmp):
         cmd = ["qemu-system-x86_64", "-kernel", args.kernel,
                "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
                "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"] + common
+        if getattr(args, "append", ""):
+            cmd += ["-append", args.append]
         g = Guest(cmd, "# ", log)
         if not g.until(rb"bastios> ", 0, 300):
             raise SystemExit("bench: BastiOS gave no prompt")
@@ -288,6 +290,7 @@ def main():
     ap.add_argument("--linux", default=os.environ.get("LINUX_KERNEL", ""))
     ap.add_argument("--accel", default=accel())
     ap.add_argument("--cpu", default="")
+    ap.add_argument("--append", default="", help="the BastiOS kernel's command line (for example pcid)")
     ap.add_argument("--icount", action="store_true",
                     help="TCG with -icount shift=0: the guest clock counts instructions (one per ns), so a figure does not depend on the host's load")
     ap.add_argument("--out", default=os.path.join(B, "results.json"))
