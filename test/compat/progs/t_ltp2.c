@@ -960,5 +960,19 @@ int main(void) {
            pthread_join(t, 0);
            long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
            kick_hits == 100 && ms < 600; }));
+    EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
+           struct stat st;
+           int fd = open("/bin/cat", O_RDONLY);
+           char h[4];
+           int ok = fd >= 0 && stat("/bin/cat", &st) == 0;
+           struct stat fs;
+           ok = ok && fstat(fd, &fs) == 0 && fs.st_size == st.st_size && fs.st_size > 4096;
+           ok = ok && pread(fd, h, 4, 0) == 4 && h[0] == 0x7f && h[1] == 'E' && h[2] == 'L' && h[3] == 'F';
+           char tail[16];
+           ok = ok && pread(fd, tail, 16, fs.st_size - 16) == 16;   // the last chunk, past the transfer buffer
+           ok = ok && open("/bin/nonesuch", O_RDONLY) < 0 && errno == ENOENT;
+           ok = ok && open("/bin/cat", O_WRONLY) < 0;
+           if (fd >= 0) close(fd);
+           ok; }));
     return done();
 }
