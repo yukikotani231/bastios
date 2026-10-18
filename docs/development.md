@@ -26,6 +26,7 @@ Packages are installed from a repository served over HTTP from the host, because
 ## Limits to know about
 
 - There is no clangd: the only suitable image is larger than the Alpine disk has room for. Neovim's LSP client is exercised against `lua-language-server`, `python-lsp-server` and `gopls`.
+- Eclipse JDT LS is checked on the Java disk with a small LSP client of its own, not with Neovim: it needs a JDK next to Neovim, and running both in the Alpine root (the JDK and jdtls are about 300 MB) was tried and not kept, because under software emulation the server did not answer Neovim's `initialize` in time.
 - Everything is measured under QEMU's software emulation in CI, so timing-sensitive checks are flaky under load; [performance.md](performance.md) has the numbers that exist.
 - The suite runs cmake, the Go, Rust and Java toolchains on x86-64 only; their images have no AArch64 build in it.
 - Kernel limits that matter to development (processes, open files, address space, files per disk) are in the README's Status section.
