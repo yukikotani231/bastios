@@ -12,6 +12,10 @@
 # the features the tests name), the memory and the devices are the same, and
 # the kernel, the disks and the checks are the same files.
 #
+# CI_KVM_PCID=1 (the pcid-kvm job) also adds +pcid to every `-cpu` and
+# `-append pcid` to the command line, so the kernel runs with process-context
+# identifiers (boot/platform.c) and the tests pass through them.
+#
 # Only the compat job uses it. The test and native jobs do not yet: under
 # KVM the stack guard test (it moves the guest's stack pointer from
 # outside) saw no fault, and the e1000 TCP test, which times the guest's
@@ -31,7 +35,26 @@ sudo udevadm trigger --name-match=kvm
 dir="${RUNNER_TEMP:-/tmp}/kvm-bin"
 mkdir -p "$dir"
 qemu=$(command -v qemu-system-x86_64)
-printf '#!/bin/sh\nexec %s -accel kvm "$@"\n' "$qemu" >"$dir/qemu-system-x86_64"
+if [ -n "${CI_KVM_PCID:-}" ]; then
+    # Every argument after -cpu gets +pcid; -append pcid goes last.
+    cat >"$dir/qemu-system-x86_64" <<EOF
+#!/bin/sh
+n=\$#
+prev=
+while [ "\$n" -gt 0 ]; do
+    a=\$1
+    shift
+    n=\$((n - 1))
+    o=\$a
+    if [ "\$prev" = -cpu ]; then a="\$a,+pcid"; fi
+    set -- "\$@" "\$a"
+    prev=\$o
+done
+exec $qemu -accel kvm "\$@" -append pcid
+EOF
+else
+    printf '#!/bin/sh\nexec %s -accel kvm "$@"\n' "$qemu" >"$dir/qemu-system-x86_64"
+fi
 chmod +x "$dir/qemu-system-x86_64"
 echo "$dir" >>"$GITHUB_PATH"
 "$dir/qemu-system-x86_64" -machine none -display none -S -monitor none -serial none &

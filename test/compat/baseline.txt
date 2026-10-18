@@ -708,6 +708,9 @@ t_mem: munmap gives address space back
 t_mem: pages come when first touched: 640 MiB of mmap, system calls and fork on pages never touched
 t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
+t_mem: a page touched before munmap faults after it
+t_mem: a page written before mprotect(PROT_READ) faults on the next write
+t_mem: a page read before munmap and mapped again at its address is a fresh zero page
 t_misc: /etc/passwd
 t_misc: /proc/diskstats opens
 t_misc: /proc/diskstats has the disk's line with its counts
