@@ -1147,7 +1147,7 @@ t_ptrace: the tracee goes on to its end
 t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH
 t_ptrace2: PTRACE_DETACH with a signal delivers it
 t_ptrace2: PTRACE_GETFPREGS gives the SSE state
-t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS agrees with PTRACE_GETREGS
+t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer
 t_ptrace2: PTRACE_GETSIGINFO at a fault: SIGSEGV, SEGV_MAPERR and the address
 t_ptrace2: PTRACE_GETSIGINFO at a signal stop gives the signal and its sender
 t_ptrace2: PTRACE_LISTEN keeps a group-stopped tracee stopped; SIGCONT then wakes it

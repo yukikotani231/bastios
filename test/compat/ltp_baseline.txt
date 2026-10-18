@@ -1277,6 +1277,7 @@ posix-clock_settime_5-2
 posix-clock_settime_6-1
 posix-clock_settime_7-2
 posix-clock_settime_8-1
+posix-clock_settime_4-2
 posix-clock_settime_speculative_4-4
 posix-ctime_1-1
 posix-difftime_1-1

@@ -306,7 +306,7 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
-AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython", "python", "git", "ripgrep")
+AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython", "python", "git", "ripgrep", "perl")
 # The tty.txt cases left out on AArch64: a MicroPython REPL still sometimes
 # stays open on CI after its keys (the harness waits for the prompt, but the
 # runner is slower than any pause), so they are not held to the baseline.
@@ -1087,6 +1087,11 @@ def main():
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
         lost = sorted(i for i in set(want) - set(ids) - alpine_left
                       if not (args.lanes or args.skip_lanes or args.groups) or i.split(": ", 1)[0] in held)
+        fresh = sorted(set(ids) - set(want))
+        if fresh and not lost:
+            print(f"compat: {len(fresh)} passing checks are not in {os.path.basename(base)} yet:")
+            for i in fresh:
+                print("  + " + i)
         if lost:
             print("compat: REGRESSION, these checks passed before:")
             for i in lost:

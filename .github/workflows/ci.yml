@@ -156,11 +156,11 @@ jobs:
           BASE: ${{ github.event.pull_request.base.sha }}
         run: |
           if [ "$GITHUB_EVENT_NAME" = push ]; then echo "run=true" >> "$GITHUB_OUTPUT"; exit 0; fi
-          if git diff --name-only "$BASE" "$GITHUB_SHA" | grep -qE '^bench/|^tools/ci-kvm\.sh$|^\.github/workflows/ci\.yml$'; then
+          if git diff --name-only "$BASE" "$GITHUB_SHA" | grep -qE '^(bench|boot|src)/|^tools/ci-kvm\.sh$|^\.github/workflows/ci\.yml$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "bench-kvm: nothing under bench/ changed, skipped" >> "$GITHUB_STEP_SUMMARY"
+            echo "bench-kvm: nothing under bench/, boot/ or src/ changed, skipped" >> "$GITHUB_STEP_SUMMARY"
           fi
       - if: steps.want.outputs.run == 'true'
         uses: actions/checkout@v4
@@ -191,6 +191,26 @@ jobs:
           mkdir -p build/bench
           bench/run.py --smp 2 --runs 3 --out build/bench/kvm.json | tee build/bench/kvm.md
           { echo '### bench/run.py under KVM'; echo; cat build/bench/kvm.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.want.outputs.run == 'true' && github.event_name == 'pull_request'
+        name: Build the kernel the pull request is based on
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add ../base "$BASE"
+          mkdir -p ../base/build
+          cp -r build/proof-cache ../base/build/ 2>/dev/null || true
+          make -C ../base build/bastios.elf BASTIOC0="$PWD/bastiolang/stage0/target/release/bastioc0" BASTIOLIB="$PWD/bastiolang"
+      - if: steps.want.outputs.run == 'true' && github.event_name == 'pull_request'
+        name: Compare with the base, kernel by kernel
+        run: |
+          bench/ab.py --a ../base/build/bastios.elf --b build/bastios.elf --rounds 5 --runs 3 --out build/bench/ab.json | tee build/bench/ab.md
+          { echo '### bench/ab.py under KVM: this pull request (B) against its base (A)'; echo; cat build/bench/ab.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.want.outputs.run == 'true'
+        name: Run the benchmarks with PCIDs
+        run: |
+          bench/run.py --os bastios --smp 2 --runs 3 --append pcid \
+            --tests syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw --out build/bench/kvm-pcid.json | tee build/bench/kvm-pcid.md
+          { echo '### bench/run.py under KVM, boot command line `pcid`'; echo; cat build/bench/kvm-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: always() && steps.want.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -198,6 +218,10 @@ jobs:
           path: |
             build/bench/kvm.json
             build/bench/kvm.md
+            build/bench/kvm-pcid.json
+            build/bench/kvm-pcid.md
+            build/bench/ab.json
+            build/bench/ab.md
           if-no-files-found: ignore
   # Process-context identifiers (boot/boot.S, boot/platform.c), off unless the
   # boot command line says `pcid`. QEMU's TCG has no PCID, so only a KVM guest

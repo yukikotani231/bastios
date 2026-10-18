@@ -365,6 +365,7 @@ t_file: utime
 t_file: write
 t_file: writev
 t_file: a write of many unaligned blocks is not short
+t_file: two hundred attributes on one file
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
@@ -1020,6 +1021,9 @@ t_ptrace2: a request on a process that is not a tracee of the caller is ESRCH
 t_ptrace2: an unknown request is EIO
 t_ptrace2: a tracer attaching to a stopped process sees it stop
 t_ptrace2: a tracer can wait for a tracee that is not its child
+t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer
+t_ptrace2: PTRACE_SINGLESTEP from a signal stop inside raise() stops with SIGTRAP one instruction on, though SIGTRAP is blocked
+t_ptrace2: changing the arguments at the entry changes the call
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file
@@ -1310,6 +1314,22 @@ alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 alpine: vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
 alpine: gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again
 alpine: sshd: Alpine's OpenSSH server takes a public-key login from its own client
+alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
+alpine: container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
+alpine: container: crun runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: crun runs the same pulled bundle rootless, with the image's command, environment and working directory
+alpine: container: crun: cgroup limits: the container sees the memory, pids and cpu limits crun set
+alpine: container: crun: the root file system is read-only, and the exit status comes back
+alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
+alpine: container: rootless runc runs a rootless runc inside its container (docker-in-docker)
+alpine: container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
+alpine: container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+alpine: container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: the image's command, environment and working directory run rootless from the bundle
+alpine: container: crun joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
+alpine: python3: sqlite3, zlib and hashlib
 t_aslr: a program starts itself and reports its layout
 t_aslr: the stack moves between runs
 t_aslr: the mmap area moves between runs
@@ -1391,6 +1411,9 @@ t_ltp2: rename: a directory moved from under the working directory leaves it in 
 t_ltp2: mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt
 t_ltp2: madvise: a range with a munmapped page in it is ENOMEM, one without is not
 t_mem: twelve shared file mappings are all written back
+t_mem: a page touched before munmap faults after it
+t_mem: a page written before mprotect(PROT_READ) faults on the next write
+t_mem: a page read before munmap and mapped again at its address is a fresh zero page
 t_misc: core_pattern and nr_open read, drop_caches takes 3 and refuses 9
 t_more: getrusage self reports a maximum resident size
 t_more: /proc/PID/status has VmRSS and the context switch counts
@@ -1611,6 +1634,12 @@ apps: nc: a raw HTTP request to the host
 apps: netns: a new network namespace has only lo, down
 apps: netns: a veth pair on a bridge; ping across, wget out through masquerade
 t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
+t_ltp2: a process signal every thread blocks goes to the first thread that unblocks it
+t_ltp2: lstat of /proc/self/fd/N is a link
+t_ltp2: lstat of /proc/self/task/TID/fd/N is a link
+t_ltp2: lstat of /proc/self/task/TID/ns/mnt and /proc/self/task/TID/status
+t_ltp2: lstat of a /proc/self/task/TID/fd directory
+t_ltp2: stat of /proc/self/task/TID/fdinfo/N
 bastio: bastio-lsp: a type error from bastioc1 becomes a diagnostic
 bastio: bastio-lsp: formatting
 bastio: bastio-lsp: go to definition
@@ -1657,3 +1686,12 @@ apps: ripgrep: search with line numbers, honouring .ignore
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: a search over many files on several threads
+apps: perl: HTTP::Tiny from the host
+apps: perl: files, directories and in-place editing
+apps: perl: fork, pipes, signals and alarm
+apps: perl: modules
+apps: perl: sockets over loopback
+apps: perl: the language
+t_core: RLIMIT_CORE 0 leaves no core file, and the status has no core flag
+t_core: RLIMIT_CORE above 0 leaves a core file, and the wait status says so
+t_core: the core file names the signal, the program counter and the variable
