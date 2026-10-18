@@ -3,7 +3,8 @@
  * terminal if there is no event0), gives the pointer a
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
- * closes the window, and what is typed goes to the focused window. Ctrl-Q
+ * closes the window, and what is typed goes to the focused window. Ctrl-T
+ * starts a terminal (bterm) and Ctrl-Q
  * ends bwm (the console comes back when /dev/fb0 closes).
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
@@ -18,6 +19,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -567,11 +569,27 @@ static int key_bytes(unsigned code, char *out)
     return 1;
 }
 
+/* Ctrl-T: a new terminal window (bterm, with ash behind it), whatever the
+ * focused window is. */
+static void launch_terminal(void)
+{
+    if (fork() == 0) {
+        char *argv[] = { "bterm", NULL };
+        signal(SIGCHLD, SIG_DFL);                             /* an ignored SIGCHLD would stay ignored in ash */
+        execv("/bin/bterm", argv);
+        _exit(127);
+    }
+}
+
 /* Gives one typed byte to the focused window; returns 1 for Ctrl-Q. */
 static int type_byte(struct win *top, char c)
 {
     if (c == 17)
         return 1;
+    if (c == 20) {
+        launch_terminal();
+        return 0;
+    }
     if (top && top->cli >= 0) {
         struct bwm_key k = { (uint32_t)top->id, (unsigned char)c };
         to_client(top->cli, BWM_KEY, &k, sizeof k);
@@ -640,6 +658,7 @@ int main(int argc, char **argv)
         win_say(c, "bwm: type here.\nCtrl-Q quits.\n");
     }
 
+    signal(SIGCHLD, SIG_IGN);                                 /* launched terminals need no wait */
     int mx = W / 2, my = H / 2;
     draw_scene();
     flush(0, 0, W, H, mx, my);
@@ -777,6 +796,12 @@ int main(int argc, char **argv)
         }
         if (mx != ox || my != oy)
             flush(mx, my, mx + ARROW_W, my + ARROW_H, mx, my);
+    }
+    if (keys >= 0) {                  /* the terminal sees every key too: what it got of the last ones must not reach the shell */
+        struct pollfd q = { 0, POLLIN, 0 };
+        char junk[64];
+        while (poll(&q, 1, 150) > 0 && read(0, junk, sizeof junk) > 0)
+            ;
     }
     if (have_tty)
         tcsetattr(0, TCSANOW, &old);
