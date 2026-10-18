@@ -1179,6 +1179,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
 {
   let mut cur = 1;
   let mut going = true;
+  let mut warm = false;                       // the processor still holds the FPU registers of the task j runs
   let mut j = locked(s, next_job_p, &mut cpu, &mut mmu, cur, true, false, pend, others);
   while going
     invariant cur < NPROC
@@ -1218,8 +1219,13 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
       },
       Job::Run(t) => {
         // The FPU page is this processor's while the task runs, so it is
-        // loaded and saved outside the lock.
-        cpu_fpu_load(&mut cpu, t.fpu);
+        // loaded and saved outside the lock. A task that fault_fast runs
+        // again keeps its registers: they were never saved, so there is
+        // nothing to load.
+        if !warm {
+          cpu_fpu_load(&mut cpu, t.fpu);
+        }
+        warm = false;
         let mut v = cpu_run(&mut cpu, mmu);
         // A task with a seccomp filter or under PTRACE_SYSCALL has every
         // call seen by the kernel, the ones answered here included.
@@ -1227,11 +1233,11 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
           v = cpu_run(&mut cpu, mmu);         // answered without the lock
         }
         mmu_exit(&mut mmu, t.lease);
-        let mut f = t.fpu;
-        cpu_fpu_save(&mut cpu, &mut f);
         // A page fault that maps memory for the task runs it again at once
-        // (fault_fast), without a turn of the round robin.
-        let mut fr = Fast::Back(f);
+        // (fault_fast), without a turn of the round robin. The kernel does
+        // not use the FPU, so until fault_fast says no, the task's FPU
+        // registers stay in the processor and its page is not written.
+        let mut fr = Fast::Back(t.fpu);
         if v == 14 && atomic_load(pend) == 0 {
           match fr {
             Fast::Back(g) => {
@@ -1244,9 +1250,12 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         }
         match fr {
           Fast::Go(t2) => {
+            warm = true;
             j = Job::Run(t2);
           },
           Fast::Back(f2) => {
+            let mut f3 = f2;
+            cpu_fpu_save(&mut cpu, &mut f3);
             // A processor exception (a page fault, vectors below 32) raises no
             // device input either: a program touching new memory would poll every
             // device on each of its faults.
@@ -1256,7 +1265,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
             if poll || atomic_load(pend) > 0 {
               try_pump(u, s, pumping, pend);
             }
-            let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f2, v, poll, pend, others);
+            let next = locked(s, turn, &mut cpu, &mut mmu, t.pid, f3, v, poll, pend, others);
             cur = next.from;
             j = next.job;
           },
