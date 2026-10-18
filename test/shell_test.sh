@@ -523,6 +523,7 @@ steps = [
     # never queued (the disk never sees them), and one removed after a
     # second batch over blocks the disk has: both give every block back.
     ("sync; stat -f -c %f /disk > fr0; i=0; while [ $i -lt 20 ]; do echo data$i > disk/tmpdrop; rm disk/tmpdrop; i=$((i+1)); done; echo old > disk/keepdrop; sync; echo more >> disk/keepdrop; cat disk/keepdrop; rm disk/keepdrop; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo dropfree=same; ls disk/tmpdrop disk/keepdrop", [b"\r\nold\r\nmore\r\n", b"dropfree=same", b"tmpdrop: No such file"], b"\n# "),
+    ("sync; stat -f -c %f /disk > fr0; mkdir disk/mf; i=0; while [ $i -lt 30 ]; do echo a$i > disk/mf/a$i; echo b$i > disk/mf/b$i; ln -s a$i disk/mf/s$i; echo a$i >> disk/mf/a$i; i=$((i+1)); done; cat disk/mf/a7 disk/mf/b29; readlink disk/mf/s5; sync; cat disk/mf/a29; rm -r disk/mf; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo mfree=same", [b"\r\na7\r\na7\r\nb29\r\na5\r\n", b"a29\r\na29\r\n", b"mfree=same"], b"\n# "),
     # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
