@@ -816,6 +816,8 @@ fn lx_more_result(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u6
       r = EBADF;
     } else if d.kind != K_FILE {
       r = ESPIPE;
+    } else if r10 % 4294967296 > 5 {
+      r = EINVAL;                           // POSIX_FADV_NORMAL .. NOREUSE are 0 to 5
     }
     // Otherwise accepted: advice is not taken.
   } else if n == LX_GETCPU {
