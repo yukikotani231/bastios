@@ -539,6 +539,12 @@ steps = [
     ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
+    # The disk finds names through a hash index once it holds more than IX_MIN entries (src/diskfs.bastio), built when the
+    # directory first grows past it and kept up by each create, rename and removal: every name stays findable across the crossing.
+    ("mkdir disk/dix; i=0; while [ $i -lt 300 ]; do echo $i > disk/dix/f$i || break; i=$((i+1)); done; i=0; while [ $i -lt 300 ]; do [ $((i%3)) -eq 0 ] && rm disk/dix/f$i; [ $((i%3)) -eq 1 ] && mv disk/dix/f$i disk/dix/g$i; i=$((i+1)); done; ls disk/dix | wc -l; cat disk/dix/g100 disk/dix/f101",
+     b"\r\n200\r\n100\r\n101\r\n", b"\n# "),
+    ("i=0; while [ $i -lt 300 ]; do [ $((i%3)) -eq 0 ] && echo r$i > disk/dix/f$i; i=$((i+1)); done; ls disk/dix | wc -l; cat disk/dix/f102 disk/dix/g100; rm -r disk/dix; ls disk/dix",
+     [b"\r\n300\r\nr102\r\n100\r\n", b"No such file"], b"\n# "),
     # The in-memory file system finds names through a hash index (src/ramfs.bastio): creating, removing and renaming hundreds of files
     # must leave every name findable, and enough removals fill it with tombstones, which a rebuild clears.
     ("mkdir ixr; i=0; while [ $i -lt 600 ]; do echo $i > ixr/f$i || break; i=$((i+1)); done; i=0; while [ $i -lt 600 ]; do [ $((i%3)) -eq 0 ] && rm ixr/f$i; [ $((i%3)) -eq 1 ] && mv ixr/f$i ixr/g$i; i=$((i+1)); done; ls ixr | wc -l; cat ixr/g400 ixr/f401", b"\r\n400\r\n400\r\n401\r\n", b"\n# "),

@@ -1146,7 +1146,7 @@ t_ptrace: the tracee goes on to its end
 t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH
 t_ptrace2: PTRACE_DETACH with a signal delivers it
 t_ptrace2: PTRACE_GETFPREGS gives the SSE state
-t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS agrees with PTRACE_GETREGS
+t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer
 t_ptrace2: PTRACE_GETSIGINFO at a fault: SIGSEGV, SEGV_MAPERR and the address
 t_ptrace2: PTRACE_GETSIGINFO at a signal stop gives the signal and its sender
 t_ptrace2: PTRACE_LISTEN keeps a group-stopped tracee stopped; SIGCONT then wakes it
@@ -1661,3 +1661,4 @@ t_ltp2: pwrite and writev: a file takes the whole count, however far the file gr
 t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
 java: java: Eclipse JDT LS, the language server, finds a type error and answers a hover
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
+alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
