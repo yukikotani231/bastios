@@ -174,7 +174,7 @@ const NAT_BASE: u64 = 40000;           // flow f goes out from port NAT_BASE + f
 const NAT_NONE: u64 = 18446744073709551615;
 
 // The TCP table's size (src/tcp.bastio has the rest).
-const TCBS: u64 = 240;                // connections (listeners and TIME_WAIT hold some)
+const TCBS: u64 = 1024;               // connections (listeners and TIME_WAIT hold some)
 const TCB_W: u64 = 29;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 

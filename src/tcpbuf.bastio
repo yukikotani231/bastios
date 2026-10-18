@@ -27,91 +27,96 @@ import "pcache.bastio";         // bytes_in, bytes_out
 
 const TCP_RING: u64 = 262144;         // bytes in each receive and send ring
 const RING_PAGES: u64 = 64;           // TCP_RING / 4096
-const RINGS: u64 = 480;               // 2 * TCBS: ring 2t receives for connection t, 2t + 1 sends
-const RING_SPARE: u64 = 480;          // the slot of the spare table in the top table
+const RINGS: u64 = 2048;              // 2 * TCBS: ring 2t receives for connection t, 2t + 1 sends
+const GROUP: u64 = 512;               // rings in one group (a level-2 table)
 const SPARE_CAP: u64 = 512;           // pages the spare table holds at most
 const SPARE_LOW: u64 = 128;           // rings_feed tops the spare pages up to this ...
 const SPARE_HIGH: u64 = 256;          // ... and gives back those over this
 
-// tab: a level-2 table, never loaded: slot r is ring r's level-1 table,
-// slot RING_SPARE the spare table, whose slots 0 .. spare hold the spare
-// pages. None until rings_feed first finds a page for it.
+// tab: a level-3 table, never loaded: slot g is the level-2 table of rings
+// g * GROUP ..., whose slot r % GROUP is ring r's level-1 table. None until
+// rings_feed first finds a page for it. sp: a level-1 table whose slots
+// 0 .. spare hold the spare pages (None likewise).
 // pages: the pages the rings hold, tables included.
-struct Rings { tab: Store, spare: u64, pages: u64 }
+enum RingTab { None, Top(PageTable) }
+enum SpareTab { None, Table(PageTable) }
+struct Rings { tab: RingTab, sp: SpareTab, spare: u64, pages: u64 }
 
 spec fn rings_ok(r: &Rings) -> bool {
-  store_ok(r.tab) && r.spare <= SPARE_CAP && r.pages <= NPAGES
+  (r.tab is RingTab::Top ==> (pt_level(r.tab.Top) == 3 && pt_leases(r.tab.Top) == 0))
+  && (r.sp is SpareTab::Table ==> (pt_level(r.sp.Table) == 1 && pt_leases(r.sp.Table) == 0))
+  && r.spare <= SPARE_CAP && r.pages <= NPAGES
 }
 
 fn rings_new() -> Rings
   ensures rings_ok(result)
 {
-  return Rings { tab: Store::None, spare: 0, pages: 0 };
+  return Rings { tab: RingTab::None, sp: SpareTab::None, spare: 0, pages: 0 };
 }
 
-/// Moves the last spare page into slot i of l1 (ring r's table, out of
-/// l2 for the call). False if there is none,
+/// Moves the last spare page into slot i of l1. False if there is none,
 /// or slot i is in use.
-fn spare_out(l2: &mut PageTable, spare: u64, l1: &mut PageTable, i: u64, r: u64) -> bool
-  requires r < RINGS && !pt_used(l2, r)
-  requires pt_level(l2) == 2 && pt_leases(l2) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0 && i < 512
-  ensures pt_level(l2) == 2 && pt_leases(l2) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0
+fn spare_out(sp: &mut PageTable, spare: u64, l1: &mut PageTable, i: u64) -> bool
+  requires pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0 && i < 512
+  ensures pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0
   ensures result ==> (spare >= 1 && spare <= SPARE_CAP)
-  ensures !pt_used(l2, r)
 {
-  if spare == 0 || spare > SPARE_CAP || pt_has(l1, i) || !pt_has(l2, RING_SPARE) {
+  if spare == 0 || spare > SPARE_CAP || pt_has(l1, i) {
     return false;
   }
-  let mut sp = pt_take(&mut l2, RING_SPARE);
-  let mut ok = false;
   if pt_has(sp, spare - 1) && !pt_shared(sp, spare - 1) {
     pt_put_frame(&mut l1, i, pt_take_frame(&mut sp, spare - 1), true);
-    ok = true;
-  }
-  pt_put(&mut l2, RING_SPARE, sp);
-  return ok;
-}
-
-/// Moves the page in slot i of l1 (ring r's table, out of l2 for the
-/// call) to spare slot `spare`. False if the
-/// spare table is full (the page stays).
-fn spare_in(l2: &mut PageTable, spare: u64, l1: &mut PageTable, i: u64, r: u64) -> bool
-  requires r < RINGS && !pt_used(l2, r)
-  requires pt_level(l2) == 2 && pt_leases(l2) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0 && i < 512
-  ensures pt_level(l2) == 2 && pt_leases(l2) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0
-  ensures result ==> spare < SPARE_CAP
-  ensures !pt_used(l2, r)
-{
-  if spare >= SPARE_CAP || !pt_has(l1, i) || pt_shared(l1, i) || !pt_has(l2, RING_SPARE) {
-    return false;
-  }
-  let mut sp = pt_take(&mut l2, RING_SPARE);
-  let mut ok = false;
-  if !pt_has(sp, spare) {
-    pt_put_frame(&mut sp, spare, pt_take_frame(&mut l1, i), true);
-    ok = true;
-  }
-  pt_put(&mut l2, RING_SPARE, sp);
-  return ok;
-}
-
-/// Makes ring r's table from the last spare page. False if there is none.
-fn spare_table(l2: &mut PageTable, spare: u64, r: u64) -> bool
-  requires pt_level(l2) == 2 && pt_leases(l2) == 0 && r < RINGS
-  ensures pt_level(l2) == 2 && pt_leases(l2) == 0
-  ensures result ==> (spare >= 1 && spare <= SPARE_CAP)
-{
-  if spare == 0 || spare > SPARE_CAP || pt_has(l2, r) || !pt_has(l2, RING_SPARE) {
-    return false;
-  }
-  let mut sp = pt_take(&mut l2, RING_SPARE);
-  if pt_has(sp, spare - 1) && !pt_shared(sp, spare - 1) {
-    let f = pt_take_frame(&mut sp, spare - 1);
-    pt_put(&mut l2, RING_SPARE, sp);
-    pt_put(&mut l2, r, pt_new(f, 1));
     return true;
   }
-  pt_put(&mut l2, RING_SPARE, sp);
+  return false;
+}
+
+/// Moves the page in slot i of l1 to spare slot `spare`. False if the
+/// spare table is full (the page stays).
+fn spare_in(sp: &mut PageTable, spare: u64, l1: &mut PageTable, i: u64) -> bool
+  requires pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0 && i < 512
+  ensures pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l1) == 1 && pt_leases(l1) == 0
+  ensures result ==> spare < SPARE_CAP
+{
+  if spare >= SPARE_CAP || !pt_has(l1, i) || pt_shared(l1, i) || pt_has(sp, spare) {
+    return false;
+  }
+  pt_put_frame(&mut sp, spare, pt_take_frame(&mut l1, i), true);
+  return true;
+}
+
+/// Puts a level-1 table made from the last spare page into slot i of l2.
+/// False if there is none, or slot i is in use.
+fn spare_table1(sp: &mut PageTable, spare: u64, l2: &mut PageTable, i: u64) -> bool
+  requires pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l2) == 2 && pt_leases(l2) == 0 && i < 512
+  ensures pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l2) == 2 && pt_leases(l2) == 0
+  ensures result ==> (spare >= 1 && spare <= SPARE_CAP)
+{
+  if spare == 0 || spare > SPARE_CAP || pt_has(l2, i) {
+    return false;
+  }
+  if pt_has(sp, spare - 1) && !pt_shared(sp, spare - 1) {
+    let f = pt_take_frame(&mut sp, spare - 1);
+    pt_put(&mut l2, i, pt_new(f, 1));
+    return true;
+  }
+  return false;
+}
+
+/// The same for a level-2 table in slot i of l3.
+fn spare_table2(sp: &mut PageTable, spare: u64, l3: &mut PageTable, i: u64) -> bool
+  requires pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l3) == 3 && pt_leases(l3) == 0 && i < 512
+  ensures pt_level(sp) == 1 && pt_leases(sp) == 0 && pt_level(l3) == 3 && pt_leases(l3) == 0
+  ensures result ==> (spare >= 1 && spare <= SPARE_CAP)
+{
+  if spare == 0 || spare > SPARE_CAP || pt_has(l3, i) {
+    return false;
+  }
+  if pt_has(sp, spare - 1) && !pt_shared(sp, spare - 1) {
+    let f = pt_take_frame(&mut sp, spare - 1);
+    pt_put(&mut l3, i, pt_new(f, 2));
+    return true;
+  }
   return false;
 }
 
@@ -126,53 +131,73 @@ fn rb_put(rb: &mut Rings, r: u64, at: u64, src: &Bytes, s: u64, len: u64) -> u64
   if len == 0 {
     return 0;
   }
+  let g = r / GROUP;
+  let ri = r % GROUP;
+  let mut done = 0;
   match rb.tab {
-    Store::None => {
-      rb.tab = Store::None;
-      return 0;
+    RingTab::None => {
+      rb.tab = RingTab::None;
     },
-    Store::Table(t) => {
-      let mut l2 = t;
-      if !pt_has(l2, r) && spare_table(&mut l2, rb.spare, r) {
-        rb.spare = rb.spare - 1;
-        if rb.pages < NPAGES {
-          rb.pages = rb.pages + 1;
-        }
-      }
-      let mut done = 0;
-      if pt_has(l2, r) {
-        let mut l1 = pt_take(&mut l2, r);
-        let mut stop = false;
-        while done < len && !stop
-          invariant done <= len && rb.spare <= SPARE_CAP && rb.pages <= NPAGES && pt_level(l1) == 1 && pt_leases(l1) == 0
-          invariant pt_level(l2) == 2 && pt_leases(l2) == 0 && !pt_used(l2, r)
-        {
-          let pos = (at + done) % TCP_RING;
-          let pg = pos / 4096;
-          let o = pos % 4096;
-          let mut c = 4096 - o;
-          if c > len - done {
-            c = len - done;
-          }
-          if !pt_has(l1, pg) && spare_out(&mut l2, rb.spare, &mut l1, pg, r) {
+    RingTab::Top(t) => {
+      let mut l3 = t;
+      match rb.sp {
+        SpareTab::None => {
+          rb.sp = SpareTab::None;
+        },
+        SpareTab::Table(st) => {
+          let mut sp = st;
+          if !pt_has(l3, g) && spare_table2(&mut sp, rb.spare, &mut l3, g) {
             rb.spare = rb.spare - 1;
             if rb.pages < NPAGES {
               rb.pages = rb.pages + 1;
             }
           }
-          if pt_has(l1, pg) {
-            pt_borrow_frame(&mut l1, pg, bytes_in, o, src, s + done, c);
-            done = done + c;
-          } else {
-            stop = true;
+          if pt_has(l3, g) {
+            let mut l2 = pt_take(&mut l3, g);
+            if !pt_has(l2, ri) && spare_table1(&mut sp, rb.spare, &mut l2, ri) {
+              rb.spare = rb.spare - 1;
+              if rb.pages < NPAGES {
+                rb.pages = rb.pages + 1;
+              }
+            }
+            if pt_has(l2, ri) {
+              let mut l1 = pt_take(&mut l2, ri);
+              let mut stop = false;
+              while done < len && !stop
+                invariant done <= len && rb.spare <= SPARE_CAP && rb.pages <= NPAGES && pt_level(l1) == 1 && pt_leases(l1) == 0
+                invariant pt_level(sp) == 1 && pt_leases(sp) == 0
+              {
+                let pos = (at + done) % TCP_RING;
+                let pg = pos / 4096;
+                let o = pos % 4096;
+                let mut c = 4096 - o;
+                if c > len - done {
+                  c = len - done;
+                }
+                if !pt_has(l1, pg) && spare_out(&mut sp, rb.spare, &mut l1, pg) {
+                  rb.spare = rb.spare - 1;
+                  if rb.pages < NPAGES {
+                    rb.pages = rb.pages + 1;
+                  }
+                }
+                if pt_has(l1, pg) {
+                  pt_borrow_frame(&mut l1, pg, bytes_in, o, src, s + done, c);
+                  done = done + c;
+                } else {
+                  stop = true;
+                }
+              }
+              pt_put(&mut l2, ri, l1);
+            }
+            pt_put(&mut l3, g, l2);
           }
-        }
-        pt_put(&mut l2, r, l1);
+          rb.sp = SpareTab::Table(sp);
+        },
       }
-      rb.tab = Store::Table(l2);
-      return done;
+      rb.tab = RingTab::Top(l3);
     },
   }
+  return done;
 }
 
 /// Copies `len` bytes of ring r from ring offset `at` on into dst from d.
@@ -186,32 +211,37 @@ fn rb_get(rb: &mut Rings, r: u64, at: u64, dst: &mut Bytes, d: u64, len: u64)
     return;
   }
   let l = blen(dst);
+  let g = r / GROUP;
+  let ri = r % GROUP;
   match rb.tab {
-    Store::None => { rb.tab = Store::None; },
-    Store::Table(t) => {
-      let mut l2 = t;
-      if pt_has(l2, r) {
-        let mut l1 = pt_take(&mut l2, r);
-        let mut done = 0;
-        while done < len
-          invariant done <= len && pt_level(l1) == 1 && blen(dst) == l && d + len <= l
-          invariant pt_level(l2) == 2 && pt_leases(l2) == 0 && !pt_used(l2, r)
-        {
-          let pos = (at + done) % TCP_RING;
-          let pg = pos / 4096;
-          let o = pos % 4096;
-          let mut c = 4096 - o;
-          if c > len - done {
-            c = len - done;
+    RingTab::None => { rb.tab = RingTab::None; },
+    RingTab::Top(t) => {
+      let mut l3 = t;
+      if pt_has(l3, g) {
+        let mut l2 = pt_take(&mut l3, g);
+        if pt_has(l2, ri) {
+          let mut l1 = pt_take(&mut l2, ri);
+          let mut done = 0;
+          while done < len
+            invariant done <= len && pt_level(l1) == 1 && blen(dst) == l && d + len <= l
+          {
+            let pos = (at + done) % TCP_RING;
+            let pg = pos / 4096;
+            let o = pos % 4096;
+            let mut c = 4096 - o;
+            if c > len - done {
+              c = len - done;
+            }
+            if pt_has(l1, pg) {
+              pt_borrow_frame(&mut l1, pg, bytes_out, o, &mut dst, d + done, c);
+            }
+            done = done + c;
           }
-          if pt_has(l1, pg) {
-            pt_borrow_frame(&mut l1, pg, bytes_out, o, &mut dst, d + done, c);
-          }
-          done = done + c;
+          pt_put(&mut l2, ri, l1);
         }
-        pt_put(&mut l2, r, l1);
+        pt_put(&mut l3, g, l2);
       }
-      rb.tab = Store::Table(l2);
+      rb.tab = RingTab::Top(l3);
     },
   }
 }
@@ -239,35 +269,48 @@ fn rb_trim(rb: &mut Rings, r: u64, from: u64, gone: u64, head: u64, live: u64)
   if gone == 0 {
     return;
   }
+  let g = r / GROUP;
+  let ri = r % GROUP;
   match rb.tab {
-    Store::None => { rb.tab = Store::None; },
-    Store::Table(t) => {
-      let mut l2 = t;
-      if pt_has(l2, r) {
-        let mut l1 = pt_take(&mut l2, r);
-        let mut count = gone / 4096 + 2;
-        if count > RING_PAGES {
-          count = RING_PAGES;
-        }
-        let first = from % TCP_RING / 4096;
-        let h = head % TCP_RING;
-        let mut i = 0;
-        while i < count
-          invariant i <= count && count <= RING_PAGES && rb.spare <= SPARE_CAP && rb.pages <= NPAGES && pt_level(l1) == 1 && pt_leases(l1) == 0
-          invariant pt_level(l2) == 2 && pt_leases(l2) == 0 && !pt_used(l2, r)
-        {
-          let pg = (first + i) % RING_PAGES;
-          if pt_has(l1, pg) && page_dead(pg, h, live) && spare_in(&mut l2, rb.spare, &mut l1, pg, r) {
-            rb.spare = rb.spare + 1;
-            if rb.pages > 0 {
-              rb.pages = rb.pages - 1;
+    RingTab::None => { rb.tab = RingTab::None; },
+    RingTab::Top(t) => {
+      let mut l3 = t;
+      match rb.sp {
+        SpareTab::None => { rb.sp = SpareTab::None; },
+        SpareTab::Table(st) => {
+          let mut sp = st;
+          if pt_has(l3, g) {
+            let mut l2 = pt_take(&mut l3, g);
+            if pt_has(l2, ri) {
+              let mut l1 = pt_take(&mut l2, ri);
+              let mut count = gone / 4096 + 2;
+              if count > RING_PAGES {
+                count = RING_PAGES;
+              }
+              let first = from % TCP_RING / 4096;
+              let h = head % TCP_RING;
+              let mut i = 0;
+              while i < count
+                invariant i <= count && count <= RING_PAGES && rb.spare <= SPARE_CAP && rb.pages <= NPAGES && pt_level(l1) == 1 && pt_leases(l1) == 0
+                invariant pt_level(sp) == 1 && pt_leases(sp) == 0
+              {
+                let pg = (first + i) % RING_PAGES;
+                if pt_has(l1, pg) && page_dead(pg, h, live) && spare_in(&mut sp, rb.spare, &mut l1, pg) {
+                  rb.spare = rb.spare + 1;
+                  if rb.pages > 0 {
+                    rb.pages = rb.pages - 1;
+                  }
+                }
+                i = i + 1;
+              }
+              pt_put(&mut l2, ri, l1);
             }
+            pt_put(&mut l3, g, l2);
           }
-          i = i + 1;
-        }
-        pt_put(&mut l2, r, l1);
+          rb.sp = SpareTab::Table(sp);
+        },
       }
-      rb.tab = Store::Table(l2);
+      rb.tab = RingTab::Top(l3);
     },
   }
 }
@@ -279,48 +322,55 @@ fn rb_clear(rb: &mut Rings, r: u64)
   requires rings_ok(rb) && r < RINGS
   ensures rings_ok(rb)
 {
+  let g = r / GROUP;
+  let ri = r % GROUP;
   match rb.tab {
-    Store::None => { rb.tab = Store::None; },
-    Store::Table(t) => {
-      let mut l2 = t;
-      if pt_has(l2, r) {
-        let mut l1 = pt_take(&mut l2, r);
-        let mut i = 0;
-        let mut empty = true;
-        while i < RING_PAGES
-          invariant i <= RING_PAGES && rb.spare <= SPARE_CAP && rb.pages <= NPAGES && pt_level(l1) == 1 && pt_leases(l1) == 0
-          invariant pt_level(l2) == 2 && pt_leases(l2) == 0 && !pt_used(l2, r)
-        {
-          if pt_has(l1, i) {
-            if spare_in(&mut l2, rb.spare, &mut l1, i, r) {
-              rb.spare = rb.spare + 1;
-              if rb.pages > 0 {
-                rb.pages = rb.pages - 1;
+    RingTab::None => { rb.tab = RingTab::None; },
+    RingTab::Top(t) => {
+      let mut l3 = t;
+      match rb.sp {
+        SpareTab::None => { rb.sp = SpareTab::None; },
+        SpareTab::Table(st) => {
+          let mut sp = st;
+          if pt_has(l3, g) {
+            let mut l2 = pt_take(&mut l3, g);
+            if pt_has(l2, ri) {
+              let mut l1 = pt_take(&mut l2, ri);
+              let mut i = 0;
+              let mut empty = true;
+              while i < RING_PAGES
+                invariant i <= RING_PAGES && rb.spare <= SPARE_CAP && rb.pages <= NPAGES && pt_level(l1) == 1 && pt_leases(l1) == 0
+                invariant pt_level(sp) == 1 && pt_leases(sp) == 0
+              {
+                if pt_has(l1, i) {
+                  if spare_in(&mut sp, rb.spare, &mut l1, i) {
+                    rb.spare = rb.spare + 1;
+                    if rb.pages > 0 {
+                      rb.pages = rb.pages - 1;
+                    }
+                  } else {
+                    empty = false;
+                  }
+                }
+                i = i + 1;
               }
-            } else {
-              empty = false;
+              // The table itself, once nothing is left in it.
+              if empty && l1_empty(l1) && rb.spare < SPARE_CAP && !pt_has(sp, rb.spare) {
+                pt_put_frame(&mut sp, rb.spare, pt_free(l1), true);
+                rb.spare = rb.spare + 1;
+                if rb.pages > 0 {
+                  rb.pages = rb.pages - 1;
+                }
+              } else {
+                pt_put(&mut l2, ri, l1);
+              }
             }
+            pt_put(&mut l3, g, l2);
           }
-          i = i + 1;
-        }
-        // The table itself, once nothing is left in it.
-        if empty && l1_empty(l1) && rb.spare < SPARE_CAP && pt_has(l2, RING_SPARE) {
-          let mut sp = pt_take(&mut l2, RING_SPARE);
-          if !pt_has(sp, rb.spare) {
-            pt_put_frame(&mut sp, rb.spare, pt_free(l1), true);
-            rb.spare = rb.spare + 1;
-            if rb.pages > 0 {
-              rb.pages = rb.pages - 1;
-            }
-          } else {
-            pt_put(&mut l2, r, l1);
-          }
-          pt_put(&mut l2, RING_SPARE, sp);
-        } else {
-          pt_put(&mut l2, r, l1);
-        }
+          rb.sp = SpareTab::Table(sp);
+        },
       }
-      rb.tab = Store::Table(l2);
+      rb.tab = RingTab::Top(l3);
     },
   }
 }
@@ -356,38 +406,43 @@ fn rings_feed(rb: &mut Rings, m: &mut Mem)
   }
   let cap = pool_size(m.pool) / 8;
   match rb.tab {
-    Store::None => {
+    RingTab::None => {
       let a = find_free(&mut m);
       if a >= NPAGES {
-        rb.tab = Store::None;
+        rb.tab = RingTab::None;
         return;
       }
-      rb.tab = Store::Table(spare_fill(pt_new(take_page(&mut m, a), 2), &mut rb.spare, rb.pages, &mut m, cap));
+      rb.tab = RingTab::Top(pt_new(take_page(&mut m, a), 3));
     },
-    Store::Table(t) => {
-      rb.tab = Store::Table(spare_fill(t, &mut rb.spare, rb.pages, &mut m, cap));
+    RingTab::Top(t) => {
+      rb.tab = RingTab::Top(t);
+    },
+  }
+  match rb.sp {
+    SpareTab::None => {
+      let a = find_free(&mut m);
+      if a >= NPAGES {
+        rb.sp = SpareTab::None;
+        return;
+      }
+      rb.spare = 0;                     // a new spare table holds nothing
+      rb.sp = SpareTab::Table(spare_fill(pt_new(take_page(&mut m, a), 1), &mut rb.spare, rb.pages, &mut m, cap));
+    },
+    SpareTab::Table(st) => {
+      rb.sp = SpareTab::Table(spare_fill(st, &mut rb.spare, rb.pages, &mut m, cap));
     },
   }
 }
 
-/// rings_feed on the top table l2, out of the Rings for the call (spare: its count).
-fn spare_fill(l2: PageTable, spare: &mut u64, pages: u64, m: &mut Mem, cap: u64) -> PageTable
-  requires pt_level(l2) == 2 && pt_leases(l2) == 0 && spare <= SPARE_CAP && pages <= NPAGES && mem_ok(m)
-  ensures pt_level(result) == 2 && pt_leases(result) == 0 && spare <= SPARE_CAP && mem_ok(m)
+/// rings_feed on the spare table sp, out of the Rings for the call (spare: its count).
+fn spare_fill(sp0: PageTable, spare: &mut u64, pages: u64, m: &mut Mem, cap: u64) -> PageTable
+  requires pt_level(sp0) == 1 && pt_leases(sp0) == 0 && spare <= SPARE_CAP && pages <= NPAGES && mem_ok(m)
+  ensures pt_level(result) == 1 && pt_leases(result) == 0 && spare <= SPARE_CAP && mem_ok(m)
 {
-  let mut t = l2;
-  if !pt_has(t, RING_SPARE) {
-    let a = find_free(&mut m);
-    if a >= NPAGES {
-      return t;
-    }
-    pt_put(&mut t, RING_SPARE, pt_new(take_page(&mut m, a), 1));
-    spare = 0;                        // a new spare table holds nothing
-  }
-  let mut sp = pt_take(&mut t, RING_SPARE);
+  let mut sp = sp0;
   let mut more = true;
   while more && spare < SPARE_LOW && pages + spare < cap
-    invariant spare <= SPARE_CAP && mem_ok(m) && pt_level(sp) == 1
+    invariant spare <= SPARE_CAP && mem_ok(m) && pt_level(sp) == 1 && pt_leases(sp) == 0
   {
     let a = find_free(&mut m);
     if a >= NPAGES || pt_has(sp, spare) {
@@ -399,7 +454,7 @@ fn spare_fill(l2: PageTable, spare: &mut u64, pages: u64, m: &mut Mem, cap: u64)
   }
   more = true;
   while more && spare > SPARE_HIGH
-    invariant spare <= SPARE_CAP && mem_ok(m) && pt_level(sp) == 1
+    invariant spare <= SPARE_CAP && mem_ok(m) && pt_level(sp) == 1 && pt_leases(sp) == 0
   {
     let s = spare - 1;
     if pt_has(sp, s) && !pt_shared(sp, s) {
@@ -409,8 +464,7 @@ fn spare_fill(l2: PageTable, spare: &mut u64, pages: u64, m: &mut Mem, cap: u64)
       more = false;
     }
   }
-  pt_put(&mut t, RING_SPARE, sp);
-  return t;
+  return sp;
 }
 
 /// Gives every page back (the card going away).
@@ -419,7 +473,11 @@ fn rings_free(rb: Rings, m: &mut Mem)
   ensures mem_ok(m)
 {
   match rb.tab {
-    Store::None => {},
-    Store::Table(t) => { free_l2(&mut m, t); },
+    RingTab::None => {},
+    RingTab::Top(t) => { free_l3(&mut m, t); },
+  }
+  match rb.sp {
+    SpareTab::None => {},
+    SpareTab::Table(st) => { free_l1(&mut m, st); },
   }
 }
