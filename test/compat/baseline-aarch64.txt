@@ -1625,3 +1625,12 @@ dev: tcc: a compile error
 dev: tcc: arguments, exit status, an executable file
 dev: tcc: hello
 dev: tcc: the library (malloc, qsort, files, strings)
+ssh: dropbear: the server starts
+ssh: dropbear: the server stops
+ssh: ssh -t: a command on a terminal (a pty in the guest)
+ssh: ssh: 1 MiB from the guest
+ssh: ssh: Ctrl-C stops the foreground command, not the shell
+ssh: ssh: an interactive login, the shell's exit status
+ssh: ssh: an unknown key is refused
+ssh: ssh: run a command
+ssh: ssh: standard input and the exit status

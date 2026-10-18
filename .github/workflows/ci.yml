@@ -449,7 +449,7 @@ jobs:
             cache: alpine
           - part: rest
             skip: main1,bastio,dev,alpine,alpine2,alpine3,alpine4,alpine5
-            disks: debian.img node.img
+            disks: disk.img debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
       # never replaced: a key that hits is not saved again).
