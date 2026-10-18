@@ -20,10 +20,9 @@ import run as R  # noqa: E402
 PCIDE = 1 << 17
 
 
-def boot_and_read(kernel, append, smp):
+def boot_and_read(kernel, append, smp, cpu="host"):
     sock = os.path.join(tempfile.gettempdir(), f"pcid-mon-{os.getpid()}-{int(bool(append))}.sock")
     R.EXTRA_QEMU = ["-monitor", f"unix:{sock},server,nowait"]
-    cpu = "host"
     args = argparse.Namespace(accel="kvm", cpu=cpu, mem="512M", smp=smp, kernel=kernel, append=append)
     tmp = tempfile.mkdtemp()
     g = R.boot("bastios", args, R.build_osbench(), tmp)
@@ -65,13 +64,19 @@ def main():
             print("pcid_test: this processor has no PCID; nothing to check")
             return 0
     bad = 0
-    for append, want in (("", False), ("pcid", True)):
-        cr4s, timing = boot_and_read(args.kernel, append, args.smp)
+    qemu64 = "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+pcid"
+    for append, want, cpu in (("", False, "host"), ("pcid", True, "host"), ("pcid", True, qemu64)):
+        try:
+            cr4s, timing = boot_and_read(args.kernel, append, args.smp, cpu)
+        except BaseException as e:  # a hang or a crash is a failure of this case, not of the script
+            print(f"pcid_test: command line {append!r}, -cpu {cpu}: FAIL; {e}")
+            bad += 1
+            continue
         on = [bool(c & PCIDE) for c in cr4s]
         # A processor that never ran user code (an idle application processor)
         # has not turned PCIDE on yet; the one that ran the benchmark has.
         ok = bool(cr4s) and (any(on) if want else not any(on))
-        print(f"pcid_test: command line {append!r}: CR4.PCIDE per processor {on}: {'ok' if ok else 'FAIL'}; {timing}")
+        print(f"pcid_test: command line {append!r}, -cpu {cpu}: CR4.PCIDE per processor {on}: {'ok' if ok else 'FAIL'}; {timing}")
         bad += not ok
     return 1 if bad else 0
 
