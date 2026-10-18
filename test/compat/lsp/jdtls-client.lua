@@ -17,17 +17,19 @@ local id = vim.lsp.start({
   cmd_env = { JAVA_HOME = "/opt/java/openjdk", HOME = "/root" },
   root_dir = "/root/javaproj",
 }, { bufnr = buf })
-vim.wait(900000, function()
+vim.wait(300000, function()
   local c = vim.lsp.get_client_by_id(id)
   return c ~= nil and c.initialized
 end, 100)
 local c = vim.lsp.get_client_by_id(id)
-if c == nil then
+if c == nil or not c.initialized then
   -- The server ended: say why, from the client's log.
   local f = io.open(vim.lsp.log.get_filename(), "r")
   local lines = {}
   for l in (f and f:lines() or function() end) do lines[#lines + 1] = l end
   for i = math.max(1, #lines - 12), #lines do print(lines[i]:sub(1, 300)) end
+  local p = io.popen("ps 2>&1 | grep -v ' ps' | cut -c1-200; tail -n 12 /tmp/jdtls-data/.metadata/.log 2>&1 | cut -c1-300")
+  print(p:read("*a"))
   os.exit(1)
 end
 out[#out + 1] = (c and c.initialized) and "initialized" or "no-init"
