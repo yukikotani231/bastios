@@ -253,6 +253,14 @@ jobs:
         env:
           CI_KVM_PCID: "1"
         run: tools/ci-kvm.sh
+      - name: Boot probe with the compat command line
+        continue-on-error: true
+        run: |
+          echo "wrapper:"; cat "$RUNNER_TEMP/kvm-bin/qemu-system-x86_64"
+          timeout 20 qemu-system-x86_64 -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt -kernel build/bastios.elf -m 256M -smp 2 \
+            -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -serial stdio -monitor none \
+            -drive file=build/compat/pcid.img,format=raw,if=none,id=vd -device virtio-blk-pci,drive=vd \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 </dev/null 2>&1 | head -c 3000 || true
       - name: Run them with PCIDs on
         run: |
           progs="t_mem t_proc t_thread t_sig3 t_signal t_ptrace t_ipc t_file"
