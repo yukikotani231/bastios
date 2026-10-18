@@ -4,7 +4,7 @@
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
  * closes the window, and what is typed goes to the focused window. Ctrl-T
- * starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
+ * (or the Term button of the task bar at the bottom, which also has a button for each window) starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
  * ends bwm (the console comes back when /dev/fb0 closes).
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
@@ -62,6 +62,12 @@ struct fix_info {
 #define MAX_COLS 80
 #define MAX_ROWS 40
 #define MAXWIN 16
+#define BAR_H 24                         /* the task bar along the bottom */
+#define TERM_X 4                         /* its Term button */
+#define TERM_W 48
+#define BTN_X0 60                        /* and the window buttons after it */
+#define BTN_W 120
+#define BTN_GAP 4
 #define GRIP 14                          /* the resize grip at the corner of a frame */
 #define MIN_CW 64
 #define MIN_CH 32
@@ -93,6 +99,7 @@ static struct win pool[MAXWIN];
 static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
 static int nz;
 static int next_id = 1;
+static void touch_bar(void);
 static struct win *sizing;               /* the window whose grip is held */
 static int sox, soy;                     /* from the pointer to the corner of the frame, when it was taken */
 
@@ -172,6 +179,7 @@ static struct win *win_new(int x, int y, int cw, int ch, const char *title, int 
         for (int r = 0; r < MAX_ROWS; r++)
             memset(w->text[r], ' ', MAX_COLS);
         z[nz++] = w;
+        touch_bar();
         return w;
     }
     return NULL;
@@ -193,6 +201,7 @@ static void win_free(struct win *w)
     if (sizing == w)
         sizing = NULL;
     w->used = 0;
+    touch_bar();
 }
 
 static void win_put(struct win *w, int c)
@@ -274,6 +283,44 @@ static void draw_win(const struct win *w, int focused)
         draw_grip(w);
 }
 
+/* The task bar: a button that starts a terminal, then one for each window
+ * in the order they were opened, the top one lit. */
+static void draw_bar(void)
+{
+    int y0 = (int)H - BAR_H;
+    fill(scene, 0, y0, W, H, rgb(25, 25, 35));
+    fill(scene, TERM_X, y0 + 3, TERM_X + TERM_W, H - 3, rgb(40, 140, 70));
+    text(scene, TERM_X + 8, y0 + 4, "Term", rgb(255, 255, 255));
+    int n = 0;
+    for (int i = 0; i < MAXWIN; i++) {
+        if (!pool[i].used)
+            continue;
+        int x = BTN_X0 + n * (BTN_W + BTN_GAP);
+        if (x + BTN_W > (int)W)
+            break;
+        fill(scene, x, y0 + 3, x + BTN_W, H - 3, nz && &pool[i] == z[nz - 1] ? rgb(40, 90, 200) : rgb(70, 70, 85));
+        char t[16];
+        snprintf(t, sizeof t, "%.14s", pool[i].title);
+        text(scene, x + 6, y0 + 4, t, rgb(255, 255, 255));
+        n++;
+    }
+}
+
+/* The window whose button is at x in the task bar, or NULL. */
+static struct win *bar_window(int x)
+{
+    int n = 0;
+    for (int i = 0; i < MAXWIN; i++) {
+        if (!pool[i].used)
+            continue;
+        int x0 = BTN_X0 + n * (BTN_W + BTN_GAP);
+        if (x >= x0 && x < x0 + BTN_W)
+            return &pool[i];
+        n++;
+    }
+    return NULL;
+}
+
 static void draw_scene(void)
 {
     for (unsigned y = 0; y < H; y++) {
@@ -283,6 +330,7 @@ static void draw_scene(void)
     }
     for (int i = 0; i < nz; i++)
         draw_win(z[i], i == nz - 1);
+    draw_bar();
 }
 
 /* The pointer: '#' black outline, '.' white fill. */
@@ -338,6 +386,7 @@ static void touch(int x0, int y0, int x1, int y1)
 }
 static void touch_win(const struct win *w) { touch(w->x, w->y, w->x + w->w, w->y + w->h); }
 static void touch_all(void) { touch(0, 0, W, H); }
+static void touch_bar(void) { touch(0, (int)H - BAR_H, W, H); }
 
 static struct win *hit(int x, int y)
 {
@@ -579,6 +628,7 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
             t.title[sizeof t.title - 1] = 0;
             snprintf(w->title, sizeof w->title, "%s", t.title);
             touch_win(w);
+            touch_bar();
         }
     } else {
         drop_client(i);                                    /* not a message we know */
@@ -943,8 +993,19 @@ int main(int argc, char **argv)
                 if (mx >= (int)W) mx = W - 1;
                 if (my >= (int)H) my = H - 1;
                 int down = m[0] & 1;
-                struct win *under = hit(mx, my);
-                if (down && !(buttons & 1) && under) {
+                int in_bar = my >= (int)H - BAR_H;
+                struct win *under = in_bar ? NULL : hit(mx, my);
+                if (down && !(buttons & 1) && in_bar) {
+                    if (mx >= TERM_X && mx < TERM_X + TERM_W) {
+                        launch_terminal();
+                    } else {
+                        struct win *bw = bar_window(mx);
+                        if (bw && bw != z[nz - 1]) {
+                            raise_win(bw);
+                            touch_all();
+                        }
+                    }
+                } else if (down && !(buttons & 1) && under) {
                     gx = mx - under->x;
                     gy = my - under->y;
                     int on_close = my < under->y + TITLE_H && mx >= under->x + under->w - BORDER - CLOSE_W && mx < under->x + under->w - BORDER - 2;

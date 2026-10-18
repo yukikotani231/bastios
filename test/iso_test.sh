@@ -581,6 +581,32 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The task bar: its Term button starts a terminal window, and a click
+        # on the button of that window (the top one already) changes nothing.
+        mark = len(out)
+        q.stdin.write(b"bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            monitor("mouse_move -484 372", "mouse_button 1", "mouse_button 0")
+            good = until(b"bterm: window 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the Term button of the task bar starts a terminal window")
+        fails += not good
+        if good:
+            time.sleep(1.5)
+            w, h, before = screendump()
+            monitor("mouse_move 60 0", "mouse_button 1", "mouse_button 0")
+            time.sleep(0.5)
+            w, h, after = screendump()
+            good = before[:w * 3 * 740] == after[:w * 3 * 740]       # above the bar, where the pointer is
+            print(("ok  " if good else "FAIL"), f"({name}) a click on the button of the top window changes nothing")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
