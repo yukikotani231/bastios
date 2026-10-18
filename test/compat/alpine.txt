@@ -560,7 +560,7 @@ $ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luapro
 initialized,hover-integer,stopped
 
 == apk: free the disk, then install python3 over HTTP
-$ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 2>&1 | bb tail -n 3 | bb cut -c1-180; echo status $?
+$ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server 2>/dev/null; bb rm -f /apk.rc /apk.log; (bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 >/apk.log 2>&1; echo $? >/apk.rc) & n=0; while [ ! -e /apk.rc ] && [ $n -lt 200 ]; do bb sleep 1; n=$((n+1)); done; if [ -e /apk.rc ]; then bb tail -n 3 /apk.log | bb cut -c1-180; echo status $(bb cat /apk.rc); else echo STALL after $n s; for r in 1 2; do echo TCP$r; bb cat /proc/net/tcp; echo DEV$r; bb cat /proc/net/dev; bb sleep 5; done; bb ps; echo ENDSTALL; fi
 status 0
 
 == python3: asyncio talks over a socketpair
