@@ -18,6 +18,7 @@
 
 import "lxcred.bastio";
 import "lxtime.bastio";
+import "lxptimer.bastio";
 
 const LX_ADJTIMEX: u64 = 159;
 const LX_SETTIMEOFDAY: u64 = 164;
@@ -302,8 +303,10 @@ fn set_wall(k: &mut Kernel, t: u64) -> u64
   if t < k.ns || t >= FOREVER {
     return EINVAL;
   }
+  let was_ep = k.epoch;
   k.epoch = t - k.ns;
   tfd_clock_set(&mut k);
+  ptimer_clock_set(&mut k, was_ep);        // src/lxptimer.bastio
   return 0;
 }
 
