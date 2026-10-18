@@ -74,8 +74,8 @@ const NET_NONE: u64 = 18446744073709551615;
 const PID_LIMIT: u64 = 65536;
 
 const SOCKS: u64 = 256;               // UDP sockets in the table
-const UDP_START: u64 = 8;             // sockets whose queues exist at first (dq and cork double from here)
-const RXQ: u64 = 16;                  // datagrams each socket can queue
+const UDP_START: u64 = 2;             // sockets whose queues exist at first (dq, dm and cork double from here)
+const RXQ: u64 = 64;                  // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
 const V6N: u64 = 64;                  // IPv6 peers (src/net6.bastio)
@@ -101,14 +101,13 @@ const S_HEAD: u64 = 2;                // the oldest queued datagram's slot
 const S_COUNT: u64 = 3;               // how many are queued
 const S_PEER_IP: u64 = 4;             // who sent the last datagram taken
 const S_PEER_PORT: u64 = 5;
-const S_SLOTS: u64 = 6;               // then per slot: length, address, port
-const SLOT_W: u64 = 3;
-const S_CORK: u64 = 54;               // bytes held back by MSG_MORE, in cork
-const S_NS: u64 = 55;                 // its network namespace (src/netns.bastio)
+const SLOT_W: u64 = 3;                // words per queued datagram, in dm: length, address, port
+const S_CORK: u64 = 6;                // bytes held back by MSG_MORE, in cork
+const S_NS: u64 = 7;                  // its network namespace (src/netns.bastio)
 const RAW_ICMP: u64 = 65537;           // S_PORT of a raw ICMP socket (no port number is)
 const RAW_ICMP6: u64 = 65538;          // S_PORT of a raw ICMPv6 socket (src/net6.bastio)
-const S_FAM: u64 = 56;                // FAM_*: which peers it takes datagrams from
-const SOCK_FIELDS: u64 = 57;          // S_SLOTS + RXQ * SLOT_W + 2, then S_NS and S_FAM
+const S_FAM: u64 = 8;                 // FAM_*: which peers it takes datagrams from
+const SOCK_FIELDS: u64 = 9;           // S_FAM + 1
 // Which address family a socket (UDP here, TCP listeners in tcp.bastio)
 // answers to. The IPv4 and IPv6 sides share one port space, as on Linux,
 // except that an IPv6-only socket and an IPv4 one may hold the same port.
@@ -174,7 +173,8 @@ const NAT_BASE: u64 = 40000;           // flow f goes out from port NAT_BASE + f
 const NAT_NONE: u64 = 18446744073709551615;
 
 // The TCP table's size (src/tcp.bastio has the rest).
-const TCBS: u64 = 240;                // connections (listeners and TIME_WAIT hold some)
+const TCBS: u64 = 1024;               // connections (listeners and TIME_WAIT hold some)
+const TCB0: u64 = 64;                 // connections the table starts with (it doubles to TCBS)
 const TCB_W: u64 = 29;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
@@ -212,8 +212,9 @@ struct Net {
   rx: u64,            // frames received and sent
   tx: u64,
   socks: Buf,         // the UDP sockets, SOCK_FIELDS words each
-  ucap: u64,          // how many sockets dq and cork have room for (grows by udp_room)
+  ucap: u64,          // how many sockets dq, dm and cork have room for (grows by udp_room)
   dq: Bytes,          // their queued datagrams, RXQ slots of UDP_MAX bytes each
+  dm: Buf,            // what is known of each slot: SLOT_W words (dm_get)
   cork: Bytes,        // the datagram each is putting together (MSG_MORE), UDP_MAX bytes each
   eph: u64,           // where the next ephemeral port search starts
   tcbs: Buf,          // TCP connections (src/tcp.bastio), TCB_W words each
@@ -261,8 +262,8 @@ spec fn net_ok(n: &Net) -> bool {
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
   && len(n.arp) == ARP_N * 2 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX && n.dns <= IP_MAX
-  && len(n.socks) == SOCKS * SOCK_FIELDS && n.ucap <= SOCKS && blen(n.dq) == n.ucap * RXQ * UDP_MAX && blen(n.cork) == n.ucap * UDP_MAX
-  && len(n.tcbs) == TCBS * TCB_W && rings_ok(n.rb)
+  && len(n.socks) == SOCKS * SOCK_FIELDS && n.ucap <= SOCKS && blen(n.dq) == n.ucap * RXQ * UDP_MAX && len(n.dm) == n.ucap * RXQ * SLOT_W && blen(n.cork) == n.ucap * UDP_MAX
+  && len(n.tcbs) <= TCBS * TCB_W && rings_ok(n.rb)
   && blen(n.lo) == LO_BYTES && len(n.lo_len) == LOQ && len(n.lo_at) == LOQ && n.lo_tail < LO_BYTES && n.lo_used <= LO_BYTES && n.lo_head < LOQ && n.lo_n <= LOQ
   && len(n.v6) == V6N * V6W && n.rtr_mac < MAC_LIMIT
   && len(n.ifs) == IFN * IF_W && len(n.nss) == NNET * NS_W && n.ns < NNET && len(n.lo_if) == LOQ
@@ -1244,6 +1245,21 @@ fn sk_set(n: &mut Net, s: u64, f: u64, v: u64)
   n.socks = set(n.socks, s * SOCK_FIELDS + f, v);
 }
 
+/// Word k of the entry for queue slot `slot` of socket s (an open socket has
+/// its entries: udp_slot_ok).
+fn dm_get(n: &Net, s: u64, slot: u64, k: u64) -> u64
+  requires net_ok(n) && s < n.ucap && slot < RXQ && k < SLOT_W
+{
+  return get(n.dm, (s * RXQ + slot) * SLOT_W + k);
+}
+
+fn dm_set(n: &mut Net, s: u64, slot: u64, k: u64, v: u64)
+  requires net_ok(n) && s < n.ucap && slot < RXQ && k < SLOT_W
+  ensures net_ok(n)
+{
+  n.dm = set(n.dm, (s * RXQ + slot) * SLOT_W + k, v);
+}
+
 /// The open socket bound to `port`, or SOCKS if there is none.
 fn sock_find(n: &Net, port: u64) -> u64
   requires net_ok(n)
@@ -1327,7 +1343,7 @@ fn port_busy(n: &Net, port: u64, fam: u64) -> bool
 /// them when the socket is opened, so an open socket always does).
 fn udp_slot_ok(n: &Net, s: u64) -> bool
   requires net_ok(n)
-  ensures result ==> s < SOCKS && (s + 1) * RXQ * UDP_MAX <= blen(n.dq) && (s + 1) * UDP_MAX <= blen(n.cork)
+  ensures result ==> s < SOCKS && (s + 1) * RXQ * UDP_MAX <= blen(n.dq) && (s + 1) * RXQ * SLOT_W <= len(n.dm) && (s + 1) * UDP_MAX <= blen(n.cork)
 {
   return s < n.ucap;
 }
@@ -1355,20 +1371,32 @@ fn udp_room(n: &mut Net, count: u64) -> bool
   }
   let mut nq = try_balloc(c * RXQ * UDP_MAX);
   let mut nc = try_balloc(c * UDP_MAX);
-  if blen(nq) != c * RXQ * UDP_MAX || blen(nc) != c * UDP_MAX {
+  let mut nm = try_alloc(c * RXQ * SLOT_W);
+  if blen(nq) != c * RXQ * UDP_MAX || blen(nc) != c * UDP_MAX || len(nm) != c * RXQ * SLOT_W {
     bfree(nq);
     bfree(nc);
+    free(nm);
     return false;
+  }
+  let mut i = 0;
+  while i < n.ucap * RXQ * SLOT_W
+    invariant i <= n.ucap * RXQ * SLOT_W && len(n.dm) == n.ucap * RXQ * SLOT_W && len(nm) == c * RXQ * SLOT_W && n.ucap <= c
+  {
+    nm = set(nm, i, get(n.dm, i));
+    i = i + 1;
   }
   bcopy(&mut nq, 0, n.dq, 0, n.ucap * RXQ * UDP_MAX);
   bcopy(&mut nc, 0, n.cork, 0, n.ucap * UDP_MAX);
   let pq = n.dq;
   let pc = n.cork;
+  let pm = n.dm;
   n.dq = nq;
   n.cork = nc;
+  n.dm = nm;
   n.ucap = c;
   bfree(pq);
   bfree(pc);
+  free(pm);
   return true;
 }
 
@@ -1387,9 +1415,9 @@ fn udp_deliver(n: &mut Net, s: u64, ulen: u64)
   let plen = ulen - 8;
   let at = (s * RXQ + slot) * UDP_MAX;
   bcopy(&mut n.dq, at, n.pkt, 42, plen);
-  sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
-  sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, be32(n.pkt, 26));
-  sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, be16(n.pkt, 34));
+  dm_set(&mut n, s, slot, 0, plen);
+  dm_set(&mut n, s, slot, 1, be32(n.pkt, 26));
+  dm_set(&mut n, s, slot, 2, be16(n.pkt, 34));
   sk_set(&mut n, s, S_COUNT, count + 1);
 }
 
@@ -1411,9 +1439,9 @@ fn raw_deliver(n: &mut Net, total: u64)
       let slot = (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
       let at = (s * RXQ + slot) * UDP_MAX;
       bcopy(&mut n.dq, at, n.pkt, 14, plen);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W, plen);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 1, src);
-      sk_set(&mut n, s, S_SLOTS + slot * SLOT_W + 2, 0);
+      dm_set(&mut n, s, slot, 0, plen);
+      dm_set(&mut n, s, slot, 1, src);
+      dm_set(&mut n, s, slot, 2, 0);
       sk_set(&mut n, s, S_COUNT, count + 1);
     }
     s = s + 1;
@@ -1660,7 +1688,7 @@ fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
     return NO_SOCK;
   }
   let slot = sk_get(n, s, S_HEAD) % RXQ;
-  let mut l = sk_get(n, s, S_SLOTS + slot * SLOT_W);
+  let mut l = dm_get(n, s, slot, 0);
   if l > UDP_MAX {
     l = UDP_MAX;
   }
@@ -1673,8 +1701,8 @@ fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
   let at = (s * RXQ + slot) * UDP_MAX;
   let bl = blen(buf);
   bcopy(&mut buf, 0, n.dq, at, l);
-  sk_set(&mut n, s, S_PEER_IP, sk_get(n, s, S_SLOTS + slot * SLOT_W + 1));
-  sk_set(&mut n, s, S_PEER_PORT, sk_get(n, s, S_SLOTS + slot * SLOT_W + 2));
+  sk_set(&mut n, s, S_PEER_IP, dm_get(n, s, slot, 1));
+  sk_set(&mut n, s, S_PEER_PORT, dm_get(n, s, slot, 2));
   sk_set(&mut n, s, S_HEAD, (slot + 1) % RXQ);
   sk_set(&mut n, s, S_COUNT, count - 1);
   return l;
@@ -1807,8 +1835,8 @@ fn net_up(d: Card) -> Nic
     arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
-    socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), cork: balloc(0), eph: 0,
-    tcbs: alloc(TCBS * TCB_W), rb: rings_new(), iss: 0,
+    socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), dm: alloc(0), cork: balloc(0), eph: 0,
+    tcbs: alloc(TCB0 * TCB_W), rb: rings_new(), iss: 0,
     lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, seen_rx: 0, seen_tick: 0, irq_on: false,
     v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_lo: 0, dns6_hi: 0, dns6_lo: 0, rs_n: 0, rs_until: 0,
     ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,
@@ -2164,6 +2192,7 @@ fn net_dismantle(n: Net, m: &mut Mem) -> Card
   free(n.arp);
   free(n.socks);
   bfree(n.dq);
+  free(n.dm);
   bfree(n.lo);
   free(n.lo_len);
   free(n.lo_at);

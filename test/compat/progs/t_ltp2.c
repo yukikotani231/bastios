@@ -109,6 +109,19 @@ static void *adopt_worker(void *a) {
     return 0;
 }
 
+static volatile int kick_hits;
+static volatile int kick_stop;
+static void kick_handler(int s) { (void)s; kick_hits++; }
+static void *kick_worker(void *a) {
+    (void)a;
+    sigset_t m;
+    sigemptyset(&m);
+    sigaddset(&m, SIGUSR2);
+    pthread_sigmask(SIG_UNBLOCK, &m, 0);
+    while (!kick_stop) { }                        // runs in user mode on the other processor
+    return 0;
+}
+
 int main(void) {
     setup();
     signal(SIGPIPE, SIG_IGN);
@@ -926,5 +939,26 @@ int main(void) {
            ready = 2;
            pthread_join(t, 0);
            adopt_hit == 1; }));
+    EXPECT("a signal reaches a thread running on another processor without waiting for its tick", ({
+           struct sigaction sa = { .sa_handler = kick_handler };
+           sigaction(SIGUSR2, &sa, 0);
+           sigset_t m;
+           sigemptyset(&m);
+           sigaddset(&m, SIGUSR2);
+           pthread_sigmask(SIG_BLOCK, &m, 0);          // only the spinning thread takes it
+           pthread_t t;
+           pthread_create(&t, 0, kick_worker, 0);
+           usleep(50000);
+           struct timespec t0, t1;
+           clock_gettime(CLOCK_MONOTONIC, &t0);
+           for (int i = 1; i <= 100; i++) {
+               kill(getpid(), SIGUSR2);
+               for (int w = 0; kick_hits < i && w < 2000; w++) usleep(500);
+           }
+           clock_gettime(CLOCK_MONOTONIC, &t1);
+           kick_stop = 1;
+           pthread_join(t, 0);
+           long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+           kick_hits == 100 && ms < 600; }));
     return done();
 }

@@ -394,6 +394,12 @@ fn post_raw(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64, listen: bool)
     wset(&mut k.sigsave, sender_at(p, s), word);    // 0: the kernel, unless post_from says
     wset(&mut k.sigsave, value_at(p, s), value);
   }
+  // A process that runs on another processor takes the signal only when it
+  // next enters the kernel, a tick away at most; the call that posted it
+  // interrupts the other processors so that it does not wait for that.
+  if !blocked && st == RUNNING {
+    k.sys = set(k.sys, SYS_KICK, 1);
+  }
   // A timed wait tries again even for a blocked signal: sigtimedwait may
   // be waiting for it.
   if (!blocked && (st == LXREADING || st == LXWAITING || st == FUTEXWAIT || st == SOCKWAIT)) || st == TIMEWAIT {

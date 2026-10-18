@@ -177,7 +177,7 @@ static int loop(unsigned long total)
     return got == total && bad == 0 ? 0 : 1;
 }
 
-#define MANY_MAX 200
+#define MANY_MAX 480
 
 /* N connections open at once to ourselves, then UDP sockets side by side:
  * the kernel's tables of connections and sockets hold more than a handful. */
@@ -189,7 +189,7 @@ static int many(int n)
     int l = socket(AF_INET, SOCK_STREAM, 0);
     struct sockaddr_in a = { .sin_family = AF_INET, .sin_port = htons(9101) };
     a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 128) != 0)
+    if (l < 0 || bind(l, (struct sockaddr *)&a, sizeof a) != 0 || listen(l, 512) != 0)
         return fail("listen");
     for (int i = 0; i < n; i++) {
         cl[i] = socket(AF_INET, SOCK_STREAM, 0);
@@ -232,15 +232,15 @@ static int many(int n)
             || recv(us[i], &got, 1, 0) != 1 || got != b)
             return fail("udp datagram");
     }
-    /* One socket queues sixteen datagrams before it is read. */
+    /* One socket queues sixty-four datagrams before it is read. */
     struct sockaddr_in q = { .sin_family = AF_INET, .sin_port = htons(9200) };
     q.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 64; i++) {
         char b = (char)('a' + i);
         if (sendto(tx, &b, 1, 0, (struct sockaddr *)&q, sizeof q) != 1)
             return fail("udp queue send");
     }
-    for (int i = 0; i < 16; i++) {
+    for (int i = 0; i < 64; i++) {
         char got = 0;
         if (recv(us[0], &got, 1, 0) != 1 || got != (char)('a' + i))
             return fail("udp queue order");
@@ -248,7 +248,7 @@ static int many(int n)
     for (int i = 0; i < 250; i++)
         close(us[i]);
     close(tx);
-    printf("mtcp: %d connections and 250 udp sockets, 16 queued\n", n);
+    printf("mtcp: %d connections and 250 udp sockets, 64 queued\n", n);
     return 0;
 }
 

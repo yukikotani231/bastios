@@ -199,6 +199,72 @@ jobs:
             build/bench/kvm.json
             build/bench/kvm.md
           if-no-files-found: ignore
+  # Process-context identifiers (boot/boot.S, boot/platform.c), off unless the
+  # boot command line says `pcid`. QEMU's TCG has no PCID, so only a KVM guest
+  # can run them: this job checks that CR4.PCIDE follows the command line, runs
+  # the system call benchmark both ways, then the memory, process, thread,
+  # signal, ptrace, IPC and file programs of the compat suite with PCIDs on
+  # (test/compat/progs/t_mem.c has the checks that a translation cached
+  # before munmap or mprotect must not survive it). It does not fail the
+  # workflow yet: the default stays off until this job has been green for a
+  # while.
+  pcid-kvm:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    continue-on-error: true
+    env:
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: |
+            proof-x86-64-
+            proof-
+          path: build/proof-cache
+      - run: make build/bastios.elf
+      - run: tools/ci-kvm.sh
+      - name: CR4.PCIDE follows the command line
+        run: |
+          set +e
+          python3 test/pcid_test.py > build/pcid.txt 2>&1
+          st=$?
+          { echo '### test/pcid_test.py under KVM'; echo; echo '```'; cat build/pcid.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat build/pcid.txt
+          exit $st
+      - name: Build the programs
+        run: |
+          progs="t_mem t_proc t_thread t_sig3 t_signal t_ptrace t_ipc t_file"
+          make $(for p in $progs; do echo build/compat/$p; done)
+          test/compat/mkdisk.py build/compat/pcid.img $(for p in $progs; do echo build/compat/$p; done)
+      - name: Every guest gets +pcid and -append pcid from here on
+        env:
+          CI_KVM_PCID: "1"
+        run: tools/ci-kvm.sh
+      - name: Boot probe with the compat command line
+        continue-on-error: true
+        run: |
+          echo "wrapper:"; cat "$RUNNER_TEMP/kvm-bin/qemu-system-x86_64"
+          timeout 20 qemu-system-x86_64 -cpu qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt -kernel build/bastios.elf -m 256M -smp 2 \
+            -display none -no-reboot -device isa-debug-exit,iobase=0xf4,iosize=0x04 -serial stdio -monitor none \
+            -drive file=build/compat/pcid.img,format=raw,if=none,id=vd -device virtio-blk-pci,drive=vd \
+            -netdev user,id=n0 -device virtio-net-pci,netdev=n0 </dev/null 2>&1 | head -c 3000 || true
+      - name: Run them with PCIDs on
+        run: |
+          progs="t_mem t_proc t_thread t_sig3 t_signal t_ptrace t_ipc t_file"
+          test/compat/run.py --kernel build/bastios.elf --disk build/compat/pcid.img --groups $(echo $progs | tr ' ' ,) --out build/compat $progs
   # The AWS ENA driver against tools/qemu-ena, a model of the device built
   # into QEMU 8.2 (about 20 minutes, so the binary is cached by the hash of
   # the model's sources). The `test` job skips these boots; here they run
@@ -449,7 +515,7 @@ jobs:
             cache: alpine
           - part: rest
             skip: main1,bastio,dev,alpine,alpine2,alpine3,alpine4,alpine5
-            disks: debian.img node.img
+            disks: disk.img debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
       # never replaced: a key that hits is not saved again).
