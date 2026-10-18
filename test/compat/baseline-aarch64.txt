@@ -1313,6 +1313,22 @@ alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 alpine: vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
 alpine: gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again
 alpine: sshd: Alpine's OpenSSH server takes a public-key login from its own client
+alpine: container: crun and runc: a default-deny profile with a short allowlist still starts the container and runs its commands
+alpine: container: crun and runc: a profile that denies mount, module, ptrace and bpf calls leaves the container's own work alone
+alpine: container: crun runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: crun runs the same pulled bundle rootless, with the image's command, environment and working directory
+alpine: container: crun: cgroup limits: the container sees the memory, pids and cpu limits crun set
+alpine: container: crun: the root file system is read-only, and the exit status comes back
+alpine: container: ocipull.sh pulls an image from a registry (with a token) and unpacks it, layers and whiteouts, into a bundle
+alpine: container: rootless runc runs a rootless runc inside its container (docker-in-docker)
+alpine: container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
+alpine: container: runc loads a seccomp filter from the config: mkdir answers EPERM, the rest runs
+alpine: container: runc runs on an overlay of the image root: writes and deletions stay in the upper layer
+alpine: container: the image's command, environment and working directory run rootless from the bundle
+alpine: container: crun joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
+alpine: strace: attaches to a running process, and hears of its death when its parent is elsewhere
+alpine: python3: sqlite3, zlib and hashlib
 t_aslr: a program starts itself and reports its layout
 t_aslr: the stack moves between runs
 t_aslr: the mmap area moves between runs
