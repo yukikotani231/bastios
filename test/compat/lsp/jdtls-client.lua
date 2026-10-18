@@ -22,6 +22,14 @@ vim.wait(900000, function()
   return c ~= nil and c.initialized
 end, 100)
 local c = vim.lsp.get_client_by_id(id)
+if c == nil then
+  -- The server ended: say why, from the client's log.
+  local f = io.open(vim.lsp.log.get_filename(), "r")
+  local lines = {}
+  for l in (f and f:lines() or function() end) do lines[#lines + 1] = l end
+  for i = math.max(1, #lines - 12), #lines do print(lines[i]:sub(1, 300)) end
+  os.exit(1)
+end
 out[#out + 1] = (c and c.initialized) and "initialized" or "no-init"
 local text = "no-reply"
 -- `System.out.println(add(1, 2))`, line 4: the cursor is on `add`; the hover is its signature.
