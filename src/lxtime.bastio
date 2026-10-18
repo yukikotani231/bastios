@@ -696,6 +696,17 @@ fn post_proc_wv(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64)
     let l = tgid(k.procs, p);
     if l >= 1 && state(k.procs, l) != FREE && state(k.procs, l) != ZOMBIE {
       at = l;
+      // Threads in sigtimedwait are asleep and look again; the first to run
+      // takes the signal off the leader (sig_adopt).
+      let mut q = 1;
+      while q < NPROC
+        invariant 1 <= q && q <= NPROC && kok(k)
+      {
+        if q != l && state(k.procs, q) == TIMEWAIT && tgid(k.procs, q) == tgid(k.procs, p) {
+          pset(&mut k.procs, q, F_STATE, READY);
+        }
+        q = q + 1;
+      }
     }
   }
   post_wv(&mut k, at, s, word, value);
@@ -906,6 +917,11 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
       return KEEP;
     }
     wait = ts.ns;
+  }
+  // A signal sent to the process that every thread blocks waits on the
+  // leader for whichever thread sigwaits for it.
+  if pid >= 1 {
+    sig_adopt(&mut k, pid, want);
   }
   let pend = pget(k.procs, pid, F_SIGPEND);
   let mut s = 1;

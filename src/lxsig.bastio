@@ -1146,8 +1146,9 @@ fn lx_sigaltstack(k: &mut Kernel, pid: u64, ss: u64, oss: u64) -> u64
 /// that signal in the process-wide queue for whichever thread unblocks it
 /// first. Standard signals only; a signal sent to the leader alone with tkill
 /// would be taken here too, which only a program that unblocks it in another
-/// thread can see.
-fn sig_adopt(k: &mut Kernel, p: u64)
+/// thread can see. `want` is the set of signals to take: what p does not
+/// block, or the set a sigtimedwait of p waits for.
+fn sig_adopt(k: &mut Kernel, p: u64, want: u64)
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
@@ -1155,7 +1156,7 @@ fn sig_adopt(k: &mut Kernel, p: u64)
   if l == p || l == 0 || state(k.procs, l) == FREE || state(k.procs, l) == ZOMBIE {
     return;
   }
-  let take = pget(k.procs, l, F_SIGPEND) & pget(k.procs, l, F_SIGMASK) & !pget(k.procs, p, F_SIGMASK) & 0xFFFFFFFF;
+  let take = pget(k.procs, l, F_SIGPEND) & pget(k.procs, l, F_SIGMASK) & want & 0xFFFFFFFF;
   if take == 0 {
     return;
   }
@@ -1222,7 +1223,7 @@ fn lx_sig_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   }
   ret(&mut k.procs, pid, r);
   if n == LX_RT_SIGPROCMASK || n == LX_RT_SIGRETURN {
-    sig_adopt(&mut k, pid);
+    sig_adopt(&mut k, pid, !pget(k.procs, pid, F_SIGMASK));
   }
   if pget(k.procs, pid, F_SIGPEND) & !pget(k.procs, pid, F_SIGMASK) != 0 {
     return SWITCH;
