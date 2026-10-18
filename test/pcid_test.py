@@ -28,13 +28,14 @@ def boot_and_read(kernel, append, smp, cpu="host"):
     g = R.boot("bastios", args, R.build_osbench(), tmp)
     try:
         at = len(g.out)
-        g.send("/disk/osbench syscall 2>&1; echo @@d")
-        m = g.until(rb"@@d", at, 120)
+        # (the quotes keep the shell's echo of this line from ending the wait)
+        g.send("/disk/osbench syscall 2>&1; echo @@do''ne")
+        m = g.until(rb"@@done", at, 120)
         if not m:
             raise SystemExit("pcid_test: the system call benchmark did not finish")
         text = g.out[at:].decode(errors="replace")
-        lines = [l.strip() for l in text.splitlines() if l.strip() and "@@d" not in l and "osbench" not in l and "bastios>" not in l]
-        t = " | ".join(lines[-3:])
+        e = re.search(r"@end syscall (\d+) (\d+)", text)
+        t = f"syscall {int(e.group(2)) / int(e.group(1)):.0f} ns" if e and int(e.group(1)) else ""
         mon = socket.socket(socket.AF_UNIX)
         mon.connect(sock)
         time.sleep(0.5)
