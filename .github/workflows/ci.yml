@@ -396,10 +396,9 @@ jobs:
       - name: Run the x86-64 guests under KVM
         run: tools/ci-kvm.sh
       - run: |
-          for i in 1 2 3 4 5 6; do
-            echo "=== round $i"; make compat COMPAT_LANES=alpine3 || true
-            grep -o 'STALL.*ENDSTALL' build/compat/report.md | sed 's/<br>/\n/g; s/\\n/\n/g' || echo "round $i: no stall"
-            grep -c 'install python3' build/compat/report.md || true
+          for i in 1 2 3 4; do
+            echo "=== round $i"; make compat || true
+            if grep -q STALL build/compat/report.md; then grep -o 'STALL.*ENDSTALL' build/compat/report.md | sed 's/<br>/\n/g; s/\\n/\n/g'; else echo "round $i: no stall"; fi
           done
       - name: What failed
         if: failure()
