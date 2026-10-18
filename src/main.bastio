@@ -414,7 +414,11 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
 // a process runs, waits for the disk, the network or the console, or has a
 // timer the tick would check.
 const STRETCH_MAX: u64 = 1000000000;
-const STRETCH_MIN_TICKS: u64 = 3;
+const STRETCH_MIN_MS: u64 = 20;
+/// A stretch for a timed wait ends this long before its deadline: the wait
+/// then polls (NEAR) for this last stretch, which costs a millisecond of the
+/// processor instead of NEAR's full length.
+const STRETCH_LEAD: u64 = 1000000;
 
 /// How long, at most, the tick may be stretched from now (k.ns), in ns; 0
 /// if some process or timer needs it. Only waits that end by an interrupt,
@@ -430,10 +434,10 @@ fn idle_horizon(k: &Kernel) -> u64
     let st = state(k.procs, p);
     if st == TIMEWAIT {
       let w = pget(k.procs, p, F_RESTART);
-      if w < 2 || w - 2 <= k.ns || w - 2 - k.ns <= NEAR {
+      if w < 2 || w - 2 <= k.ns || w - 2 - k.ns <= STRETCH_LEAD {
         return 0;                           // sleepers_due makes it ready now
       }
-      h = smaller(h, w - 2 - k.ns - NEAR);
+      h = smaller(h, w - 2 - k.ns - STRETCH_LEAD);
     } else if st != FREE && st != ZOMBIE && st != READING && st != WAITING && st != LXREADING
        && st != LXWAITING && st != LXVFORK && st != FUTEXWAIT && st != SOCKWAIT && st != STOPPED {
       return 0;
@@ -488,13 +492,13 @@ fn stretch_p(s: &mut Sys, cpu: &Cpu)
     return;
   }
   s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
-  let n = smaller(smaller(idle_horizon(s.k) / NS_PER_TICK, 100), nic_dhcp_due(s.k.nic, s.k.ticks));
-  if n < STRETCH_MIN_TICKS || s.k.ns >= FOREVER {
+  let n = smaller(smaller(idle_horizon(s.k) / 1000000, 1000), smaller(nic_dhcp_due(s.k.nic, s.k.ticks), 100) * 10);
+  if n < STRETCH_MIN_MS || s.k.ns >= FOREVER {
     return;
   }
   nic_listen(&mut s.k.nic);                 // a frame ends the stretch
   pic_mask_timer(&mut s.pic);
-  lapic_arm(&mut s.apic, c10 * n, V_LTIMER);
+  lapic_arm(&mut s.apic, c10 * n / 10, V_LTIMER);
   s.slept = s.k.ns + 1;
 }
 
