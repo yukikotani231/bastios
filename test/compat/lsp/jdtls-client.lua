@@ -5,6 +5,8 @@
 local out = {}
 vim.cmd.edit("/root/javaproj/Main.java")
 local buf = vim.api.nvim_get_current_buf()
+vim.lsp.set_log_level("debug")
+local events = {}
 local launcher = vim.fn.glob("/opt/jdtls/plugins/org.eclipse.equinox.launcher_*.jar")
 local id = vim.lsp.start({
   name = "jdtls",
@@ -16,6 +18,9 @@ local id = vim.lsp.start({
     "-jar", launcher, "-configuration", "/opt/jdtls/config_linux", "-data", "/tmp/jdtls-data" },
   cmd_env = { JAVA_HOME = "/opt/java/openjdk", HOME = "/root" },
   root_dir = "/root/javaproj",
+  on_init = function() events[#events + 1] = "init" end,
+  on_exit = function(code, sig) events[#events + 1] = "exit" .. code .. "/" .. sig end,
+  on_error = function(code, err) events[#events + 1] = "error" .. code .. ":" .. tostring(err):sub(1, 80) end,
 }, { bufnr = buf })
 vim.wait(300000, function()
   local c = vim.lsp.get_client_by_id(id)
@@ -23,13 +28,17 @@ vim.wait(300000, function()
 end, 100)
 local c = vim.lsp.get_client_by_id(id)
 if c == nil or not c.initialized then
-  -- The server ended: say why, from the client's log.
+  -- Say what happened, in a line: the events and the first and last messages the client logged.
   local f = io.open(vim.lsp.log.get_filename(), "r")
-  local lines = {}
-  for l in (f and f:lines() or function() end) do lines[#lines + 1] = l end
-  for i = math.max(1, #lines - 12), #lines do print(lines[i]:sub(1, 300)) end
-  local p = io.popen("ps 2>&1 | grep -v ' ps' | cut -c1-200; tail -n 12 /tmp/jdtls-data/.metadata/.log 2>&1 | cut -c1-300")
-  print(p:read("*a"))
+  local recv, last, n = nil, "", 0
+  for l in (f and f:lines() or function() end) do
+    if l:find("rpc.receive", 1, true) then
+      n = n + 1
+      recv = recv or l:sub(-110)
+    end
+    last = l
+  end
+  print("events " .. table.concat(events, ",") .. "; received " .. n .. " " .. tostring(recv) .. "; last " .. last:sub(-110))
   os.exit(1)
 end
 out[#out + 1] = (c and c.initialized) and "initialized" or "no-init"
