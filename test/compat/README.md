@@ -116,7 +116,7 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   venv, `pip install` packages from the host's web server (pinned by SHA-256
   in `pythondeps.txt`, served at `HOSTURL/wheels/`; pip finds them through
   `/etc/pip.conf`), build a C extension from source (MarkupSafe), run the
-  whole test suite of a real project (Jinja2's 784 tests), load binary musl
+  whole test suite of a real project (Jinja2's 784 tests, spread over two xdist workers), load binary musl
   wheels (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson,
   cffi) and run `pyprogs/stdlib.py`, which exercises the standard library on
   top of the system calls: fork, threads, signals, sockets, mmap, pty,
@@ -208,6 +208,13 @@ pass, fail (`TFAIL`), broken (`TBROK`: it could not set itself up),
 unsupported (`TCONF`: it needs something this system does not claim to
 have, such as a kernel config or a block device), hang (interrupted after
 `--timeout` seconds) or crash. `--only REGEX` runs a subset by tag.
+
+`make compat-ltp` also runs LTP's pseudo-terminal, namespace (container) and
+CVE regression tests, and the Open POSIX Test Suite's conformance tests
+(`--suite posix`; about 1,600 programs named after an interface and an
+assertion, such as `posix-sigaction_1-1`). Those exit 0 for a pass, 1 for a
+failure, 2 when they could not set themselves up, 4 or 5 for something not
+supported here.
 
 The report ranks missing system calls by how many tests they block, as
 `run.py` does, and lists every test that did not pass with its first

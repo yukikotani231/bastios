@@ -5,12 +5,14 @@ file lib/modules), as a tar file (/disk/root.tar) next to a BusyBox at
 /disk/busybox. The checks unpack it under /disk/r, make the device nodes,
 chroot into it and compile and run Java programs.
 
-    jdkdisk.py OUT.img IMAGE BUSYBOX --cache DIR
+    jdkdisk.py OUT.img IMAGE BUSYBOX --cache DIR [--jdtls TGZ]
 
 IMAGE is a Docker Hub image, NAME@sha256:DIGEST (the Makefile pins
 eclipse-temurin). Its layers are fetched and cached as alpinedisk.py does it
 (in DIR, checked against their digests each time they are used). The whole
 image root is kept except the documentation, manual pages, jmods and src.zip.
+With --jdtls, the Eclipse JDT LS release tarball is added as /disk/jdtls.tar
+(its plugins and the Linux configuration, under opt/jdtls).
 """
 import io, os, sys, tarfile
 
@@ -33,6 +35,10 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
+    jdtls = None
+    if "--jdtls" in args:
+        jdtls = args[args.index("--jdtls") + 1]
+        del args[args.index("--jdtls"):args.index("--jdtls") + 2]
     out, image, busybox = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "jdk")
     cache = cache or work
@@ -50,8 +56,20 @@ def main():
                 t.addfile(ti)
     if JAVAC not in files:
         sys.exit(f"jdkdisk: {image} has no {JAVAC}")
+    extra = []
+    if jdtls:
+        # Eclipse JDT LS (the language server): the launcher and its bundles
+        # and the Linux configuration, as /opt/jdtls once unpacked in the root.
+        jt = os.path.join(work, "jdtls.tar")
+        with tarfile.open(jdtls, "r:gz") as src, tarfile.open(jt, "w") as dst:
+            for m in src:
+                top = m.name.lstrip("./").split("/")[0]
+                if top in ("plugins", "config_linux"):
+                    m.name = "opt/jdtls/" + m.name.lstrip("./")
+                    dst.addfile(m, src.extractfile(m) if m.isfile() else None)
+        extra = [f"jdtls.tar={jt}"]
     env = dict(os.environ, MKDISK_FREE_MB="1300")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
-                               f"busybox={busybox}", f"root.tar={tar}"], env)
+                               f"busybox={busybox}", f"root.tar={tar}"] + extra, env)
 
 main()

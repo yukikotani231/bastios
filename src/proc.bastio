@@ -565,7 +565,7 @@ const SYS_BUSY: u64 = SYS_PT2 + NPROC;           // SYS_PT2 + NPROC; one word: t
 const SYS_SCT: u64 = SYS_BUSY + 1;             // the writable numbers of src/lxsysctl.bastio, SC_NUM words (43)
 const SYS_OOM: u64 = SYS_SCT + 43;             // SYS_SCT + SCT_NUM; a word per process: oom_score_adj + 1001 + 1 (0: never written; src/lxprocfs.bastio)
 const SYS_XA: u64 = SYS_OOM + NPROC;             // extended attributes (src/lxxattr.bastio): XA_N entries of three words: handle + 1 (0 free), name length, value length; then one word, the number of entries in use
-const SYS_KEY: u64 = SYS_XA + 3 * 32 + 1;        // kernel keys (src/lxkeys.bastio): a counter for the next serial, then KEY_N rows of KEY_W words, then KEY_N rows of KL_N links, then four words per process, then KU_N rows of three words (uid + 1, user keyring, user session keyring)
+const SYS_KEY: u64 = SYS_XA + 3 * 256 + 1;        // kernel keys (src/lxkeys.bastio): a counter for the next serial, then KEY_N rows of KEY_W words, then KEY_N rows of KL_N links, then four words per process, then KU_N rows of three words (uid + 1, user keyring, user session keyring)
 const KEY_N: u64 = 64;
 const KEY_W: u64 = 16;
 const KL_N: u64 = 64;
@@ -611,6 +611,9 @@ const TS_OWE: u64 = 32;                // an event stop came before the stop aft
 const TS_NR: u64 = 256;                // times a number below 1024
 const TS_EV: u64 = 1048576;            // times the event of the stop (PTRACE_EVENT_*, below 16)
 const EV_STOP: u64 = 15;               // PTRACE_EVENT_STOP (128) as the event field holds it
+const TS_LISTEN: u64 = 1099511627776;  // 2^40: PTRACE_LISTEN: stopped as by a stop signal, until SIGCONT (src/lxptrace.bastio)
+const TS_XEV: u64 = 2199023255552;     // 2^41: the exit event stop was reported (the exit call runs again once the tracer resumes it)
+const TS_VFDONE: u64 = 4398046511104;  // 2^42: a vfork parent whose event stop is to be followed by the vfork-done one
 const TS_MSG: u64 = 16777216;          // times its message (PTRACE_GETEVENTMSG, below 65536)
 const PT_ATTACHED: u64 = 65536;        // PTRACE_ATTACH or SEIZE rather than TRACEME
 const PT_STOPPED: u64 = 131072;        // in a ptrace-stop: the tracer may read and change it
@@ -740,8 +743,8 @@ const UM_BAD: u64 = 0x100000000;      // an id with no map (ID_SPAN)
 const UMW_DENY: u64 = 3;              // user namespace slot word: setgroups denied
 const UMW_CNT: u64 = 4;               // words 4 and 5: extents of the uid and gid map
 const UMW_EXT: u64 = 6;               // then UM_N extents of 3 words (inside, outside, count) for each map
-const USR_N: u64 = 32;                // user namespaces besides the first
-const UM_N: u64 = 5;                  // extents of an id map (Linux's UID_GID_MAP_MAX_EXTENTS)
+const USR_N: u64 = 34;                // user namespaces besides the first (Linux nests 32 deep)
+const UM_N: u64 = 8;                  // extents of an id map (Linux allows 340; a map is written in at most 2048 bytes)
 const UMW_PAR: u64 = 6 + 2 * UM_N * 3; // the id of the parent user namespace (0: the first)
 const UMW_MARK: u64 = UMW_PAR + 1;    // scratch of usr_gc: 1 if a process is in this namespace or a descendant of it
 const USR_W: u64 = UMW_MARK + 1;      // id + 1 (0: free), owner uid, owner gid, setgroups denied, uid and gid extents, then the extents, the parent, the mark
@@ -797,8 +800,9 @@ const MNS_IO: u64 = MNS_TM + TM_N * TM_W;
 const CO_N: u64 = 32;
 const MNS_CO: u64 = MNS_IO + IO_N * 2;
 const MNS_LEN: u64 = MNS_CO + CO_N * 2;
-const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the extended attributes: XA_N rows of XA_ROW bytes, the name then the value
-const KDB: u64 = XAB + 32 * 320;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
+const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the key descriptions begin (the extended attributes have k.xab)
+const XAB_LEN: u64 = 256 * 320;                 // k.xab: XA_N rows of XA_ROW bytes (src/lxxattr.bastio), allocated by the first attribute
+const KDB: u64 = XAB;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
 const KPB: u64 = KDB + KEY_N * KDESC;              // then KP_N payload slots of KPAY bytes
 const MSTR_LEN: u64 = KPB + KP_N * KPAY;   // the last lookup's logical path, then a key and a source per mount, then a path kept by ovl_stash
 const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
@@ -807,7 +811,7 @@ const AT_FDCWD: u64 = 0xFFFFFF9C;     // -100, as the int it is
 // flags, restorer, mask).
 const SIGACT_ROW: u64 = 256;          // per process: four words per signal
 const SIGACT_LEN: u64 = NPROC * SIGACT_ROW;
-const SIGSAVE_ROW: u64 = 129;         // per process: the saved mask, a sender per signal, then a queued value per signal (1 + 2 * NSIG)
+const SIGSAVE_ROW: u64 = 194;         // per process: the saved mask, a sender per signal, a queued value per signal (1 + 2 * NSIG), then the real-time queue: a count and RTQ_N entries of a sender word and a value (src/lxsig.bastio)
 const SIGSAVE_LEN: u64 = NPROC * SIGSAVE_ROW;
 const ALARMS_LEN: u64 = NPROC * 2 + NPROC * 16;        // NPROC * 2, then PT_N POSIX timers of PT_W words per process
 const PT_BASE: u64 = NPROC * 2;             // where the POSIX timers start in k.alarms (src/lxptimer.bastio)
@@ -827,7 +831,10 @@ const HOLES_LEN: u64 = NPROC * 64;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
 const LAZY_LEN: u64 = NPROC * LZ_W;
 const AN_N: u64 = 32;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
-const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages
+const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages (+ AN_X)
+// Added to a record's page count if its pages may also run code: the flag
+// takes no room of its own, which the native kernel's small heap has none of.
+const AN_X: u64 = 4294967296;
 const LX_PAUSE: u64 = 34;
 const LX_RT_SIGSUSPEND: u64 = 130;
 const LX_WAITID: u64 = 247;
@@ -839,7 +846,7 @@ const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none ye
 const OF_EVENT: u64 = 8;              // an eventfd: x the counter; word 3: nonblocking + 2 * semaphore (src/lxevent.bastio)
 const OF_TIMER: u64 = 9;              // a timerfd: x the timer; word 3: nonblocking
 const OF_EPOLL: u64 = 10;             // an epoll instance: x the instance; word 3: nonblocking
-const TFD_N: u64 = 64;                // timerfds, in k.evt from 0: TFD_STRIDE words each
+const TFD_N: u64 = 256;               // timerfds, in k.evt from 0: TFD_STRIDE words each
 const TFD_STRIDE: u64 = 4;
 const TFD_MAYCANCEL: u64 = 2;         // word 0: 1 (in use), plus this (TFD_TIMER_CANCEL_ON_SET)
 const TFD_CANCELED: u64 = 4;          // plus this once the wall clock was set
@@ -847,10 +854,10 @@ const EP_N: u64 = 32;                 // epoll instances, in k.evt from EP_AT: E
 const EP_FDS: u64 = 256;              // descriptors one epoll instance watches
 const EP_ENTRY: u64 = 4;              // fd + 1 (0: empty), its description, events, data
 const EP_STRIDE: u64 = 1025;          // 1 + EP_FDS * EP_ENTRY
-const EP_AT: u64 = 256;               // TFD_N * TFD_STRIDE
-const FIFO_N: u64 = 32;               // open named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
+const EP_AT: u64 = 1024;              // TFD_N * TFD_STRIDE
+const FIFO_N: u64 = 128;              // open named pipes, in k.evt from FIFO_AT: FIFO_STRIDE words each
 const FIFO_STRIDE: u64 = 2;           // the FIFO's file handle + 1 (0: free), its pipe + 1
-const FIFO_AT: u64 = 33056;           // EP_AT + EP_N * EP_STRIDE
+const FIFO_AT: u64 = 33824;           // EP_AT + EP_N * EP_STRIDE
 const INO_N: u64 = 32;                // inotify instances, in k.evt from INO_AT: INO_STRIDE words each (src/lxinotify.bastio)
 const INO_W: u64 = 64;                // watches per instance
 const INO_WAT: u64 = 3;               // a watch: the handle + 1 (0: free), its mask, its descriptor
@@ -859,13 +866,13 @@ const INO_NAMEW: u64 = 32;            // words of an event's name: 8 bytes each
 const INO_EV: u64 = 36;               // an event: wd, mask, cookie, name length, then INO_NAMEW words
 const INO_HEAD: u64 = 4;              // in use, the next watch descriptor, events queued, the first
 const INO_STRIDE: u64 = 1348;         // INO_HEAD + INO_W * INO_WAT + INO_Q * INO_EV
-const INO_AT: u64 = 33120;            // FIFO_AT + FIFO_N * FIFO_STRIDE
-const INO_G: u64 = 76256;            // INO_AT + INO_N * INO_STRIDE: what all instances share
+const INO_AT: u64 = 34080;            // FIFO_AT + FIFO_N * FIFO_STRIDE
+const INO_G: u64 = 77216;            // INO_AT + INO_N * INO_STRIDE: what all instances share
 const FAN_M: u64 = 15;               // fanotify marks per instance (an inotify instance's slot: src/lxinotify.bastio)
 const FAN_MK: u64 = 12;              // a mark: the handle + 1 (0: free), its type, mask, ignored mask, flags, prefix length, then 6 words of prefix
 const FAN_Q: u64 = 32;               // events an instance queues, the overflow event included
 const FAN_EV: u64 = 5;               // an event: mask, process, handle + 1, thread, descriptor + 1 opened for its read
-const EVT_LEN: u64 = 76377;          // INO_G + 121
+const EVT_LEN: u64 = 77340;           // INO_G + 124
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or DEV_PTS + N; word 3: nonblocking (src/lxpty.bastio)
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
@@ -1077,7 +1084,9 @@ struct Kernel {
   gfx: Bytes,           // the screen for /dev/fb0: its geometry and the pixels waiting for the console pump (src/lxfb.bastio)
   mns: Buf,             // mount namespaces: each process's, and their mounts (src/lxns.bastio)
   scf: Buf,             // seccomp filters, empty until one is loaded (src/lxseccomp.bastio)
+  swp: Buf,             // the swap area's bookkeeping, empty without one (src/swap.bastio)
   mstr: Bytes,          // the mounts' paths, and the logical path of the last lookup
+  xab: Bytes,           // the extended attributes' names and values: empty until the first is set, then XAB_LEN bytes
   naps: bool,           // a process may be in TIMEWAIT: false lets sleepers_wake skip its scan
   undo_hi: u64,         // one past the highest SEM_UNDO entry ever made (undo_find): no later one is in use (sem_exit and undo_clear stop there)
   mt_hi: u64,           // one past the highest mount entry ever given to a namespace (me_set): no later one is in use
@@ -1166,7 +1175,7 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) == EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN && (blen(k.xab) == 0 || blen(k.xab) == XAB_LEN)
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -1478,6 +1487,40 @@ fn zgrow(t: &mut Buf, n: u64) -> bool
   t = nt;
   free(prev);
   return true;
+}
+
+/// Word at of the event tables k.evt (timerfds, epoll, FIFOs, inotify); 0
+/// where the table has not grown that far yet.
+fn evg(k: &Kernel, at: u64) -> u64
+  requires kok(k)
+{
+  if at < len(k.evt) {
+    return get(k.evt, at);
+  }
+  return 0;
+}
+
+/// Sets word at of k.evt. The first store of a non-zero word allocates the
+/// whole table (in steps, the freed smaller tables would fragment a heap
+/// with an exact-size free list). Nothing is stored when memory runs out.
+fn evs(k: &mut Kernel, at: u64, v: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if at >= EVT_LEN {
+    return;
+  }
+  if at >= len(k.evt) {
+    if v == 0 {
+      return;                              // a zero word is already what reads give
+    }
+    if !zgrow(&mut k.evt, EVT_LEN) {
+      return;
+    }
+  }
+  if at < len(k.evt) {
+    k.evt = set(k.evt, at, v);
+  }
 }
 
 /// A FREE process id for a new process, or 0 if there is none. When every
@@ -1858,6 +1901,7 @@ fn terminate(k: &mut Kernel, mmu: &Mmu, who: u64, code0: u64)
     return;
   }
   map_drop_all(&mut k, pid);                 // shared file pages go back first
+  swap_drop_all(&mut k, pid);                // so do the pages it had swapped out
   vfork_give_back(&mut k, mmu, pid);         // a borrowed address space goes home
   match take_space(&mut k.spaces, pid) {
     Space::Empty => {},

@@ -581,6 +581,18 @@ build/compat/tree-sitter-c.so: | build/compat/src
 	$(MUSLCC) -shared -fPIC -O2 -Wl,-s -I build/compat/src/tree-sitter-c/src -o $@.part build/compat/src/tree-sitter-c/src/parser.c
 	mv $@.part $@
 
+# TypeScript 7's compiler and language server (one static Go program, lib/tsc)
+# with the declaration files it reads, as a tar file to unpack under the Alpine
+# root (opt/typescript/lib), for the case that runs it with Neovim's LSP client.
+# x86-64 only.
+build/compat/tstools.tar: | build/compat/src
+	curl -fsSL -o build/compat/src/tsc.tgz https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-$(TSC_VER).tgz
+	echo "$(TSC_SHA256)  build/compat/src/tsc.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/tsc && mkdir build/compat/src/tsc
+	tar xzf build/compat/src/tsc.tgz -C build/compat/src/tsc --strip-components=1 package/lib
+	tar -cf $@.part -C build/compat/src/tsc lib --transform 's,^lib,opt/typescript/lib,' --owner=0 --group=0
+	mv $@.part $@
+
 # python-lsp-server and the pure-Python packages it needs, as a tar file for
 # the case that runs it under Alpine's python3 with Neovim's LSP client. The
 # wheels come from PyPI, each pinned by SHA-256 in test/compat/pylsp.py, and are
@@ -588,14 +600,18 @@ build/compat/tree-sitter-c.so: | build/compat/src
 build/compat/pylsp.tar: test/compat/pylsp.py | build/compat/src
 	test/compat/pylsp.py $@ build/compat/src/pylsp-wheels
 
+# The Go toolchain of the golang image (godisk.py's selection) and gopls, as a
+# tar file to unpack under the Alpine root's /usr/local, for the case that runs
+# gopls with Neovim's LSP client. x86-64 only.
+build/compat/gotools.tar: test/compat/gotools.py test/compat/godisk.py test/compat/alpinedisk.py build/compat/gopls
+	test/compat/gotools.py $@ $(GO_IMAGE) build/compat/gopls --cache $(ALPINE_CACHE)
+
 # strace, for the cases that trace a program on the Alpine disk (ptrace). Alpine's
 # package is not on the disk's repository, so this is the layer of the stagex/strace
 # image on Docker Hub (musl, linked to Alpine's libc), pinned by the layer's SHA-256.
 STRACE_LAYER := sha256:1380bf046ab307e9340c2273fdcd2b1f224d019544a8db326d5776eeac5c5525
 build/compat/strace: | build/compat/src
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:stagex/strace:pull" | jq -r .token) && \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/strace.tgz https://registry-1.docker.io/v2/stagex/strace/blobs/$(STRACE_LAYER)
-	echo "$(patsubst sha256:%,%,$(STRACE_LAYER))  build/compat/src/strace.tgz" | sha256sum -c - >/dev/null
+	test/compat/hubblob.sh stagex/strace $(STRACE_LAYER) build/compat/src/strace.tgz
 	rm -rf build/compat/src/strace && mkdir build/compat/src/strace
 	tar xzf build/compat/src/strace.tgz -C build/compat/src/strace usr/bin/strace
 	strip -o $@.part build/compat/src/strace/usr/bin/strace
@@ -615,10 +631,8 @@ GDB_LAYERS := sha256:0b9b7727f90001f8d1eaeff1db88899575254b37875d1ab6fd10af2703e
 GDB_LIBS := libexpat.so.1 liblzma.so.5 libreadline.so.8 libz.so.1 libzstd.so.1 libncursesw.so.6 libpython3.14.so.1.0 libmpfr.so.6 libgmp.so.10 libdebuginfod.so.1 libstdc++.so.6 libgcc_s.so.1 libcurl.so.4 libelf.so.1 libfts.so.0 libjson-c.so.5 libbrotlicommon.so.1 libbrotlidec.so.1 libcares.so.2 libidn2.so.0 libnghttp2.so.14 libpsl.so.5 libssl.so.3 libcrypto.so.3 libunistring.so.5
 build/compat/gdb.tar: | build/compat/src
 	rm -rf build/compat/src/gdb && mkdir -p build/compat/src/gdb/all build/compat/src/gdb/gdb/bin build/compat/src/gdb/gdb/lib
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$(GDB_REPO):pull" | jq -r .token) && \
 	for d in $(GDB_LAYERS); do \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/gdb/layer.tgz https://registry-1.docker.io/v2/$(GDB_REPO)/blobs/$$d && \
-	  echo "$${d#sha256:}  build/compat/src/gdb/layer.tgz" | sha256sum -c - >/dev/null && \
+	  test/compat/hubblob.sh $(GDB_REPO) $$d build/compat/src/gdb/layer.tgz && \
 	  tar xzf build/compat/src/gdb/layer.tgz -C build/compat/src/gdb/all --exclude='dev/*' --no-same-owner || exit 1; \
 	done
 	cd build/compat/src/gdb && cp all/usr/bin/gdb gdb/bin/gdb && cp all/lib/ld-musl-x86_64.so.1 gdb/lib/ld-musl-x86_64.so.1 && ln -s ld-musl-x86_64.so.1 gdb/lib/libc.musl-x86_64.so.1 && \
@@ -854,10 +868,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
@@ -882,8 +896,18 @@ build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/co
 # The Go toolchain of the official golang:alpine image (static programs), as a
 # root under /disk/g, for go.txt. Pinned by digest, its layers kept in
 # ALPINE_CACHE like the others'. x86-64 only.
-build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/gopls
+	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --gopls build/compat/gopls
+
+# gopls, Go's language server, as a static program built on the host from the
+# pinned release (the module proxy checks every module against the checksum
+# database), for the cases that ask it about a Go program. It goes into the Go
+# disk as /usr/local/bin/gopls. x86-64 only. (The version is in
+# test/compat/images.mk.)
+build/compat/gopls: | build/compat/src
+	GOTOOLCHAIN=local GOBIN=$(CURDIR)/build/compat/src/gopls-bin CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-trimpath \
+	  go install -ldflags='-s -w' golang.org/x/tools/gopls@$(GOPLS_VER)
+	mv build/compat/src/gopls-bin/gopls $@
 
 # Python development, on a seventh disk (test/compat/pythondisk.py) for
 # python.txt: the root of the official python:alpine image (CPython, pip and
@@ -896,14 +920,36 @@ build/compat/python.img: test/compat/pythondisk.py test/compat/pythondeps.txt te
 # The JDK of the official eclipse-temurin alpine image, as a tar file the cases
 # unpack, for java.txt. Pinned by digest, its layers kept in ALPINE_CACHE like
 # the others'. x86-64 only.
-build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/jdtls.tgz
+	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --jdtls build/compat/jdtls.tgz
+
+# Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
+# Java disk as /opt/jdtls.
+build/compat/jdtls.tgz: | build/compat/src
+	curl -fsSL -o $@ $(JDTLS_URL)
+	echo "$(JDTLS_SHA256)  $@" | sha256sum -c - >/dev/null
 
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
 # gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
 # digest, its layers kept in ALPINE_CACHE like the others'. x86-64 only.
-build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/rust-analyzer build/compat/rust-src.tgz
+	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --rust-analyzer build/compat/rust-analyzer --rust-src build/compat/rust-src.tgz
+
+# The standard library's source, pinned by the SHA-256 of its tar.gz in the Rust
+# release's manifest; the Rust disk unpacks it where rust-analyzer looks for it.
+build/compat/rust-src.tgz: | build/compat/src
+	curl -fsSL -o $@.part $(RUST_SRC_URL)
+	echo "$(RUST_SRC_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	mv $@.part $@
+
+# rust-analyzer, Rust's language server (a static musl program), for the Rust
+# disk: it goes in as /usr/local/cargo/bin/rust-analyzer. x86-64 only.
+build/compat/rust-analyzer: | build/compat/src
+	curl -fsSL -o build/compat/src/rust-analyzer.tgz $(RUST_ANALYZER_URL)
+	echo "$(RUST_ANALYZER_SHA256)  build/compat/src/rust-analyzer.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/rust-analyzer && mkdir build/compat/src/rust-analyzer
+	tar xzf build/compat/src/rust-analyzer.tgz -C build/compat/src/rust-analyzer --strip-components=3 --wildcards '*/rust-analyzer-preview/bin/rust-analyzer'
+	mv build/compat/src/rust-analyzer/rust-analyzer $@
 
 # Rootless-capable Podman (the static mgoltzsche/podman image), as a tar file
 # the cases unpack, for podman.txt. Pinned by digest, its layers kept in
@@ -946,6 +992,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
+# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
+LTP_SUITES ?= --suite pty --suite containers --suite cve --suite posix
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -967,16 +1015,25 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/lib -s
 	$(MAKE) -C build/ltp/libs -s
 	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
+	$(MAKE) -C build/ltp/testcases/cve -s -k || true
+	# The Open POSIX Test Suite is configured on its own; a few tests do not
+	# build against musl (they check _POSIX_SPORADIC_SERVER and the like).
+	cd build/ltp/testcases/open_posix_testsuite && ./configure -q CC="$(MUSLCC)" \
+	  CFLAGS="-O2 -fPIE" LDFLAGS=-static-pie >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite generate-makefiles >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite/conformance/interfaces -s -k -j4 >/dev/null 2>&1 || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs
 # (25 boots, three at a time; about 10 minutes on four processors). Fails
 # only if a test in ltp_baseline.txt stops passing.
 compat-ltp: build/bastios.elf build/ltp/.built
-	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
 
 compat-ltp-baseline: build/bastios.elf build/ltp/.built
-	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
 
 # Not part of `make test`: the same micro-benchmarks (bench/osbench.c) on
 # BastiOS and on Linux in the same QEMU machine, side by side; see

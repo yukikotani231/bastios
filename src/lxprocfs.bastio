@@ -122,7 +122,7 @@ const TASK_DIRS: u64 = 0xC00;          // DIR_PROC + TASK_DIRS + pid: /proc/PID/
 const FDI_DIRS: u64 = 0x1800;           // DIR_PROC + FDI_DIRS + pid: /proc/PID/fdinfo
 const SYSD: u64 = 0x1400;              // DIR_PROC + SYSD + j: /proc/sys and its directories (src/lxsysctl.bastio)
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
-const LOOP_SYS: u64 = 8;               // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio
+const LOOP_SYS: u64 = 10;              // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio, queue/logical_block_size, queue/dma_alignment
 const SY_PX: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
 const SY_FI: u64 = SY_PX + NPROC * PXF_N;   // after those: /proc/P/fdinfo/FD at P * LXNFD + FD
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
@@ -257,7 +257,13 @@ fn proc_task(k: &mut Kernel, n: u64) -> u64
   }
   let fd = xfer_is(k.fs.xfer, te, te + 3, "/fd");
   let ns = xfer_is(k.fs.xfer, te, te + 3, "/ns");
-  if (!fd && !ns) || (te + 3 < n && bget(k.fs.xfer, te + 3) != 47) {
+  let fdi = te + 7 <= n && xfer_is(k.fs.xfer, te, te + 7, "/fdinfo");
+  if fdi {
+    // fdinfo and what is in it are the process's, as fd is
+    if te + 7 < n && bget(k.fs.xfer, te + 7) != 47 {
+      return n;
+    }
+  } else if (!fd && !ns) || (te + 3 < n && bget(k.fs.xfer, te + 3) != 47) {
     return n;
   }
   let q = proc_pid(k.procs, k.fs.xfer, 5, e);
@@ -762,6 +768,12 @@ fn loop_sys_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, at, n, "loop/dio") {
     return base + 7;
   }
+  if xfer_is(x, at, n, "queue/logical_block_size") {
+    return base + 8;
+  }
+  if xfer_is(x, at, n, "queue/dma_alignment") {
+    return base + 9;
+  }
   return 0;
 }
 
@@ -805,8 +817,12 @@ fn loop_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
     v = flags / 4 % 2;
   } else if a == 6 {
     v = flags / 8 % 2;
-  } else {
+  } else if a == 7 {
     v = flags / 16 % 2;
+  } else if a == 8 {
+    v = 512;                                // the sector size of every device here
+  } else {
+    v = 511;                                // buffers for the device need 512-byte alignment
   }
   let e = put_n(&mut o, 0, v);
   return put_c(&mut o, e, 10);
@@ -1413,45 +1429,45 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
     }
     a = put_c(&mut o, a, 10);
   }
-  if d.kind == K_INOTIFY && d.x < INO_N && get(k.evt, INO_AT + d.x * INO_STRIDE) != 2 {
+  if d.kind == K_INOTIFY && d.x < INO_N && evg(k, INO_AT + d.x * INO_STRIDE) != 2 {
     let mut w = 0;
     while w < INO_W
       invariant w <= INO_W && a <= PROC_OUT && blen(o) == PROC_OUT && d.x < INO_N && kok(k)
     {
       let at = INO_AT + d.x * INO_STRIDE + INO_HEAD + w * INO_WAT;
-      let hv = get(k.evt, at);
+      let hv = evg(k, at);
       if hv != 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
         a = put_s(&mut o, a, "inotify wd:");
-        a = put_n(&mut o, a, get(k.evt, at + 2));
+        a = put_n(&mut o, a, evg(k, at + 2));
         a = put_s(&mut o, a, " ino:");
         a = put_x(&mut o, a, hv);                  // the handle: what stat calls the inode is this plus INO_FILES
         a = put_s(&mut o, a, " sdev:00000001 mask:");
-        a = put_x(&mut o, a, get(k.evt, at + 1));
+        a = put_x(&mut o, a, evg(k, at + 1));
         a = put_s(&mut o, a, " ignored_mask:0\n");
       }
       w = w + 1;
     }
   }
-  if d.kind == K_INOTIFY && d.x < INO_N && get(k.evt, INO_AT + d.x * INO_STRIDE) == 2 {
+  if d.kind == K_INOTIFY && d.x < INO_N && evg(k, INO_AT + d.x * INO_STRIDE) == 2 {
     let mut m = 0;
     while m < FAN_M
       invariant m <= FAN_M && a <= PROC_OUT && blen(o) == PROC_OUT && d.x < INO_N && kok(k)
     {
       let at = INO_AT + d.x * INO_STRIDE + 6 + m * FAN_MK;     // the mark (fm_at in src/lxinotify.bastio)
-      let hv = get(k.evt, at);
-      if hv != 0 && get(k.evt, at + 1) == 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
+      let hv = evg(k, at);
+      if hv != 0 && evg(k, at + 1) == 0 && hv < 0x100000000 && a + 120 <= PROC_OUT {
         a = put_s(&mut o, a, "fanotify ino:");
         a = put_x(&mut o, a, hv);
         a = put_s(&mut o, a, " sdev:00000001 mflags:");
-        if get(k.evt, at + 4) % 2 == 1 {
+        if evg(k, at + 4) % 2 == 1 {
           a = put_s(&mut o, a, "40");
         } else {
           a = put_s(&mut o, a, "0");
         }
         a = put_s(&mut o, a, " mask:");
-        a = put_h(&mut o, a, get(k.evt, at + 2));
+        a = put_h(&mut o, a, evg(k, at + 2));
         a = put_s(&mut o, a, " ignored_mask:");
-        a = put_h(&mut o, a, get(k.evt, at + 3));
+        a = put_h(&mut o, a, evg(k, at + 3));
         a = put_c(&mut o, a, 10);
       }
       m = m + 1;
@@ -1937,10 +1953,22 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_n(&mut o, a, pc_count(k.fs.pc));
       a = put_s(&mut o, a, "\noom_kill ");
       a = put_n(&mut o, a, get(k.sys, SYS_VM));
+      a = put_s(&mut o, a, "\npswpin ");
+      a = put_n(&mut o, a, swap_pin(k));
+      a = put_s(&mut o, a, "\npswpout ");
+      a = put_n(&mut o, a, swap_pout(k));
       return put_s(&mut o, a, "\n");
     }
     if what == SY_SWAPS {
-      return put_s(&mut o, 0, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+      let mut a = put_s(&mut o, 0, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
+      if swap_on(k) {
+        a = put_s(&mut o, a, "swapfile\t\t\t\tfile\t\t");
+        a = put_n(&mut o, a, swap_total(k) * 4);
+        a = put_s(&mut o, a, "\t\t");
+        a = put_n(&mut o, a, swap_used(k) * 4);
+        a = put_s(&mut o, a, "\t\t-2\n");
+      }
+      return a;
     }
     if what == SY_NETARP {
       // The card's ARP cache; only the namespace the machine boots in
@@ -2283,7 +2311,11 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     // The memory in use counts as active; psutil and free(1) read these.
     a = put_s(&mut o, a, " kB\nSwapCached: 0 kB\nActive: ");
     a = put_n(&mut o, a, total - smaller(free, total));
-    return put_s(&mut o, a, " kB\nInactive: 0 kB\nSwapTotal: 0 kB\nSwapFree: 0 kB\nDirty: 0 kB\nWriteback: 0 kB\nShmem: 0 kB\nSReclaimable: 0 kB\n");
+    a = put_s(&mut o, a, " kB\nInactive: 0 kB\nSwapTotal: ");
+    a = put_n(&mut o, a, swap_total(k) * 4);
+    a = put_s(&mut o, a, " kB\nSwapFree: ");
+    a = put_n(&mut o, a, swap_free(k) * 4);
+    return put_s(&mut o, a, " kB\nDirty: 0 kB\nWriteback: 0 kB\nShmem: 0 kB\nSReclaimable: 0 kB\n");
   }
   if what == PF_CPUINFO && p == 0 {
     let mut a = 0;

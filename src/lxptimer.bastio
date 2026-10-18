@@ -11,8 +11,10 @@
 // Like the itimer, they move with a thread group's shared state
 // (src/lxthread.bastio), and exit and execve delete them.
 //
-// Not done: SIGEV_THREAD and SIGEV_THREAD_ID are refused (-EINVAL), the
-// signal carries no si_value.
+// The state word also carries the low 32 bits of sigev_value (times 65536),
+// which the signal's siginfo gives back with si_code SI_TIMER.
+//
+// Not done: SIGEV_THREAD and SIGEV_THREAD_ID are refused (-EINVAL).
 
 import "lxtime.bastio";
 
@@ -56,13 +58,14 @@ fn ptimer_tick(k: &mut Kernel)
   requires kok(k)
   ensures kok(k)
 {
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE and has no timer
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
   {
     let mut t = 0;
     while t < PT_N
-      invariant t <= PT_N && 1 <= p && p < NPROC && kok(k)
+      invariant t <= PT_N && 1 <= p && p < cap && cap <= NPROC && kok(k)
     {
       let dl = get(k.alarms, pt_at(p, t, 0));
       let now = pt_now(k, p, t);
@@ -87,7 +90,7 @@ fn ptimer_tick(k: &mut Kernel)
         } else {
           k.alarms = set(k.alarms, pt_at(p, t, 3), over);
           if 1 <= s && s <= NSIG {
-            post_proc(&mut k, p, s);
+            post_proc_wv(&mut k, p, s, t + TIMER_MARK + SW_QUEUE, get(k.alarms, pt_at(p, t, 2)) / 65536 % 0x100000000);
           }
         }
       }
@@ -102,7 +105,7 @@ fn ptimer_tick(k: &mut Kernel)
 fn pt_now(k: &Kernel, p: u64, t: u64) -> u64
   requires kok(k) && p < NPROC && t < PT_N
 {
-  let clk = wrap_sub(get(k.alarms, pt_at(p, t, 2)) / 128, 1);
+  let clk = wrap_sub(get(k.alarms, pt_at(p, t, 2)) / 128 % 512, 1);
   if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
     return clock_now(k, p, clk);
   }
@@ -130,11 +133,13 @@ fn lx_timer_create(k: &mut Kernel, pid: u64, clk: u64, sev: u64, idp: u64) -> u6
     return EINVAL;
   }
   let mut sig = SIGALRM;
+  let mut val = 0;
   if sev != 0 {
     // struct sigevent: sigval (8 bytes), int signo, int notify.
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, sev, &mut k.fs.xfer, 16) != 16 {
       return EFAULT;
     }
+    val = get_u64(k.fs.xfer, 0);
     let w = get_u64(k.fs.xfer, 8);
     let notify = w / 0x100000000;
     sig = w % 0x100000000;
@@ -159,7 +164,10 @@ fn lx_timer_create(k: &mut Kernel, pid: u64, clk: u64, sev: u64, idp: u64) -> u6
   }
   k.alarms = set(k.alarms, pt_at(pid, t, 0), 0);
   k.alarms = set(k.alarms, pt_at(pid, t, 1), 0);
-  k.alarms = set(k.alarms, pt_at(pid, t, 2), (clk + 1) * 128 + sig);
+  if sev == 0 {
+    val = t;                                // sigev_value is the timer's id, as on Linux
+  }
+  k.alarms = set(k.alarms, pt_at(pid, t, 2), (clk + 1) * 128 + sig + 65536 * (val % 0x100000000));
   k.alarms = set(k.alarms, pt_at(pid, t, 3), 0);
   return 0;
 }
@@ -211,7 +219,7 @@ fn lx_timer_settime(k: &mut Kernel, pid: u64, id: u64, flags: u64, nv: u64, ov: 
   }
   let mut dl = 0;
   if val.ns != 0 {
-    let now = clock_now(k, pid, wrap_sub(get(k.alarms, pt_at(pid, t, 2)) / 128, 1));
+    let now = clock_now(k, pid, wrap_sub(get(k.alarms, pt_at(pid, t, 2)) / 128 % 512, 1));
     let base = pt_now(k, pid, t);
     if flags & TIMER_ABSTIME == 0 {
       dl = sat_add(base, val.ns);

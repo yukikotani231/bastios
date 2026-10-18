@@ -72,8 +72,29 @@ static inline void wrmsr(uint32_t msr, uint64_t v) {
 
 #define SYSCALL_VECTOR 0x80
 
+/* Does the boot command line have the word `w`? */
+extern uint64_t bst_boot_cmdline(uint64_t i);              /* multiboot.c */
+static int cmdline_has(const char *w) {
+    for (uint64_t i = 0; bst_boot_cmdline(i) < 256; i++) {
+        if (i && bst_boot_cmdline(i - 1) != ' ') continue;
+        uint64_t k = 0;
+        while (w[k] && bst_boot_cmdline(i + k) == (uint8_t)w[k]) k++;
+        if (!w[k] && (bst_boot_cmdline(i + k) == 256 || bst_boot_cmdline(i + k) == ' ')) return 1;
+    }
+    return 0;
+}
+
+/* Process-context identifiers, off unless the command line says `pcid` and
+ * the processor has them (CPUID.1:ECX bit 17): then a trap from user mode no
+ * longer empties the TLB of the kernel's translations (boot.S,
+ * bst_cpu_enter). Read by bst_cpu_enter on each processor. */
+uint64_t bst_pcid_on;
+
 void bst_platform_init(void) {
     alias_init();
+    uint32_t a = 1, b, c = 0, d;
+    __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    bst_pcid_on = (c >> 17 & 1) && cmdline_has("pcid");
 
     /* Each processor's task state segment is set up by bst_core_init (smp.c). */
 

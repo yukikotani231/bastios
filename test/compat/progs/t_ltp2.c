@@ -14,6 +14,7 @@
 #include <netinet/in.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/uio.h>
 #include <sys/personality.h>
 #include <net/if.h>
 #include <sys/ioctl.h>
@@ -93,6 +94,20 @@ static int serve_three(void) {
 
 static volatile int ltp2_mq_hit;
 static void ltp2_mq_fn(union sigval v) { ltp2_mq_hit = v.sival_int; }
+
+static volatile int adopt_hit;
+static void adopt_handler(int s) { (void)s; adopt_hit = 1; }
+static void *adopt_worker(void *a) {
+    sigset_t m;
+    sigemptyset(&m);
+    sigaddset(&m, SIGUSR1);
+    pthread_sigmask(SIG_BLOCK, &m, 0);
+    *(volatile int *)a = 1;
+    while (*(volatile int *)a != 2) usleep(1000);
+    pthread_sigmask(SIG_UNBLOCK, &m, 0);          // takes the signal every thread blocked
+    for (int i = 0; i < 2000 && !adopt_hit; i++) usleep(1000);
+    return 0;
+}
 
 int main(void) {
     setup();
@@ -510,6 +525,46 @@ int main(void) {
                _exit(r == 0 && me == (SCHED_FIFO | 0x40000000) && gp == SCHED_OTHER && gq.sched_priority == 0 ? 0 : 1);
            }
            int st; waitpid(c, &st, 0); WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("locked pages: msync(MS_INVALIDATE) is EBUSY and madvise(MADV_DONTNEED) EINVAL, until munlock", ({
+           char *m = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_LOCKED, -1, 0);
+           int a = msync(m, 4096, MS_INVALIDATE), ae = errno;
+           int b = madvise(m, 4096, MADV_DONTNEED), be = errno;
+           int c = madvise(m + 4096, 4096, MADV_DONTNEED);          // the second page is locked too
+           munlock(m, 4096);
+           int d = msync(m, 4096, MS_INVALIDATE);
+           int e = madvise(m, 4096, MADV_DONTNEED);
+           int f = madvise(m + 4096, 4096, MADV_DONTNEED), fe = errno;
+           munmap(m, 8192);
+           a == -1 && ae == EBUSY && b == -1 && be == EINVAL && c == -1 && d == 0 && e == 0 && f == -1 && fe == EINVAL; }));
+    EXPECT("locked pages: unmapping or mapping over them unlocks them", ({
+           char *m = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int l = mlock(m, 4096);
+           munmap(m, 4096);
+           char *n = mmap(m, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+           int a = madvise(n, 4096, MADV_DONTNEED);                  // a new mapping is not locked
+           mlock(n, 4096);
+           char *o = mmap(n, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+           int b = madvise(o, 4096, MADV_DONTNEED);                  // nor is one mapped over a locked one
+           munmap(o, 4096);
+           l == 0 && n == m && a == 0 && o == n && b == 0; }));
+    EXPECT("splice from a pipe into a Unix socket and into a TCP connection delivers the bytes", ({
+           int pp[2], sv[2]; pipe(pp); socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
+           char in[3000], out[3000]; for (int i = 0; i < 3000; i++) in[i] = i * 7;
+           write(pp[1], in, 3000);
+           long a = splice(pp[0], 0, sv[0], 0, 3000, 0);
+           int got = 0; while (got < a) { int r = read(sv[1], out + got, 3000 - got); if (r <= 0) break; got += r; }
+           int ok1 = a == 3000 && got == 3000 && memcmp(in, out, 3000) == 0;
+           int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+           bind(ls, (void *)&sa, sizeof sa); listen(ls, 1); socklen_t sl = sizeof sa; getsockname(ls, (void *)&sa, &sl);
+           int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (void *)&sa, sizeof sa); int s = accept(ls, 0, 0);
+           write(pp[1], in, 1000);
+           long b = splice(pp[0], 0, c, 0, 1000, 0);
+           got = 0; while (got < b) { int r = read(s, out + got, 1000 - got); if (r <= 0) break; got += r; }
+           int ok2 = b == 1000 && got == 1000 && memcmp(in, out, 1000) == 0;
+           int u = socket(AF_INET, SOCK_DGRAM, 0); write(pp[1], in, 10);
+           long d = splice(pp[0], 0, u, 0, 10, 0);                     // a datagram socket is not done
+           close(pp[0]); close(pp[1]); close(sv[0]); close(sv[1]); close(ls); close(c); close(s); close(u);
+           ok1 && ok2 && d == -1 && errno == EINVAL; }));
     EXPECT("shutdown(SHUT_RD) on a unix socket: reads end, the peer's sends are EPIPE, poll reports POLLRDHUP", ({
            int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv);
            write(sv[1], "ab", 2);
@@ -781,5 +836,95 @@ int main(void) {
            ok = ok && madvise(m, 3 * 4096, MADV_NORMAL) == -1 && errno == ENOMEM;
            munmap(m, 2 * 4096);
            ok; }));
+    EXPECT("IPv4 multicast: leaving a group never joined is EADDRNOTAVAIL, a join then a leave works", ({
+           int s = socket(AF_INET, SOCK_DGRAM, 0);
+           struct ip_mreq m;
+           m.imr_multiaddr.s_addr = htonl(0xe0000123);
+           m.imr_interface.s_addr = htonl(INADDR_ANY);
+           int ok = s >= 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, 3) == -1 && errno == EINVAL;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_ADD_MEMBERSHIP, &m, sizeof m) == 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == 0;
+           ok = ok && setsockopt(s, IPPROTO_IP, IP_DROP_MEMBERSHIP, &m, sizeof m) == -1 && errno == EADDRNOTAVAIL;
+           close(s);
+           ok; }));
+    EXPECT("pwrite and writev: a file takes the whole count, however far the file grows", ({
+           int fd = open("cf_pwhole", O_RDWR | O_CREAT | O_TRUNC, 0644);
+           static char big[100000];
+           memset(big, 'p', sizeof big);
+           int ok = fd >= 0;
+           for (int i = 0; ok && i < 60; i++) {
+               off_t at = (off_t)i * 70001 + 3;
+               size_t n = 33757 + (size_t)i * 1000;
+               ok = pwrite(fd, big, n, at) == (ssize_t)n;
+           }
+           ok = ok && pwrite(fd, big, sizeof big, 30000000) == (ssize_t)sizeof big;
+           for (int i = 0; ok && i < 40; i++) {
+               struct iovec v[3] = { { big, 20000 + (size_t)i * 500 }, { big + 30000, 1 }, { big + 40000, 46873 } };
+               size_t n = v[0].iov_len + 1 + 46873;
+               ok = lseek(fd, (off_t)i * 80000 + 7, SEEK_SET) >= 0 && writev(fd, v, 3) == (ssize_t)n;
+           }
+           close(fd); unlink("cf_pwhole");
+           ok; }));
+    EXPECT("F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor", ({
+           int pf[2];
+           int ok = pipe(pf) == 0;
+           sigset_t set;
+           sigemptyset(&set); sigaddset(&set, SIGUSR1);
+           sigprocmask(SIG_BLOCK, &set, NULL);
+           ok = ok && fcntl(pf[0], F_SETOWN, getpid()) == 0 && fcntl(pf[0], F_SETSIG, SIGUSR1) == 0;
+           ok = ok && fcntl(pf[0], F_SETFL, O_ASYNC) == 0;
+           ok = ok && write(pf[1], "x", 1) == 1;
+           siginfo_t si;
+           memset(&si, 0, sizeof si);
+           struct timespec to = { 2, 0 };
+           ok = ok && sigtimedwait(&set, &si, &to) == SIGUSR1;
+           ok = ok && si.si_code == POLL_IN && si.si_fd == pf[0] && si.si_band == (POLLIN | POLLRDNORM);
+           close(pf[0]); close(pf[1]);
+           ok; }));
+    EXPECT("lstat of /proc/self/fd/N is a link", ({
+           struct stat st;
+           int ok = lstat("/proc/self/fd/0", &st) == 0 && S_ISLNK(st.st_mode);
+           ok; }));
+    EXPECT("lstat of a /proc/self/task/TID/fd directory", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/fd", (int)getpid());
+           int ok = lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+           ok; }));
+    EXPECT("lstat of /proc/self/task/TID/fd/N is a link", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/fd/0", (int)getpid());
+           int ok = lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+           ok; }));
+    EXPECT("stat of /proc/self/task/TID/fdinfo/N", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/fdinfo/0", (int)getpid());
+           int ok = stat(path, &st) == 0;
+           ok; }));
+    EXPECT("lstat of /proc/self/task/TID/ns/mnt and /proc/self/task/TID/status", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/status", (int)getpid());
+           int ok = stat(path, &st) == 0;
+           ok; }));
+    EXPECT("a process signal every thread blocks goes to the first thread that unblocks it", ({
+           struct sigaction sa = { .sa_handler = adopt_handler };
+           sigaction(SIGUSR1, &sa, 0);
+           sigset_t m;
+           sigemptyset(&m);
+           sigaddset(&m, SIGUSR1);
+           pthread_sigmask(SIG_BLOCK, &m, 0);
+           volatile int ready = 0;
+           pthread_t t;
+           pthread_create(&t, 0, adopt_worker, (void *)&ready);
+           while (!ready) usleep(1000);
+           kill(getpid(), SIGUSR1);
+           ready = 2;
+           pthread_join(t, 0);
+           adopt_hit == 1; }));
     return done();
 }

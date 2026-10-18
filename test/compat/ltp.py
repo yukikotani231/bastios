@@ -57,14 +57,16 @@ def load_tests(ltp, only, skip, suites=()):
     helper programs next to it that are not tests themselves (execve_child
     and the like, which LTP copies from the directory a test starts in)."""
     progs, dirs = {}, {}
-    names = ["syscalls", *suites]
+    posix = "posix" in suites
+    names = ["syscalls", *(s for s in suites if s != "posix")]
     for suite in names:
-        for root, _, files in os.walk(os.path.join(ltp, "testcases", "kernel", suite)):
-            for f in sorted(files):
-                p = os.path.join(root, f)
-                if os.access(p, os.X_OK) and "." not in f and is_elf(p) and f not in progs:
-                    progs[f] = p
-                    dirs.setdefault(root, []).append(f)
+        for base in (os.path.join(ltp, "testcases", "kernel", suite), os.path.join(ltp, "testcases", suite)):
+            for root, _, files in os.walk(base):
+                for f in sorted(files):
+                    p = os.path.join(root, f)
+                    if os.access(p, os.X_OK) and "." not in f and is_elf(p) and f not in progs:
+                        progs[f] = p
+                        dirs.setdefault(root, []).append(f)
     entries = []
     for suite in names:
         for line in open(os.path.join(ltp, "runtest", suite)):
@@ -82,7 +84,27 @@ def load_tests(ltp, only, skip, suites=()):
             continue
         helpers = [f for f in dirs[os.path.dirname(progs[argv[0]])] if f not in tested]
         tests.append((tag, argv, {argv[0], *helpers}))
+    if posix:
+        for tag, prog, path in posix_tests(ltp):
+            if (only and not re.search(only, tag)) or tag in skip:
+                continue
+            progs[prog] = path
+            tests.append((tag, [prog], {prog}))
     return tests, progs, missing
+
+
+def posix_tests(ltp):
+    """The Open POSIX Test Suite's conformance programs that were built:
+    (tag, file name, path). Its tests are named after the interface and the
+    assertion (sigaction_1-1) and have no runtest file."""
+    base = os.path.join(ltp, "testcases", "open_posix_testsuite", "conformance", "interfaces")
+    found = []
+    for root, _, files in os.walk(base):
+        for f in files:
+            p = os.path.join(root, f)
+            if f.endswith(".run-test") and os.access(p, os.X_OK) and is_elf(p):
+                found.append(("posix-" + f[:-len(".run-test")], f, p))
+    return sorted(found)
 
 
 def load_skip():
@@ -96,6 +118,30 @@ def load_skip():
                 tag, _, why = line.partition(" ")
                 skip[tag] = why.strip()
     return skip
+
+
+# The Open POSIX Test Suite's exit statuses.
+POSIX_FAIL, POSIX_UNRESOLVED, POSIX_UNSUPPORTED, POSIX_UNTESTED = 1, 2, 4, 5
+
+
+def classify_posix(status, text):
+    """(result, detail) for an Open POSIX test: it exits 0 for PASSED, 1 for
+    FAILED, 2 for UNRESOLVED (it could not set itself up), 4 for UNSUPPORTED
+    and 5 for UNTESTED."""
+    lines = [l.strip() for l in text.split("\n") if l.strip() not in ("", "#") and not l.startswith("@@")]
+    note = next((l for l in reversed(lines) if not l.startswith("[pid ")), "")
+    fault = next((l for l in lines if l.startswith("[pid ") and "not implemented" not in l), "")
+    if status is None:
+        return "hang", fault or note or "did not finish"
+    if status == 0:
+        return "pass", ""
+    if status == POSIX_FAIL:
+        return "fail", fault or note or "exit 1"
+    if status == POSIX_UNRESOLVED:
+        return "broken", fault or note or "exit 2"
+    if status in (POSIX_UNSUPPORTED, POSIX_UNTESTED):
+        return "unsupported", note
+    return "crash", f"exit {status}" + (": " + (fault or note) if fault or note else "")
 
 
 def classify(status, text):
@@ -270,7 +316,7 @@ def run_guest(args, tests, progs, log, gated):
 
 
 def record(tag, text, status):
-    result, detail = classify(status, text)
+    result, detail = (classify_posix if tag.startswith("posix-") else classify)(status, text)
     calls = sorted({int(n) for n in NOTE.findall(text)})
     return {"name": tag, "result": result, "detail": detail[:300], "syscalls": calls}
 
@@ -336,7 +382,8 @@ def main():
                     help="machines run at once (each has two processors)")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("--suite", action="append", default=[],
-                    help="also run runtest/NAME with the programs in testcases/kernel/NAME (pty, sched, ...)")
+                    help="also run runtest/NAME with the programs in testcases/kernel/NAME (pty, sched, ...); "
+                         "posix is the Open POSIX Test Suite's conformance tests")
     args = ap.parse_args()
 
     base = os.path.join(HERE, "ltp_baseline.txt")

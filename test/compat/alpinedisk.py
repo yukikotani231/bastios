@@ -538,8 +538,9 @@ def main():
     for r in (repo, repo2):
         args += [f"a/{os.path.basename(r)}/{ARCH}/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
     # Room for the unpacked root and what apk installs (neovim, gcc and git
-    # together are about 350 MB; cmake, tmux and lua-language-server add about 60 MB).
-    env = dict(os.environ, MKDISK_FREE_MB="700")
+    # together are about 350 MB; cmake, tmux and lua-language-server add about 60 MB). The x86-64 disk also holds
+    # the Go toolchain and gopls as a tar file (140 MB), which a case unpacks (140 MB more).
+    env = dict(os.environ, MKDISK_FREE_MB="700" if ARCH != "x86_64" else "850")
     subprocess.run([os.path.join(HERE, "mkdisk.py"), out] + args, check=True, env=env)
 
 if __name__ == "__main__":

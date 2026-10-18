@@ -1,13 +1,67 @@
 """Exercises the parts of the Python standard library that lean on the
 operating system, one check per line: "ok NAME" or "FAIL NAME: error".
 Run by python.txt on BastiOS; the same file runs on Linux for comparison."""
-import os, sys, time, threading, tempfile, shutil, subprocess, socket, select, selectors, signal, mmap, fcntl, resource, struct, zlib, io
+import warnings, os, sys, time, threading, tempfile, shutil, subprocess, socket, select, selectors, signal, mmap, fcntl, resource, struct, zlib, io, faulthandler
+
+# A check that has not ended after this many seconds is a hang: the script
+# names it, dumps every thread's stack and exits, so a lost wake-up costs
+# a minute and not the lane's whole timeout.
+HANG_SECONDS = 90
+# The checks that hang or fail now and then on KVM runners (a lost wake-up
+# somewhere under real parallelism) run apart, as the group "concurrency",
+# so one of them cannot take the rest of the library down with it.
+GROUP = sys.argv[3] if len(sys.argv) > 3 else "main"
+
+# The watchdog is a thread, so every fork would warn about forking a
+# multi-threaded process; the checks fork on purpose.
+warnings.simplefilter("ignore")
 
 def main():
     failed = []
 
-    def check(name):
+    def check(name, group="main"):
         def deco(f):
+            if group != GROUP:
+                return f
+            def hang():
+                # One line per thread (innermost call first, the watchdog
+                # itself left out), short enough for the lane's report.
+                print("HANG %s: no end after %d s" % (name, HANG_SECONDS), flush=True)
+                # asyncio's tasks: where each coroutine is suspended, the call
+                # the event loop is waiting for.
+                aio = sys.modules.get("asyncio.tasks")
+                for t in list(getattr(aio, "_scheduled_tasks", [])):
+                    chain, c = [], t.get_coro()
+                    while c is not None:
+                        fr = getattr(c, "cr_frame", None) or getattr(c, "gi_frame", None)
+                        chain.append("%s:%d" % (getattr(c, "__qualname__", "?"), fr.f_lineno if fr else -1))
+                        c = getattr(c, "cr_await", None) or getattr(c, "gi_yieldfrom", None)
+                    print("task: %s" % " > ".join(chain), flush=True)
+                # Children of this process and their states: a subprocess the
+                # loop waits for may have ended without the loop being told.
+                me = str(os.getpid())
+                for d in os.listdir("/proc"):
+                    try:
+                        st = open("/proc/%s/stat" % d).read()
+                        rest = st[st.rindex(")") + 2:].split()
+                        if d.isdigit() and rest[1] == me:
+                            print("child %s: state %s" % (d, rest[0]), flush=True)
+                    except (OSError, ValueError):
+                        pass
+                for tid, frame in sys._current_frames().items():
+                    if tid == threading.get_ident():
+                        continue
+                    calls = []
+                    while frame and len(calls) < 3:
+                        calls.append("%s:%d %s" % (os.path.basename(frame.f_code.co_filename), frame.f_lineno, frame.f_code.co_name))
+                        frame = frame.f_back
+                    print("thread %d: %s" % (tid & 0xffff, " < ".join(calls)), flush=True)
+                faulthandler.dump_traceback(file=sys.stdout, all_threads=True)
+                sys.stdout.flush()
+                os._exit(3)
+            watchdog = threading.Timer(HANG_SECONDS, hang)
+            watchdog.daemon = True
+            watchdog.start()
             try:
                 f()
                 print("ok", name)
@@ -17,6 +71,7 @@ def main():
                 while tb.tb_next:
                     tb = tb.tb_next
                 print("FAIL %s: %s: %s (%s:%d)" % (name, type(e).__name__, str(e)[:120], os.path.basename(tb.tb_frame.f_code.co_filename), tb.tb_lineno))
+            watchdog.cancel()
             sys.stdout.flush()
             return f
         return deco
@@ -287,13 +342,18 @@ def main():
             d = m.dict(); pr = ctx.Process(target=d.update, args=({"a": 1},)); pr.start(); pr.join(); assert dict(d) == {"a": 1}
         sm = shared_memory.SharedMemory(create=True, size=64); sm.buf[0] = 9
         s2 = shared_memory.SharedMemory(name=sm.name); assert s2.buf[0] == 9; s2.close(); sm.close(); sm.unlink()
-        from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
-        with ProcessPoolExecutor(2, mp_context=ctx) as ex:
-            assert list(ex.map(abs, [-5, -6])) == [5, 6]
+        from concurrent.futures import ThreadPoolExecutor
         with ThreadPoolExecutor(4) as ex:
             assert sum(ex.map(abs, range(-10, 0))) == 55
 
-    @check("asyncio: loopback server, subprocess, executor, unix socket, timers")
+    @check("ProcessPoolExecutor on forked workers", "concurrency")
+    def _():
+        import multiprocessing as mp
+        from concurrent.futures import ProcessPoolExecutor
+        with ProcessPoolExecutor(2, mp_context=mp.get_context("fork")) as ex:
+            assert list(ex.map(abs, [-5, -6])) == [5, 6]
+
+    @check("asyncio: loopback server, subprocess, executor, unix socket, timers", "concurrency")
     def _():
         import asyncio
         async def main():

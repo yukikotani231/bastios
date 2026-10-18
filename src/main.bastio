@@ -84,6 +84,7 @@ import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
 import "lxanon.bastio";
+import "swap.bastio";
 import "oom.bastio";
 import "lxcow.bastio";
 import "hda.bastio";
@@ -452,7 +453,7 @@ fn idle_horizon(k: &Kernel) -> u64
   while t < TFD_N
     invariant t <= TFD_N && kok(k)
   {
-    if get(k.evt, t * TFD_STRIDE + 2) != 0 {
+    if evg(k, t * TFD_STRIDE + 2) != 0 {
       return 0;                             // a timerfd is armed
     }
     t = t + 1;
@@ -483,7 +484,7 @@ fn stretch_p(s: &mut Sys, cpu: &Cpu)
   // raises no interrupt, the network stack's timers, the disk's batch.
   if s.polled || snd_queued(s.k.snd) != 0
      || (nic_up(s.k.nic) && !nic_irq(s.k.nic)) || !nic_timers_idle(s.k.nic)
-     || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 {
+     || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 || s.k.fs.disk.pdn != 0 {
     return;
   }
   s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
@@ -555,7 +556,11 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
   ensures sys_ok(s)
 {
   ack(&mut s.pic, &mut s.apic, v);
-  if s.slept != 0 {
+  // Only the bootstrap processor ends its stretch: the local APIC timer
+  // stretch_end disarms is the one of the processor that runs it, and on
+  // an application processor that is its own tick, without which a
+  // program it runs is never preempted (and never sees a signal).
+  if s.slept != 0 && lapic_self(&mut s.apic) == s.apic.id {
     stretch_end(&mut s, cpu);
   }
   if v == V_TIMER {
@@ -674,6 +679,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if pt_sys_entry(&mut s.k, p, pget(s.k.procs, p, F_RESTART) != 0) {
       return (p + 1) % NPROC;               // stopped for its tracer before the call (src/lxptrace.bastio)
     }
+    if ino_throttle(&mut s.k, p) {
+      return (p + 1) % NPROC;               // (a reader of a half-full inotify queue goes first)
+    }
     ino_before(&mut s.k, p);                // src/lxinotify.bastio
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
@@ -700,6 +708,31 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   let mut is_bus = false;
   if v == 14 {
+    // A swapped page (src/swap.bastio) is a page there but with no access: nothing below may see it first.
+    let sw = swap_fault(&mut s.k, p);
+    if sw == SW_OK {
+      pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+      return p;
+    }
+    if sw == SW_BUSY {
+      return (p + 1) % NPROC;               // a processor runs its space: try again
+    }
+    if sw == SW_NOMEM {
+      // The page is in the swap file and there is no page to read it into:
+      // the same reclaim as a fault that finds no page (src/oom.bastio).
+      let oo = oom_fault(&mut s.k, &mut s.con, p, true);
+      if oo == OOM_RETRY {
+        pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
+        return p;
+      }
+      if oo == OOM_WAIT {
+        return (p + 1) % NPROC;
+      }
+      if oo == OOM_SELF {
+        terminate(&mut s.k, mmu, p, death_code(SIGKILL, false));
+        return (p + 1) % NPROC;
+      }
+    }
     let lz = lazy_fault(&mut s.k, p);
     if lz == LZ_WAIT && state(s.k.procs, p) == READY {
       // Its code page's blocks are being read: it sleeps until the disk's
@@ -737,8 +770,12 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     let ova = pget(s.k.procs, p, reg_word(R_FAULT));
     if ova >= USER_BASE && ova - USER_BASE < USER_SIZE {
       let oq = (ova - USER_BASE) / 4096;
+      // (A stack page it grows into is wanted too: with swap on, a program
+      // that fills memory still calls deeper, and the page comes from swap.)
+      let present = user_present(&mut s.k.spaces, p, ova);
       let want = anon_covers(s.k.anon, p, oq) || lazy_covers(s.k, p, oq)
-        || (user_present(&mut s.k.spaces, p, ova) && !user_page_writable(&mut s.k.spaces, p, ova));
+        || (present && !user_page_writable(&mut s.k.spaces, p, ova))
+        || (!present && oq >= STACK_FIRST && oq < STACK_LOW && pget(s.k.procs, p, F_BRK) != 0);
       let oo = oom_fault(&mut s.k, &mut s.con, p, want);
       if oo == OOM_RETRY {
         pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
@@ -790,10 +827,27 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       pt_stepped(&mut s.k, p);
     }
     let mut addr = pget(s.k.procs, p, F_REGS + R_RIP);
+    // The siginfo's si_code: SEGV_MAPERR (1) for an address nothing maps,
+    // SEGV_ACCERR (2) for a page the access is not allowed on (the page
+    // fault error code says it was present), ILL_ILLOPN (2) for a bad
+    // opcode, SI_KERNEL (0x80) for a general protection fault.
+    let mut code = 1;
     if v == 14 {
       addr = pget(s.k.procs, p, F_REGS + 19);   // CR2
+      let off = addr - smaller(addr, USER_BASE);
+      let low = pget(s.k.procs, p, F_MMAP);
+      if pget(s.k.procs, p, F_REGS + 18) % 2 == 1 {
+        code = 2;
+      } else if addr >= USER_BASE && low <= STACK_FIRST * 4096 && off >= low && off < STACK_FIRST * 4096 && !hole_within(s.k, p, off / 4096, off / 4096 + 1) {
+        code = 2;                           // inside the mmap area: a PROT_NONE reservation maps no pages
+      }
+    } else if v == 6 {
+      code = 2;
+    } else if v == 13 {
+      code = 128;
+      addr = 0;
     }
-    if fault_caught(&mut s.k, p, sig, addr) {
+    if fault_caught(&mut s.k, p, sig, addr, code) {
       return (p + 1) % NPROC;
     }
     puts(&mut s.con, "\r\n[pid ");
@@ -878,7 +932,7 @@ fn fault_fast(s: &mut Sys, cpu: &Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u
     return Fast::Back(fpu);
   }
   pset(&mut s.k.procs, p, reg_word(R_FAULT), cpu_get(cpu, R_FAULT));
-  if !(anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
+  if swap_count(s.k, tgid_) != 0 || !(anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
     return Fast::Back(fpu);
   }
   pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
@@ -1716,7 +1770,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   bfree(sys.k.uxb);
   free(sys.k.mns);
   free(sys.k.scf);
+  free(sys.k.swp);
   bfree(sys.k.mstr);
+  bfree(sys.k.xab);
   pool = sys.k.mem.pool;
   // Off, or a restart. QEMU's isa-debug-exit device (tests) exits at once,
   // with status 33; elsewhere the port is unused.
