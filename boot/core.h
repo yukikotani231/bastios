@@ -36,6 +36,7 @@
 #define CORE_CR3       384                      /* the shadow table bst_cpu_enter built (with its PCID), for its last instructions */
 #define CORE_KCR3      392                      /* what a trap from user mode loads into CR3: the kernel's table, with its PCID and no-flush bit when PCIDs are on; 0 until this processor's first bst_cpu_enter */
 #define CORE_UPCID     400                      /* the PCID of the shadow table (0 without PCIDs), or'ed into CORE_CR3 */
+#define CORE_FSB       408                      /* the FS base the processor holds, with bit 63 set (0: unknown): bst_cpu_enter writes the register only when it differs */
 #define CORE_IST_TOP   0x2000                   /* top of the 4 KiB IST1 stack, the block's second page */
 #define CORE_GUARD     0x2000                   /* the unmapped page below the kernel stack */
 
