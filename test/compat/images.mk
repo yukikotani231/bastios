@@ -44,3 +44,8 @@ STRACE_SHA256 := 83262583a3529f02c3501aa8b8ac772b4cbc03dc934e98bab6e4883626e283a
 # that runs on the JDK 21 of the Java disk (1.62 wants Java 25).
 JDTLS_URL    := https://download.eclipse.org/jdtls/milestones/1.61.0/jdt-language-server-1.61.0-202609031315.tar.gz
 JDTLS_SHA256 := 338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64
+# TypeScript 7's compiler, a static Go program that also speaks LSP
+# (`tsc --lsp --stdio`), with the standard library's declaration files: the
+# linux-x64 package from npm, pinned by the SHA-256 of its tarball.
+TSC_VER    := 7.0.2
+TSC_SHA256 := 7ecad6f67377e831856367ab062ef394f21506a611405bf8ac0ff039348637d3

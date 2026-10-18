@@ -116,8 +116,9 @@ const P_LEN: u64 = 38;
 const G_A0: u64 = 118;                         // the call's first argument (the result may overwrite its register)
 const G_PID: u64 = 119;
 const G_FANM: u64 = 120;
-const G_COOL: u64 = 121;                       // no call waits for a reader before this time (ns): the last wait found none
+const G_COOL: u64 = 121;                       // no call waits for a reader before this time (ns): the last wait found none, and nothing was read since
 const G_PROG: u64 = 122;                       // events queued in all when the wait began: a reader that took some is making progress
+const G_READ: u64 = 123;                       // when an instance was last read with events queued (ns)
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -781,6 +782,8 @@ fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   if q == 0 {
     return EAGAIN;
   }
+  iput(&mut k, INO_G + G_READ, k.ns);
+  iput(&mut k, INO_G + G_COOL, 0);         // somebody reads after all
   let room = smaller(n, XFER);
   let mut off = 0;
   let mut taken = 0;
@@ -864,14 +867,19 @@ fn ino_producer(n: u64) -> bool {
 }
 
 const INO_WAIT: u64 = 30000000;                // how long a call waits for a reader of a half-full queue (ns): three timer ticks, as a reader on an idle processor starts at the next tick
+const INO_LIVE: u64 = 1000000000;              // a reader that took events this recently is slow, not gone: the call waits on for it
 const INO_COOL: u64 = 1000000000;              // and how long calls go on without waiting after one found no reader
 
 /// Before a call that queues events, when some queue is half full: the
 /// process waits (true) for its reader to drain it, as it would have no
 /// need to on Linux, whose queue holds 16384 events and this kernel's far
 /// fewer. On another processor a reader gets no turn from the writer's
-/// yielding. The wait is bounded: if the queue is still half full when it
-/// ends, nobody is reading, and for INO_COOL calls go on at once.
+/// yielding. The wait is bounded: if the readers took no events by the
+/// time it ends, and none has read an instance for INO_LIVE, nobody is
+/// reading, and for INO_COOL calls go on at once. A reader that read
+/// within INO_LIVE is waited for again: on a loaded host the processor it
+/// runs on can stall for far longer than INO_WAIT, and a queue left to
+/// overflow then loses its events.
 fn ino_throttle(k: &mut Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -889,6 +897,10 @@ fn ino_throttle(k: &mut Kernel, pid: u64) -> bool
     // reading; if they took some, a slow one is (it may start only at the
     // next timer tick), and the next call waits again.
     if ino_queued(k) >= iget(k, INO_G + G_PROG) {
+      if k.ns - smaller(iget(k, INO_G + G_READ), k.ns) < INO_LIVE {
+        wait_until(&mut k, pid, n, sat_add(k.ns, INO_WAIT));
+        return true;
+      }
       iput(&mut k, INO_G + G_COOL, sat_add(k.ns, INO_COOL));
     }
     return false;
@@ -1795,6 +1807,8 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   if q == 0 {
     return EAGAIN;
   }
+  iput(&mut k, INO_G + G_READ, k.ns);
+  iput(&mut k, INO_G + G_COOL, 0);         // somebody reads after all
   if n < FAN_META {
     return EINVAL;
   }

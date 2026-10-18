@@ -581,6 +581,18 @@ build/compat/tree-sitter-c.so: | build/compat/src
 	$(MUSLCC) -shared -fPIC -O2 -Wl,-s -I build/compat/src/tree-sitter-c/src -o $@.part build/compat/src/tree-sitter-c/src/parser.c
 	mv $@.part $@
 
+# TypeScript 7's compiler and language server (one static Go program, lib/tsc)
+# with the declaration files it reads, as a tar file to unpack under the Alpine
+# root (opt/typescript/lib), for the case that runs it with Neovim's LSP client.
+# x86-64 only.
+build/compat/tstools.tar: | build/compat/src
+	curl -fsSL -o build/compat/src/tsc.tgz https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-$(TSC_VER).tgz
+	echo "$(TSC_SHA256)  build/compat/src/tsc.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/tsc && mkdir build/compat/src/tsc
+	tar xzf build/compat/src/tsc.tgz -C build/compat/src/tsc --strip-components=1 package/lib
+	tar -cf $@.part -C build/compat/src/tsc lib --transform 's,^lib,opt/typescript/lib,' --owner=0 --group=0
+	mv $@.part $@
+
 # python-lsp-server and the pure-Python packages it needs, as a tar file for
 # the case that runs it under Alpine's python3 with Neovim's LSP client. The
 # wheels come from PyPI, each pinned by SHA-256 in test/compat/pylsp.py, and are
@@ -856,10 +868,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
@@ -980,8 +992,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
-# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests.
-LTP_SUITES ?= --suite pty --suite containers --suite cve
+# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
+LTP_SUITES ?= --suite pty --suite containers --suite cve --suite posix
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -1006,6 +1018,12 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
 	$(MAKE) -C build/ltp/testcases/cve -s -k || true
+	# The Open POSIX Test Suite is configured on its own; a few tests do not
+	# build against musl (they check _POSIX_SPORADIC_SERVER and the like).
+	cd build/ltp/testcases/open_posix_testsuite && ./configure -q CC="$(MUSLCC)" \
+	  CFLAGS="-O2 -fPIE" LDFLAGS=-static-pie >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite generate-makefiles >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite/conformance/interfaces -s -k -j4 >/dev/null 2>&1 || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs

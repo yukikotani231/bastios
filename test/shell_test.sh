@@ -308,9 +308,9 @@ steps = [
     # src/tcpbuf.bastio), so the later page counts may be lower than the
     # first by that much.
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
-    # 100 connections to ourselves at once is 200 in the kernel's table (it
-    # held 32), and 250 UDP sockets at once (32 before).
-    ("mtcp many 100", b"mtcp: 100 connections and 250 udp sockets, 16 queued", b"\n# "),
+    # 450 connections to ourselves at once is 900 in the kernel's table (it
+    # held 32, then 240), and 250 UDP sockets at once (32 before).
+    ("mtcp many 450", b"mtcp: 450 connections and 250 udp sockets, 16 queued", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -449,8 +449,8 @@ steps = [
     # cpu.max with every processor busy running waiting calls again (readers of
     # a fifo nobody writes to): the throttled group's next period must still
     # begin, or its process is never scheduled again.
-    ("mkdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/rq/cpu.max; mkfifo /tmp/rb; ash -c 'echo $$ > /sys/fs/cgroup/rk/cgroup.procs; for i in 1 2 3 4; do cat /tmp/rb > /dev/null & done; sleep 60 > /tmp/rb & wait' & sleep 1; ash -c 'echo $$ > /sys/fs/cgroup/rq/cgroup.procs; i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; echo burst > /tmp/rbd' & n=0; while [ ! -f /tmp/rbd ] && [ $n -lt 20 ]; do sleep 1; n=$((n+1)); done; read r < /tmp/rbd; echo r=$r; echo 1 > /sys/fs/cgroup/rk/cgroup.kill; echo 1 > /sys/fs/cgroup/rq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo c=$?; rm -f /tmp/rb /tmp/rbd",
-     [b"r=burst", b"c=0"], b"\n# "),
+    ("mkdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/rq/cpu.max; mkfifo /tmp/rb; ash -c 'echo $$ > /sys/fs/cgroup/rk/cgroup.procs; for i in 1 2 3 4; do cat /tmp/rb > /dev/null & done; sleep 60 > /tmp/rb & wait' & sleep 1; ash -c 'echo $$ > /sys/fs/cgroup/rq/cgroup.procs; while :; do :; done' & sleep 2; while read k v; do case $k in usage_usec) a=$v;; esac; done < /sys/fs/cgroup/rq/cpu.stat; sleep 5; while read k v; do case $k in usage_usec) b=$v;; esac; done < /sys/fs/cgroup/rq/cpu.stat; [ \"$b\" -gt \"$a\" ] && echo ran on; echo 1 > /sys/fs/cgroup/rk/cgroup.kill; echo 1 > /sys/fs/cgroup/rq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo c=$?; rm -f /tmp/rb",
+     [b"ran on", b"c=0"], b"\n# "),
     # cpu.weight: two groups that both have more busy processes than there are
     # processors share them in proportion to their weights, here 1 to 3.
     ("mkdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo 100 > /sys/fs/cgroup/wa/cpu.weight; echo 300 > /sys/fs/cgroup/wb/cpu.weight; cat /sys/fs/cgroup/wb/cpu.weight; printf 'echo $$ > /sys/fs/cgroup/$1/cgroup.procs\\nwhile :; do :; done\\n' > /tmp/wb.sh; for g in wa wb; do for i in 1 2 3 4 5 6; do ash /tmp/wb.sh $g & done; done; sleep 12; while read k v; do case $k in usage_usec) a=$v;; esac; done < /sys/fs/cgroup/wa/cpu.stat; while read k v; do case $k in usage_usec) b=$v;; esac; done < /sys/fs/cgroup/wb/cpu.stat; echo a=$a b=$b; [ $((b * 10)) -gt $((a * 20)) ] && [ $((b * 10)) -lt $((a * 45)) ] && echo weighted; echo 1 > /sys/fs/cgroup/wa/cgroup.kill; echo 1 > /sys/fs/cgroup/wb/cgroup.kill; sleep 2; rmdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo r=$?",
