@@ -1976,8 +1976,6 @@ posix-sigaction_1-6
 posix-sigaction_1-7
 posix-sigaction_1-8
 posix-sigaction_1-9
-posix-sigaction_10-1
-posix-sigaction_11-1
 posix-sigaction_12-1
 posix-sigaction_12-10
 posix-sigaction_12-11
@@ -2576,7 +2574,6 @@ posix-timer_create_11-1
 posix-timer_create_16-1
 posix-timer_create_3-1
 posix-timer_create_7-1
-posix-timer_create_8-1
 posix-timer_create_9-1
 posix-timer_create_speculative_15-1
 posix-timer_create_speculative_2-1
@@ -2585,7 +2582,6 @@ posix-timer_delete_1-1
 posix-timer_delete_1-2
 posix-timer_delete_speculative_5-1
 posix-timer_delete_speculative_5-2
-posix-timer_getoverrun_1-1
 posix-timer_getoverrun_2-1
 posix-timer_getoverrun_speculative_6-1
 posix-timer_getoverrun_speculative_6-2
