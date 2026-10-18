@@ -1668,6 +1668,8 @@ apps: micropython: json, re, files, os
 apps: micropython: threads and a lock
 tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
 tty: kilo: edit and save a file
+tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
+tty: micropython: REPL line editing and history
 tty: stty: the terminal is in canonical mode again after an editor
 tty: utf-8: erase takes back a whole character on the console
 tty: vi: edit and save a file

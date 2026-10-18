@@ -545,6 +545,10 @@ steps = [
      b"\r\n200\r\n100\r\n101\r\n", b"\n# "),
     ("i=0; while [ $i -lt 300 ]; do [ $((i%3)) -eq 0 ] && echo r$i > disk/dix/f$i; i=$((i+1)); done; ls disk/dix | wc -l; cat disk/dix/f102 disk/dix/g100; rm -r disk/dix; ls disk/dix",
      [b"\r\n300\r\nr102\r\n100\r\n", b"No such file"], b"\n# "),
+    # A file created and removed before its first commit is dropped without reading its entry back (disk_remove): the files
+    # beside it, committed earlier, are left alone, and the slot serves the next ones.
+    ("echo keep1 > disk/byst; echo keep2 > disk/byst2; sync; i=0; while [ $i -lt 30 ]; do echo tmp$i > disk/chn; echo more > disk/chn2; rm disk/chn disk/chn2; i=$((i+1)); done; echo new > disk/after; cat disk/byst disk/byst2 disk/after; ls disk/chn; rm disk/byst disk/byst2 disk/after",
+     [b"keep1\r\nkeep2\r\nnew\r\n", b"No such file"], b"\n# "),
     # The in-memory file system finds names through a hash index (src/ramfs.bastio): creating, removing and renaming hundreds of files
     # must leave every name findable, and enough removals fill it with tombstones, which a rebuild clears.
     ("mkdir ixr; i=0; while [ $i -lt 600 ]; do echo $i > ixr/f$i || break; i=$((i+1)); done; i=0; while [ $i -lt 600 ]; do [ $((i%3)) -eq 0 ] && rm ixr/f$i; [ $((i%3)) -eq 1 ] && mv ixr/f$i ixr/g$i; i=$((i+1)); done; ls ixr | wc -l; cat ixr/g400 ixr/f401", b"\r\n400\r\n400\r\n401\r\n", b"\n# "),
