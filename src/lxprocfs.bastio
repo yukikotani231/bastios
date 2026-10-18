@@ -1953,6 +1953,24 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_n(&mut o, a, pc_count(k.fs.pc));
       a = put_s(&mut o, a, "\noom_kill ");
       a = put_n(&mut o, a, get(k.sys, SYS_VM));
+      a = put_s(&mut o, a, "\nkill9 ");
+      a = put_n(&mut o, a, get(k.sys, SYS_DBG));
+      let mut e = 0;
+      while e < 4
+        invariant e <= 4 && kok(k) && blen(o) == PROC_OUT && a <= PROC_OUT
+      {
+        let slot = SYS_DBG + 1 + e * 3;
+        a = put_s(&mut o, a, " [");
+        a = put_n(&mut o, a, get(k.sys, slot) / 4294967296);
+        a = put_s(&mut o, a, ">");
+        a = put_n(&mut o, a, get(k.sys, slot) % 4294967296);
+        a = put_s(&mut o, a, " ");
+        a = put_n(&mut o, a, get(k.sys, slot + 1));
+        a = put_s(&mut o, a, "/");
+        a = put_n(&mut o, a, get(k.sys, slot + 2));
+        a = put_s(&mut o, a, "]");
+        e = e + 1;
+      }
       a = put_s(&mut o, a, "\npswpin ");
       a = put_n(&mut o, a, swap_pin(k));
       a = put_s(&mut o, a, "\npswpout ");

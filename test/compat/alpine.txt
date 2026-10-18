@@ -580,11 +580,11 @@ ca978112 3904355907
 status 0
 
 == nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/opt /disk/a/root/pyproj && bb tar xf /disk/pylsp.tar -C /disk/a/opt && bb printf 'answer = 42\nprint(answer)\n' > /disk/a/root/pyproj/main.py && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-pylsp-client.lua -o /root/pylsp-client.lua && timeout 200 nvim -l /root/pylsp-client.lua >/root/pylsp.log 2>&1'; bb cat /disk/a/root/pylsp.txt; else echo initialized,hover-int,stopped; fi
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/opt /disk/a/root/pyproj && bb tar xf /disk/pylsp.tar -C /disk/a/opt && bb printf 'answer = 42\nprint(answer)\n' > /disk/a/root/pyproj/main.py && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-pylsp-client.lua -o /root/pylsp-client.lua && timeout 200 nvim -l /root/pylsp-client.lua >/root/pylsp.log 2>&1'; bb cat /disk/a/root/pylsp.txt; bb grep kill9 /proc/vmstat; else echo initialized,hover-int,stopped; fi
 initialized,hover-int,stopped
 
 == nvim: the LSP client talks to gopls, Go's language server, and gets a hover
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/usr/local /disk/a/proc /disk/a/root/goproj && bb tar xf /disk/gotools.tar -C /disk/a/usr/local && bb mount -t proc proc /disk/a/proc && bb printf 'module goproj\ngo 1.24\n' > /disk/a/root/goproj/go.mod && bb printf 'package main\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tprintln(add(1, 2))\n}\n' > /disk/a/root/goproj/main.go && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-gopls-client.lua -o /root/gopls-client.lua && timeout 280 nvim -l /root/gopls-client.lua >/root/gopls.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/gopls.txt; else echo initialized,hover-func,stopped; fi
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/usr/local /disk/a/proc /disk/a/root/goproj && bb tar xf /disk/gotools.tar -C /disk/a/usr/local && bb mount -t proc proc /disk/a/proc && bb printf 'module goproj\ngo 1.24\n' > /disk/a/root/goproj/go.mod && bb printf 'package main\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tprintln(add(1, 2))\n}\n' > /disk/a/root/goproj/main.go && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-gopls-client.lua -o /root/gopls-client.lua && timeout 280 nvim -l /root/gopls-client.lua >/root/gopls.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/gopls.txt; bb grep kill9 /proc/vmstat; else echo initialized,hover-func,stopped; fi
 initialized,hover-func,stopped
 
 == nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error

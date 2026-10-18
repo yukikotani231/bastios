@@ -981,6 +981,27 @@ fn lx_kill(k: &mut Kernel, pid: u64, target: u64, s: u64) -> u64
   return lx_kill_w(&mut k, pid, target, s, pid, false);
 }
 
+/// Experiment: remembers the last four SIGKILLs sent with kill(2): who sent
+/// them (pid and name) and to whom (the raw argument and the name).
+fn kill_trace(k: &mut Kernel, pid: u64, raw: u64)
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let n = get(k.sys, SYS_DBG);
+  let slot = SYS_DBG + 1 + (n % 4) * 3;
+  k.sys = set(k.sys, SYS_DBG, sat_add(n, 1));
+  k.sys = set(k.sys, slot, pid * 4294967296 + raw % 4294967296);
+  pr_comm(&mut k, pid);
+  k.sys = set(k.sys, slot + 1, rd64(k.fs.xfer, 0));
+  let low = raw % 0x100000000;
+  if low < NPROC && low >= 1 {
+    pr_comm(&mut k, low);
+    k.sys = set(k.sys, slot + 2, rd64(k.fs.xfer, 0));
+  } else {
+    k.sys = set(k.sys, slot + 2, 0);
+  }
+}
+
 /// lx_kill with the sender word of the siginfo; `thread` aims a signal at
 /// one thread (tkill) instead of the process, where it goes to a thread
 /// that does not block it.
@@ -990,6 +1011,9 @@ fn lx_kill_w(k: &mut Kernel, pid: u64, raw: u64, s: u64, word: u64, thread: bool
 {
   if s > NSIG {
     return EINVAL;
+  }
+  if s == 9 {
+    kill_trace(&mut k, pid, raw);
   }
   // The call's pid is an int: a C library may pass a negative one with the
   // upper half of the register clear, which still names a group.
