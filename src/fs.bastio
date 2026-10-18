@@ -2485,7 +2485,7 @@ fn vfs_mount_node(v: &Vfs, s: u64) -> u64
 fn vfs_mount_ro(v: &Vfs, s: u64) -> bool
   requires vfs_ok(v) && s < MNT_N
 {
-  return get(v.mnt, 2 * s + 1) != 0;
+  return get(v.mnt, 2 * s + 1) % 4 != 0;
 }
 
 /// Is mount slot s an ext4 image (src/ext4.bastio)? Such a mount stays
@@ -2493,7 +2493,7 @@ fn vfs_mount_ro(v: &Vfs, s: u64) -> bool
 fn vfs_mount_ext(v: &Vfs, s: u64) -> bool
   requires vfs_ok(v) && s < MNT_N
 {
-  return get(v.mnt, 2 * s + 1) == 2;
+  return get(v.mnt, 2 * s + 1) % 4 == 2;
 }
 
 /// Marks mount slot s as a read-only ext4 image.
@@ -2501,7 +2501,25 @@ fn vfs_set_ext(v: &mut Vfs, s: u64)
   requires vfs_ok(v) && s < MNT_N
   ensures vfs_ok(v)
 {
-  v.mnt = set(v.mnt, 2 * s + 1, 2);
+  let w = get(v.mnt, 2 * s + 1);
+  v.mnt = set(v.mnt, 2 * s + 1, w - w % 4 + 2);
+}
+
+/// The mount flags kept for slot s (MS_NOSUID, MS_NODEV, MS_NOEXEC,
+/// MS_NOATIME, MS_NODIRATIME): the upper bits of its second word.
+fn vfs_mount_flags(v: &Vfs, s: u64) -> u64
+  requires vfs_ok(v) && s < MNT_N
+{
+  return get(v.mnt, 2 * s + 1) / 4;
+}
+
+/// Sets the mount flags of slot s, keeping its read-only state.
+fn vfs_set_mflags(v: &mut Vfs, s: u64, fl: u64)
+  requires vfs_ok(v) && s < MNT_N && fl < 65536
+  ensures vfs_ok(v)
+{
+  let w = get(v.mnt, 2 * s + 1);
+  v.mnt = set(v.mnt, 2 * s + 1, w % 4 + fl * 4);
 }
 
 /// Mounts on in-memory directory node i. False if every slot is taken.
@@ -2531,11 +2549,12 @@ fn vfs_set_ro(v: &mut Vfs, s: u64, ro: bool)
   requires vfs_ok(v) && s < MNT_N
   ensures vfs_ok(v)
 {
+  let w = get(v.mnt, 2 * s + 1);
   let mut r = 0;
   if ro {
     r = 1;
   }
-  v.mnt = set(v.mnt, 2 * s + 1, r);
+  v.mnt = set(v.mnt, 2 * s + 1, w - w % 4 + r);
 }
 
 /// Is a[..l] the same as b[..l]?
@@ -2609,6 +2628,56 @@ fn vfs_dev_of(v: &mut Vfs, n: u64) -> u64
     s = s + 1;
   }
   return best;
+}
+
+/// The mount flags (the statfs f_flags: ST_RDONLY 1, ST_NOSUID 2, ST_NODEV 4,
+/// ST_NOEXEC 8, ST_NOATIME 1024, ST_NODIRATIME 2048) of the innermost tmpfs
+/// mount that holds the name in the first n bytes of the transfer buffer,
+/// or 0.
+fn vfs_path_mflags(v: &mut Vfs, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  if on_disk(v, n) {
+    return 0;
+  }
+  let mut best = 0;
+  let mut best_l = 0;
+  let mut found = false;
+  let mut s = 0;
+  while s < v.mnt_hi
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XFER
+  {
+    let i = vfs_mount_node(v, s);
+    if i < NFILES {
+      let l = ram_name(&mut v.ram, i, &mut v.name);
+      if l != NO_FILE && l <= n && (l == n || bget(v.xfer, l) == 47) && same_start(v.xfer, v.name, l) && (!found || l > best_l) {
+        found = true;
+        best_l = l;
+        best = smaller(vfs_mount_flags(v, s), 65535);
+        if vfs_mount_ro(v, s) {
+          best = best + 1;
+        }
+      }
+    }
+    s = s + 1;
+  }
+  return best;
+}
+
+/// vfs_path_mflags of file f (a vfs_lookup handle). Uses the transfer buffer.
+fn vfs_file_mflags(v: &mut Vfs, f: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f >= NFILES {
+    return 0;
+  }
+  let l = ram_name(&mut v.ram, f, &mut v.xfer);
+  if l == NO_FILE {
+    return 0;
+  }
+  return vfs_path_mflags(&mut v, l);
 }
 
 /// Does file f (a vfs_lookup handle) lie in a mount? Uses the transfer

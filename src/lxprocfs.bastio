@@ -1788,10 +1788,23 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
         }
         if ext {
           a = put_s(&mut o, a, " ext4 ro 0 0\n");
-        } else if vfs_mount_ro(k.fs, s) {
-          a = put_s(&mut o, a, " tmpfs ro 0 0\n");
         } else {
-          a = put_s(&mut o, a, " tmpfs rw 0 0\n");
+          if vfs_mount_ro(k.fs, s) {
+            a = put_s(&mut o, a, " tmpfs ro");
+          } else {
+            a = put_s(&mut o, a, " tmpfs rw");
+          }
+          let mf = vfs_mount_flags(k.fs, s);
+          if mf / 2 % 2 == 1 {
+            a = put_s(&mut o, a, ",nosuid");
+          }
+          if mf / 4 % 2 == 1 {
+            a = put_s(&mut o, a, ",nodev");
+          }
+          if mf / 8 % 2 == 1 {
+            a = put_s(&mut o, a, ",noexec");
+          }
+          a = put_s(&mut o, a, " 0 0\n");
         }
       }
     }
