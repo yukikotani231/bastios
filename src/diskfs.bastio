@@ -84,8 +84,8 @@ import "core/bitmap.bastio";
 import "core/bytes.bastio";
 
 const DSLOTS: u64 = 262144;           // directory entries, at most (16384 directory blocks: 512 named by the superblock, the rest by extension blocks)
-const BATCH_MAX: u64 = 32;               // blocks a batch of writes makes before it commits (disk_write)
-const OB_MAX: u64 = 40;               // blocks it replaces: at most one per block it makes, and room for a write's five
+const BATCH_MAX: u64 = 64;               // blocks a batch of writes makes before it commits (disk_write)
+const OB_MAX: u64 = 72;               // blocks it replaces: at most one per block it makes, and room for a write's five
 const PD_MAX: u64 = 8;                // directory blocks whose entries wait for a commit (ent_lazy)
 const BATCH_TICKS: u64 = 10;          // ticks (10 ms each) a batch waits for more writes before disk_pump commits it
 const DENT: u64 = 256;
