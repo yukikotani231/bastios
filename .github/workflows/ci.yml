@@ -191,6 +191,12 @@ jobs:
           mkdir -p build/bench
           bench/run.py --smp 2 --runs 3 --out build/bench/kvm.json | tee build/bench/kvm.md
           { echo '### bench/run.py under KVM'; echo; cat build/bench/kvm.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.want.outputs.run == 'true'
+        name: Run the benchmarks with PCIDs
+        run: |
+          bench/run.py --os bastios --smp 2 --runs 3 --append pcid \
+            --tests syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw --out build/bench/kvm-pcid.json | tee build/bench/kvm-pcid.md
+          { echo '### bench/run.py under KVM, boot command line `pcid`'; echo; cat build/bench/kvm-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: always() && steps.want.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
@@ -198,6 +204,8 @@ jobs:
           path: |
             build/bench/kvm.json
             build/bench/kvm.md
+            build/bench/kvm-pcid.json
+            build/bench/kvm-pcid.md
           if-no-files-found: ignore
   # Process-context identifiers (boot/boot.S, boot/platform.c), off unless the
   # boot command line says `pcid`. QEMU's TCG has no PCID, so only a KVM guest
