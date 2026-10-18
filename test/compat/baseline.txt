@@ -407,6 +407,7 @@ t_file: they follow a rename
 t_file: they stay while a name is left
 t_file: tmpfile
 t_file: truncate
+t_file: two hundred attributes on one file
 t_file: unlink
 t_file: unlink an open file, then read it
 t_file: utime
