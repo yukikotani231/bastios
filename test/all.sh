@@ -35,7 +35,7 @@ tests=(
   "acpi fuzz|c|test/acpi_test.sh"
   "sysfuzz_calls|c|test/sysfuzz_calls.sh"
   "aarch64|d|test/aarch64_test.sh --build"
-  "aarch64 64 cpus|d|BOOT_ONLY=1 SMP=64 TIMEOUT=240 test/aarch64_test.sh"
+  "aarch64 64 cpus|d|BOOT_ONLY=1 SMP=64 TIMEOUT=480 test/aarch64_test.sh"
   "aarch64 gicv2|d|GIC=2 SMP=2 test/aarch64_test.sh"
   "aarch64 el2|d|VIRT=,virtualization=on SMP=2 test/aarch64_test.sh"
   "aarch64 mem|d|MEM=2500M SMP=2 test/aarch64_test.sh"

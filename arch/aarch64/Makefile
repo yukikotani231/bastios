@@ -243,7 +243,11 @@ QUICKJS_REV   ?= 535a7c250ff4a577ec36c3e103daab6dadeea650
 SQLITE_GIT    ?= https://github.com/sqlite/sqlite
 SQLITE_TAG    ?= version-3.52.0
 APPCC := $(ACC) -static -no-pie -O2 -w $(ULFLAGS)
-COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3
+MPY_GIT       ?= https://github.com/micropython/micropython
+MPY_TAG       ?= v1.24.1
+KILO_GIT      ?= https://github.com/antirez/kilo
+KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
+COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll
 
 $(B)/compat/lua: | $(B)/compat
 	rm -rf $(B)/compat/src/lua && mkdir -p $(B)/compat/src
@@ -268,6 +272,30 @@ $(B)/compat/sqlite3: | $(B)/compat
 
 # Dropbear and the keys of the ssh group (test/compat/ssh.txt) go on this disk
 # too; the host client and key generator are built further down.
+# MicroPython's unix port as a static glibc program, without the modules that
+# need libraries the cross toolchain does not bring (ffi, btree, ssl); its
+# mpy-cross, which runs while building, is the host's.
+$(B)/compat/micropython: | $(B)/compat
+	rm -rf $(B)/compat/src/micropython && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(MPY_TAG) $(MPY_GIT) $(B)/compat/src/micropython
+	git -C $(B)/compat/src/micropython submodule -q update --init --depth 1 lib/micropython-lib
+	$(MAKE) -C $(B)/compat/src/micropython/mpy-cross -s ARCH= >/dev/null
+	$(MAKE) -C $(B)/compat/src/micropython/ports/unix -s CC="$(ACC)" STRIP="$(CROSS)strip" LDFLAGS_EXTRA="-static -no-pie $(ULFLAGS)" \
+	  MICROPY_PY_FFI=0 MICROPY_PY_BTREE=0 MICROPY_PY_SSL=0 MICROPY_SSL_AXTLS=0 >/dev/null
+	$(CROSS)strip -o $@ $(B)/compat/src/micropython/ports/unix/build-standard/micropython
+
+# kilo, a small editor that puts the terminal in raw mode, and a program that
+# waits for keys in epoll_wait, as libuv does (test/compat/tty.txt).
+$(B)/compat/kilo: | $(B)/compat
+	rm -rf $(B)/compat/src/kilo && mkdir -p $(B)/compat/src/kilo
+	git -C $(B)/compat/src/kilo init -q
+	git -C $(B)/compat/src/kilo fetch -q --depth 1 $(KILO_GIT) $(KILO_REV)
+	git -C $(B)/compat/src/kilo checkout -q FETCH_HEAD
+	$(APPCC) -s -o $@ $(B)/compat/src/kilo/kilo.c
+
+$(B)/compat/ttyepoll: test/compat/progs/ttyepoll.c | $(B)/compat
+	$(APPCC) -s -o $@ $<
+
 $(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys test/compat/mkdisk.py
 	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
 
@@ -518,7 +546,7 @@ $(B)/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/com
 # --skip-lanes) let a CI runner build and run a part of the suite: the
 # images of its lanes, and those lanes.
 COMPAT_DISKS ?= $(B)/compat/disk.img $(B)/compat/dev.img $(B)/compat/bastio.img $(B)/compat/alpine.img $(B)/compat/debian.img $(B)/compat/node.img
-COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps,ssh --kernel $(B)/bastios.bin \
+COMPAT_RUN := test/compat/run.py --arch aarch64 --groups progs,busybox,apps,ssh,tty --kernel $(B)/bastios.bin \
               --disk $(B)/compat/disk.img --dev-disk $(B)/compat/dev.img --bastio-disk $(B)/compat/bastio.img --alpine-disk $(B)/compat/alpine.img \
               --alpine-repo $(B)/compat/alpine/disk/http \
               --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST)-arm64.json --debian-disk $(B)/compat/debian.img \

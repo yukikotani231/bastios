@@ -288,13 +288,35 @@ bst_cpu_enter:
         and     $-CORE_BLOCK, %rsi              /* this processor's block */
         mov     %rsp, CORE_KRSP(%rsi)
 
+        /* Once per processor: what a trap loads into CR3 (CORE_KCR3). With
+         * PCIDs on (bst_pcid_on, platform.c) CR4.PCIDE comes on here, while CR3
+         * still has PCID 0, the kernel's table is PCID 1 and loaded without
+         * flushing (it never changes once the processors run: a trap no longer
+         * empties the TLB of the kernel's translations), and the shadow table
+         * is PCID 2, loaded with a flush every time (its slot 0 changes with
+         * the process, and the process's table with every munmap and mprotect). */
+        cmpq    $0, CORE_KCR3(%rsi)
+        jne     4f
+        movabs  $bst_kernel_pml4, %rax
+        cmpq    $0, bst_pcid_on(%rip)
+        je      5f
+        mov     %cr4, %rdx
+        bts     $17, %rdx                       /* PCIDE */
+        mov     %rdx, %cr4
+        or      $1, %rax
+        bts     $63, %rax                       /* do not flush */
+        movq    $2, CORE_UPCID(%rsi)
+5:      mov     %rax, CORE_KCR3(%rsi)
+4:
         /* The shadow table: slot 0 is the window's level-3 table. */
         mov     CORE_UROOT(%rsi), %rax
         mov     CORE_INDEX(%rsi), %rdx
         shl     $12, %rdx
         movabs  $bst_shadow_pml4, %rcx
         add     %rcx, %rdx
-        mov     %rdx, CORE_CR3(%rsi)
+        mov     %rdx, %rcx
+        or      CORE_UPCID(%rsi), %rcx
+        mov     %rcx, CORE_CR3(%rsi)
         mov     8(%rax), %rax                   /* slot 1 of the process's table */
         mov     %rax, (%rdx)
         movq    $1, CORE_UMODE(%rsi)
@@ -441,7 +463,7 @@ trap_alias:
         cmpq    $0, CORE_UMODE(%rax)
         je      1f
         movq    $0, CORE_UMODE(%rax)
-        movabs  $bst_kernel_pml4, %rax
+        mov     CORE_KCR3(%rax), %rax
         mov     %rax, %cr3
 1:      movabs  $trap_common, %rax
         jmp     *%rax
