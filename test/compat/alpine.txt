@@ -524,6 +524,10 @@ status 0
 ripgrep
 fzf
 
+== STAT 01
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == rg and fzf: search a tree, filter a list
 $ bb mkdir -p /disk/a/root/rgp/sub && bb printf 'alpha\nneedle one\n' > /disk/a/root/rgp/a.txt && bb printf 'needle two\nbeta\n' > /disk/a/root/rgp/sub/b.txt && bb chroot /disk/a /bin/sh -c 'cd /root/rgp && rg -c needle | sort; rg --files | wc -l; printf "apple\nbanana\ncherry\n" | fzf --filter=ban'
 a.txt:1
@@ -531,47 +535,91 @@ sub/b.txt:1
 2
 banana
 
+== STAT 02
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == nvim: :make reads gcc's error into the quickfix list and :cc jumps to its line
 $ bb printf 'int main(void) {\n  return undefined_var;\n}\n' > /disk/a/root/bad.c && bb printf 'vim.o.makeprg = "gcc -c /root/bad.c -o /dev/null"\nvim.cmd("silent make")\nlocal at, e\nfor i, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then at, e = i, x break end end\nvim.cmd("cc " .. at)\nio.open("/root/qf.txt", "w"):write(e.lnum, " ", vim.fn.line("."), " ", vim.fn.fnamemodify(vim.fn.bufname(vim.fn.bufnr()), ":t"), "\\n")\n' > /disk/a/root/qf.lua && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -l /root/qf.lua >/dev/null 2>&1'; bb cat /disk/a/root/qf.txt
 2 2 bad.c
+
+== STAT 03
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == nvim: the edit-build-run loop on a C project: :make with make and gcc reports the error, the fix is saved, :make succeeds and the program runs
 $ bb mkdir -p /disk/a/root/proj && bb printf 'prog: main.c util.c\n\tgcc -Wall -o prog main.c util.c\n' > /disk/a/root/proj/Makefile && bb printf '#include <stdio.h>\nint answer(void);\nint main(void) { printf("answer=%%d\\n", answer()); return 0; }\n' > /disk/a/root/proj/main.c && bb printf 'int answer(void) {\n  return missing;\n}\n' > /disk/a/root/proj/util.c && bb printf 'local function nvalid() local n = 0 for _, x in ipairs(vim.fn.getqflist()) do if x.valid == 1 then n = n + 1 end end return n end\nvim.cmd("silent make")\nlocal before = nvalid()\nvim.cmd("cfirst")\nlocal l = vim.fn.getline("."):gsub("missing", "42")\nvim.fn.setline(".", l)\nvim.cmd("silent write")\nvim.cmd("silent make")\nlocal after = nvalid()\nlocal out = vim.trim(io.popen("/root/proj/prog"):read("*a"))\nio.open("/root/proj.txt", "w"):write(before > 0 and "error" or "noerror", " ", after, " ", out, "\\n")\n' > /disk/a/root/proj.lua && bb chroot /disk/a /bin/sh -c 'cd /root/proj && nvim -l /root/proj.lua >/dev/null 2>&1'; bb cat /disk/a/root/proj.txt
 error 0 answer=42
 
+== STAT 04
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == nvim: :grep with ripgrep fills the quickfix list
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'set grepprg=rg\ --vimgrep' -c 'silent grep needle /root/rgp' -c 'call writefile([len(getqflist()) . " " . join(sort(map(getqflist(), "fnamemodify(bufname(v:val.bufnr), \":t\")")), ",")], "/root/rg.txt")' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/rg.txt
 2 a.txt,b.txt
+
+== STAT 05
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == tmux: a detached session runs a shell on a pseudo-terminal, takes keys and shows its screen
 $ bb rm -f /disk/a/root/tm.res; test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts && bb chroot /disk/a /bin/sh -c 'exec </dev/null >/root/tm.out 2>&1; export TERM=xterm; tmux -f /dev/null new-session -d -s t -x 80 -y 24 sh && sleep 1 && tmux send-keys -t t "echo sum=$((40+2))" Enter && sleep 1 && tmux capture-pane -p -t t >/root/tm.cap && grep -c "^sum=42" /root/tm.cap >/root/tm.res; tmux kill-server'; bb umount /disk/a/dev/pts 2>/dev/null; bb umount /disk/a/dev 2>/dev/null; bb cat /disk/a/root/tm.res
 1
 
+== STAT 06
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == tmux: a client on the console passes it to the server (SCM_RIGHTS of the console)
 $ test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts && bb chroot /disk/a /bin/sh -c 'export TERM=xterm; tmux -f /dev/null new-session -d -s k sh; tmux ls | cut -c1-12; tmux kill-server >/dev/null 2>&1'; bb umount /disk/a/dev/pts 2>/dev/null; bb umount /disk/a/dev 2>/dev/null
 k: 1 windows
+
+== STAT 07
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == cmake: configure, build and run a C project
 $ bb mkdir -p /disk/a/root/cm /disk/a/proc && { [ %MACHINE% != aarch64 ] || bb mount -t proc proc /disk/a/proc; } && bb printf 'cmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello main.c)\n' > /disk/a/root/cm/CMakeLists.txt && bb printf '#include <stdio.h>\nint main(void) { puts("built by cmake"); return 0; }\n' > /disk/a/root/cm/main.c && bb chroot /disk/a /bin/sh -c 'cd /root/cm && cmake -S . -B build >/root/cm/cfg.log 2>&1 && cmake --build build >/root/cm/build.log 2>&1 && ./build/hello'; if [ %MACHINE% = aarch64 ]; then bb umount /disk/a/proc; fi
 built by cmake
 
+== STAT 08
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 $ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luaproj /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb printf 'local answer = 42\nprint(answer)\n' > /disk/a/root/luaproj/main.lua && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-real-client.lua -o /root/lsp-real-client.lua && timeout 200 nvim -l /root/lsp-real-client.lua >/root/lsreal.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/lsreal.txt
 initialized,hover-integer,stopped
 
+== STAT 09
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == apk: free the disk, then install python3 over HTTP
 $ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server 2>/dev/null; bb rm -f /apk.rc /apk.log; (bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 >/apk.log 2>&1; echo $? >/apk.rc) & n=0; while [ ! -e /apk.rc ] && [ $n -lt 200 ]; do bb sleep 1; n=$((n+1)); done; if [ -e /apk.rc ]; then bb tail -n 3 /apk.log | bb cut -c1-180; echo status $(bb cat /apk.rc); else echo STALL after $n s; bb tail -n 2 /apk.log; for r in 1 2; do echo TCP$r; bb cat /proc/net/tcp | bb cut -c1-110; echo DEV$r; bb cat /proc/net/dev | bb tail -n +3 | bb tr -s ' '; bb sleep 3; done; bb ps | bb tail -n 8; echo ENDSTALL; fi
 status 0
+
+== STAT 10
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == python3: asyncio talks over a socketpair
 $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import asyncio,socket\nasync def m():\n a,b=socket.socketpair()\n r,w=await asyncio.open_connection(sock=a)\n r2,w2=await asyncio.open_connection(sock=b)\n w.write(b\"ping\")\n await w.drain()\n print(await r2.read(4))\nasyncio.run(m())')" 2>&1 | bb tail -n 3; echo status $?
 b'ping'
 status 0
 
+== STAT 11
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == python3: asyncio runs a subprocess
 $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import asyncio\nasync def m():\n p=await asyncio.create_subprocess_exec(\"echo\",\"sub\",stdout=asyncio.subprocess.PIPE)\n o,_=await p.communicate()\n print(o)\nasyncio.run(m())')" 2>&1 | bb tail -n 3; echo status $?
 b'sub\n'
 status 0
+
+== STAT 12
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == python3: sqlite3, zlib and hashlib
 $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqlite3,zlib,hashlib\nc=sqlite3.connect(\"/tmp/t.db\")\nc.execute(\"create table t(a)\")\nc.execute(\"insert into t values(41)\")\nc.commit()\nprint(c.execute(\"select a+1 from t\").fetchone()[0])\nprint(hashlib.sha256(b\"a\").hexdigest()[:8], zlib.crc32(b\"a\"))')" 2>&1 | bb tail -n 3; echo status $?
@@ -579,17 +627,33 @@ $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqli
 ca978112 3904355907
 status 0
 
+== STAT 13
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
 $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/opt /disk/a/root/pyproj && bb tar xf /disk/pylsp.tar -C /disk/a/opt && bb printf 'answer = 42\nprint(answer)\n' > /disk/a/root/pyproj/main.py && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-pylsp-client.lua -o /root/pylsp-client.lua && timeout 200 nvim -l /root/pylsp-client.lua >/root/pylsp.log 2>&1'; bb cat /disk/a/root/pylsp.txt; else echo initialized,hover-int,stopped; fi
 initialized,hover-int,stopped
+
+== STAT 14
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == nvim: the LSP client talks to gopls, Go's language server, and gets a hover
 $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/usr/local /disk/a/proc /disk/a/root/goproj && bb tar xf /disk/gotools.tar -C /disk/a/usr/local && bb mount -t proc proc /disk/a/proc && bb printf 'module goproj\ngo 1.24\n' > /disk/a/root/goproj/go.mod && bb printf 'package main\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tprintln(add(1, 2))\n}\n' > /disk/a/root/goproj/main.go && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-gopls-client.lua -o /root/gopls-client.lua && timeout 280 nvim -l /root/gopls-client.lua >/root/gopls.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/gopls.txt; else echo initialized,hover-func,stopped; fi
 initialized,hover-func,stopped
 
+== STAT 15
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc /disk/a/root/tsproj && bb tar xf /disk/tstools.tar -C /disk/a && bb mount -t proc proc /disk/a/proc && bb printf '{"compilerOptions":{"strict":true,"target":"es2022","module":"esnext","moduleResolution":"bundler","noEmit":true},"include":["*.ts"]}\n' > /disk/a/root/tsproj/tsconfig.json && bb printf 'function add(a: number, b: number): number { return a + b; }\nconst s: string = add(1, 2);\nconsole.log(add(1, 2));\n' > /disk/a/root/tsproj/main.ts && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-ts-client.lua -o /root/ts-client.lua && timeout 280 nvim -l /root/ts-client.lua >/root/ts.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/ts.txt || bb tail -n 3 /disk/a/root/ts.log; else echo initialized,hover-func,diagnostic,stopped; fi
 initialized,hover-func,diagnostic,stopped
+
+== STAT 16
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
@@ -598,9 +662,17 @@ $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; d
 [1, 2, 3, 4]
 status 0
 
+== STAT 17
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 $ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL nodejs >/dev/null 2>&1; bb timeout -s KILL 120 bb chroot /disk/a /usr/bin/node -e 'let s=0;for(let i=0;i<3e6;i++)s+=i;console.log(s,[3,1,2].sort().join())' 2>&1 | bb head -n 12; bb chroot /disk/a /sbin/apk del -q --no-progress nodejs 2>/dev/null
 4499998500000 1,2,3
+
+== STAT 18
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
 $ B=/disk/busybox; export B; $B ip link add cn_br type bridge && $B ip addr add 10.0.4.1/24 dev cn_br && $B ip link set cn_br up && $B ip link add cn_v0 type veth && $B ip link set veth0 name cn_v1 && $B ip link set cn_v0 master cn_br && $B ip link set cn_v0 up && $B printf '%s\n' 'ip -4 addr show dev cn_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cn.sh && ($B unshare -n $B sh -c 'touch /disk/cn_nr; until $B ip link show cn_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cn_v1 && $B ip link set cn_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cn_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cn_nr ]; do sleep 1; done; $B ip link set cn_v1 netns $P; until [ -e /disk/cn_ok ]; do sleep 1; done; $B mkdir -p /disk/n /run/runc && cd /disk/n && /disk/runc spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cn.sh"#' config.json && /disk/runc --root /run/runc run cn < /dev/null; echo status $?; kill $P); $B rm -f /disk/cn_nr /disk/cn_ok /disk/a/cn.sh; $B ip link del cn_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
@@ -610,6 +682,10 @@ apk=0
 tig version 2.6.1
 status 0
 
+== STAT 19
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == container: crun joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
 $ B=/disk/busybox; export B; $B ip link add cc_br type bridge && $B ip addr add 10.0.4.1/24 dev cc_br && $B ip link set cc_br up && $B ip link add cc_v0 type veth && $B ip link set veth0 name cc_v1 && $B ip link set cc_v0 master cc_br && $B ip link set cc_v0 up && $B printf '%s\n' 'ip -4 addr show dev cc_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cc.sh && ($B unshare -n $B sh -c 'touch /disk/cc_nr; until $B ip link show cc_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cc_v1 && $B ip link set cc_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cc_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cc_nr ]; do sleep 1; done; $B ip link set cc_v1 netns $P; until [ -e /disk/cc_ok ]; do sleep 1; done; $B mkdir -p /disk/cnn /run/crun && cd /disk/cnn && /disk/crun spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cc.sh"#' config.json && /disk/crun --root /run/crun run cc < /dev/null; echo status $?; kill $P); $B rm -f /disk/cc_nr /disk/cc_ok /disk/a/cc.sh; $B ip link del cc_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
 inet 10.0.4.2/24
@@ -617,6 +693,10 @@ hello from the host
 apk=0
 tig version 2.6.1
 status 0
+
+== STAT 20
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == abuild: install it with fakeroot and the build tools
 # Building Alpine packages on BastiOS: abuild, which runs the builds as an
@@ -630,6 +710,10 @@ abuild
 /usr/bin/fakeroot
 /usr/bin/scanelf
 
+== STAT 21
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == abuild-keygen: a builder user makes a signing key and trusts it
 $ [ %MACHINE% = x86_64 ] && bb chmod 666 /disk/a/dev/null /disk/a/dev/zero /disk/a/dev/random /disk/a/dev/urandom /disk/a/dev/tty && bb chroot /disk/a /bin/sh -lc 'adduser -D builder && addgroup builder abuild && su builder -c "abuild-keygen -a -n -q" >/dev/null 2>&1; cp /home/builder/.abuild/*.rsa.pub /etc/apk/keys/ && ls /home/builder/.abuild | sed "s/-[0-9a-f]*\.rsa/.rsa/" && openssl rsa -in /home/builder/.abuild/*.rsa -check -noout'
 abuild.conf
@@ -637,10 +721,18 @@ builder.rsa
 builder.rsa.pub
 RSA key ok
 
+== STAT 22
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == symlink: a new symlink belongs to the user who made it, who can set its times
 $ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd /tmp && ln -s nowhere lnk && stat -c \"%u %g\" lnk && touch -h -d @1000000000 lnk && stat -c %Y lnk; rm lnk"'
 1000 1000
 1000000000
+
+== STAT 23
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == abuild: libgreet: a patch, a test suite, and -dev and -doc packages
 $ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /home/builder && mkdir -p aports && wget -q -O- HOSTURL/aports.tar | tar x -C aports && sed -i "s,@URL@,HOSTURL," aports/*/APKBUILD && chown -R builder:builder aports && su builder -c "cd ~/aports/libgreet && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^patching file|^LD_LIBRARY_PATH" /tmp/ab.log; ls /home/builder/packages/aports/x86_64 | cat'
@@ -653,6 +745,10 @@ libgreet-1.2-r0.apk
 libgreet-dev-1.2-r0.apk
 libgreet-doc-1.2-r0.apk
 
+== STAT 24
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == abuild: greeter: build-time dependencies come from the repository just made, and the runtime one is traced
 $ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd ~/aports/greeter && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^[[:space:]]+so:|Installing libgreet-dev" /tmp/ab.log | sed "s/^[[:space:]]*//"; ls /home/builder/packages/aports/x86_64 | grep greeter | cat'
 abuild=0
@@ -660,6 +756,10 @@ abuild=0
 so:libc.musl-x86_64.so.1
 so:libgreet.so.1
 greeter-0.3-r1.apk
+
+== STAT 25
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == apk: install the built packages from the signed repository, with their scripts
 $ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'apk add -q --no-progress -X /home/builder/packages/aports greeter 2>/dev/null; echo apk=$?; greeter Yuki; cat /var/lib/greeter-installed; apk verify /home/builder/packages/aports/x86_64/greeter-0.3-r1.apk; apk info -R greeter 2>/dev/null | grep so:; apk del -q greeter libgreet >/dev/null 2>&1; ls /var/lib/greeter-installed 2>&1 | grep -c "No such file"'
@@ -671,10 +771,18 @@ so:libc.musl-x86_64.so.1
 so:libgreet.so.1
 1
 
+== STAT 26
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
 == apk: a repository signed with a key that is not trusted is refused
 $ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'mkdir /root/keys && mv /etc/apk/keys/builder-* /root/keys/ && apk add -q --no-progress -X /home/builder/packages/aports greeter 2>&1 | grep -q "UNTRUSTED signature" && echo refused; apk info -e greeter; echo installed=$?; mv /root/keys/* /etc/apk/keys/'
 refused
 installed=1
+
+== STAT 27
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
 
 == abuild: tinycc: a C compiler built from its source, which then compiles a program
 # timeout 900
@@ -683,3 +791,7 @@ abuild=0
 >>> tinycc-dev*: Create tinycc-dev-0.9.28-r0.apk
 >>> tinycc*: Create tinycc-0.9.28-r0.apk
 built by an apk-built tcc
+== STAT 28
+$ bb grep -E 'MemFree|MemAvailable|^Cached|^Active' /proc/meminfo | bb tr -s ' ' | bb tr '\n' ' '; echo
+x
+
