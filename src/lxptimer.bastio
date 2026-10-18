@@ -6,6 +6,8 @@
 // and a state word, 0 for a free timer, else (clock + 1) * 128 + the signal
 // it sends (0 for SIGEV_NONE), and the overrun count of its last expiry
 // (the rounds of its interval that passed unseen, at most INT_MAX). The timer tick (lx_alarms) runs them out.
+// A CLOCK_REALTIME timer set to an absolute time keeps PT_ABS in its state
+// word, and setting the wall clock moves its deadline (ptimer_clock_set).
 // A deadline is on k.ns, or for a CPU-time clock on the process's CPU
 // time (pt_now), so such a timer only moves while the process runs.
 // Like the itimer, they move with a thread group's shared state
@@ -26,6 +28,8 @@ const LX_TIMER_DELETE: u64 = 226;
 const SIGEV_SIGNAL: u64 = 0;
 const SIGEV_NONE: u64 = 1;
 const OVERRUN_MAX: u64 = 2147483647;  // INT_MAX: timer_getoverrun returns an int
+const PT_ABS_BIT: u64 = 256;          // the state word's (clock + 1) is below this; PT_ABS_BIT * 128 marks a CLOCK_REALTIME timer set with TIMER_ABSTIME
+const PT_ABS: u64 = PT_ABS_BIT * 128;
 
 /// Where word f of timer t of process p is in k.alarms.
 fn pt_at(p: u64, t: u64, f: u64) -> u64
@@ -108,7 +112,7 @@ fn ptimer_tick(k: &mut Kernel)
 fn pt_now(k: &Kernel, p: u64, t: u64) -> u64
   requires kok(k) && p < NPROC && t < PT_N
 {
-  let clk = wrap_sub(get(k.alarms, pt_at(p, t, 2)) / 128 % 512, 1);
+  let clk = wrap_sub(get(k.alarms, pt_at(p, t, 2)) / 128 % PT_ABS_BIT, 1);
   if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
     return clock_now(k, p, clk);
   }
@@ -222,7 +226,7 @@ fn lx_timer_settime(k: &mut Kernel, pid: u64, id: u64, flags: u64, nv: u64, ov: 
   }
   let mut dl = 0;
   if val.ns != 0 {
-    let now = clock_now(k, pid, wrap_sub(get(k.alarms, pt_at(pid, t, 2)) / 128 % 512, 1));
+    let now = clock_now(k, pid, wrap_sub(get(k.alarms, pt_at(pid, t, 2)) / 128 % PT_ABS_BIT, 1));
     let base = pt_now(k, pid, t);
     if flags & TIMER_ABSTIME == 0 {
       dl = sat_add(base, val.ns);
@@ -246,7 +250,48 @@ fn lx_timer_settime(k: &mut Kernel, pid: u64, id: u64, flags: u64, nv: u64, ov: 
   k.alarms = set(k.alarms, pt_at(pid, t, 0), dl);
   k.alarms = set(k.alarms, pt_at(pid, t, 1), iv.ns);
   k.alarms = set(k.alarms, pt_at(pid, t, 3), 0);
+  // Only a REALTIME timer set to an absolute time follows the wall clock.
+  let st = get(k.alarms, pt_at(pid, t, 2));
+  let mut kept = st % PT_ABS + st / (PT_ABS * 2) * (PT_ABS * 2);
+  if flags & TIMER_ABSTIME != 0 && dl != 0 && wrap_sub(st / 128 % PT_ABS_BIT, 1) == CLOCK_REALTIME {
+    kept = kept + PT_ABS;
+  }
+  k.alarms = set(k.alarms, pt_at(pid, t, 2), kept);
   return 0;
+}
+
+/// The wall clock was set from epoch `was_ep` to k.epoch: the deadline of each
+/// armed absolute CLOCK_REALTIME timer is a wall time, so on k.ns it moves
+/// the other way, and a timer whose time has now passed runs out at once.
+fn ptimer_clock_set(k: &mut Kernel, was_ep: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);
+  let mut p = 1;
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
+  {
+    let mut t = 0;
+    while t < PT_N
+      invariant t <= PT_N && 1 <= p && p < cap && cap <= NPROC && kok(k)
+    {
+      let dl = get(k.alarms, pt_at(p, t, 0));
+      if dl != 0 && get(k.alarms, pt_at(p, t, 2)) / PT_ABS % 2 == 1 {
+        let mut nd = 1;
+        if k.epoch >= was_ep {
+          if dl > k.epoch - was_ep {
+            nd = dl - (k.epoch - was_ep);
+          }
+        } else {
+          nd = sat_add(dl, was_ep - k.epoch);
+        }
+        k.alarms = set(k.alarms, pt_at(p, t, 0), nd);
+      }
+      t = t + 1;
+    }
+    p = p + 1;
+  }
 }
 
 fn is_ptimer_call(n: u64) -> bool {
