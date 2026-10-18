@@ -245,9 +245,13 @@ SQLITE_TAG    ?= version-3.52.0
 APPCC := $(ACC) -static -no-pie -O2 -w $(ULFLAGS)
 MPY_GIT       ?= https://github.com/micropython/micropython
 MPY_TAG       ?= v1.24.1
+CPYTHON_GIT   ?= https://github.com/python/cpython
+CPYTHON_TAG   ?= v3.12.7
+ZLIB_GIT      ?= https://github.com/madler/zlib
+ZLIB_TAG      ?= v1.3.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
-COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll
+COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll $(B)/compat/python
 
 $(B)/compat/lua: | $(B)/compat
 	rm -rf $(B)/compat/src/lua && mkdir -p $(B)/compat/src
@@ -284,6 +288,31 @@ $(B)/compat/micropython: | $(B)/compat
 	  MICROPY_PY_FFI=0 MICROPY_PY_BTREE=0 MICROPY_PY_SSL=0 MICROPY_SSL_AXTLS=0 >/dev/null
 	$(CROSS)strip -o $@ $(B)/compat/src/micropython/ports/unix/build-standard/micropython
 
+# CPython as a static glibc program with its C modules built in (zlib from
+# source; no ctypes, sqlite3, readline, lzma, bz2, ssl), and its standard
+# library in one zip for the disk as /disk/py/lib/python312.zip (run it with
+# PYTHONHOME=/disk/py). It is cross-built with a host python3.12 of the same
+# minor version, which also writes the zip.
+$(B)/compat/python: test/compat/pyzip.py | $(B)/compat
+	rm -rf $(B)/compat/src/pyzlib $(B)/compat/src/pyzlib-out $(B)/compat/src/cpython $(B)/compat/py && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) $(B)/compat/src/pyzlib
+	cd $(B)/compat/src/pyzlib && CC="$(ACC)" CFLAGS="-O2" ./configure --static --prefix=$(CURDIR)/$(B)/compat/src/pyzlib-out >/dev/null
+	$(MAKE) -C $(B)/compat/src/pyzlib -s install >/dev/null
+	git clone -q --depth 1 --branch $(CPYTHON_TAG) $(CPYTHON_GIT) $(B)/compat/src/cpython
+	cd $(B)/compat/src/cpython && ZLIB_CFLAGS=-I$(CURDIR)/$(B)/compat/src/pyzlib-out/include \
+	  ZLIB_LIBS="-L$(CURDIR)/$(B)/compat/src/pyzlib-out/lib -lz" PKG_CONFIG_LIBDIR=/nonexistent MODULE_BUILDTYPE=static \
+	  py_cv_module__ctypes=n/a py_cv_module__ctypes_test=n/a py_cv_module_readline=n/a py_cv_module__uuid=n/a \
+	  py_cv_module__lzma=n/a py_cv_module__bz2=n/a py_cv_module__sqlite3=n/a py_cv_module_xxlimited=n/a \
+	  py_cv_module_xxlimited_35=n/a ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=no ac_cv_buggy_getaddrinfo=no \
+	  CC="$(ACC)" CFLAGS="-O2" LDFLAGS="-static -no-pie $(ULFLAGS)" \
+	  ./configure --host=aarch64-linux-gnu --build=x86_64-linux-gnu --with-build-python=python3.12 \
+	  --disable-shared --disable-test-modules --without-ensurepip --prefix=/disk/py >/dev/null
+	$(MAKE) -C $(B)/compat/src/cpython -s >/dev/null
+	mkdir -p $(B)/compat/py/lib
+	cp $(B)/compat/src/cpython/build/lib.*/_sysconfigdata_*.py $(B)/compat/src/cpython/Lib/
+	python3.12 test/compat/pyzip.py $(B)/compat/src/cpython/Lib $(B)/compat/py/lib/python312.zip
+	$(CROSS)strip -o $@ $(B)/compat/src/cpython/python
+
 # kilo, a small editor that puts the terminal in raw mode, and a program that
 # waits for keys in epoll_wait, as libuv does (test/compat/tty.txt).
 $(B)/compat/kilo: | $(B)/compat
@@ -297,7 +326,7 @@ $(B)/compat/ttyepoll: test/compat/progs/ttyepoll.c | $(B)/compat
 	$(APPCC) -s -o $@ $<
 
 $(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys py=$(B)/compat/py
 
 # Alpine Linux for AArch64 (test/compat/alpine.txt), from the same pinned
 # Docker Hub images as the x86-64 suite's, their arm64 layers: the minirootfs

@@ -306,10 +306,10 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
-AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython")
-# The tty.txt cases left out on AArch64: python is not built there yet, and
-# a MicroPython REPL that is sent Ctrl-D under a heavy host load does not exit.
-AARCH64_TTY_SKIP = ("python", "micropython")
+AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython", "python")
+# The tty.txt cases left out on AArch64: a MicroPython REPL that is sent Ctrl-D
+# under a heavy host load does not exit.
+AARCH64_TTY_SKIP = ("micropython",)
 
 
 class Guest:
