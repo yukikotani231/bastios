@@ -488,7 +488,7 @@ fn stretch_p(s: &mut Sys, cpu: &Cpu)
   // raises no interrupt, the network stack's timers, the disk's batch.
   if s.polled || snd_queued(s.k.snd) != 0
      || (nic_up(s.k.nic) && !nic_irq(s.k.nic)) || !nic_timers_idle(s.k.nic)
-     || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 {
+     || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 || s.k.fs.disk.pdn != 0 {
     return;
   }
   s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);

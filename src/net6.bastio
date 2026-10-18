@@ -399,9 +399,10 @@ fn v6_in(n: &mut Net, flen: u64)
 fn raw6_slot(n: &Net, s: u64) -> u64
   requires net_ok(n) && s < SOCKS
   ensures result <= RXQ
+  ensures result < RXQ ==> (s + 1) * RXQ * UDP_MAX <= blen(n.dq)
 {
   let count = sk_get(n, s, S_COUNT);
-  if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP6 && sk_get(n, s, S_NS) == n.ns && count < RXQ {
+  if udp_slot_ok(n, s) && sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP6 && sk_get(n, s, S_NS) == n.ns && count < RXQ {
     return (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
   }
   return RXQ;

@@ -433,8 +433,8 @@ jobs:
       matrix:
         include:
           - part: programs
-            lanes: main1,bastio
-            disks: disk.img bastio.img
+            lanes: main1,bastio,dev
+            disks: disk.img bastio.img dev.img
           - part: alpine
             lanes: alpine,alpine2
             disks: alpine.img
@@ -448,8 +448,8 @@ jobs:
             disks: alpine.img
             cache: alpine
           - part: rest
-            skip: main1,bastio,alpine,alpine2,alpine3,alpine4,alpine5
-            disks: debian.img node.img
+            skip: main1,bastio,dev,alpine,alpine2,alpine3,alpine4,alpine5
+            disks: disk.img debian.img node.img
     env:
       # Raise it to drop the third-party cache entry below (a bad entry is
       # never replaced: a key that hits is not saved again).
@@ -465,7 +465,7 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-arm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu tcl
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-arm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu tcl autopoint texinfo
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
@@ -486,6 +486,7 @@ jobs:
           key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
+            build/aarch64/compat/make
             build/aarch64/compat/tcc
             build/aarch64/compat/src/tcc
             build/aarch64/compat/musl
@@ -514,6 +515,7 @@ jobs:
           key: compat-3p-arm64-${{ matrix.cache || matrix.part }}-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-${{ hashFiles('test/compat/patches/**', 'test/compat/busybox.config') }}
           path: |
             build/aarch64/compat/z3
+            build/aarch64/compat/make
             build/aarch64/compat/tcc
             build/aarch64/compat/src/tcc
             build/aarch64/compat/musl
