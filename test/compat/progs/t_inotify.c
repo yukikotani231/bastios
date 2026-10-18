@@ -64,6 +64,23 @@ static long proc_num(const char *path) {
     return n > 0 ? atol(b) : -1;
 }
 
+// Makes and removes 2000 files in in_idle, with an inotify watch on it that
+// nobody reads when watch is set; returns the time taken in ms.
+static long churn_ms(int watch) {
+    struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
+    int fd = inotify_init1(IN_NONBLOCK);
+    mkdir("in_idle", 0755);
+    if (watch) inotify_add_watch(fd, "in_idle", IN_DELETE | IN_CREATE);
+    for (int i = 0; i < 2000; i++) {
+        char path[64]; snprintf(path, sizeof path, "in_idle/%d", i);
+        int f = open(path, O_CREAT | O_WRONLY, 0644); if (f >= 0) close(f);
+        unlink(path);
+    }
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    close(fd); rmdir("in_idle");
+    return (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+}
+
 int main(void) {
     setup();
     char buf[256] = "data";
@@ -404,19 +421,13 @@ int main(void) {
         else fail("got %d of %d events, %d overflows, poll timed out %d, read errno %d", got, n, over, timedout, e);
     }
 
-    EXPECT("a watch nobody reads does not hold its writer back: 2000 files made and removed take under 3 s", ({
-        struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
-        int fd = inotify_init1(IN_NONBLOCK);
-        mkdir("in_idle", 0755);
-        inotify_add_watch(fd, "in_idle", IN_DELETE | IN_CREATE);
-        for (int i = 0; i < 2000; i++) {
-            char path[64]; snprintf(path, sizeof path, "in_idle/%d", i);
-            int f = open(path, O_CREAT | O_WRONLY, 0644); if (f >= 0) close(f);
-            unlink(path);
-        }
-        clock_gettime(CLOCK_MONOTONIC, &t1);
-        close(fd); rmdir("in_idle");
-        (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000 < 3000; }));
+    // Timed against the same loop with no watch, so a slow or busy machine
+    // moves both: waiting on each event for a reader would add 20 s (4000
+    // events, 5 ms each), far past the 3 s allowed.
+    EXPECT("a watch nobody reads does not hold its writer back: 2000 files made and removed take at most 3 s longer than with no watch", ({
+        long bare = churn_ms(0);
+        long watched = churn_ms(1);
+        watched - bare < 3000; }));
 
     unlink("in_late");
     unlink("in_f");

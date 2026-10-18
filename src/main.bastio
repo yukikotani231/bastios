@@ -556,7 +556,11 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
   ensures sys_ok(s)
 {
   ack(&mut s.pic, &mut s.apic, v);
-  if s.slept != 0 {
+  // Only the bootstrap processor ends its stretch: the local APIC timer
+  // stretch_end disarms is the one of the processor that runs it, and on
+  // an application processor that is its own tick, without which a
+  // program it runs is never preempted (and never sees a signal).
+  if s.slept != 0 && lapic_self(&mut s.apic) == s.apic.id {
     stretch_end(&mut s, cpu);
   }
   if v == V_TIMER {
