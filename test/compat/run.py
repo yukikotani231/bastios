@@ -951,7 +951,7 @@ def main():
         if lane_chosen("alpine3"):
             disk = os.path.join(args.out, "alpine-run3.img")
             shutil.copyfile(args.alpine_disk, disk)
-            lanes.append(("alpine3", disk, [("alpine#3", "tools and languages in Alpine", applets_lane(alpine3, 300))], "1G"))
+            lanes.append(("alpine3", disk, [("alpine#3", "tools and languages in Alpine", applets_lane(alpine3, 300))], "2G"))
         if lane_chosen("alpine4"):
             disk = os.path.join(args.out, "alpine-run4.img")
             shutil.copyfile(args.alpine_disk, disk)
