@@ -20,7 +20,7 @@
 // 48 bytes with its SYN, fails with EINVAL); with nothing there it fails with
 // EAGAIN if the file was opened O_NONBLOCK, else it sleeps until the next
 // tick and looks again (`wait_asleep`). poll says POLLIN when something is
-// there. The ioctls that describe the device (EVIOCG*) are not answered yet.
+// there. The ioctls that describe the device are answered by keyev_ioctl.
 
 import "linux.bastio";
 
@@ -144,4 +144,104 @@ fn keyev_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u
   }
   ret(&mut k.procs, pid, put);
   return KEEP;
+}
+
+/// What EVIOCGNAME answers (with its NUL).
+fn keyev_name() -> Str {
+  return "BastiOS keyboard";
+}
+
+/// ioctl(2) on /dev/input/event0, the requests of Linux's evdev that tell
+/// a program what the device is (EVIOCGVERSION, EVIOCGID, EVIOCGNAME,
+/// EVIOCGPROP, EVIOCGBIT, EVIOCGKEY, EVIOCGLED, EVIOCGRAB): a keyboard on the
+/// i8042 bus that has the keys of key codes 1 to 127. The keys that are
+/// held down now are not tracked, so EVIOCGKEY and EVIOCGLED say none. The
+/// others are ENOTTY, and EVIOCGPHYS and EVIOCGUNIQ are ENOENT as for a
+/// device without one.
+fn keyev_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == 0x40044590 {
+    return 0;                             // EVIOCGRAB: nobody else reads, so nothing to take
+  }
+  if req / 256 % 256 != 0x45 || req / 1073741824 != 2 {
+    return ENOTTY;                        // not an evdev read request
+  }
+  let nr = req % 256;
+  let size = smaller(req / 65536 % 16384, 96);
+  if nr == 1 {
+    if size < 4 {
+      return EINVAL;
+    }
+    xfer_zero(&mut k, 4);
+    xfer_u64(&mut k.fs.xfer, 0, 0x010001);   // EV_VERSION
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if nr == 2 {
+    if size < 8 {
+      return EINVAL;
+    }
+    xfer_zero(&mut k, 8);
+    xfer_u64(&mut k.fs.xfer, 0, 0x0100000100010011);   // BUS_I8042, vendor 1, product 1, version 0x100
+    return lx_put_out(&mut k, pid, arg, 8);
+  }
+  if nr == 6 {
+    let name = keyev_name();
+    let n = slen(name) + 1;
+    let m = smaller(size, n);
+    xfer_zero(&mut k, 96);
+    let mut i = 0;
+    while i + 1 < m
+      invariant kok(k) && i <= m && m <= 96 && m <= n
+    {
+      bset(&mut k.fs.xfer, i, sget(name, i));
+      i = i + 1;
+    }
+    let r = lx_put_out(&mut k, pid, arg, m);
+    if r != 0 {
+      return r;
+    }
+    return m;
+  }
+  if nr == 7 || nr == 8 {
+    return ENOENT;                        // no physical path, no unique name
+  }
+  if nr == 9 || nr == 0x18 || nr == 0x19 || (nr >= 0x20 && nr <= 0x3F) {
+    // EVIOCGPROP, EVIOCGKEY, EVIOCGLED, EVIOCGBIT(ev): a bitmap of up to 96 bytes
+    xfer_zero(&mut k, 96);
+    let mut have = 0;
+    if nr == 0x20 {
+      bset(&mut k.fs.xfer, 0, 3);         // the types EV_SYN and EV_KEY
+      have = 4;
+    } else if nr == 0x21 {
+      let mut i = 0;
+      while i < 16
+        invariant kok(k) && i <= 16
+      {
+        bset(&mut k.fs.xfer, i, 255);     // the key codes 0 to 127
+        i = i + 1;
+      }
+      bset(&mut k.fs.xfer, 0, 254);       // all but KEY_RESERVED
+      have = 96;
+    } else if nr == 9 {
+      have = 4;
+    } else if nr == 0x18 {
+      have = 96;
+    } else if nr == 0x19 {
+      have = 4;
+    } else {
+      have = 4;
+    }
+    let n = smaller(size, have);
+    if n == 0 {
+      return 0;
+    }
+    let r = lx_put_out(&mut k, pid, arg, n);
+    if r != 0 {
+      return r;
+    }
+    return n;
+  }
+  return ENOTTY;
 }

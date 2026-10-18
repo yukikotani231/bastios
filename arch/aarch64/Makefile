@@ -249,9 +249,12 @@ CPYTHON_GIT   ?= https://github.com/python/cpython
 CPYTHON_TAG   ?= v3.12.7
 ZLIB_GIT      ?= https://github.com/madler/zlib
 ZLIB_TAG      ?= v1.3.1
+GIT_GIT       ?= https://github.com/git/git
+GIT_TAG       ?= v2.47.0
+RIPGREP_VER   ?= 14.1.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
-COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll $(B)/compat/python
+COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll $(B)/compat/python $(B)/compat/git $(B)/compat/rg
 
 $(B)/compat/lua: | $(B)/compat
 	rm -rf $(B)/compat/src/lua && mkdir -p $(B)/compat/src
@@ -312,6 +315,30 @@ $(B)/compat/python: test/compat/pyzip.py | $(B)/compat
 	cp $(B)/compat/src/cpython/build/lib.*/_sysconfigdata_*.py $(B)/compat/src/cpython/Lib/
 	python3.12 test/compat/pyzip.py $(B)/compat/src/cpython/Lib $(B)/compat/py/lib/python312.zip
 	$(CROSS)strip -o $@ $(B)/compat/src/cpython/python
+
+# git, with zlib and nothing else (no curl, OpenSSL, expat, gettext or iconv),
+# as a static glibc program. It looks for its own subcommands in /disk.
+$(B)/compat/git: | $(B)/compat
+	rm -rf $(B)/compat/src/gitzlib $(B)/compat/src/gitzlib-out $(B)/compat/src/git && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) $(B)/compat/src/gitzlib
+	cd $(B)/compat/src/gitzlib && CC="$(ACC)" CFLAGS="-O2" ./configure --static --prefix=$(CURDIR)/$(B)/compat/src/gitzlib-out >/dev/null
+	$(MAKE) -C $(B)/compat/src/gitzlib -s install >/dev/null
+	git clone -q --depth 1 --branch $(GIT_TAG) $(GIT_GIT) $(B)/compat/src/git
+	$(MAKE) -C $(B)/compat/src/git -s CC="$(ACC)" CFLAGS="-O2 -I$(CURDIR)/$(B)/compat/src/gitzlib-out/include" \
+	  LDFLAGS="-static -no-pie $(ULFLAGS) -L$(CURDIR)/$(B)/compat/src/gitzlib-out/lib" NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_ICONV=1 NO_REGEX=NeedsStartEnd \
+	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates git >/dev/null
+	$(CROSS)strip -o $@ $(B)/compat/src/git/git
+
+# ripgrep, a static glibc build from crates.io (pinned by version and
+# Cargo.lock). Needs cargo and the aarch64-unknown-linux-gnu target.
+$(B)/compat/rg: | $(B)/compat
+	command -v rustup >/dev/null && rustup target add aarch64-unknown-linux-gnu >/dev/null 2>&1 || true
+	rm -rf $(B)/compat/src/rg-root && mkdir -p $(B)/compat/src
+	RUSTFLAGS="-C target-feature=+crt-static -C relocation-model=static -C link-arg=-no-pie -C link-arg=-Wl,-z,max-page-size=0x1000 -C link-arg=-Wl,-Ttext-segment=0x400000" \
+	  CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=$(ACC) cargo install ripgrep --version $(RIPGREP_VER) --locked \
+	  --target aarch64-unknown-linux-gnu --root $(B)/compat/src/rg-root --quiet
+	$(CROSS)strip -o $@ $(B)/compat/src/rg-root/bin/rg
 
 # kilo, a small editor that puts the terminal in raw mode, and a program that
 # waits for keys in epoll_wait, as libuv does (test/compat/tty.txt).

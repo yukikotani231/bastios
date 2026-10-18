@@ -306,9 +306,10 @@ def with_bb(cmd, bb):
 # ---------------------------------------------------------------- the guest
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
-AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython", "python")
-# The tty.txt cases left out on AArch64: a MicroPython REPL that is sent Ctrl-D
-# under a heavy host load does not exit.
+AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython", "python", "git", "ripgrep")
+# The tty.txt cases left out on AArch64: a MicroPython REPL still sometimes
+# stays open on CI after its keys (the harness waits for the prompt, but the
+# runner is slower than any pause), so they are not held to the baseline.
 AARCH64_TTY_SKIP = ("micropython",)
 
 
@@ -415,6 +416,18 @@ class Guest:
         time.sleep(0.5)
         typed = len(self.out)
         for k in keys:
+            shown = bytes(self.out[echoed:])
+            if k != b"\x03" and (b">>> " in shown or b"Ctrl-D to exit" in shown):
+                # Keys for a REPL go to its prompt: a program still busy has
+                # the terminal in cooked mode, and its switch back to raw
+                # (tcsetattr with TCSAFLUSH, here as on Linux) drops what was
+                # typed before.
+                end = time.time() + 60
+                while time.time() < end:
+                    tail = bytes(self.out).rstrip(b" ")
+                    if tail.endswith(b">>>") or tail.endswith(b"..."):
+                        break
+                    self.read_until(b"\x00never", len(self.out), 0.2)
             self.send(k)
             typed = len(self.out)
             time.sleep(0.4)

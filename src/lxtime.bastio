@@ -15,6 +15,7 @@
 // the same arithmetic; the vDSO makes the system call for the others.
 
 import "linux.bastio";
+import "arch/timewait.bastio";
 
 const LX_NANOSLEEP: u64 = 35;
 const LX_GETTIMEOFDAY: u64 = 96;
@@ -25,17 +26,16 @@ const LX_CLOCK_NANOSLEEP: u64 = 230;
 
 const NS_PER_S: u64 = 1000000000;
 const NS_PER_TICK: u64 = 10000000;    // the timer runs at 100 Hz
-/// How close to its deadline a timed wait stops sleeping and goes back to
-/// trying its call each time it is scheduled, as all timed waits did
-/// before TIMEWAIT. A tick (every 10 ms) wakes the sleeper (idled,
-/// finish_p) well within that time, so the deadline is met as closely as
-/// before. 200 ms, not two ticks: LTP's timer tests (pselect01,
-/// epoll_pwait03, ...) time sleeps of 1 to 100 ms and fail if a few end
-/// late. Under emulation on a busy host, with 20 or 50 ms, some of them
-/// did end 3 to 9 ms late, and nothing found why. A wait that short then
-/// costs a processor as before; a longer one (sleep 15, a poll with a
-/// timeout of seconds) sleeps for all but its last 200 ms.
-const NEAR: u64 = 200000000;
+// How close to its deadline a timed wait stops sleeping and goes back to
+// trying its call each time it is scheduled, as all timed waits did
+// before TIMEWAIT (NEAR, in arch/timewait.bastio). A tick (every 10 ms)
+// wakes the sleeper (idled, finish_p) well within that time, so the
+// deadline is met as closely as before. It is not two ticks: LTP's timer
+// tests (pselect01, epoll_pwait03, ...) time sleeps of 1 to 100 ms and fail
+// if a few end late. A wait that short costs a processor as before; a
+// longer one (sleep 15, a poll with a timeout of seconds) sleeps for all
+// but its last NEAR.
+
 const FOREVER: u64 = 18446744073709551613;   // 2^64 - 3: a deadline never reached
 const TIMER_ABSTIME: u64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
