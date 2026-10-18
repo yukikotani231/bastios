@@ -407,6 +407,7 @@ t_file: they follow a rename
 t_file: they stay while a name is left
 t_file: tmpfile
 t_file: truncate
+t_file: two hundred attributes on one file
 t_file: unlink
 t_file: unlink an open file, then read it
 t_file: utime
@@ -453,7 +454,7 @@ t_inotify: two hundred and fifty timerfds at once
 t_inotify: thirty inotify instances at once
 t_inotify: thirty named pipes open at once
 t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
-t_inotify: a watch nobody reads does not hold its writer back: 2000 files made and removed take under 3 s
+t_inotify: a watch nobody reads does not hold its writer back: 2000 files made and removed take at most 3 s longer than with no watch
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
