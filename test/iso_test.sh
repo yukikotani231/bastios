@@ -599,7 +599,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             # screen, and leaving it brings the shell's screen back.
             keys = {" ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
             def typed(text):
-                monitor(*[f"sendkey {keys.get(c, c)}" for c in text], "sendkey ret")
+                monitor(*[f"sendkey {keys.get(c, 'shift-' + c.lower() if c.isupper() else c)}" for c in text], "sendkey ret")
             typed("printf '\\033[?1049halt\\n'")
             time.sleep(1.5)
             w, h, px = screendump()
@@ -631,7 +631,9 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             time.sleep(2)                                   # let go of the key before the next one
             monitor("sendkey ctrl-u")
             # The grip makes the terminal 60 x 20 cells: the window shrinks
-            # (the wallpaper shows where it was) and the shell still answers.
+            # (the wallpaper shows where it was), the shell gets SIGWINCH and still answers.
+            typed("trap 'echo winched' WINCH")
+            time.sleep(1)
             monitor("mouse_move 196 86", "mouse_button 1", "mouse_move -160 -64", "mouse_button 0")
             time.sleep(1.5)
             typed("echo resized")
@@ -639,7 +641,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             w, h, px = screendump()
             lines = screen_text_at(px, w, 72, 90, 60, 20)
             pxl = lambda x, y: tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
-            good = any(l.strip() == "resized" for l in lines) and pxl(600, 300) == pxl(10, 300)
+            good = (any(l.strip() == "resized" for l in lines) and any(l.strip() == "winched" for l in lines)
+                    and pxl(600, 300) == pxl(10, 300))
             print(("ok  " if good else "FAIL"), f"({name}) dragging the grip of the terminal window resizes its grid")
             if not good:
                 print("\n".join(l for l in lines if l))
