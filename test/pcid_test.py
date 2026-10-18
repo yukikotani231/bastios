@@ -34,7 +34,7 @@ def boot_and_read(kernel, append, smp):
         if not m:
             raise SystemExit("pcid_test: the system call benchmark did not finish")
         text = g.out[at:].decode(errors="replace")
-        t = re.search(r"syscall[^\n]*?([0-9.]+)\s*(ns|us)", text)
+        t = re.search(r"^(?!/disk)[^\n]*?([0-9.]+)\s*(ns|us)[^\n]*", text, re.M)
         mon = socket.socket(socket.AF_UNIX)
         mon.connect(sock)
         time.sleep(0.5)

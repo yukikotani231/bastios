@@ -347,7 +347,8 @@ class Guest:
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             preexec_fn=(lambda: os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))) if self.idle else None)
         if not self.read_until(b"bastios> ", 0, 60):
-            raise SystemExit("compat: the kernel did not reach its shell prompt")
+            tail = self.out[-1500:].decode(errors="replace")
+            raise SystemExit("compat: the kernel did not reach its shell prompt; its last output:\n" + tail)
         mark = len(self.out)
         self.send(b"ash\r")
         if not self.read_until(PROMPT, mark, 30):
