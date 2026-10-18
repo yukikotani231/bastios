@@ -556,6 +556,13 @@ static long long now_ms(void)
     return (long long)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+/* With key events the terminal also gets the bytes of every key, so Ctrl-Q
+ * reaches it as a ^Q a moment after the event. bwm waits for that byte
+ * (or 2 s) before it ends, so the ^Q is not left for the shell. */
+#define QUIT_WAIT_MS 2000
+static long long quit_due;                /* when to end without the ^Q; 0 until Ctrl-Q came as an event */
+static int tty_q;                         /* the ^Q came first */
+
 /* The bytes a key press makes (at most 4) in out; returns how many. */
 static int key_bytes(unsigned code, char *out)
 {
@@ -703,6 +710,11 @@ int main(int argc, char **argv)
             long long d = rep_due - now_ms();
             wait = d < 0 ? 0 : (int)d;
         }
+        if (quit_due) {
+            long long d = quit_due - now_ms();
+            if (wait < 0 || d < wait)
+                wait = d < 0 ? 0 : (int)d;
+        }
         if (poll(p, np, wait) < 0 && errno != EINTR)
             break;
         int ox = mx, oy = my;
@@ -713,9 +725,18 @@ int main(int argc, char **argv)
             ssize_t n = read(0, b, sizeof b);
             if (n <= 0)
                 break;
-            for (ssize_t i = 0; keys < 0 && i < n; i++)      /* with key events, the terminal's bytes are the same keys again */
-                if (type_byte(top, b[i]))
+            for (ssize_t i = 0; i < n; i++) {
+                if (keys >= 0) {                 /* with key events, the terminal's bytes are the same keys again */
+                    if (b[i] == 17) {
+                        if (quit_due)
+                            running = 0;
+                        else
+                            tty_q = 1;
+                    }
+                } else if (type_byte(top, b[i])) {
                     running = 0;
+                }
+            }
         }
         if (ikeys >= 0 && (p[ikeys].revents & POLLIN)) {
             struct kev ev[16];
@@ -744,7 +765,7 @@ int main(int argc, char **argv)
                         int m = key_bytes(code, out);
                         for (int j = 0; j < m; j++)
                             if (type_byte(top, out[j]))
-                                running = 0;
+                                quit_due = now_ms() + QUIT_WAIT_MS;
                         if (m > 0 && ev[i].value == 1 && out[0] != 17 && out[0] != 20) {
                             rep_code = code;
                             rep_due = now_ms() + REPEAT_FIRST_MS;
@@ -755,12 +776,14 @@ int main(int argc, char **argv)
                 }
             }
         }
+        if (quit_due && (tty_q || now_ms() >= quit_due))
+            running = 0;
         if (rep_code && now_ms() >= rep_due) {
             char out[4];
             int m = key_bytes(rep_code, out);
             for (int j = 0; j < m; j++)
                 if (type_byte(top, out[j]))
-                    running = 0;
+                    quit_due = now_ms() + QUIT_WAIT_MS;
             rep_due += REPEAT_NEXT_MS;
         }
         if (ils >= 0 && (p[ils].revents & POLLIN)) {
@@ -838,12 +861,6 @@ int main(int argc, char **argv)
         }
         if (mx != ox || my != oy)
             flush(mx, my, mx + ARROW_W, my + ARROW_H, mx, my);
-    }
-    if (keys >= 0) {                  /* the terminal sees every key too: what it got of the last ones must not reach the shell */
-        struct pollfd q = { 0, POLLIN, 0 };
-        char junk[64];
-        while (poll(&q, 1, 150) > 0 && read(0, junk, sizeof junk) > 0)
-            ;
     }
     if (have_tty)
         tcsetattr(0, TCSANOW, &old);
