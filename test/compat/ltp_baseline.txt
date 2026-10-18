@@ -1252,7 +1252,6 @@ posix-clock_gettime_1-1
 posix-clock_gettime_1-2
 posix-clock_gettime_2-1
 posix-clock_gettime_3-1
-posix-clock_gettime_4-1
 posix-clock_gettime_7-1
 posix-clock_gettime_8-1
 posix-clock_gettime_8-2
