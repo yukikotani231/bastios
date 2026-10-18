@@ -450,6 +450,10 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
     k.perr = EACCES;                        // no execute permission (src/lxperm.bastio)
     return none;
   }
+  if vfs_path_mflags(&mut k.fs, n) / 8 % 2 == 1 {
+    k.perr = EACCES;                        // a noexec mount
+    return none;
+  }
   let size = vfs_size(&mut k.fs, f);
   if size == NO_FILE {
     return none;
@@ -477,6 +481,9 @@ fn fd_src(k: &mut Kernel, pid: u64, fd: u64) -> Src
   let m = file_meta(&mut k.fs, f);
   if !m.ok || !may_meta(k.procs, pid, m.mode, m.own, MAY_X) {
     return none;
+  }
+  if vfs_file_mflags(&mut k.fs, f) / 8 % 2 == 1 {
+    return none;                            // a noexec mount (k.perr is EACCES)
   }
   let size = vfs_size(&mut k.fs, f);
   if size == NO_FILE {

@@ -1664,3 +1664,4 @@ java: java: Eclipse JDT LS, the language server, finds a type error and answers 
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
+t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them

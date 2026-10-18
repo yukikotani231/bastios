@@ -1411,6 +1411,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     return fifo_open(&mut k, pid, ff, flags);
   }
   let nt = vfs_node_type(&mut k.fs, fh);
+  if fh != NO_FILE && (nt == T_CHR || nt == T_BLK) && flags & LO_PATH == 0 && vfs_path_mflags(&mut k.fs, n) / 4 % 2 == 1 {
+    return EACCES;                          // a nodev mount
+  }
   if fh != NO_FILE && (nt == T_CHR || nt == T_BLK || nt == T_SOCK) && flags & LO_PATH == 0 {
     // (O_PATH holds the node itself, not its device: crun changes a node
     // it made through /proc/self/fd/N.)
