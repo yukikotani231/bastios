@@ -301,13 +301,24 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     put32(&mut n.out, 62, seq_add(rcv, hhi - rxlen));
   }
   let head = twb(n, t, W_TXHEAD, TCP_RING);
+  let hop = next_hop(n, rip);
+  if dl > 0 && is_local(n, rip) && is_local(n, hop) {
+    // To ourselves: the data goes from the send ring straight into the
+    // loopback queue, and only the headers are copied from out.
+    let at = lo_room(n, 34 + tlen);
+    if at != NO_SOCK {
+      rb_get(&mut n.rb, tx_ring(t), (head + off) % TCP_RING, &mut n.lo, at + 34 + hl, dl);
+      q_put(&mut n, ns_lo(n), 34 + tlen, 34 + hl, at);
+    }
+    return;
+  }
   rb_get(&mut n.rb, tx_ring(t), (head + off) % TCP_RING, &mut n.out, 34 + hl, dl);
   // Round the loopback queue the frame never meets a wire, so it has no
   // checksum (tcp_in does not look for one there).
   if !is_local(n, rip) {
     put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, rip), rip, IP_TCP, tlen));
   }
-  send_via(&mut n, next_hop(n, rip), 34 + tlen);
+  send_via(&mut n, hop, 34 + tlen);
 }
 
 /// Arms the resend timer if it is off: TCP_RTO, doubled for each resend
@@ -864,7 +875,17 @@ fn tcp_in(n: &mut Net, total: u64)
     }
     // Fewer if the ring found no page for the rest: dropped, and resent.
     let head = twb(n, t, W_RXHEAD, TCP_RING);
-    take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.pkt, doff, take);
+    if n.lo_split {
+      // A long segment from ourselves: its data is still in lo (net_poll).
+      let base = n.lo_src;
+      if base <= LO_BYTES && base + doff + take <= LO_BYTES {
+        take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.lo, base + doff, take);
+      } else {
+        take = 0;
+      }
+    } else {
+      take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.pkt, doff, take);
+    }
     let mut got = rxlen + take;
     let hlo = twb(n, t, W_HLO, TCP_RING + 1);
     let hhi = twb(n, t, W_HHI, TCP_RING + 1);
@@ -922,7 +943,15 @@ fn tcp_hold(n: &mut Net, t: u64, ahead: u64, doff: u64, dl: u64)
   // The ring may find pages for only part of it: hold that part, if it
   // still touches what is held.
   let head = twb(n, t, W_RXHEAD, TCP_RING);
-  let got = rb_put(&mut n.rb, rx_ring(t), (head + lo) % TCP_RING, n.pkt, doff, hi - lo);
+  let mut got = 0;
+  if n.lo_split {
+    let base = n.lo_src;
+    if base <= LO_BYTES && base + doff + (hi - lo) <= LO_BYTES {
+      got = rb_put(&mut n.rb, rx_ring(t), (head + lo) % TCP_RING, n.lo, base + doff, hi - lo);
+    }
+  } else {
+    got = rb_put(&mut n.rb, rx_ring(t), (head + lo) % TCP_RING, n.pkt, doff, hi - lo);
+  }
   if got == 0 || (hhi > 0 && lo + got < hlo) {
     return;
   }
