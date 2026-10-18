@@ -1,5 +1,6 @@
 /* bwm, a compositing window manager for /dev/fb0. It takes the mouse from
- * /dev/input/mice and the keyboard from the terminal, gives the pointer a
+ * /dev/input/mice and the keyboard from /dev/input/event0 (from the
+ * terminal if there is no event0), gives the pointer a
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
  * closes the window, and what is typed goes to the focused window. Ctrl-Q
@@ -528,6 +529,59 @@ static int listen_socket(void)
     return s;
 }
 
+/* The keyboard as key events (/dev/input/event0): a press or release of a
+ * key with its Linux key code (1 to 88 are the PS/2 set 1 codes). bwm keeps
+ * the modifiers and makes the bytes the terminal would have given, so the
+ * clients see the same keys either way. */
+struct kev { uint64_t sec, usec; uint16_t type, code; int32_t value; };
+static const char kmap[]  = "\0\033" "1234567890-=\177\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
+static const char kmaps[] = "\0\033" "!@#$%^&*()_+\177\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
+static int k_shift, k_ctrl, k_caps;
+
+/* The bytes a key press makes (at most 4) in out; returns how many. */
+static int key_bytes(unsigned code, char *out)
+{
+    static const struct { unsigned code; char final; } nav[] = {
+        { 103, 'A' }, { 108, 'B' }, { 106, 'C' }, { 105, 'D' }, { 102, 'H' }, { 107, 'F' } };
+    for (unsigned i = 0; i < sizeof nav / sizeof nav[0]; i++)
+        if (nav[i].code == code) {
+            out[0] = 27; out[1] = '['; out[2] = nav[i].final;
+            return 3;
+        }
+    if (code == 111) { memcpy(out, "\033[3~", 4); return 4; }        /* Delete */
+    if (code == 104) { memcpy(out, "\033[5~", 4); return 4; }        /* Page Up */
+    if (code == 109) { memcpy(out, "\033[6~", 4); return 4; }        /* Page Down */
+    if (code == 110) { memcpy(out, "\033[2~", 4); return 4; }        /* Insert */
+    if (code >= sizeof kmap - 1)
+        return 0;
+    char c = k_shift ? kmaps[code] : kmap[code];
+    if (c >= 'a' && c <= 'z' && k_caps)
+        c -= 32;
+    else if (c >= 'A' && c <= 'Z' && k_caps)
+        c += 32;
+    if (k_ctrl && c >= 'a' && c <= 'z')
+        c -= 96;
+    if (c == 0)
+        return 0;
+    out[0] = c;
+    return 1;
+}
+
+/* Gives one typed byte to the focused window; returns 1 for Ctrl-Q. */
+static int type_byte(struct win *top, char c)
+{
+    if (c == 17)
+        return 1;
+    if (top && top->cli >= 0) {
+        struct bwm_key k = { (uint32_t)top->id, (unsigned char)c };
+        to_client(top->cli, BWM_KEY, &k, sizeof k);
+    } else if (top) {
+        touch_win(top);
+        win_put(top, c);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     int builtin = 1;
@@ -543,6 +597,7 @@ int main(int argc, char **argv)
         return 2;
     }
     int mice = open("/dev/input/mice", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int keys = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     struct var_info v;
     struct fix_info f;
     if (fb < 0 || ioctl(fb, 0x4600, &v) != 0 || ioctl(fb, 0x4602, &f) != 0 || v.bits_per_pixel != 32) {
@@ -598,10 +653,11 @@ int main(int argc, char **argv)
     struct win *drag = NULL;
     int gx = 0, gy = 0, buttons = 0, running = 1;
     while (running) {
-        struct pollfd p[3 + MAXCLI];
-        int np = 0, imice = -1, ils = -1, icli[MAXCLI];
+        struct pollfd p[4 + MAXCLI];
+        int np = 0, imice = -1, ikeys = -1, ils = -1, icli[MAXCLI];
         p[np++] = (struct pollfd){ 0, POLLIN, 0 };
         if (mice >= 0) { imice = np; p[np++] = (struct pollfd){ mice, POLLIN, 0 }; }
+        if (keys >= 0) { ikeys = np; p[np++] = (struct pollfd){ keys, POLLIN, 0 }; }
         if (ls >= 0) { ils = np; p[np++] = (struct pollfd){ ls, POLLIN, 0 }; }
         for (int i = 0; i < MAXCLI; i++) {
             icli[i] = -1;
@@ -617,15 +673,32 @@ int main(int argc, char **argv)
             ssize_t n = read(0, b, sizeof b);
             if (n <= 0)
                 break;
-            for (ssize_t i = 0; i < n; i++) {
-                if (b[i] == 17) {                          /* Ctrl-Q */
+            for (ssize_t i = 0; keys < 0 && i < n; i++)      /* with key events, the terminal's bytes are the same keys again */
+                if (type_byte(top, b[i]))
                     running = 0;
-                } else if (top && top->cli >= 0) {
-                    struct bwm_key k = { (uint32_t)top->id, (unsigned char)b[i] };
-                    to_client(top->cli, BWM_KEY, &k, sizeof k);
-                } else if (top) {
-                    touch_win(top);
-                    win_put(top, b[i]);
+        }
+        if (ikeys >= 0 && (p[ikeys].revents & POLLIN)) {
+            struct kev ev[16];
+            ssize_t n;
+            while ((n = read(keys, ev, sizeof ev)) > 0) {
+                for (size_t i = 0; i < (size_t)n / sizeof ev[0]; i++) {
+                    if (ev[i].type != 1)                     /* EV_KEY */
+                        continue;
+                    unsigned code = ev[i].code;
+                    int down = ev[i].value != 0;
+                    if (code == 42 || code == 54) {
+                        k_shift = down;
+                    } else if (code == 29 || code == 97) {
+                        k_ctrl = down;
+                    } else if (code == 58 && down) {
+                        k_caps = !k_caps;
+                    } else if (down) {
+                        char out[4];
+                        int m = key_bytes(code, out);
+                        for (int j = 0; j < m; j++)
+                            if (type_byte(top, out[j]))
+                                running = 0;
+                    }
                 }
             }
         }
