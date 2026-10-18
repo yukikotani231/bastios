@@ -15,3 +15,7 @@ posix-pthread_mutex_init_3-2 hangs
 posix-pthread_once_6-1 hangs
 posix-pthread_rwlock_wrlock_3-1 hangs
 posix-sigpause_4-1 hangs
+
+# Needs a page cache that drops pages while the test runs: preadv2 with RWF_NOWAIT must meet an evicted page and answer EAGAIN. Files here live in memory, so it never does and the test runs out its 60 s.
+preadv203 needs an evictable page cache
+preadv203_64 needs an evictable page cache
