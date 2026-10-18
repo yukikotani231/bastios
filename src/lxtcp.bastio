@@ -292,25 +292,7 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
     return w;
   }
   // More than one transfer buffer's worth, while the send ring takes it.
-  let mut total = got;
-  let mut go = true;
-  while go && buf < 0x800000000000 && total < n && total <= TCP_RING - XFER
-    invariant kok(k) && pid < NPROC && total <= TCP_RING
-  {
-    let c = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, &mut k.fs.xfer, smaller(n - total, XFER));
-    if c == NO_RESULT || c == 0 {
-      go = false;                           // as a short write
-    } else {
-      let last = total + c >= n || total + c > TCP_RING - XFER;
-      let r = tcp_send_piece(&mut k, pid, fd, c, more || !last, !last);
-      if r > c {
-        go = false;                         // full, or an error: say it next time
-      } else {
-        total = total + r;
-        go = r == c;
-      }
-    }
-  }
+  let total = tcp_send_run(&mut k.nic, &mut k.spaces, &mut k.mem, k.anon, &mut k.fs.xfer, pid, tk.t, buf, n, got, more);
   if !more && total < n {
     // Stopped before the last piece: the pieces sent so far were corked, but
     // nothing follows to uncork the short segment that may be left.
@@ -318,6 +300,51 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
     if tk2.err == 0 && tk2.mode == TM_CONN {
       tcp_cork(&mut k.nic, tk2.t, false);
     }
+  }
+  return total;
+}
+
+/// The pieces of a write after its first, `done` bytes of `n` from `va`
+/// having gone: each is copied into `xfer` and put into the send buffer, all
+/// under one move of the card out of its enum, which costs about as much as a
+/// piece's copy. Stops at the first piece the send buffer does not take whole
+/// (full, or the connection cannot send) or that cannot be read; the last
+/// piece is sent as the caller said (`more`). Returns the bytes gone in all.
+fn tcp_send_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfer: &mut Bytes, pid: u64, t: u64, va: u64, n: u64, done: u64, more: bool) -> u64
+  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && done <= n && done <= XFER
+  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XFER
+  ensures result <= TCP_RING
+{
+  let mut total = done;
+  match c {
+    Nic::None => {
+      c = Nic::None;
+    },
+    Nic::Up(mut nn) => {
+      let mut go = true;
+      while go && va < 0x800000000000 && total < n && total <= TCP_RING - XFER
+        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && total <= TCP_RING && net_ok(nn)
+      {
+        let want = smaller(n - total, XFER);
+        let g = copy_from_user(&mut spaces, &mut m, an, pid, va + total, &mut xfer, want);
+        if g == NO_RESULT || g == 0 {
+          go = false;                       // as a short write
+        } else {
+          let last = total + g >= n || total + g > TCP_RING - XFER;
+          if last {
+            net_cork(&mut nn, t, more);
+          }
+          let r = tcp_write(&mut nn, t, xfer, g);
+          if r > g || r == 0 {
+            go = false;                     // full, or an error: say it next time
+          } else {
+            total = total + r;
+            go = r == g;
+          }
+        }
+      }
+      c = Nic::Up(nn);
+    },
   }
   return total;
 }
