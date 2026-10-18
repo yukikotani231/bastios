@@ -128,8 +128,8 @@ jobs:
             proof-
           path: build/proof-cache
       - run: make test NATIVE=1 LANES='a b ce' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
-      # The AArch64 port's Bastio user programs (shell, hello, spin, true) built
-      # by the native AArch64 backend, booted once on QEMU virt.
+      # The AArch64 port's kernel and Bastio user programs (shell, hello, spin,
+      # true) built by the native AArch64 backend, booted once on QEMU virt.
       - run: test/aarch64_test.sh --build
         env:
           NATIVE: 1
