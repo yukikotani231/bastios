@@ -307,10 +307,8 @@ def with_bb(cmd, bb):
 
 # The programs of apps.txt the AArch64 suite builds (arch/aarch64/Makefile).
 AARCH64_APPS = ("lua", "qjs", "sqlite3", "ash", "wget", "nc", "httpd", "netns", "micropython", "python", "git", "ripgrep", "perl")
-# The tty.txt cases left out on AArch64: a MicroPython REPL still sometimes
-# stays open on CI after its keys (the harness waits for the prompt, but the
-# runner is slower than any pause), so they are not held to the baseline.
-AARCH64_TTY_SKIP = ("micropython",)
+# The tty.txt cases left out on AArch64 (none now).
+AARCH64_TTY_SKIP = ()
 
 
 class Guest:
