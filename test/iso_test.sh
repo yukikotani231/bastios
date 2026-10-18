@@ -428,6 +428,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = (10, 10, 10) in cell
             print(("ok  " if good else "FAIL"), f"({name}) a typed key appears in the focused window")
             fails += not good
+            # Alt-Tab brings up the window at the bottom: the picture changes,
+            # and with three windows, three of them bring it back.
+            w, h, before = screendump()
+            monitor("sendkey alt-tab")
+            w, h, once = screendump()
+            monitor("sendkey alt-tab", "sendkey alt-tab")
+            w, h, thrice = screendump()
+            good = once != before and thrice == before
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Tab cycles the windows")
+            fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")
@@ -592,6 +602,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # A key held down repeats (bwm does it, the events have none).
+            monitor("sendkey z 2500")
+            time.sleep(1.2)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any("zzzzzzzzzz" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) a key held down repeats in the terminal window")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            time.sleep(2)                                   # let go of the key before the next one
+            monitor("sendkey ctrl-u")
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
