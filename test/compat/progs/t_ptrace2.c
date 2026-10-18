@@ -104,19 +104,34 @@ static int pc_sp(pid_t c, unsigned long *pc, unsigned long *sp)
 }
 
 #ifdef __x86_64__
-/* Runs the tracee to the entry of system call nr; its registers are left in *r. */
-static int to_call(pid_t c, long nr, struct user_regs_struct *r)
+typedef struct user_regs_struct regs_t;
+#define REG_NR(r) ((long)(r).orig_rax)
+#define REG_ARG0(r) ((r).rdi)
+#define REG_RET(r) ((r).rax)
+static int get_regs(pid_t c, regs_t *r) { return ptrace(PTRACE_GETREGS, c, 0, r) == 0; }
+static int set_regs(pid_t c, regs_t *r) { return ptrace(PTRACE_SETREGS, c, 0, r) == 0; }
+#else
+typedef struct { unsigned long long x[31], sp, pc, pstate; } regs_t;   /* struct user_pt_regs */
+#define REG_NR(r) ((long)(r).x[8])
+#define REG_ARG0(r) ((r).x[0])
+#define REG_RET(r) ((r).x[0])
+static int get_regs(pid_t c, regs_t *r) { struct iovec iov = {r, sizeof *r}; return ptrace(PTRACE_GETREGSET, c, (void *)NT_PRSTATUS, &iov) == 0; }
+static int set_regs(pid_t c, regs_t *r) { struct iovec iov = {r, sizeof *r}; return ptrace(PTRACE_SETREGSET, c, (void *)NT_PRSTATUS, &iov) == 0; }
+#endif
+
+/* Runs the tracee to the entry of system call nr; its registers are left in *r.
+ * The first stop at nr is its entry: stops come in pairs, entry first. */
+static int to_call(pid_t c, long nr, regs_t *r)
 {
     for (int i = 0; i < 64; i++) {
         if (ptrace(PTRACE_SYSCALL, c, 0, 0) != 0) return 0;
         int st = wst(c);
         if (st == -1 || !WIFSTOPPED(st)) return 0;
-        ptrace(PTRACE_GETREGS, c, 0, r);
-        if ((long)r->orig_rax == nr && (long)r->rax == -ENOSYS) return 1;
+        get_regs(c, r);
+        if (REG_NR(*r) == nr) return 1;
     }
     return 0;
 }
-#endif
 
 static pid_t traced_child(void (*body)(void))
 {
@@ -262,23 +277,23 @@ int main(void)
 #ifdef __x86_64__
     EXPECT("changing orig_rax to -1 at the entry skips the call; rax at the exit is the result", ({
            c = fork(); if (c == 0) { ptrace(PTRACE_TRACEME, 0, 0, 0); raise(SIGSTOP); long r = syscall(SYS_getppid); _exit(r == 777 ? 66 : 67); }
-           int ok = stopped_with(c, SIGSTOP); struct user_regs_struct r;
+           int ok = stopped_with(c, SIGSTOP); regs_t r;
            ok = ok && to_call(c, SYS_getppid, &r);
            r.orig_rax = -1; ptrace(PTRACE_SETREGS, c, 0, &r);
            ptrace(PTRACE_SYSCALL, c, 0, 0); ok = ok && stopped_with(c, SIGTRAP);
            ptrace(PTRACE_GETREGS, c, 0, &r); ok = ok && (long)r.rax == -ENOSYS;
            r.rax = 777; ptrace(PTRACE_SETREGS, c, 0, &r);
            ptrace(PTRACE_CONT, c, 0, 0); int cx = wst(c); ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 66; }));
-    EXPECT("changing the arguments at the entry changes the call", ({
-           c = fork(); if (c == 0) { ptrace(PTRACE_TRACEME, 0, 0, 0); raise(SIGSTOP); long r = syscall(SYS_getpgid, 0x7fffff00); _exit(r == -1 ? 68 : 69); }
-           int ok = stopped_with(c, SIGSTOP); struct user_regs_struct r;
-           ok = ok && to_call(c, SYS_getpgid, &r); r.rdi = 0; ptrace(PTRACE_SETREGS, c, 0, &r);
-           ptrace(PTRACE_CONT, c, 0, 0); int cx = wst(c); ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 69; }));
     EXPECT("PTRACE_GETFPREGS gives the SSE state", ({
            c = traced_child(body_exit5); int ok = stopped_with(c, SIGSTOP); struct user_fpregs_struct f;
            ok = ok && ptrace(PTRACE_GETFPREGS, c, 0, &f) == 0 && f.mxcsr == 0x1f80;
            kill(c, SIGKILL); wst(c); ok; }));
 #endif
+    EXPECT("changing the arguments at the entry changes the call", ({
+           c = fork(); if (c == 0) { ptrace(PTRACE_TRACEME, 0, 0, 0); raise(SIGSTOP); long r = syscall(SYS_getpgid, 0x7fffff00); _exit(r == -1 ? 68 : 69); }
+           int ok = stopped_with(c, SIGSTOP); regs_t r;
+           ok = ok && to_call(c, SYS_getpgid, &r); REG_ARG0(r) = 0; ok = ok && set_regs(c, &r);
+           ptrace(PTRACE_CONT, c, 0, 0); int cx = wst(c); ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 69; }));
     EXPECT("PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer", ({
            c = traced_child(body_exit5); int ok = stopped_with(c, SIGSTOP); unsigned long pc = 0, sp = 0;
            ok = ok && pc_sp(c, &pc, &sp) && pc > 0x1000 && sp > 0x1000;
