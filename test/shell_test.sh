@@ -309,8 +309,8 @@ steps = [
     # first by that much.
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
     # 100 connections to ourselves at once is 200 in the kernel's table (it
-    # held 32), and 30 UDP sockets at once (8 before).
-    ("mtcp many 100", b"mtcp: 100 connections and 30 udp sockets, 16 queued", b"\n# "),
+    # held 32), and 250 UDP sockets at once (32 before).
+    ("mtcp many 100", b"mtcp: 100 connections and 250 udp sockets, 16 queued", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -523,6 +523,7 @@ steps = [
     # never queued (the disk never sees them), and one removed after a
     # second batch over blocks the disk has: both give every block back.
     ("sync; stat -f -c %f /disk > fr0; i=0; while [ $i -lt 20 ]; do echo data$i > disk/tmpdrop; rm disk/tmpdrop; i=$((i+1)); done; echo old > disk/keepdrop; sync; echo more >> disk/keepdrop; cat disk/keepdrop; rm disk/keepdrop; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo dropfree=same; ls disk/tmpdrop disk/keepdrop", [b"\r\nold\r\nmore\r\n", b"dropfree=same", b"tmpdrop: No such file"], b"\n# "),
+    ("sync; stat -f -c %f /disk > fr0; mkdir disk/mf; i=0; while [ $i -lt 30 ]; do echo a$i > disk/mf/a$i; echo b$i > disk/mf/b$i; ln -s a$i disk/mf/s$i; echo a$i >> disk/mf/a$i; i=$((i+1)); done; cat disk/mf/a7 disk/mf/b29; readlink disk/mf/s5; sync; cat disk/mf/a29; rm -r disk/mf; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo mfree=same", [b"\r\na7\r\na7\r\nb29\r\na5\r\n", b"a29\r\na29\r\n", b"mfree=same"], b"\n# "),
     # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.

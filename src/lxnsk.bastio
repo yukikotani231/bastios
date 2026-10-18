@@ -1422,6 +1422,23 @@ fn nsf_link_meta(d: u64) -> Meta {
   return Meta { ok: true, mode: S_IFLNK, size: 0, ino: INO_PROC + d % 4096, mtime: 0, own: 0 };
 }
 
+/// lstat of /proc/PID/fd/N (name x[..n] in the transfer buffer): the link
+/// itself while the descriptor is open, else m.
+fn fd_link_meta(k: &mut Kernel, n: u64, m: Meta) -> Meta
+  requires kok(k) && n <= XFER
+  ensures kok(k)
+{
+  let pfd = proc_fd(k.procs, k.fs.xfer, n);
+  if pfd == NO_RESULT {
+    return m;
+  }
+  let d = fd_look(k, pfd / LXNFD, pfd % LXNFD);
+  if d.kind == K_BAD {
+    return Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0, own: 0 };
+  }
+  return Meta { ok: true, mode: S_IFLNK, size: 64, ino: INO_PROC + 32768 + pfd, mtime: 0, own: proc_own(k, pfd / LXNFD) };
+}
+
 /// fstat on fd, a descriptor of link d.
 fn nsf_fd_meta(k: &Kernel, pid: u64, fd: u64, d: u64) -> Meta
   requires kok(k) && pid < NPROC && d >= PROC_DEV + PSYS + SY_NS && d < PROC_DEV + PSYS + SY_NS + NPROC * NF_N

@@ -11,6 +11,9 @@
 # with `--target user --arch aarch64`. Needs z3, qemu-system-aarch64 and
 # an AArch64 C compiler with binutils (Debian/Ubuntu: gcc-aarch64-linux-gnu
 # qemu-system-arm; on an AArch64 machine plain gcc).
+#
+# NATIVE=1 builds the kernel and the Bastio user programs with bastioc1's
+# AArch64 backend instead (assembly, no C compiler on the proved code).
 BASTIOC0 ?= ../bastiolang/stage0/target/release/bastioc0
 BASTIOC  ?= build/bastioc1
 BASTIOLIB ?= ../bastiolang
@@ -142,11 +145,22 @@ $(B)/user/vdso.so: user/vdso-aarch64.c user/vdso-aarch64.ld user/vdso-aarch64.ma
 # 2. Prove the kernel and translate it to freestanding C.
 KSRCS := $(wildcard src/*.bastio) $(wildcard src/aarch64/*.bastio src/aarch64/arch/*.bastio) $(wildcard files/*)
 
-$(B)/kernel.c: $(KSRCS) $(UBINS) $(LXELFS) $(B)/user/vdso.so $(BASTIOC) | $(B)
+# NATIVE=1 writes the kernel as assembly with bastioc1's AArch64 backend
+# (no C compiler between the proved code and the machine code); the boot
+# code and the platform stay C and assembly.
+ifeq ($(NATIVE),1)
+$(B)/kernel.s: $(KSRCS) $(UBINS) $(LXELFS) $(B)/user/vdso.so $(BASTIOC) $(B)/user.backend | $(B)
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/aarch64 --lib src --target kernel --arch aarch64 --backend native --emit-asm -o $@ src/aarch64/main.bastio
+
+$(B)/kernel.o: $(B)/kernel.s
+	$(CROSS)as -o $@ $<
+else
+$(B)/kernel.c: $(KSRCS) $(UBINS) $(LXELFS) $(B)/user/vdso.so $(BASTIOC) $(B)/user.backend | $(B)
 	$(BASTIOC) --lib $(BASTIOLIB) --lib src/aarch64 --lib src --target kernel --arch aarch64 -o $@ src/aarch64/main.bastio
 
 $(B)/kernel.o: $(B)/kernel.c
 	$(ACC) $(GCFLAGS) -c -o $@ $<
+endif
 
 # The platform runs with the MMU off at first, where unaligned accesses fault.
 $(B)/platform.o: boot/aarch64/platform.c | $(B)

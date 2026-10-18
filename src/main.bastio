@@ -484,7 +484,7 @@ fn stretch_p(s: &mut Sys, cpu: &Cpu)
   // raises no interrupt, the network stack's timers, the disk's batch.
   if s.polled || snd_queued(s.k.snd) != 0
      || (nic_up(s.k.nic) && !nic_irq(s.k.nic)) || !nic_timers_idle(s.k.nic)
-     || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 {
+     || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 || s.k.fs.disk.pdn != 0 {
     return;
   }
   s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
@@ -556,7 +556,11 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64)
   ensures sys_ok(s)
 {
   ack(&mut s.pic, &mut s.apic, v);
-  if s.slept != 0 {
+  // Only the bootstrap processor ends its stretch: the local APIC timer
+  // stretch_end disarms is the one of the processor that runs it, and on
+  // an application processor that is its own tick, without which a
+  // program it runs is never preempted (and never sees a signal).
+  if s.slept != 0 && lapic_self(&mut s.apic) == s.apic.id {
     stretch_end(&mut s, cpu);
   }
   if v == V_TIMER {
@@ -1768,6 +1772,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.scf);
   free(sys.k.swp);
   bfree(sys.k.mstr);
+  bfree(sys.k.xab);
   pool = sys.k.mem.pool;
   // Off, or a restart. QEMU's isa-debug-exit device (tests) exits at once,
   // with status 33; elsewhere the port is unused.

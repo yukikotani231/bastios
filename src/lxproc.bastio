@@ -1160,6 +1160,9 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   if !follow && pf != 0 && is_ns_file(pf) {
     m = nsf_link_meta(pf);                  // lstat: the /proc/PID/ns link itself
   }
+  if !follow && n <= XFER {
+    m = fd_link_meta(&mut k, n, m);
+  }
   if !m.ok {
     return ENOENT;
   }
