@@ -99,18 +99,65 @@ fn tx_ring(t: u64) -> u64
   return 2 * t + 1;
 }
 
+/// A word of slot t, or 0 for a slot the table has not grown to yet (a
+/// slot is made, with every word set, by tcb_init).
 fn tw(n: &Net, t: u64, f: u64) -> u64
   requires net_ok(n) && t < TCBS && f < TCB_W
-  ensures result == get(n.tcbs, t * TCB_W + f)
+  ensures t * TCB_W + f < len(n.tcbs) ==> result == get(n.tcbs, t * TCB_W + f)
+  ensures t * TCB_W + f >= len(n.tcbs) ==> result == 0
 {
-  return get(n.tcbs, t * TCB_W + f);
+  if t * TCB_W + f < len(n.tcbs) {
+    return get(n.tcbs, t * TCB_W + f);
+  }
+  return 0;
 }
 
 fn tset(n: &mut Net, t: u64, f: u64, v: u64)
   requires net_ok(n) && t < TCBS && f < TCB_W
   ensures net_ok(n)
 {
-  n.tcbs = set(n.tcbs, t * TCB_W + f, v);
+  if t * TCB_W + f < len(n.tcbs) {
+    n.tcbs = set(n.tcbs, t * TCB_W + f, v);
+  }
+}
+
+/// Makes the table hold slot t: it starts with TCB0 slots and doubles, up
+/// to TCBS, so a machine that opens few connections does not pay for the
+/// most it could. False, with the table as it was, when memory runs out.
+fn tcb_room(n: &mut Net, t: u64) -> bool
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let have = len(n.tcbs);
+  if have >= (t + 1) * TCB_W {
+    return true;
+  }
+  let mut slots = have / TCB_W * 2;
+  if slots < TCB0 {
+    slots = TCB0;
+  }
+  if slots < t + 1 {
+    slots = t + 1;
+  }
+  if slots > TCBS {
+    slots = TCBS;
+  }
+  let mut nt = try_alloc(slots * TCB_W);
+  if len(nt) != slots * TCB_W {
+    free(nt);
+    return false;
+  }
+  let mut i = 0;
+  while i < have
+    invariant i <= have && have == len(n.tcbs) && len(nt) == slots * TCB_W && have <= slots * TCB_W
+  {
+    nt = set(nt, i, get(n.tcbs, i));
+    i = i + 1;
+  }
+  let prev = n.tcbs;
+  n.tcbs = nt;
+  free(prev);
+  return true;
 }
 
 /// a + b on sequence numbers (mod 2^32).
@@ -406,22 +453,25 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
 /// connection waiting out TIME_WAIT that nobody holds is taken instead,
 /// as Linux reuses them under pressure: a program that opens and closes
 /// many connections in a row would otherwise run out of slots.
-fn tcb_free_slot(n: &Net) -> u64
+fn tcb_free_slot(n: &mut Net) -> u64
   requires net_ok(n)
-  ensures result <= TCBS
+  ensures net_ok(n) && result <= TCBS
 {
   let mut t = 0;
   while t < TCBS
-    invariant t <= TCBS
+    invariant t <= TCBS && net_ok(n)
   {
     if tw(n, t, W_STATE) == T_CLOSED && tw(n, t, W_HELD) == 0 {
-      return t;
+      if tcb_room(&mut n, t) {
+        return t;
+      }
+      return TCBS;                    // no memory to grow the table
     }
     t = t + 1;
   }
   let mut w = 0;
   while w < TCBS
-    invariant w <= TCBS
+    invariant w <= TCBS && net_ok(n)
   {
     if tw(n, w, W_STATE) == T_TIME_WAIT && tw(n, w, W_HELD) == 0 {
       return w;
@@ -680,7 +730,7 @@ fn tcp_accept_syn(n: &mut Net, lis: u64, seq: u64, hl: u64)
   requires net_ok(n) && lis < TCBS && seq < SEQ_MOD && 20 <= hl && 34 + hl <= FRAME_MAX
   ensures net_ok(n)
 {
-  let t = tcb_free_slot(n);
+  let t = tcb_free_slot(&mut n);
   if t >= TCBS {
     return;
   }
@@ -1014,7 +1064,7 @@ fn tcp_listen_on(n: &mut Net, want: u64, fam: u64) -> u64
   if port == 0 || port > 65535 || (n.ns == 0 && n.ip == 0) || tcp_port_taken(n, port, fam) {
     return NO_SOCK;
   }
-  let t = tcb_free_slot(n);
+  let t = tcb_free_slot(&mut n);
   if t >= TCBS {
     return NO_SOCK;
   }
@@ -1076,7 +1126,7 @@ fn tcp_open(n: &mut Net, to: u64, port: u64) -> u64
   if ip > IP_MAX || port == 0 || port > 65535 || !can_reach(n, ip) {
     return NO_SOCK;
   }
-  let t = tcb_free_slot(n);
+  let t = tcb_free_slot(&mut n);
   if t >= TCBS {
     return NO_SOCK;
   }

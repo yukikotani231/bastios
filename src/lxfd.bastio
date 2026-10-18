@@ -706,9 +706,9 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
   } else if kind == OF_TCP && x < TCBS {
     tcp_close(&mut k.nic, x);               // sends the FIN after what is buffered
   } else if kind == OF_TIMER && x < TFD_N {
-    k.evt = set(k.evt, x * TFD_STRIDE, 0);  // the timer is free again
+    evs(&mut k, x * TFD_STRIDE, 0);  // the timer is free again
   } else if kind == OF_EPOLL && x < EP_N {
-    k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
+    evs(&mut k, EP_AT + x * EP_STRIDE, 0);
   } else if kind == OF_PTY {
     pty_drop(&mut k, x);                    // src/lxpty.bastio
   } else if kind == OF_PQ && x < PQ_N {
@@ -843,6 +843,7 @@ fn lx_fd_close(k: &mut Kernel, pid: u64, fd: u64) -> bool
       lock_drop(&mut k.locks, tgid(k.procs, pid), f, LKC_FCNTL);
     }
   }
+  pq_flush(&mut k, pid, fd);                // src/lxmq.bastio
   fd_set_k(&mut k, pid, fd, 0);
   unref_value(&mut k, v);
   return true;
@@ -1427,6 +1428,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
     if nd == DEV_TTY {
       return fd_install_console(&mut k, pid);
+    }
+    if nd == DEV_PTMX {
+      return pty_open_master(&mut k, pid, flags);   // a /dev/ptmx made by mknod in a chroot
     }
     if nd == DEV_NONE {
       return ENXIO;

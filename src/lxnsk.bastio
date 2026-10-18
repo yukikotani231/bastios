@@ -565,6 +565,19 @@ fn tm_clock(k: &Kernel, pid: u64, clk: u64, t: u64) -> u64
   return t;
 }
 
+/// Whether clock reading now plus offset off (a signed 64-bit count in two's
+/// complement, negative if `neg`) falls outside 0 to 2^63 - 1 ns.
+fn tm_range(now: u64, off: u64, neg: bool) -> bool
+{
+  if neg {
+    return now <= 0xFFFFFFFFFFFFFFFF - off;       // the sum does not wrap: it is below zero
+  }
+  // Linux adds to the clock's seconds and tests those against KTIME_SEC_MAX,
+  // so the clock counts as up to a second more than it reads.
+  let top = 0x7FFFFFFFFFFFFFFF - 1000000000;
+  return off > top || now > top - off;
+}
+
 /// What a write to pid's /proc/PID/timens_offsets (n bytes in the transfer
 /// buffer: lines of "clock secs nsecs", clock 1 monotonic or 7 boottime)
 /// sets, for the namespace pid's children get. n, or -errno.
@@ -612,14 +625,14 @@ fn tm_write(k: &mut Kernel, p: u64, n: u64) -> u64
     }
     let mut sec = 0;
     got = false;
-    while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && sec <= 4000000000
-      invariant i <= n && n <= 32 && sec <= 40000000099 && kok(k)
+    while i < n && bget(k.fs.xfer, i) >= 48 && bget(k.fs.xfer, i) <= 57 && sec <= 100000000000
+      invariant i <= n && n <= 32 && sec <= 1000000000099 && kok(k)
     {
       sec = sec * 10 + cast[u64](bget(k.fs.xfer, i)) - 48;
       got = true;
       i = i + 1;
     }
-    if !got || sec > 4000000000 || i >= n || bget(k.fs.xfer, i) != 32 {
+    if !got || i >= n || bget(k.fs.xfer, i) != 32 {
       return EINVAL;
     }
     while i < n && bget(k.fs.xfer, i) == 32
@@ -644,6 +657,11 @@ fn tm_write(k: &mut Kernel, p: u64, n: u64) -> u64
     {
       i = i + 1;
     }
+    // As on Linux, an offset that puts the clock outside 0 to KTIME_MAX
+    // (2^63 - 1 ns) is ERANGE.
+    if sec > 9223372036 {
+      return ERANGE;
+    }
     // secs may be negative, nsecs is always added: "-2 500000000" is -1.5 s
     let m = sec * 1000000000;
     let mut off = m + ns;
@@ -653,6 +671,9 @@ fn tm_write(k: &mut Kernel, p: u64, n: u64) -> u64
       } else {
         off = (0xFFFFFFFFFFFFFFFF - (m - ns)) + 1;
       }
+    }
+    if (clk == 1 || clk == 7) && tm_range(k.ns, off, neg && m > 0) {
+      return ERANGE;
     }
     if clk == 1 {
       w1 = off;
@@ -725,7 +746,7 @@ fn tm_put(o: &mut Bytes, at: u64, w: u64) -> u64
 // processes of its own namespace, by their ids there; one in the first
 // namespace sees every process by its row, as before. A namespace made
 // from inside another nests: a process has an id in its own namespace
-// (NSK_VPID) and in the two around it (NSK_VP1, NSK_VP2), so there are three
+// (NSK_VPID) and in each one around it (NSK_VP1 ..), so there are PN_LEVELS
 // levels besides the first (past them is ENOSPC). A process sees, and can
 // signal, the processes of its namespace and of those inside it, by their
 // ids in its own.
@@ -768,8 +789,8 @@ fn pn_within(k: &Kernel, n: u64, a: u64) -> bool
 {
   let mut x = n;
   let mut i = 0;
-  while i < 4 && x != 0
-    invariant i <= 4 && kok(k)
+  while i < PN_LEVELS + 1 && x != 0
+    invariant i <= PN_LEVELS + 1 && kok(k)
   {
     if x == a {
       return true;
@@ -783,12 +804,12 @@ fn pn_within(k: &Kernel, n: u64, a: u64) -> bool
 /// How many PID namespaces deep n is (0: the first).
 fn pn_depth(k: &Kernel, n: u64) -> u64
   requires kok(k)
-  ensures result <= 4
+  ensures result <= PN_LEVELS + 1
 {
   let mut x = n;
   let mut d = 0;
-  while d < 4 && x != 0
-    invariant d <= 4 && kok(k)
+  while d < PN_LEVELS + 1 && x != 0
+    invariant d <= PN_LEVELS + 1 && kok(k)
   {
     x = pn_parent(k, x);
     d = d + 1;
@@ -892,7 +913,7 @@ fn pn_alloc(k: &mut Kernel, id: u64) -> u64
 fn pn_deep_ok(k: &Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
 {
-  return pn_depth(k, nsk_of(k, NSK_PIDC, pid)) < 3;
+  return pn_depth(k, nsk_of(k, NSK_PIDC, pid)) < PN_LEVELS;
 }
 
 /// unshare(CLONE_NEWPID): pid's children will start in a new PID
@@ -946,19 +967,22 @@ fn pidns_enter(k: &mut Kernel, pid: u64, c: u64)
   pn_ids(&mut k, c, n);
 }
 
-/// Gives c an id in PID namespace n and in the two around it.
+/// Gives c an id in PID namespace n and in each one around it, as far out
+/// as PN_LEVELS goes.
 fn pn_ids(k: &mut Kernel, c: u64, n: u64)
   requires kok(k) && c < NPROC && n < MNS_MAX
   ensures kok(k)
 {
-  let v = pn_alloc(&mut k, n);
-  nsk_set(&mut k, NSK_VPID, c, v);
-  let p = pn_parent(k, n);
-  let v1 = pn_alloc(&mut k, p);
-  nsk_set(&mut k, NSK_VP1, c, v1);
-  let q = pn_parent(k, p);
-  let v2 = pn_alloc(&mut k, q);
-  nsk_set(&mut k, NSK_VP2, c, v2);
+  let mut x = n;
+  let mut j = 0;
+  while j < PN_LEVELS
+    invariant j <= PN_LEVELS && x < MNS_MAX && kok(k)
+  {
+    let v = pn_alloc(&mut k, x);
+    nsk_set(&mut k, vp_kind(j), c, v);
+    x = pn_parent(k, x);
+    j = j + 1;
+  }
 }
 
 /// clone(CLONE_NEWPID): child c of pid is the init of a new namespace
@@ -976,8 +1000,13 @@ fn pidns_clone(k: &mut Kernel, c: u64)
     return;
   }
   pn_open(&mut k, s, id, 2, nsk_of(k, NSK_PID, c), nsk_of(k, NSK_USER, c));   // c has an id in the namespace around (pidns_enter): one level out now
-  nsk_set(&mut k, NSK_VP2, c, nsk_of(k, NSK_VP1, c));
-  nsk_set(&mut k, NSK_VP1, c, nsk_of(k, NSK_VPID, c));
+  let mut j = PN_LEVELS - 1;
+  while j > 0
+    invariant j < PN_LEVELS && kok(k)
+  {
+    nsk_set(&mut k, vp_kind(j), c, nsk_of(k, vp_kind(j - 1), c));
+    j = j - 1;
+  }
   nsk_set(&mut k, NSK_PID, c, id);
   nsk_set(&mut k, NSK_PIDC, c, id);
   nsk_set(&mut k, NSK_VPID, c, 1);
@@ -1004,7 +1033,16 @@ fn vp_kind(j: u64) -> u64
   if j == 1 {
     return NSK_VP1;
   }
-  return NSK_VP2;
+  if j == 2 {
+    return NSK_VP2;
+  }
+  if j == 3 {
+    return NSK_VP3;
+  }
+  if j == 4 {
+    return NSK_VP4;
+  }
+  return NSK_VP5;
 }
 
 /// Process row's id in PID namespace o (not the first): 0 if it is not in
@@ -1012,16 +1050,16 @@ fn vp_kind(j: u64) -> u64
 fn vp_in(k: &Kernel, row: u64, o: u64) -> u64
   requires kok(k) && row < NPROC
 {
-  let r = nsk_of(k, NSK_PID, row);
-  if r == o {
-    return get(k.mns, nsk_at(NSK_VPID, row));
-  }
-  let p = pn_parent(k, r);
-  if r != 0 && p == o {
-    return get(k.mns, nsk_at(NSK_VP1, row));
-  }
-  if p != 0 && pn_parent(k, p) == o {
-    return get(k.mns, nsk_at(NSK_VP2, row));
+  let mut r = nsk_of(k, NSK_PID, row);
+  let mut j = 0;
+  while j < PN_LEVELS && r != 0
+    invariant j <= PN_LEVELS && r < MNS_MAX && kok(k)
+  {
+    if r == o {
+      return get(k.mns, nsk_at(vp_kind(j), row));
+    }
+    r = pn_parent(k, r);
+    j = j + 1;
   }
   return 0;
 }
@@ -1382,6 +1420,23 @@ fn nsf_meta(k: &Kernel, d: u64) -> Meta
 /// What lstat says about link d: a symbolic link.
 fn nsf_link_meta(d: u64) -> Meta {
   return Meta { ok: true, mode: S_IFLNK, size: 0, ino: INO_PROC + d % 4096, mtime: 0, own: 0 };
+}
+
+/// lstat of /proc/PID/fd/N (name x[..n] in the transfer buffer): the link
+/// itself while the descriptor is open, else m.
+fn fd_link_meta(k: &mut Kernel, n: u64, m: Meta) -> Meta
+  requires kok(k) && n <= XFER
+  ensures kok(k)
+{
+  let pfd = proc_fd(k.procs, k.fs.xfer, n);
+  if pfd == NO_RESULT {
+    return m;
+  }
+  let d = fd_look(k, pfd / LXNFD, pfd % LXNFD);
+  if d.kind == K_BAD {
+    return Meta { ok: false, mode: 0, size: 0, ino: 0, mtime: 0, own: 0 };
+  }
+  return Meta { ok: true, mode: S_IFLNK, size: 64, ino: INO_PROC + 32768 + pfd, mtime: 0, own: proc_own(k, pfd / LXNFD) };
 }
 
 /// fstat on fd, a descriptor of link d.

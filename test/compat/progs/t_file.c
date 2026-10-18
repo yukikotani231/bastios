@@ -148,6 +148,19 @@ int main(void) {
         EXPECT("a bad descriptor is EBADF", fgetxattr(-1, "user.a", v, sizeof v) == -1 && errno == EBADF);
         EXPECT("a bad name pointer is EFAULT", getxattr("cx_h", (const char *)1, v, sizeof v) == -1 && errno == EFAULT);
         EXPECT("the attributes of a removed file do not come back", setxattr("cx_h", "user.z", "z", 1, 0) == 0 && unlink("cx_h") == 0 && open("cx_h", O_RDWR | O_CREAT, 0644) >= 0 && listxattr("cx_h", l, sizeof l) == 0);
+        {
+            /* Two hundred at once: the table holds 256 in all. */
+            int y = open("cx_two", O_RDWR | O_CREAT, 0644), ok = y >= 0, n = 0;
+            char nm[24], big[4096];
+            for (int i = 0; i < 200; i++) {
+                snprintf(nm, sizeof nm, "user.n%d", i);
+                if (fsetxattr(y, nm, "v", 1, 0) == 0) n++;
+            }
+            ok = ok && n == 200 && flistxattr(y, big, sizeof big) > 1000;
+            EXPECT("two hundred attributes on one file", ok);
+            if (y >= 0) close(y);
+            unlink("cx_two");
+        }
         unlink("cx_h");
         unlink("cx_s");
         rmdir("cx_d");

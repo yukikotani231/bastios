@@ -41,6 +41,8 @@ system. Without `/dev/kvm`, `bench/run.py` downloads the kernel with
 | pipebw | 64 KiB writes through a pipe to a reader |
 | tcplat, tcpbw | the same over TCP on 127.0.0.1 |
 
+CI's `bench-kvm` job runs the same table under KVM on every push to main (GitHub's hosted runners offer `/dev/kvm`) and puts it in the job summary, so a figure there is free of TCG's software-TLB costs; the tables below are TCG.
+
 `make bench-workloads` adds whole-program workloads and `make bench-net` a TCP comparison over a network card (see Results).
 
 `bench/prof.py -- COMMAND` shows where the time goes for one command on
@@ -116,6 +118,18 @@ running; the second table below splits the first run from the later ones.)
 | tgz | 3.37 / 2.89 | 4.20 / 1.92 | 0.80x / 1.51x |
 | scan | 0.97 / 1.05 | 0.41 / 0.41 | 2.37x / 2.57x |
 
+Measured again on 2026-10-17 after the directory-listing, lazy-entry and
+removal changes below (the same programs; `-smp 2`, 512 MiB, median of 3 on a
+different host, so the ratios and not the seconds are comparable):
+
+| Workload | BastiOS (s) | Linux (s) | BastiOS / Linux |
+|---|---:|---:|---:|
+| untar | 0.93 | 0.32 | 2.88x |
+| apk | 8.65 | 6.30 | 1.37x |
+| hello | 0.79 | 0.64 | 1.23x |
+| tgz | 1.72 | 1.25 | 1.37x |
+| scan | 0.47 | 0.26 | 1.76x |
+
 How to read it: a build of many files is CPU-bound, and `make1` and `make2`
 run at the speed of Linux's (0.96x to 1.06x); user-side work is the same
 instructions on both. Where BastiOS is behind:
@@ -124,7 +138,54 @@ instructions on both. Where BastiOS is behind:
   synchronous metadata writes (`disk_set_owner` and `disk_set_meta` write the
   entry's sector and wait for it), where Linux's ext4 batches them in its
   journal. Deferring those writes would save at most about 18% and changes
-  what survives a power cut, so it is not done.
+  what survives a power cut, so it is not done. Counting the disk's own
+  statistics (`/proc/diskstats`) for the 500-file root: 1082 write commands, about
+  2.2 a file and a little over a millisecond each as the host sees them, and a
+  `perf` profile of the run puts 40% of the host's samples in the guest's
+  submit and poll loops (`virtio_submit`, `blk_poll`). The time is the number
+  of round trips to the emulated disk, not the kernel's work between them.
+  Most of a round trip is the host's `fsync`: the virtio-blk device does not
+  take the cache feature, so QEMU makes every write durable before it answers,
+  and the same run with `cache=unsafe` on the drive takes 0.71 s instead of
+  1.16 s. Accepting the feature does not help by itself: the queue already
+  writes twice and flushes twice per file (the data, a flush, the directory
+  block, a flush: 1094 writes and 1094 flushes for the run), so a real flush
+  costs the fsync a write-through write costs now, and the synchronous
+  entry-sector writes need a flush each on top. The run got slower with the
+  feature (1.33 s). Gaining anything takes merging a transaction's trailing
+  flush into the next one's leading flush, and queueing the entry-sector
+  writes. That is a large change to the proofs and the crash tests for at
+  most a fifth of the time, so it is not done.
+  What was done instead: a new file's entry and a chown, chmod or utimes of
+  a file no longer write their sector and wait (each after draining the
+  queue); the entry's directory block is queued with the next commit
+  (`ent_lazy`), so a file created, given its owner, mode and times and
+  written costs one commit. Host writes for the 500-file root went from 2249
+  to 1329, and `untar` from a median of 1.4 s to 1.05 s over six runs each
+  (the host is noisy: single runs ranged 1.1 to 1.8 s before the change);
+  `apk` improved by about 5%. Directories and hard links are still written
+  at once, so a directory is on the disk before the entries in it.
+  A write to another file no longer commits the batch: the file it leaves
+  is retired (its directory block is noted like a lazy entry's) and the
+  batch goes on with the next one, so several small files share a commit,
+  and a symlink's target is written without waiting for the queue. The
+  commit still flushes the data before any directory block that names it.
+  The 500-file root now makes 643 host writes (from 1329) and `untar` runs
+  about 15% faster (median of three alternating runs, 0.93 to 0.78 s).
+  The same goes for removing a file the disk never held (or held empty):
+  its entry rides the next commit as the creation did, and `O_TRUNC` on a
+  file that is already empty no longer drains the queue. The `create` test
+  (create, write 1 KiB, close, unlink) went from 2 host writes per
+  iteration to 0.5 and from about 2.2 ms to 0.8-1.2 ms on the same host.
+- `scan` (2.4x in the table) was profiled on a different machine from the
+  table's, where a warm run took 0.54 s: the guest's own time is mostly
+  `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
+  (2%); about a third of the samples are QEMU's own code, which the build
+  here has no symbols for. Not compared with Linux on that machine.
+  Listing a directory on the disk asked `vfs_readdir` about every slot of the
+  disk in turn, since a directory's entries are not stored together; `getdents`
+  now skips over the slots of other directories in one tight loop, which took the
+  same run on this host from 0.16-0.18 s to 0.14 s.
 - `hello` was 3.6x off Linux when run again (3.65 s against 1.02 s), and
   slower the second time than the first. The time was in the emulator, not
   the disk: the page cache that shares program code between runs
@@ -134,8 +195,6 @@ instructions on both. Where BastiOS is behind:
   translated cc1 again (about 80,000 translated blocks a run, against about
   13,000 when the pages are reused). The cache holds 32 MiB now and a warm
   `hello` takes about 0.7 s on the machine the first run takes about 1.5 s on.
-  `scan` is slower on BastiOS than on Linux (2.4x) for its own reasons: path
-  lookup and small reads.
 - The disk's block cache stops at 32 MiB because doubling it makes Z3 give up
   on `lx_syscall`; it is a sixteenth of memory below that (`dq_slots_for` in
   `src/diskq.bastio`; the kernel heap extension, which it takes half of, is
@@ -250,6 +309,30 @@ processor takes the kernel's one lock (`Lock[Sys]`, see "How it scales" in
 docs/architecture.md), and a compile is mostly `exec`, file creation and
 reads. That is a guess from the fit, not a profile. It is not part of
 `make bench`, which runs the same program on Linux; this one is BastiOS alone.
+
+## Process-context identifiers (boot option `pcid`)
+
+Every trap from user mode loads CR3 twice: the kernel's table on the way in
+and the processor's shadow table on the way out. Without PCIDs each load
+empties the TLB, so the kernel's translations (the code and data a system
+call touches) are walked again after every system call. With the boot
+option `pcid`, on a processor that has them (CPUID.1:ECX bit 17),
+`bst_cpu_enter` (boot/boot.S) turns on CR4.PCIDE once per processor and
+gives the two tables identifiers of their own: the kernel's table is PCID 1
+and is loaded without flushing, since it does not change once the processors
+run (the identity map, the entry area and the block guards are all set up
+before the first user process); the shadow table is PCID 2 and is loaded
+with a flush every time, since its slot 0 follows the process and the
+process's own table changes with every munmap, mprotect and copy-on-write
+fault. So only the kernel's side gains: no user translation can outlive a
+change to its mapping. The option is off by default because it can only be
+tested under KVM (QEMU's TCG has no PCID): the `pcid-kvm` job in CI checks
+that CR4.PCIDE follows the command line, runs the memory, process, thread,
+signal, ptrace, IPC and file programs of the compat suite with PCIDs on, and
+prints the system call time both ways in its summary. A later step could keep
+the user table's translations too (a PCID per address space, flushed when
+`bst_pt_take` or `bst_pt_set_access` changed an entry), which needs the
+prelude's generation count to cover permission changes.
 
 ## Reading the numbers
 
