@@ -90,6 +90,7 @@ const LO_BYTES: u64 = 98304;         // ... in this many bytes (a ring: a frame 
 // that leaves by a card, a virtual interface or the held-frame queue stays
 // within FRAME_MAX (send_via, ip_in).
 const NET_BUF: u64 = 15000;
+const LO_HEAD: u64 = 94;              // 14 + 20 + 60: the Ethernet, IP and longest TCP header, which net_poll copies of a long segment
 const LO_NET: u64 = 127;              // 127.0.0.0/8: this machine
 const LO_IP: u64 = 0x7F000001;        // 127.0.0.1
 const EPH_LO: u64 = 49152;            // ephemeral ports: 49152 .. 65535
@@ -228,6 +229,8 @@ struct Net {
   lo_head: u64,       // the oldest one's slot,
   lo_n: u64,          // and how many are queued
   lo_in: bool,        // the frame in pkt came round that queue: TCP sums are skipped, as on Linux's lo
+  lo_split: bool,     // pkt holds only the first LO_HEAD bytes of that frame; the rest is still in lo, where lo_src says the frame starts
+  lo_src: u64,
   seen_rx: u64,       // rx and the tick count when sock_wake last looked
   seen_tick: u64,
   irq_on: bool,       // received frames raise the card's interrupt (nic_listen)
@@ -555,15 +558,14 @@ fn lo_send(n: &mut Net, flen: u64) -> bool
   return q_send(&mut n, ns_lo(n), flen);
 }
 
-/// Queues the outgoing frame for net_poll to take in as if it had arrived
-/// on interface `to` (loopback, or a virtual one: src/netns.bastio). A
-/// full queue drops it, as a busy card would; TCP sends it again.
-fn q_send(n: &mut Net, to: u64, flen: u64) -> bool
+/// Where q_put would put a frame of flen bytes in lo, or NO_SOCK if the
+/// queue has no room for it.
+fn lo_room(n: &Net, flen: u64) -> u64
   requires net_ok(n) && flen <= NET_BUF
-  ensures net_ok(n)
+  ensures result == NO_SOCK || result + flen <= LO_BYTES
 {
   if n.lo_n >= LOQ {
-    return false;
+    return NO_SOCK;
   }
   // A frame does not wrap round the end of the ring: it starts over at 0
   // and the bytes left at the end count as used.
@@ -574,10 +576,46 @@ fn q_send(n: &mut Net, to: u64, flen: u64) -> bool
     at = 0;
   }
   if n.lo_used + pad + flen > LO_BYTES {
+    return NO_SOCK;
+  }
+  return at;
+}
+
+/// Queues the outgoing frame for net_poll to take in as if it had arrived
+/// on interface `to` (loopback, or a virtual one: src/netns.bastio). A
+/// full queue drops it, as a busy card would; TCP sends it again.
+fn q_send(n: &mut Net, to: u64, flen: u64) -> bool
+  requires net_ok(n) && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  return q_put(&mut n, to, flen, flen, NO_SOCK);
+}
+
+/// q_send for a frame whose bytes from `hlen` on a caller has put in lo
+/// already, at `pre` (what lo_room said): only the first hlen bytes of the
+/// outgoing frame are copied. With hlen == flen nothing is in lo yet, and
+/// `pre` is ignored.
+fn q_put(n: &mut Net, to: u64, flen: u64, hlen: u64, pre: u64) -> bool
+  requires net_ok(n) && flen <= NET_BUF && hlen <= flen
+  ensures net_ok(n)
+{
+  if n.lo_n >= LOQ {
+    return false;
+  }
+  let mut at = (n.lo_tail + n.lo_used) % LO_BYTES;
+  let mut pad = 0;
+  if at + flen > LO_BYTES {
+    pad = LO_BYTES - at;
+    at = 0;
+  }
+  if n.lo_used + pad + flen > LO_BYTES {
+    return false;
+  }
+  if hlen < flen && at != pre {
     return false;
   }
   let slot = (n.lo_head + n.lo_n) % LOQ;
-  bcopy(&mut n.lo, at, n.out, 0, flen);
+  bcopy(&mut n.lo, at, n.out, 0, hlen);
   n.lo_used = n.lo_used + pad + flen;
   n.lo_at = set(n.lo_at, slot, at);
   n.lo_len = set(n.lo_len, slot, flen);
@@ -1735,13 +1773,25 @@ fn net_poll(n: &mut Net)
     if n.lo_n > 0 {
       n.lo_n = n.lo_n - 1;
     }
+    // A segment longer than a card's frame (TCP to ourselves) is not copied
+    // into pkt: only its headers are, and tcp_in reads its data from lo. Its
+    // bytes stay in the ring's count until ip_in is done, so that a frame
+    // that ip_in sends in answer is not put over them.
+    let split = flen > FRAME_MAX;
+    let mut keep = false;
+    let mut ktail = 0;
+    let mut kfreed = 0;
     let mut fits = false;
     if flen <= NET_BUF && at <= LO_BYTES && at + flen <= LO_BYTES {
       fits = true;
       // Its bytes, and any padding before it, are free again.
       let tail = (at + flen) % LO_BYTES;
       let freed = (tail + LO_BYTES - n.lo_tail) % LO_BYTES;
-      if n.lo_n == 0 || freed > n.lo_used {
+      if split && ns < NNET {
+        keep = true;
+        ktail = tail;
+        kfreed = freed;
+      } else if n.lo_n == 0 || freed > n.lo_used {
         n.lo_used = 0;
         n.lo_tail = 0;
       } else {
@@ -1753,7 +1803,13 @@ fn net_poll(n: &mut Net)
       n.lo_tail = 0;
     }
     if fits && ns < NNET {
-      bcopy(&mut n.pkt, 0, n.lo, at, flen);
+      if split {
+        bcopy(&mut n.pkt, 0, n.lo, at, LO_HEAD);
+        n.lo_split = true;
+        n.lo_src = at;
+      } else {
+        bcopy(&mut n.pkt, 0, n.lo, at, flen);
+      }
       if n.rx < 18446744073709551615 {
         n.rx = n.rx + 1;
       }
@@ -1762,6 +1818,16 @@ fn net_poll(n: &mut Net)
       n.lo_in = true;
       ip_in(&mut n, flen);
       n.lo_in = false;
+      n.lo_split = false;
+    }
+    if keep {
+      if n.lo_n == 0 || kfreed > n.lo_used {
+        n.lo_used = 0;
+        n.lo_tail = 0;
+      } else {
+        n.lo_used = n.lo_used - kfreed;
+        n.lo_tail = ktail;
+      }
     }
     q = q - 1;
   }
@@ -1837,7 +1903,7 @@ fn net_up(d: Card) -> Nic
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), dm: alloc(0), cork: balloc(0), eph: 0,
     tcbs: alloc(TCB0 * TCB_W), rb: rings_new(), iss: 0,
-    lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, seen_rx: 0, seen_tick: 0, irq_on: false,
+    lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, lo_split: false, lo_src: 0, seen_rx: 0, seen_tick: 0, irq_on: false,
     v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_lo: 0, dns6_hi: 0, dns6_lo: 0, rs_n: 0, rs_until: 0,
     ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,
     nlq: balloc(NLS * NLQ), nls: alloc(NLS * NL_W), nl_at: 0, nl_lim: 0, nl_msg: 0, nl_full: false,
