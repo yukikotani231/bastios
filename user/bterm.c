@@ -1,6 +1,7 @@
-/* bterm, a terminal window for bwm (user/bwmproto.h): an 80 x 24 grid of
- * 8 x 16 cells drawn with the console's font, with BusyBox's ash on a
- * pseudo-terminal behind it. What bwm sends as keys goes to the shell;
+/* bterm, a terminal window for bwm (user/bwmproto.h): a grid of 8 x 16
+ * cells (80 x 24 to begin with; dragging the grip of the window changes it)
+ * drawn with the console's font, with BusyBox's ash on a pseudo-terminal
+ * behind it. What bwm sends as keys goes to the shell;
  * what the shell writes is read as a VT100 subset: CR, LF, backspace, tab,
  * the cursor moves (CSI A B C D G H d f, ESC 7 8), erase (J K X), insert and
  * delete of characters (@ P) and of lines (L M), scrolling (S T, ESC M D E)
@@ -18,12 +19,16 @@
 #include "bwmlib.h"
 #include "font8x8.h"
 
-#define COLS 80
-#define ROWS 24
+#define MAXC 160                          /* the most columns and rows the grid can have */
+#define MAXR 60
 #define CW 8
 #define CH 16
-#define WIDTH (COLS * CW)
-#define HEIGHT (ROWS * CH)
+#define MINC 10
+#define MINR 4
+
+static int cols = 80, rows = 24;          /* the size of the grid now */
+#define WIDTH (cols * CW)
+#define HEIGHT (rows * CH)
 
 static const uint32_t palette[16] = {
     0x000000, 0xCD3131, 0x0DBC79, 0xE5E510, 0x2472C8, 0xBC3FBC, 0x11A8CD, 0xC0C0C0,
@@ -31,17 +36,16 @@ static const uint32_t palette[16] = {
 };
 
 struct cell { unsigned char ch, fg, bg; };
-static struct cell grid[ROWS][COLS];
-static uint32_t pixbuf[WIDTH * HEIGHT];
-static uint32_t *pix = pixbuf;            /* the window's pixels: bwm's shared memory when it gave some */
+static struct cell grid[MAXR][MAXC];
+static uint32_t *pix;            /* the window's pixels: bwm's shared memory when it gave some */
 static int shared;
-static unsigned char dirty[ROWS];
+static unsigned char dirty[MAXR];
 static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
 static int priv;                          /* the CSI had a '?' prefix */
-static int top, bot = ROWS - 1;           /* the scroll region, inclusive */
+static int top, bot = 23;           /* the scroll region, inclusive */
 static int saved_cx, saved_cy;
-static struct cell main_grid[ROWS][COLS];
+static struct cell main_grid[MAXR][MAXC];
 static int main_cx, main_cy, alt;
 
 static void put_cell(int r, int c, unsigned char ch)
@@ -74,7 +78,7 @@ static void scroll_region(int n)
     else
         memmove(grid[top + k], grid[top], sizeof grid[0] * (h - k));
     for (int i = 0; i < k; i++)
-        clear_cells(n > 0 ? bot - i : top + i, 0, COLS);
+        clear_cells(n > 0 ? bot - i : top + i, 0, cols);
     for (int r = top; r <= bot; r++)
         dirty[r] = 1;
 }
@@ -83,7 +87,7 @@ static void linefeed(void)
 {
     if (cy == bot)
         scroll_region(1);
-    else if (cy < ROWS - 1)
+    else if (cy < rows - 1)
         cy++;
 }
 
@@ -104,15 +108,15 @@ static void set_alt(int on)
         memcpy(main_grid, grid, sizeof grid);
         main_cx = cx;
         main_cy = cy;
-        for (int r = 0; r < ROWS; r++)
-            clear_cells(r, 0, COLS);
+        for (int r = 0; r < rows; r++)
+            clear_cells(r, 0, cols);
     } else {
         memcpy(grid, main_grid, sizeof grid);
         cx = main_cx;
         cy = main_cy;
     }
     top = 0;
-    bot = ROWS - 1;
+    bot = rows - 1;
     memset(dirty, 1, sizeof dirty);
 }
 
@@ -152,10 +156,10 @@ static void csi(int final)
         return;
     }
     switch (final) {
-    case 'G': cx = n - 1 < 0 ? 0 : n - 1 >= COLS ? COLS - 1 : n - 1; break;
-    case 'd': cy = n - 1 < 0 ? 0 : n - 1 >= ROWS ? ROWS - 1 : n - 1; break;
+    case 'G': cx = n - 1 < 0 ? 0 : n - 1 >= cols ? cols - 1 : n - 1; break;
+    case 'd': cy = n - 1 < 0 ? 0 : n - 1 >= rows ? rows - 1 : n - 1; break;
     case 'X':
-        clear_cells(cy, cx, cx + n > COLS ? COLS : cx + n);
+        clear_cells(cy, cx, cx + n > cols ? cols : cx + n);
         break;
     case 'S': scroll_region(n); break;
     case 'T': scroll_region(-n); break;
@@ -169,9 +173,9 @@ static void csi(int final)
         }
         break;
     case 'r': {
-        int t = param(0, 1) - 1, b = param(1, ROWS) - 1;
+        int t = param(0, 1) - 1, b = param(1, rows) - 1;
         if (t < 0) t = 0;
-        if (b >= ROWS) b = ROWS - 1;
+        if (b >= rows) b = rows - 1;
         if (t < b) {
             top = t;
             bot = b;
@@ -181,50 +185,50 @@ static void csi(int final)
         break;
     }
     case 'A': cy = cy - n < 0 ? 0 : cy - n; break;
-    case 'B': cy = cy + n >= ROWS ? ROWS - 1 : cy + n; break;
-    case 'C': cx = cx + n >= COLS ? COLS - 1 : cx + n; break;
+    case 'B': cy = cy + n >= rows ? rows - 1 : cy + n; break;
+    case 'C': cx = cx + n >= cols ? cols - 1 : cx + n; break;
     case 'D': cx = cx - n < 0 ? 0 : cx - n; break;
     case 'H': case 'f':
         cy = param(0, 1) - 1;
         cx = param(1, 1) - 1;
         if (cy < 0) cy = 0;
-        if (cy >= ROWS) cy = ROWS - 1;
+        if (cy >= rows) cy = rows - 1;
         if (cx < 0) cx = 0;
-        if (cx >= COLS) cx = COLS - 1;
+        if (cx >= cols) cx = cols - 1;
         break;
     case 'J':
         if (nparam == 0 || params[0] == 0) {
-            clear_cells(cy, cx, COLS);
-            for (int r = cy + 1; r < ROWS; r++)
-                clear_cells(r, 0, COLS);
+            clear_cells(cy, cx, cols);
+            for (int r = cy + 1; r < rows; r++)
+                clear_cells(r, 0, cols);
         } else if (params[0] == 2 || params[0] == 3) {
-            for (int r = 0; r < ROWS; r++)
-                clear_cells(r, 0, COLS);
+            for (int r = 0; r < rows; r++)
+                clear_cells(r, 0, cols);
         } else if (params[0] == 1) {
             for (int r = 0; r < cy; r++)
-                clear_cells(r, 0, COLS);
+                clear_cells(r, 0, cols);
             clear_cells(cy, 0, cx + 1);
         }
         break;
     case 'K':
         if (nparam == 0 || params[0] == 0)
-            clear_cells(cy, cx, COLS);
+            clear_cells(cy, cx, cols);
         else if (params[0] == 1)
             clear_cells(cy, 0, cx + 1);
         else
-            clear_cells(cy, 0, COLS);
+            clear_cells(cy, 0, cols);
         break;
     case '@':
-        for (int c = COLS - 1; c >= cx + n; c--)
+        for (int c = cols - 1; c >= cx + n; c--)
             grid[cy][c] = grid[cy][c - n];
-        clear_cells(cy, cx, cx + n > COLS ? COLS : cx + n);
+        clear_cells(cy, cx, cx + n > cols ? cols : cx + n);
         break;
     case 'P':
-        if (n > COLS - cx)
-            n = COLS - cx;
-        for (int c = cx; c + n < COLS; c++)
+        if (n > cols - cx)
+            n = cols - cx;
+        for (int c = cx; c + n < cols; c++)
             grid[cy][c] = grid[cy][c + n];
-        clear_cells(cy, COLS - n, COLS);
+        clear_cells(cy, cols - n, cols);
         break;
     case 'm':
         if (nparam == 0)
@@ -303,30 +307,53 @@ static void feed(unsigned char b)
             cx--;
     } else if (b == '\t') {
         cx = (cx + 8) & ~7;
-        if (cx >= COLS)
-            cx = COLS - 1;
+        if (cx >= cols)
+            cx = cols - 1;
     } else if (b >= 32 && b < 127) {
-        if (cx >= COLS) {
+        if (cx >= cols) {
             cx = 0;
             linefeed();
         }
         put_cell(cy, cx, b);
         cx++;
-        if (cx >= COLS)
-            cx = COLS;                            /* wraps when the next character comes */
+        if (cx >= cols)
+            cx = cols;                            /* wraps when the next character comes */
     }
+}
+
+/* The grid gets nc columns and nr rows. What was in it stays where it is;
+ * the new cells are blank. */
+static void resize_grid(int nc, int nr)
+{
+    for (int r = 0; r < MAXR; r++)
+        for (int c = 0; c < MAXC; c++)
+            if (r >= rows || c >= cols) {
+                grid[r][c] = (struct cell){ ' ', 7, 0 };
+                main_grid[r][c] = (struct cell){ ' ', 7, 0 };
+            }
+    cols = nc;
+    rows = nr;
+    if (cx > cols) cx = cols;
+    if (cy >= rows) cy = rows - 1;
+    if (main_cx > cols) main_cx = cols;
+    if (main_cy >= rows) main_cy = rows - 1;
+    if (saved_cx > cols) saved_cx = cols;
+    if (saved_cy >= rows) saved_cy = rows - 1;
+    top = 0;
+    bot = rows - 1;
+    memset(dirty, 1, sizeof dirty);
 }
 
 /* Redraws the rows that changed (and the cursor's) and sends them. */
 static int repaint(int fd, int id, int *old_cx, int *old_cy)
 {
     dirty[*old_cy] = 1;
-    int ccx = cx >= COLS ? COLS - 1 : cx;
+    int ccx = cx >= cols ? cols - 1 : cx;
     dirty[cy] = 1;
-    for (int r = 0; r < ROWS; r++) {
+    for (int r = 0; r < rows; r++) {
         if (!dirty[r])
             continue;
-        for (int c = 0; c < COLS; c++)
+        for (int c = 0; c < cols; c++)
             draw_cell(r, c, r == cy && c == ccx);
         dirty[r] = 0;
         if ((shared ? bwm_damage(fd, id, 0, r * CH, WIDTH, CH) : bwm_draw(fd, id, pix, WIDTH, 0, r * CH, WIDTH, CH)) != 0)
@@ -348,22 +375,24 @@ int main(void)
     if (id >= 0) {
         shared = 1;
     } else {
-        pix = pixbuf;
+        pix = NULL;
         close(fd);                                /* a failed try may have cost the connection */
         fd = bwm_connect();
-        id = fd < 0 ? -1 : bwm_create(fd, WIDTH, HEIGHT, "Terminal");
+        pix = malloc((size_t)MAXC * CW * MAXR * CH * 4);
+        id = fd < 0 || !pix ? -1 : bwm_create(fd, WIDTH, HEIGHT, "Terminal");
     }
     if (id < 0) {
         puts("bterm: cannot open a window");
         return 1;
     }
+    bwm_resizable(fd, id);
     int m = posix_openpt(O_RDWR | O_NOCTTY);
     if (m < 0 || grantpt(m) != 0 || unlockpt(m) != 0) {
         puts("bterm: no pseudo-terminal");
         return 1;
     }
     char *slave = ptsname(m);
-    struct winsize ws = { ROWS, COLS, WIDTH, HEIGHT };
+    struct winsize ws = { rows, cols, WIDTH, HEIGHT };
     ioctl(m, TIOCSWINSZ, &ws);
     pid_t child = fork();
     if (child == 0) {
@@ -380,8 +409,8 @@ int main(void)
         execl("/bin/ash", "ash", (char *)NULL);
         _exit(127);
     }
-    for (int r = 0; r < ROWS; r++)
-        clear_cells(r, 0, COLS);
+    for (int r = 0; r < rows; r++)
+        clear_cells(r, 0, cols);
     memset(dirty, 1, sizeof dirty);
     int ocx = 0, ocy = 0;
     repaint(fd, id, &ocx, &ocy);
@@ -410,6 +439,22 @@ int main(void)
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
                 if (write(m, &c, 1) != 1)
+                    break;
+            } else if (t == BWM_RESIZE) {
+                struct bwm_resize *r = (struct bwm_resize *)buf;
+                int nc = r->w / CW, nr = r->h / CH;
+                nc = nc < MINC ? MINC : nc > MAXC ? MAXC : nc;
+                nr = nr < MINR ? MINR : nr > MAXR ? MAXR : nr;
+                if (shared) {
+                    if (bwm_resized_shm(fd, id, nc * CW, nr * CH, &pix, (size_t)WIDTH * HEIGHT * 4) != 0)
+                        break;
+                } else if (bwm_resized(fd, id, nc * CW, nr * CH) != 0) {
+                    break;
+                }
+                resize_grid(nc, nr);
+                struct winsize nws = { rows, cols, WIDTH, HEIGHT };
+                ioctl(m, TIOCSWINSZ, &nws);
+                if (repaint(fd, id, &ocx, &ocy) != 0)
                     break;
             } else if (t == BWM_CLOSE || t < 0) {
                 break;

@@ -471,7 +471,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bhello: mouse 78 50 1", mark)
             print(("ok  " if good else "FAIL"), f"({name}) a click inside the window reaches the client, in its own coordinates")
             fails += not good
-            monitor("mouse_move 114 -60", "mouse_button 1", "mouse_button 0")
+            # The grip at the corner of the frame: dragging it 100 right and 60
+            # down asks the client for a 300 x 160 window, which it paints again.
+            monitor("mouse_move 120 45", "mouse_button 1", "mouse_move 100 60", "mouse_button 0")
+            good = until(b"bhello: resized 300 160", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(100, 200) == (0, 255, 0) and at(350, 200) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) dragging the grip resizes the window and the client paints it again")
+            fails += not good
+            monitor("mouse_move -6 -165", "mouse_button 1", "mouse_button 0")
             good = until(b"bhello: closed", mark)
             time.sleep(0.5)
             w, h, px = screendump()
@@ -500,6 +509,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             w, h, px = screendump()
             good = good and at(80, 100) == (255, 255, 0) and at(260, 100) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) a change in the shared pixels shows after the client says where")
+            fails += not good
+            monitor("mouse_move -242 -199", "mouse_button 1", "mouse_move 100 60", "mouse_button 0")
+            good = until(b"bhello: resized 300 160", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(100, 200) == (255, 255, 0) and at(350, 200) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) a shared window is resized with new shared memory")
             fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
@@ -583,7 +599,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             # screen, and leaving it brings the shell's screen back.
             keys = {" ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
             def typed(text):
-                monitor(*[f"sendkey {keys.get(c, c)}" for c in text], "sendkey ret")
+                monitor(*[f"sendkey {keys.get(c, 'shift-' + c.lower() if c.isupper() else c)}" for c in text], "sendkey ret")
             typed("printf '\\033[?1049halt\\n'")
             time.sleep(1.5)
             w, h, px = screendump()
@@ -614,6 +630,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             time.sleep(2)                                   # let go of the key before the next one
             monitor("sendkey ctrl-u")
+            # The grip makes the terminal 60 x 20 cells: the window shrinks
+            # (the wallpaper shows where it was), the shell gets SIGWINCH and still answers.
+            typed("trap 'echo winched' WINCH")
+            time.sleep(1)
+            monitor("mouse_move 196 86", "mouse_button 1", "mouse_move -160 -64", "mouse_button 0")
+            time.sleep(1.5)
+            typed("echo resized")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            pxl = lambda x, y: tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3])
+            good = (any(l.strip() == "resized" for l in lines) and any(l.strip() == "winched" for l in lines)
+                    and pxl(600, 300) == pxl(10, 300))
+            print(("ok  " if good else "FAIL"), f"({name}) dragging the grip of the terminal window resizes its grid")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
