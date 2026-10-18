@@ -129,6 +129,7 @@ fn l2_zero(m: &mut Mem, l2: &mut PageTable, p: u64) -> bool
     if !pt_shared(l1, p % 512) {
       let w = pt_writable(l1, p % 512);
       let mut f = pt_take_frame(&mut l1, p % 512);
+      let x = is_x_frame(m, f);               // writable and executable: a JIT's code page
       let mut i = 0;
       while i < 512
         invariant i <= 512
@@ -136,7 +137,12 @@ fn l2_zero(m: &mut Mem, l2: &mut PageTable, p: u64) -> bool
         frame_write(&mut f, i, 0);
         i = i + 1;
       }
-      pt_put_frame(&mut l1, p % 512, f, w);
+      if x {
+        pt_put_frame(&mut l1, p % 512, f, false);
+        pt_set_access(&mut l1, p % 512, 2);
+      } else {
+        pt_put_frame(&mut l1, p % 512, f, w);
+      }
     } else if !pt_writable(l1, p % 512) {
       let s = pt_take_shared(&mut l1, p % 512);
       let b = find_free(&mut m);
@@ -197,11 +203,17 @@ fn l2_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
     return true;
   }
   let f = pt_take_frame(&mut src, from % 512);
+  let x = is_x_frame(m, f);                       // writable and executable: it stays so
   if tf == tt {
     if pt_has(src, to % 512) {
       pt_put_frame(&mut src, from % 512, f, w);   // cannot happen: `to` was emptied
     } else {
-      pt_put_frame(&mut src, to % 512, f, w);
+      if x {
+        pt_put_frame(&mut src, to % 512, f, false);
+        pt_set_access(&mut src, to % 512, 2);
+      } else {
+        pt_put_frame(&mut src, to % 512, f, w);
+      }
       if hidden {
         pt_set_access(&mut src, to % 512, 0);
       }
@@ -214,7 +226,12 @@ fn l2_move(m: &mut Mem, l2: &mut PageTable, from: u64, to: u64) -> bool
   if pt_has(dst, to % 512) {
     give_page(&mut m, f);                         // cannot happen: `to` was emptied
   } else {
-    pt_put_frame(&mut dst, to % 512, f, w);
+    if x {
+      pt_put_frame(&mut dst, to % 512, f, false);
+      pt_set_access(&mut dst, to % 512, 2);
+    } else {
+      pt_put_frame(&mut dst, to % 512, f, w);
+    }
     if hidden {
       pt_set_access(&mut dst, to % 512, 0);
     }
@@ -262,10 +279,16 @@ fn l2_move_x(m: &mut Mem, a: &mut PageTable, b: &mut PageTable, pf: u64, pt: u64
     }
   } else {
     let f = pt_take_frame(&mut src, pf % 512);
+    let x = is_x_frame(m, f);                     // writable and executable: it stays so
     if pt_has(dst, pt % 512) {
       give_page(&mut m, f);                       // cannot happen: `to` was emptied
     } else {
-      pt_put_frame(&mut dst, pt % 512, f, w);
+      if x {
+        pt_put_frame(&mut dst, pt % 512, f, false);
+        pt_set_access(&mut dst, pt % 512, 2);
+      } else {
+        pt_put_frame(&mut dst, pt % 512, f, w);
+      }
       if hidden {
         pt_set_access(&mut dst, pt % 512, 0);
       }
