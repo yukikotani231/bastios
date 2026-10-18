@@ -362,7 +362,7 @@ def table(results):
             row = f"| {key} | {unit} | " + " | ".join(cells) + " |"
             if len(oses) == 2:
                 # A slowdown factor either way: higher is worse for BastiOS.
-                row += f" {vals[0] / vals[1]:.2f}x |" if None not in vals else " |"
+                row += f" {vals[0] / vals[1]:.2f}x |" if None not in vals and vals[1] else " |"
             lines.append(row)
     return "\n".join(lines)
 
