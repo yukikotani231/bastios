@@ -73,7 +73,8 @@ const NET_PENDING: u64 = 1000;        // nic_ping_start: started, check later
 const NET_NONE: u64 = 18446744073709551615;
 const PID_LIMIT: u64 = 65536;
 
-const SOCKS: u64 = 32;                // UDP sockets in the table
+const SOCKS: u64 = 256;               // UDP sockets in the table
+const UDP_START: u64 = 8;             // sockets whose queues exist at first (dq and cork double from here)
 const RXQ: u64 = 16;                  // datagrams each socket can queue
 const UDP_MAX: u64 = 1472;            // the largest payload one frame carries
 const NO_SOCK: u64 = 18446744073709551615;
@@ -211,6 +212,7 @@ struct Net {
   rx: u64,            // frames received and sent
   tx: u64,
   socks: Buf,         // the UDP sockets, SOCK_FIELDS words each
+  ucap: u64,          // how many sockets dq and cork have room for (grows by udp_room)
   dq: Bytes,          // their queued datagrams, RXQ slots of UDP_MAX bytes each
   cork: Bytes,        // the datagram each is putting together (MSG_MORE), UDP_MAX bytes each
   eph: u64,           // where the next ephemeral port search starts
@@ -259,7 +261,7 @@ spec fn net_ok(n: &Net) -> bool {
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
   && len(n.arp) == ARP_N * 2 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX && n.dns <= IP_MAX
-  && len(n.socks) == SOCKS * SOCK_FIELDS && blen(n.dq) == SOCKS * RXQ * UDP_MAX && blen(n.cork) == SOCKS * UDP_MAX
+  && len(n.socks) == SOCKS * SOCK_FIELDS && n.ucap <= SOCKS && blen(n.dq) == n.ucap * RXQ * UDP_MAX && blen(n.cork) == n.ucap * UDP_MAX
   && len(n.tcbs) == TCBS * TCB_W && rings_ok(n.rb)
   && blen(n.lo) == LO_BYTES && len(n.lo_len) == LOQ && len(n.lo_at) == LOQ && n.lo_tail < LO_BYTES && n.lo_used <= LO_BYTES && n.lo_head < LOQ && n.lo_n <= LOQ
   && len(n.v6) == V6N * V6W && n.rtr_mac < MAC_LIMIT
@@ -1321,6 +1323,55 @@ fn port_busy(n: &Net, port: u64, fam: u64) -> bool
   return false;
 }
 
+/// Whether socket s has its datagram queue and cork buffer (udp_room makes
+/// them when the socket is opened, so an open socket always does).
+fn udp_slot_ok(n: &Net, s: u64) -> bool
+  requires net_ok(n)
+  ensures result ==> s < SOCKS && (s + 1) * RXQ * UDP_MAX <= blen(n.dq) && (s + 1) * UDP_MAX <= blen(n.cork)
+{
+  return s < n.ucap;
+}
+
+/// Makes the queues and cork buffers of the first `count` sockets, doubling
+/// from UDP_START (the allocator reuses a freed block only for a buffer of
+/// exactly the same size, so a step of one socket would leave every old copy
+/// unused), with their bytes kept. False, with n as it was, when memory
+/// runs out.
+fn udp_room(n: &mut Net, count: u64) -> bool
+  requires net_ok(n) && count <= SOCKS
+  ensures net_ok(n) && (result ==> count <= n.ucap)
+{
+  if count <= n.ucap {
+    return true;
+  }
+  let mut c = UDP_START;
+  while c < count
+    invariant c >= UDP_START && c <= SOCKS && net_ok(n)
+  {
+    c = c * 2;
+    if c > SOCKS {
+      c = SOCKS;
+    }
+  }
+  let mut nq = try_balloc(c * RXQ * UDP_MAX);
+  let mut nc = try_balloc(c * UDP_MAX);
+  if blen(nq) != c * RXQ * UDP_MAX || blen(nc) != c * UDP_MAX {
+    bfree(nq);
+    bfree(nc);
+    return false;
+  }
+  bcopy(&mut nq, 0, n.dq, 0, n.ucap * RXQ * UDP_MAX);
+  bcopy(&mut nc, 0, n.cork, 0, n.ucap * UDP_MAX);
+  let pq = n.dq;
+  let pc = n.cork;
+  n.dq = nq;
+  n.cork = nc;
+  n.ucap = c;
+  bfree(pq);
+  bfree(pc);
+  return true;
+}
+
 /// Queues the payload of the received UDP datagram (ulen bytes with its
 /// header, at 34) on socket s. A datagram arriving at a full queue is
 /// dropped, which UDP allows.
@@ -1329,7 +1380,7 @@ fn udp_deliver(n: &mut Net, s: u64, ulen: u64)
   ensures net_ok(n)
 {
   let count = sk_get(n, s, S_COUNT);
-  if count >= RXQ {
+  if count >= RXQ || !udp_slot_ok(n, s) {
     return;
   }
   let slot = (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
@@ -1356,7 +1407,7 @@ fn raw_deliver(n: &mut Net, total: u64)
     invariant s <= SOCKS && net_ok(n) && plen <= UDP_MAX
   {
     let count = sk_get(n, s, S_COUNT);
-    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP && sk_get(n, s, S_NS) == n.ns && count < RXQ {
+    if sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP && sk_get(n, s, S_NS) == n.ns && count < RXQ && udp_slot_ok(n, s) {
       let slot = (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
       let at = (s * RXQ + slot) * UDP_MAX;
       bcopy(&mut n.dq, at, n.pkt, 14, plen);
@@ -1421,6 +1472,9 @@ fn udp_open(n: &mut Net) -> u64
     invariant s <= SOCKS && net_ok(n)
   {
     if sk_get(n, s, S_OPEN) != 1 {
+      if !udp_room(&mut n, s + 1) {
+        return NO_SOCK;
+      }
       sk_set(&mut n, s, S_OPEN, 1);
       sk_set(&mut n, s, S_PORT, 0);
       sk_set(&mut n, s, S_HEAD, 0);
@@ -1565,7 +1619,7 @@ fn udp_send_more(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64
   requires net_ok(n)
   ensures net_ok(n)
 {
-  if !udp_is_open(n, s) || s >= SOCKS || size > blen(buf) {
+  if !udp_is_open(n, s) || !udp_slot_ok(n, s) || size > blen(buf) {
     return NO_SOCK;
   }
   let have = sk_get(n, s, S_CORK);
@@ -1602,7 +1656,7 @@ fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
 {
   net_poll(&mut n);
   let count = udp_queued(n, s);
-  if count == 0 {
+  if count == 0 || !udp_slot_ok(n, s) {
     return NO_SOCK;
   }
   let slot = sk_get(n, s, S_HEAD) % RXQ;
@@ -1753,7 +1807,7 @@ fn net_up(d: Card) -> Nic
     arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
-    socks: alloc(SOCKS * SOCK_FIELDS), dq: balloc(SOCKS * RXQ * UDP_MAX), cork: balloc(SOCKS * UDP_MAX), eph: 0,
+    socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), cork: balloc(0), eph: 0,
     tcbs: alloc(TCBS * TCB_W), rb: rings_new(), iss: 0,
     lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, seen_rx: 0, seen_tick: 0, irq_on: false,
     v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_lo: 0, dns6_hi: 0, dns6_lo: 0, rs_n: 0, rs_until: 0,
