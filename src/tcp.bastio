@@ -1506,15 +1506,23 @@ fn tcp_cork(c: &mut Nic, t: u64, more: bool)
   match c {
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
-      if tcb_held(n, t) {
-        if !more {
-          tset(&mut n, t, W_CORK, 0);
-        } else if tw(n, t, W_CORK) == 0 && n.now < 0xFFFFFFFFFFFF0000 {
-          tset(&mut n, t, W_CORK, n.now + TCP_CORK_TICKS);
-        }
-      }
+      net_cork(&mut n, t, more);
       c = Nic::Up(n);
     },
+  }
+}
+
+/// tcp_cork on the card itself.
+fn net_cork(n: &mut Net, t: u64, more: bool)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if tcb_held(n, t) {
+    if !more {
+      tset(&mut n, t, W_CORK, 0);
+    } else if tw(n, t, W_CORK) == 0 && n.now < 0xFFFFFFFFFFFF0000 {
+      tset(&mut n, t, W_CORK, n.now + TCP_CORK_TICKS);
+    }
   }
 }
 
