@@ -257,7 +257,13 @@ fn proc_task(k: &mut Kernel, n: u64) -> u64
   }
   let fd = xfer_is(k.fs.xfer, te, te + 3, "/fd");
   let ns = xfer_is(k.fs.xfer, te, te + 3, "/ns");
-  if (!fd && !ns) || (te + 3 < n && bget(k.fs.xfer, te + 3) != 47) {
+  let fdi = te + 7 <= n && xfer_is(k.fs.xfer, te, te + 7, "/fdinfo");
+  if fdi {
+    // fdinfo and what is in it are the process's, as fd is
+    if te + 7 < n && bget(k.fs.xfer, te + 7) != 47 {
+      return n;
+    }
+  } else if (!fd && !ns) || (te + 3 < n && bget(k.fs.xfer, te + 3) != 47) {
     return n;
   }
   let q = proc_pid(k.procs, k.fs.xfer, 5, e);
