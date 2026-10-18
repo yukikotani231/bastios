@@ -60,7 +60,8 @@ else
 fi
 chmod +x "$dir/qemu-system-x86_64"
 echo "$dir" >>"$GITHUB_PATH"
-"$dir/qemu-system-x86_64" -machine none -display none -S -monitor none -serial none &
+# Probe QEMU itself: the PCID wrapper adds -append, which -machine none refuses.
+"$qemu" -accel kvm -machine none -display none -S -monitor none -serial none &
 pid=$!
 sleep 1
 if kill -0 "$pid" 2>/dev/null; then
