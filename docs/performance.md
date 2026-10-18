@@ -118,6 +118,18 @@ running; the second table below splits the first run from the later ones.)
 | tgz | 3.37 / 2.89 | 4.20 / 1.92 | 0.80x / 1.51x |
 | scan | 0.97 / 1.05 | 0.41 / 0.41 | 2.37x / 2.57x |
 
+Measured again on 2026-10-17 after the directory-listing, lazy-entry and
+removal changes below (the same programs; `-smp 2`, 512 MiB, median of 3 on a
+different host, so the ratios and not the seconds are comparable):
+
+| Workload | BastiOS (s) | Linux (s) | BastiOS / Linux |
+|---|---:|---:|---:|
+| untar | 0.93 | 0.32 | 2.88x |
+| apk | 8.65 | 6.30 | 1.37x |
+| hello | 0.79 | 0.64 | 1.23x |
+| tgz | 1.72 | 1.25 | 1.37x |
+| scan | 0.47 | 0.26 | 1.76x |
+
 How to read it: a build of many files is CPU-bound, and `make1` and `make2`
 run at the speed of Linux's (0.96x to 1.06x); user-side work is the same
 instructions on both. Where BastiOS is behind:
@@ -153,6 +165,11 @@ instructions on both. Where BastiOS is behind:
   (the host is noisy: single runs ranged 1.1 to 1.8 s before the change);
   `apk` improved by about 5%. Directories and hard links are still written
   at once, so a directory is on the disk before the entries in it.
+  The same goes for removing a file the disk never held (or held empty):
+  its entry rides the next commit as the creation did, and `O_TRUNC` on a
+  file that is already empty no longer drains the queue. The `create` test
+  (create, write 1 KiB, close, unlink) went from 2 host writes per
+  iteration to 0.5 and from about 2.2 ms to 0.8-1.2 ms on the same host.
 - `scan` (2.4x in the table) was profiled on a different machine from the
   table's, where a warm run took 0.54 s: the guest's own time is mostly
   `vfs_readdir` (14% of the samples), then `disk_find` (3%) and `vfs_nlink`
