@@ -254,7 +254,7 @@ GIT_TAG       ?= v2.47.0
 RIPGREP_VER   ?= 14.1.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
-COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll $(B)/compat/python $(B)/compat/git $(B)/compat/rg
+COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll $(B)/compat/python $(B)/compat/git $(B)/compat/rg $(B)/compat/perl
 
 $(B)/compat/lua: | $(B)/compat
 	rm -rf $(B)/compat/src/lua && mkdir -p $(B)/compat/src
@@ -330,6 +330,33 @@ $(B)/compat/git: | $(B)/compat
 	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates git >/dev/null
 	$(CROSS)strip -o $@ $(B)/compat/src/git/git
 
+# perl, cross-built with perl-cross (the build machine's miniperl runs the
+# generators), statically linked with its XS modules. The pure-Perl modules
+# test/compat/apps.txt uses are collected into $(B)/compat/perllib, which goes
+# on the disk as /disk/perllib. The re extension is left out: its static link
+# duplicates the regex engine. Locale support is off: a static glibc cannot load
+# locales, and perl would warn on every start when LANG names one.
+PERL_GIT      ?= https://github.com/Perl/perl5
+PERL_TAG      ?= v5.40.0
+PERLX_URL     ?= https://github.com/arsv/perl-cross/releases/download/1.6.2/perl-cross-1.6.2.tar.gz
+PERL_MODULES  := strict warnings Carp Exporter Data::Dumper JSON::PP Digest::MD5 Digest::SHA POSIX List::Util \
+                 Scalar::Util Fcntl Socket IO::Handle IO::Socket::INET HTTP::Tiny Time::HiRes File::Spec \
+                 File::Temp File::Path File::Basename Cwd Getopt::Long Storable Encode IO::Select
+$(B)/compat/perl: test/compat/perlmods.py | $(B)/compat
+	rm -rf $(B)/compat/src/perl5 $(B)/compat/perllib && mkdir -p $(B)/compat/src
+	git clone -q --depth 1 --branch $(PERL_TAG) $(PERL_GIT) $(B)/compat/src/perl5
+	curl -fsSL $(PERLX_URL) | tar xz -C $(B)/compat/src
+	cp -a $(B)/compat/src/perl-cross-1.6.2/. $(B)/compat/src/perl5/
+	cd $(B)/compat/src/perl5 && ./configure --target=aarch64-linux-gnu --prefix=/disk \
+	  -Dprivlib=/disk/perllib -Darchlib=/disk/perllib -Dsitelib=/disk/perllib -Dsitearch=/disk/perllib \
+	  -Dman1dir=none -Dman3dir=none -Doptimize=-O2 -Accflags=-DNO_LOCALE -Dldflags="-static -no-pie $(ULFLAGS)" -Dlibs=-lm -Uusedl -Uusethreads \
+	  --disable-mod=DB_File,GDBM_File,NDBM_File,ODBM_File,SDBM_File,re >/dev/null
+	$(MAKE) -C $(B)/compat/src/perl5 -s perl >/dev/null
+	$(MAKE) -C $(B)/compat/src/perl5 -s >/dev/null
+	python3 test/compat/perlmods.py $(B)/compat/src/perl5 $(B)/compat/perllib $(PERL_MODULES)
+	$(CROSS)strip -o $@ $(B)/compat/src/perl5/perl
+$(B)/compat/perllib: $(B)/compat/perl ;
+
 # ripgrep, a static glibc build from crates.io (pinned by version and
 # Cargo.lock). Needs cargo and the aarch64-unknown-linux-gnu target.
 $(B)/compat/rg: | $(B)/compat
@@ -352,8 +379,8 @@ $(B)/compat/kilo: | $(B)/compat
 $(B)/compat/ttyepoll: test/compat/progs/ttyepoll.c | $(B)/compat
 	$(APPCC) -s -o $@ $<
 
-$(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys py=$(B)/compat/py
+$(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/perllib $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys perllib=$(B)/compat/perllib py=$(B)/compat/py
 
 # Alpine Linux for AArch64 (test/compat/alpine.txt), from the same pinned
 # Docker Hub images as the x86-64 suite's, their arm64 layers: the minirootfs
