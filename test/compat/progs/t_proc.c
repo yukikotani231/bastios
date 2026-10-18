@@ -164,6 +164,20 @@ int main(int argc, char **argv) {
              read(fd, b, sizeof b) == -1 && errno == ESRCH && close(fd) == 0)));
     }
     {
+        /* A program that polls kill(pid, 0) to see whether a process is gone
+           (BusyBox timeout) must not find the id taken again a moment later:
+           the next forks number on instead of reusing the id that just ended. */
+        int first = -1, again = 0, i, q;
+        if ((q = fork()) == 0) _exit(0);
+        if (q > 0 && waitpid(q, &st, 0) == q) first = q;
+        for (i = 0; i < 16 && first > 0; i++) {
+            if ((q = fork()) == 0) _exit(0);
+            if (q == first) again = 1;
+            if (q > 0) waitpid(q, &st, 0);
+        }
+        EXPECT("sixteen forks after a process ended do not reuse its id", first > 0 && !again);
+    }
+    {
         /* A script runs through the interpreter its "#!" line names, with
          * the line's argument and the script's path before the rest. */
         char self[256], line[300];

@@ -22,6 +22,7 @@ import "snd.bastio";
 const NPROC: u64 = 1024;
 const STRIDE: u64 = 76 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
+const FORK_SPAN: u64 = 64;           // how far above the lowest free id a fork may number on (new_fork_pid)
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
 
 // Row fields.
@@ -1547,12 +1548,15 @@ fn new_tid(k: &mut Kernel) -> u64
   return new_pid_from(&mut k, true);
 }
 
-/// new_pid for a forked process. It takes the lowest free id, as the shell
-/// and the docs show, but never the id handed out last, so a child that just
-/// ended does not give its id to the next fork. Numbering round and round
-/// instead (as new_tid does) lets the ids spread over every row of the table,
-/// and every scan for a ready process then walks all of them, so it is done
-/// only while pid_max is set to something else than its default (LTP fork13).
+/// new_pid for a forked process. It takes the free id after the one handed
+/// out last, as long as that stays within FORK_SPAN of the lowest free id, and
+/// the lowest free id otherwise. A child that just ended so does not give its
+/// id to the next forks: a program that polls kill(pid, 0) to see whether a
+/// process is gone (BusyBox timeout) must not find the id taken again a
+/// moment later and then signal a stranger. Numbering round and round over
+/// every row (as new_tid does) would make every scan for a ready process walk
+/// all of them, so it is done only while pid_max is set to something else
+/// than its default (LTP fork13); the span keeps the ids, and the scans, close.
 fn new_fork_pid(k: &mut Kernel) -> u64
   requires kok(k)
   ensures kok(k) && result < NPROC
@@ -1563,6 +1567,16 @@ fn new_fork_pid(k: &mut Kernel) -> u64
   }
   let last = pget(k.procs, 0, F_START);
   let pid = free_pid(k.procs, 1);
+  if pid != 0 && last >= 1 {
+    let next = free_pid(k.procs, sat_add(last, 1));
+    if next > last && next < pid + FORK_SPAN {
+      if next >= k.pid_hi {
+        k.pid_hi = next + 1;
+      }
+      pset(&mut k.procs, 0, F_START, next);
+      return next;
+    }
+  }
   if pid != 0 && pid == last {
     let other = free_pid(k.procs, pid + 1);
     if other != 0 && other != pid {
