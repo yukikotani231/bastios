@@ -58,6 +58,15 @@ def run(line):
     read_until(b"\n# ", mark)
     return out[mark:].decode(errors="replace").replace("\r", "")
 
+def hold(group, prefix=""):
+    """Starts `mhog hold HOLD` in cgroup group as $big and waits until it has
+    written all its pages: on a loaded host a fixed sleep was not always
+    enough, and a holder still growing when the next program starts is the
+    one the killer picks."""
+    mark = len(out)
+    run(f"{prefix}ash -c 'echo $$ > /sys/fs/cgroup/{group}/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!")
+    read_until(b"mhog: holding", mark)
+
 def check(name, ok, text=""):
     global fails
     if ok:
@@ -160,7 +169,7 @@ check("pages went out and came back", vm("pswpout") > 1000 and vm("pswpin") > 10
 check("nothing was killed", vm("oom_kill") == kills)
 check("every slot is free again", meminfo("SwapFree") == SWAP_KB)
 # A holder is pushed out by a second program; swapoff brings it home.
-run(f"mkdir /sys/fs/cgroup/sw; echo +memory > /sys/fs/cgroup/cgroup.subtree_control; ash -c 'echo $$ > /sys/fs/cgroup/sw/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold("sw", "mkdir /sys/fs/cgroup/sw; echo +memory > /sys/fs/cgroup/cgroup.subtree_control; ")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 check("a holder and a second program both fit", f"touched {SECOND} MiB" in t and "rc=0" in t and vm("oom_kill") == kills, t)
 used = meminfo("SwapTotal") - meminfo("SwapFree")
@@ -180,12 +189,12 @@ run("/disk/mhog swapon /disk/swap")
 def group_swap(g):
     return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
 run("mkdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm; echo 0 > /sys/fs/cgroup/sl/memory.swap.max; echo 2097152 > /sys/fs/cgroup/sm/memory.swap.max")
-run(f"ash -c 'echo $$ > /sys/fs/cgroup/sl/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold("sl")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 used = meminfo("SwapTotal") - meminfo("SwapFree")
 check("a group with memory.swap.max 0 keeps its pages in memory", group_swap("sl") == 0 and "Out of memory: Killed process" in t, f"{group_swap('sl')} {t}")
 run("kill -9 $big; sleep 1")
-run(f"ash -c 'echo $$ > /sys/fs/cgroup/sm/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!; sleep 1")
+hold("sm")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") == 2097152, f"{group_swap('sm')} {t}")
 run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm")
