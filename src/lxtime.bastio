@@ -29,13 +29,15 @@ const NS_PER_TICK: u64 = 10000000;    // the timer runs at 100 Hz
 /// trying its call each time it is scheduled, as all timed waits did
 /// before TIMEWAIT. A tick (every 10 ms) wakes the sleeper (idled,
 /// finish_p) well within that time, so the deadline is met as closely as
-/// before. 200 ms, not two ticks: LTP's timer tests (pselect01,
+/// before. 50 ms, not two ticks: LTP's timer tests (pselect01,
 /// epoll_pwait03, ...) time sleeps of 1 to 100 ms and fail if a few end
-/// late. Under emulation on a busy host, with 20 or 50 ms, some of them
-/// did end 3 to 9 ms late, and nothing found why. A wait that short then
-/// costs a processor as before; a longer one (sleep 15, a poll with a
-/// timeout of seconds) sleeps for all but its last 200 ms.
-const NEAR: u64 = 200000000;
+/// late; with 20 ms, some of them ended 3 to 9 ms late under emulation on a
+/// busy host, as ticks are not on time there. A wait that short costs a
+/// processor as before; a longer one (sleep 15, a poll with a timeout of
+/// seconds) sleeps for all but its last 50 ms, and an idle bootstrap
+/// processor sleeps for all but the last millisecond (STRETCH_LEAD): its
+/// local APIC timer is set to the deadline.
+const NEAR: u64 = 50000000;
 const FOREVER: u64 = 18446744073709551613;   // 2^64 - 3: a deadline never reached
 const TIMER_ABSTIME: u64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
