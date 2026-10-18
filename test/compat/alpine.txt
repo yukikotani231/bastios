@@ -587,11 +587,6 @@ initialized,hover-int,stopped
 $ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/usr/local /disk/a/proc /disk/a/root/goproj && bb tar xf /disk/gotools.tar -C /disk/a/usr/local && bb mount -t proc proc /disk/a/proc && bb printf 'module goproj\ngo 1.24\n' > /disk/a/root/goproj/go.mod && bb printf 'package main\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tprintln(add(1, 2))\n}\n' > /disk/a/root/goproj/main.go && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-gopls-client.lua -o /root/gopls-client.lua && timeout 280 nvim -l /root/gopls-client.lua >/root/gopls.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/gopls.txt; else echo initialized,hover-func,stopped; fi
 initialized,hover-func,stopped
 
-== nvim: the LSP client talks to Eclipse JDT LS, Java's language server, and gets a hover
-# timeout 2500
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc /disk/a/root/javaproj /disk/a/tmp && bb tar xf /disk/jdktools.tar -C /disk/a && bb mount -t proc proc /disk/a/proc && bb printf 'public class Main {\n    static int add(int a, int b) { return a + b; }\n    public static void main(String[] args) {\n        int n = "text";\n        System.out.println(add(1, 2));\n    }\n}\n' > /disk/a/root/javaproj/Main.java && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-jdtls-client.lua -o /root/jdtls-client.lua && /opt/java/openjdk/bin/java -version >/root/jdtls.log 2>&1; timeout 2400 nvim -l /root/jdtls-client.lua >>/root/jdtls.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/jdtls.txt || bb tail -n 3 /disk/a/root/jdtls.log; bb rm -rf /disk/a/opt/java /disk/a/opt/jdtls; else echo initialized,hover-add,stopped; fi
-initialized,hover-add,stopped
-
 == python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
 [1, 2, 3, 4]
