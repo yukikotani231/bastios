@@ -980,8 +980,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
-# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests.
-LTP_SUITES ?= --suite pty --suite containers --suite cve
+# Besides runtest/syscalls: the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
+LTP_SUITES ?= --suite pty --suite containers --suite cve --suite posix
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -1006,6 +1006,12 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
 	$(MAKE) -C build/ltp/testcases/cve -s -k || true
+	# The Open POSIX Test Suite is configured on its own; a few tests do not
+	# build against musl (they check _POSIX_SPORADIC_SERVER and the like).
+	cd build/ltp/testcases/open_posix_testsuite && ./configure -q CC="$(MUSLCC)" \
+	  CFLAGS="-O2 -fPIE" LDFLAGS=-static-pie >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite generate-makefiles >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite/conformance/interfaces -s -k -j4 >/dev/null 2>&1 || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs
