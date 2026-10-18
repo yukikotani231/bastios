@@ -165,6 +165,13 @@ instructions on both. Where BastiOS is behind:
   (the host is noisy: single runs ranged 1.1 to 1.8 s before the change);
   `apk` improved by about 5%. Directories and hard links are still written
   at once, so a directory is on the disk before the entries in it.
+  A write to another file no longer commits the batch: the file it leaves
+  is retired (its directory block is noted like a lazy entry's) and the
+  batch goes on with the next one, so several small files share a commit,
+  and a symlink's target is written without waiting for the queue. The
+  commit still flushes the data before any directory block that names it.
+  The 500-file root now makes 643 host writes (from 1329) and `untar` runs
+  about 15% faster (median of three alternating runs, 0.93 to 0.78 s).
   The same goes for removing a file the disk never held (or held empty):
   its entry rides the next commit as the creation did, and `O_TRUNC` on a
   file that is already empty no longer drains the queue. The `create` test
