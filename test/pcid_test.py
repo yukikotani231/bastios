@@ -33,7 +33,8 @@ def boot_and_read(kernel, append, smp, cpu="host"):
         if not m:
             raise SystemExit("pcid_test: the system call benchmark did not finish")
         text = g.out[at:].decode(errors="replace")
-        t = re.search(r"^(?!/disk)[^\n]*?([0-9.]+)\s*(ns|us)[^\n]*", text, re.M)
+        lines = [l.strip() for l in text.splitlines() if l.strip() and "@@d" not in l and "osbench" not in l and "bastios>" not in l]
+        t = " | ".join(lines[-3:])
         mon = socket.socket(socket.AF_UNIX)
         mon.connect(sock)
         time.sleep(0.5)
@@ -42,7 +43,7 @@ def boot_and_read(kernel, append, smp, cpu="host"):
         time.sleep(1.5)
         regs = mon.recv(1 << 20).decode(errors="replace")
         cr4s = [int(x, 16) for x in re.findall(r"CR4=([0-9a-f]+)", regs)]
-        return cr4s, (t.group(0) if t else text.strip()[-200:])
+        return cr4s, t or text.strip()[-200:]
     finally:
         g.stop()
         try:
