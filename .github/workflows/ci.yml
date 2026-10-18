@@ -238,8 +238,12 @@ jobs:
       - run: tools/ci-kvm.sh
       - name: CR4.PCIDE follows the command line
         run: |
-          test/pcid_test.py | tee build/pcid.txt
+          set +e
+          python3 test/pcid_test.py > build/pcid.txt 2>&1
+          st=$?
           { echo '### test/pcid_test.py under KVM'; echo; echo '```'; cat build/pcid.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          cat build/pcid.txt
+          exit $st
       - name: Build the programs
         run: |
           progs="t_mem t_proc t_thread t_sig3 t_signal t_ptrace t_ipc t_file"
