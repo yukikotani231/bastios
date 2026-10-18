@@ -1682,6 +1682,7 @@ posix-pthread_kill_2-1
 posix-pthread_kill_3-1
 posix-pthread_kill_7-1
 posix-pthread_kill_8-1
+posix-sigwait_6-1
 posix-pthread_mutex_destroy_1-1
 posix-pthread_mutex_destroy_2-1
 posix-pthread_mutex_destroy_2-2
