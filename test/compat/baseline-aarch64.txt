@@ -1659,3 +1659,6 @@ apps: ripgrep: search with line numbers, honouring .ignore
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
 apps: ripgrep: a search over many files on several threads
+t_core: RLIMIT_CORE 0 leaves no core file, and the status has no core flag
+t_core: RLIMIT_CORE above 0 leaves a core file, and the wait status says so
+t_core: the core file names the signal, the program counter and the variable
