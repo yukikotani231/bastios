@@ -40,6 +40,20 @@ int main(void) {
     EXPECT("munmap faults on touch", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            munmap(q, 4096) == 0 && ({ pid_t c = fork(); c == 0 ? (q[0] = 1, _exit(0), 0) :
            c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    // A translation cached while the page was mapped must not outlive a
+    // system call that changes the mapping (what a TLB tagged with process
+    // identifiers must still honour): touch first, change, touch again.
+    EXPECT("a page touched before munmap faults after it", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ pid_t c = fork(); c == 0 ? (q[0] = 1, munmap(q, 4096), q[0] = 2, _exit(0), 0) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    EXPECT("a page written before mprotect(PROT_READ) faults on the next write", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ pid_t c = fork(); c == 0 ? (q[0] = 1, mprotect(q, 4096, PROT_READ), q[0] = 2, _exit(0), 0) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    EXPECT("a page read before munmap and mapped again at its address is a fresh zero page", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ q[0] = 'P'; pid_t c = fork(); c == 0 ? ({ char r = q[0]; munmap(q, 4096);
+              char *n = mmap(q, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+              _exit(r == 'P' && n == q && q[0] == 0 ? 0 : 1); 0; }) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && q[0] == 'P'; }));
     {
         int ro = open("cm_ro", O_RDWR | O_CREAT | O_TRUNC, 0644), wo = -1, bad;
         if (ro >= 0) { write(ro, "x", 1); close(ro); }

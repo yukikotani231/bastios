@@ -698,6 +698,10 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       s.stop = true;
       s.reboot = what == REBOOT;
     }
+    if get(s.k.sys, SYS_KICK) != 0 {
+      s.k.sys = set(s.k.sys, SYS_KICK, 0);
+      lapic_wake(&mut s.apic);              // a signal for a process running on another processor
+    }
     sock_wake(&mut s.k);
     if what == SWITCH {
       sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep

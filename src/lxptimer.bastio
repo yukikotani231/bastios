@@ -78,6 +78,9 @@ fn ptimer_tick(k: &mut Kernel)
           // Rounds that passed before this tick are overruns; the next
           // deadline is the first round after now.
           over = smaller((now - dl) / iv, OVERRUN_MAX);
+          if dl == 1 {
+            over = OVERRUN_MAX;                 // an absolute time from before boot: the gap is beyond what the deadline can hold
+          }
           next = sat_add(now, iv - (now - dl) % iv);
         }
         k.alarms = set(k.alarms, pt_at(p, t, 0), next);

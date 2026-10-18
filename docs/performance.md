@@ -310,6 +310,30 @@ docs/architecture.md), and a compile is mostly `exec`, file creation and
 reads. That is a guess from the fit, not a profile. It is not part of
 `make bench`, which runs the same program on Linux; this one is BastiOS alone.
 
+## Process-context identifiers (boot option `pcid`)
+
+Every trap from user mode loads CR3 twice: the kernel's table on the way in
+and the processor's shadow table on the way out. Without PCIDs each load
+empties the TLB, so the kernel's translations (the code and data a system
+call touches) are walked again after every system call. With the boot
+option `pcid`, on a processor that has them (CPUID.1:ECX bit 17),
+`bst_cpu_enter` (boot/boot.S) turns on CR4.PCIDE once per processor and
+gives the two tables identifiers of their own: the kernel's table is PCID 1
+and is loaded without flushing, since it does not change once the processors
+run (the identity map, the entry area and the block guards are all set up
+before the first user process); the shadow table is PCID 2 and is loaded
+with a flush every time, since its slot 0 follows the process and the
+process's own table changes with every munmap, mprotect and copy-on-write
+fault. So only the kernel's side gains: no user translation can outlive a
+change to its mapping. The option is off by default because it can only be
+tested under KVM (QEMU's TCG has no PCID): the `pcid-kvm` job in CI checks
+that CR4.PCIDE follows the command line, runs the memory, process, thread,
+signal, ptrace, IPC and file programs of the compat suite with PCIDs on, and
+prints the system call time both ways in its summary. A later step could keep
+the user table's translations too (a PCID per address space, flushed when
+`bst_pt_take` or `bst_pt_set_access` changed an entry), which needs the
+prelude's generation count to cover permission changes.
+
 ## Reading the numbers
 
 TCG is not a processor. It inflates some costs and hides others, and it
