@@ -156,22 +156,22 @@ fn pump(ser: &Serial, s: &mut Sys)
   requires sys_ok(s)
   ensures sys_ok(s)
 {
-  let mut typed = false;
   let mut c = serial_poll(ser);
   let mut n = 0;
   while c < 256 && n < 4096
     invariant sys_ok(s)
   {
     q_push(&mut s.k.q, c);
-    typed = true;
     n = n + 1;
     c = serial_poll(ser);
   }
-  if typed {
-    tty_intr(&mut s.con, &mut s.k);
-    tty_cook(&mut s.con, &mut s.k);
-    wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line, s.k.pid_hi);
-  }
+  // On every tick, as next_job does on x86-64 (src/main.bastio), not only
+  // when bytes came in: a byte typed while no Linux program was reading
+  // stays queued (tty_cook), and a reader that blocks later would wait for
+  // the next key otherwise.
+  tty_intr(&mut s.con, &mut s.k);
+  tty_cook(&mut s.con, &mut s.k);
+  wake_readers(&mut s.k.procs, &mut s.k.q, s.k.line, s.k.pid_hi);
   drain(ser, &mut s.con);
   wake_writers(&mut s.k.procs);
 }

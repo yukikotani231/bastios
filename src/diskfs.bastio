@@ -175,6 +175,7 @@ struct DiskFs {
   hint: u64,            // where the next allocation starts looking
   ix: Bytes,            // the index of names (below), IX_BYTES once built, else empty
   ixn: u64,             // its cells in use
+  pnew: u64,            // the entry (plus 1) a file was last created in since the directory last went to the disk: the disk holds a free slot there, not an earlier file; 0 if none
   ixmin: u64,           // entries above which the directory has the index (IX_MIN or IX_MIN_BIG)
   free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); lowered to a freed one
   foreign: bool,        // the disk holds something else, and is left alone
@@ -671,6 +672,7 @@ fn dir_flush(d: &mut DiskFs, s: u64) -> bool
   requires disk_ok(d) && s < DIR_SECTORS
   ensures disk_ok(d) && d.dcap == old(d.dcap) && d.slots == old(d.slots)
 {
+  d.pnew = 0;
   let b = dir_block(d, s / BSECT);
   if b == 0 || s / BSECT >= d.dcap {
     return false;
@@ -919,7 +921,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, ppt: 0, pr: 0, tick: 0,
-    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
+    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
   }
@@ -1669,6 +1671,9 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         return DSLOTS;
       }
       d.free0 = i;
+      if lazy {
+        d.pnew = i + 1;
+      }
       ix_add(&mut d, i);
       return i;
     }
@@ -1771,8 +1776,16 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
     if d.pw == i + 1 && d.pr == 0 {
       let s = i / 2;
       let b = dir_block(d, s / BSECT);
-      if b != 0 && b < MAX_BLOCKS && blk_read(&mut d.dev, d.plo + b * BSECT + s % BSECT, &mut d.sec) {
-        oldroot = tree_in(d, d.sec, i % 2 * DENT + E_ROOT);
+      if d.pnew == i + 1 {
+        // Created since the directory last reached the disk, which holds a
+        // free slot there: no read to find that out.
+        dropped = true;
+      } else if b != 0 && b < MAX_BLOCKS && blk_read(&mut d.dev, d.plo + b * BSECT + s % BSECT, &mut d.sec) {
+        // (A free slot on the disk may keep the root of a file removed
+        // from it: only a file's own entry names blocks to free.)
+        if cast[u64](bget(d.sec, i % 2 * DENT + E_KIND)) == 1 {
+          oldroot = tree_in(d, d.sec, i % 2 * DENT + E_ROOT);
+        }
         dropped = true;
       }
     }
@@ -2308,6 +2321,7 @@ fn disk_commit(d: &mut DiskFs) -> bool
   d.pw = 0;
   d.pr = 0;
   d.pdn = 0;
+  d.pnew = 0;
   if !ok || t == 0 {
     dq_kill(&mut d.q);                // dq_fits said there was room: not reached
     return true;
