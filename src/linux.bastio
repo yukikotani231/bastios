@@ -1184,6 +1184,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_FB {
     return fb_ioctl(&mut k, pid, req % 0x100000000, arg);    // src/lxfb.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_KEYEV {
+    return keyev_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxkeyev.bastio
+  }
   if d.kind == K_DEV && d.x == DEV_SER {
     return ser_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxserial.bastio
   }
