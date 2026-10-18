@@ -765,6 +765,36 @@ fn lx_mq_receive(k: &mut Kernel, pid: u64, was: u64, fd: u64, va: u64, len: u64,
   return KEEP;
 }
 
+/// Drops the mq_notify registration of queue q if process `me` (its group
+/// + 1) holds it.
+fn pq_notify_drop(k: &mut Kernel, q: u64, me: u64)
+  requires kok(k) && q < PQ_N
+  ensures kok(k)
+{
+  if pq_get(k, q, PW_NPID) == me {
+    let s = pq_get(k, q, PW_NSIG);
+    if s >= PQ_THREAD && s < PQ_THREAD + NLS {
+      nic_nl_wake(&mut k.nic, s - PQ_THREAD, k.ipcb, PQ_COOKIES + q * PQ_COOKIE_LEN, 0);   // lets musl's helper thread end
+    }
+    pq_set(&mut k, q, PW_NPID, 0);
+  }
+}
+
+/// Descriptor fd of pid is about to be closed: if it is a queue, the process
+/// loses its mq_notify registration on it, as on Linux (mqueue_flush_file).
+fn pq_flush(k: &mut Kernel, pid: u64, fd: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = pq_desc(k, pid, fd, 0);
+  if h < OFD_N {
+    let q = of_get(k.ofd, h, 2);
+    if q < PQ_N {
+      pq_notify_drop(&mut k, q, tgid(k.procs, pid) + 1);
+    }
+  }
+}
+
 /// mq_notify(fd, sevp): registers pid for a signal when a message comes
 /// to the empty queue (one process at a time), or with sevp null drops
 /// its registration. SIGEV_THREAD is musl's: its helper thread waits on a
@@ -802,7 +832,7 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
         return EFAULT;
       }
     }
-    if how == SIGEV_SIGNAL && (sig == 0 || sig > NSIG) {
+    if how == SIGEV_SIGNAL && sig > NSIG {          // signo 0 is valid and sends nothing, as on Linux
       return EINVAL;
     }
   }
@@ -817,13 +847,7 @@ fn lx_mq_notify(k: &mut Kernel, pid: u64, fd: u64, sev: u64) -> u64
   let me = tgid(k.procs, pid) + 1;
   let np = pq_get(k, q, PW_NPID);
   if sev == 0 {
-    if np == me {
-      let s = pq_get(k, q, PW_NSIG);
-      if s >= PQ_THREAD && s < PQ_THREAD + NLS {
-        nic_nl_wake(&mut k.nic, s - PQ_THREAD, k.ipcb, PQ_COOKIES + q * PQ_COOKIE_LEN, 0);   // lets musl's helper thread end
-      }
-      pq_set(&mut k, q, PW_NPID, 0);
-    }
+    pq_notify_drop(&mut k, q, me);
     return 0;
   }
   if np != 0 && np <= NPROC && state(k.procs, np - 1) != FREE {

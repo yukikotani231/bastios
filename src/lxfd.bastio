@@ -843,6 +843,7 @@ fn lx_fd_close(k: &mut Kernel, pid: u64, fd: u64) -> bool
       lock_drop(&mut k.locks, tgid(k.procs, pid), f, LKC_FCNTL);
     }
   }
+  pq_flush(&mut k, pid, fd);                // src/lxmq.bastio
   fd_set_k(&mut k, pid, fd, 0);
   unref_value(&mut k, v);
   return true;
