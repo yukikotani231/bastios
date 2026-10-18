@@ -98,7 +98,9 @@ const EXT_START: u64 = 4;             // extension blocks a mounted disk has roo
 const EXT_MAX: u64 = 32;              // extension blocks: DIR_SB + EXT_MAX * EXT_PTRS >= DIR_BLOCKS
 const IX_CELLS: u64 = 524288;          // cells of the name index (a power of two, at least twice DSLOTS)
 const IX_BYTES: u64 = 2097152;         // 4 bytes a cell: 0 empty, else entry + 1
-const IX_MIN: u64 = 1024;             // a directory with more entries than this has the index
+const IX_MIN: u64 = 1024;             // a directory with more entries than this has the index on a small machine
+const IX_MIN_BIG: u64 = 128;          // and on one with room for the 2 MiB (cache of at least IX_BIG_NC slots)
+const IX_BIG_NC: u64 = 1024;
 const IX_MAX: u64 = 393216;           // cells in use (stale ones too) before the index is rebuilt
 const DIR_START: u64 = 8;             // the blocks of memory the directory starts with (it doubles from there)
 const DIR_FIXED: u64 = 4;             // directory blocks 0..3 are disk blocks 1..4
@@ -173,6 +175,7 @@ struct DiskFs {
   hint: u64,            // where the next allocation starts looking
   ix: Bytes,            // the index of names (below), IX_BYTES once built, else empty
   ixn: u64,             // its cells in use
+  ixmin: u64,           // entries above which the directory has the index (IX_MIN or IX_MIN_BIG)
   free0: u64,           // every directory entry below this is in use (disk_entry starts its search for a free one here); lowered to a freed one
   foreign: bool,        // the disk holds something else, and is left alone
   psz: u64,             // its sectors (the whole device, or the partition)
@@ -703,7 +706,7 @@ fn dir_grow(d: &mut DiskFs) -> bool
       return false;
     }
     d.slots = DPB * (db + 1);
-    ix_rebuild(&mut d);
+    ix_ensure(&mut d);
     return true;
   }
   put_u64(&mut d.sb, 8 * db, b);
@@ -714,7 +717,7 @@ fn dir_grow(d: &mut DiskFs) -> bool
     return false;
   }
   d.slots = DPB * (db + 1);
-  ix_rebuild(&mut d);
+  ix_ensure(&mut d);
   return true;
 }
 
@@ -906,13 +909,17 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   if n > MAX_BLOCKS {
     n = MAX_BLOCKS;
   }
+  let mut ixmin = IX_MIN;
+  if cslots >= IX_BIG_NC {
+    ixmin = IX_MIN_BIG;
+  }
   let mut nc = cslots;
   if n < DATA_B0 + 16 || mode == DM_RAW {
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, ppt: 0, pr: 0, tick: 0,
-    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
+    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
   }
@@ -1302,7 +1309,7 @@ fn ix_rebuild(d: &mut DiskFs)
   requires disk_ok(d)
   ensures disk_ok(d)
 {
-  if d.slots <= IX_MIN {
+  if d.slots <= d.ixmin {
     return;
   }
   if blen(d.ix) != IX_BYTES {
@@ -1342,12 +1349,24 @@ fn ix_rebuild(d: &mut DiskFs)
   }
 }
 
+/// Builds the index when the directory has grown past d.ixmin and there is
+/// none yet. Once it exists, a new directory block needs no rebuild: its
+/// entries get their cells as they are named (ix_add).
+fn ix_ensure(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d)
+{
+  if blen(d.ix) != IX_BYTES {
+    ix_rebuild(&mut d);
+  }
+}
+
 /// The entry in directory p named name[from..from + n], or DSLOTS.
 fn disk_child(d: &DiskFs, p: u64, name: &Bytes, from: u64, n: u64) -> u64
   requires disk_ok(d) && from + n <= blen(name)
   ensures result <= DSLOTS
 {
-  if blen(d.ix) == IX_BYTES && d.slots > IX_MIN {
+  if blen(d.ix) == IX_BYTES && d.slots > d.ixmin {
     let mut c = ix_hash(p, name, from, n);
     let mut t = 0;
     while t < IX_CELLS

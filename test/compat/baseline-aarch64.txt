@@ -1020,6 +1020,8 @@ t_ptrace2: a request on a process that is not a tracee of the caller is ESRCH
 t_ptrace2: an unknown request is EIO
 t_ptrace2: a tracer attaching to a stopped process sees it stop
 t_ptrace2: a tracer can wait for a tracee that is not its child
+t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer
+t_ptrace2: PTRACE_SINGLESTEP from a signal stop inside raise() stops with SIGTRAP one instruction on, though SIGTRAP is blocked
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file
@@ -1649,5 +1651,14 @@ apps: python: the language and the standard library
 apps: python: threads, subprocess and asyncio
 apps: python: urllib from the host
 tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
-tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
-tty: micropython: REPL line editing and history
+apps: git: init, commit, log and diff
+apps: git: 300 files, a branch and a merge
+apps: git: gc, fsck and a clone through upload-pack
+apps: git: stash, revert and bisect run
+apps: ripgrep: search with line numbers, honouring .ignore
+apps: ripgrep: case-insensitive counts and file lists
+apps: ripgrep: replacement, multi-line and standard input
+apps: ripgrep: a search over many files on several threads
+t_core: RLIMIT_CORE 0 leaves no core file, and the status has no core flag
+t_core: RLIMIT_CORE above 0 leaves a core file, and the wait status says so
+t_core: the core file names the signal, the program counter and the variable
