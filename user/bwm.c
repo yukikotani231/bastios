@@ -4,7 +4,7 @@
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
  * closes the window, and what is typed goes to the focused window. Ctrl-T
- * starts a terminal (bterm) and Ctrl-Q
+ * starts a terminal (bterm), Alt-Tab brings up the window at the bottom and Ctrl-Q
  * ends bwm (the console comes back when /dev/fb0 closes).
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
@@ -539,7 +539,7 @@ static int listen_socket(void)
 struct kev { uint64_t sec, usec; uint16_t type, code; int32_t value; };
 static const char kmap[]  = "\0\033" "1234567890-=\177\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
 static const char kmaps[] = "\0\033" "!@#$%^&*()_+\177\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
-static int k_shift, k_ctrl, k_caps;
+static int k_shift, k_ctrl, k_alt, k_caps;
 
 /* Auto-repeat is done here, since the key events carry only presses and
  * releases: the last key pressed repeats after 400 ms, then every 40 ms,
@@ -730,6 +730,13 @@ int main(int argc, char **argv)
                         k_shift = down;
                     } else if (code == 29 || code == 97) {
                         k_ctrl = down;
+                    } else if (code == 56 || code == 100) {
+                        k_alt = down;
+                    } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
+                        if (nz > 1) {
+                            raise_win(z[0]);
+                            touch_all();
+                        }
                     } else if (code == 58 && down) {
                         k_caps = !k_caps;
                     } else if (down) {
