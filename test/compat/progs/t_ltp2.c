@@ -869,5 +869,33 @@ int main(void) {
            ok = ok && si.si_code == POLL_IN && si.si_fd == pf[0] && si.si_band == (POLLIN | POLLRDNORM);
            close(pf[0]); close(pf[1]);
            ok; }));
+    EXPECT("lstat of /proc/self/fd/N is a link", ({
+           struct stat st;
+           int ok = lstat("/proc/self/fd/0", &st) == 0 && S_ISLNK(st.st_mode);
+           ok; }));
+    EXPECT("lstat of a /proc/self/task/TID/fd directory", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/fd", (int)getpid());
+           int ok = lstat(path, &st) == 0 && S_ISDIR(st.st_mode);
+           ok; }));
+    EXPECT("lstat of /proc/self/task/TID/fd/N is a link", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/fd/0", (int)getpid());
+           int ok = lstat(path, &st) == 0 && S_ISLNK(st.st_mode);
+           ok; }));
+    EXPECT("stat of /proc/self/task/TID/fdinfo/N", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/fdinfo/0", (int)getpid());
+           int ok = stat(path, &st) == 0;
+           ok; }));
+    EXPECT("lstat of /proc/self/task/TID/ns/mnt and /proc/self/task/TID/status", ({
+           struct stat st;
+           char path[96];
+           snprintf(path, sizeof path, "/proc/self/task/%d/status", (int)getpid());
+           int ok = stat(path, &st) == 0;
+           ok; }));
     return done();
 }

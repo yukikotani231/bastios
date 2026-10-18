@@ -1170,6 +1170,8 @@ utsname03_clone
 utsname03_unshare
 utsname04_clone
 utsname04_unshare
+userns07
+userns08
 cve-2012-0957
 cve-2015-7550
 cve-2016-4997
@@ -1185,7 +1187,6 @@ cve-2017-12193
 cve-2017-15274
 cve-2017-15299
 cve-2017-15951
-cve-2017-17052
 cve-2017-17053
 cve-2017-17712
 cve-2017-17807
