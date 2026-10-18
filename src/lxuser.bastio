@@ -10,7 +10,7 @@
 // process is in. An id with no map shows as the overflow id 65534, and one
 // that is passed in without a map is -EINVAL. A user namespace's slot in
 // k.mns holds its owner (the creator's effective ids), whether setgroups is
-// denied, and the uid and gid maps of up to UM_N extents (inside id, outside
+// denied, and the uid and gid maps of up to UM_N (8) extents (inside id, outside
 // id, count). Outside ids are host ids. A namespace made inside another
 // records its parent; the outside ids written to its map are the parent's
 // inside ids, and are composed through the parent's map when they are
@@ -552,7 +552,7 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
   if par != 0 && ps >= USR_N {
     return EPERM;
   }
-  if n == 0 || n > 512 {
+  if n == 0 || n > 2048 {
     return EINVAL;
   }
   if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
@@ -560,7 +560,7 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
   }
   let mut m = n;
   while m > 0 && bget(k.fs.xfer, m - 1) == 0
-    invariant m <= n && n <= 512
+    invariant m <= n && n <= 2048
   {
     m = m - 1;                              // as on Linux, the text ends at a NUL (runc's length counts one)
   }
@@ -571,7 +571,7 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
   let mut cnt = 0;
   let mut single = true;                    // one extent of one id: what anyone may write
   while at < m && cnt < UM_N
-    invariant at <= m && m <= 512 && cnt <= UM_N && s < USR_N && g < 2 && kok(k)
+    invariant at <= m && m <= 2048 && cnt <= UM_N && s < USR_N && g < 2 && kok(k)
   {
     let a = num_at(k.fs.xfer, at, m);
     if !a.ok {
@@ -587,7 +587,7 @@ fn um_map_write(k: &mut Kernel, pid: u64, t: u64, g: u64, va: u64, n: u64) -> u6
     }
     let mut e = c.at;
     while e < m && (bget(k.fs.xfer, e) == 32 || bget(k.fs.xfer, e) == 9)
-      invariant c.at <= e && e <= m && m <= 512
+      invariant c.at <= e && e <= m && m <= 2048
     {
       e = e + 1;
     }

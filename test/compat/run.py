@@ -945,10 +945,13 @@ def main():
             disk = os.path.join(args.out, "alpine-run2.img")
             shutil.copyfile(args.alpine_disk, disk)
             lanes.append(("alpine2", disk, [("alpine#2", "containers in Alpine", applets_lane(alpine2, 300))], "384M"))
+        # alpine3 has 1G: gopls loads the Go standard library for a hover, and
+        # at 384M the kernel now and then killed it (Neovim printed "Killed"),
+        # and the Python pool that ran next with it.
         if lane_chosen("alpine3"):
             disk = os.path.join(args.out, "alpine-run3.img")
             shutil.copyfile(args.alpine_disk, disk)
-            lanes.append(("alpine3", disk, [("alpine#3", "tools and languages in Alpine", applets_lane(alpine3, 300))], "384M"))
+            lanes.append(("alpine3", disk, [("alpine#3", "tools and languages in Alpine", applets_lane(alpine3, 300))], "1G"))
         if lane_chosen("alpine4"):
             disk = os.path.join(args.out, "alpine-run4.img")
             shutil.copyfile(args.alpine_disk, disk)
@@ -956,12 +959,10 @@ def main():
                                             ("alpine-tty", "programs on the terminal in Alpine",
                                              lambda e: [run_tty(e, n, p, k, c, x, 60, bb) for n, p, k, c, x in alpine_tty])],
                           "384M"))
-        # alpine5 has 1G: gopls loads the Go standard library for a hover, and
-        # at 384M the kernel now and then killed it (Neovim printed "Killed").
         if lane_chosen("alpine5"):
             disk = os.path.join(args.out, "alpine-run5.img")
             shutil.copyfile(args.alpine_disk, disk)
-            lanes.append(("alpine5", disk, [("alpine#5", "Neovim, gcc and the debuggers in Alpine", applets_lane(alpine5, 300))], "1G"))
+            lanes.append(("alpine5", disk, [("alpine#5", "Neovim, gcc and the debuggers in Alpine", applets_lane(alpine5, 300))], "384M"))
     if args.debian_disk and lane_chosen("debian"):
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
