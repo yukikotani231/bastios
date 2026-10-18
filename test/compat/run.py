@@ -1087,6 +1087,11 @@ def main():
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
         lost = sorted(i for i in set(want) - set(ids) - alpine_left
                       if not (args.lanes or args.skip_lanes or args.groups) or i.split(": ", 1)[0] in held)
+        fresh = sorted(set(ids) - set(want))
+        if fresh and not lost:
+            print(f"compat: {len(fresh)} passing checks are not in {os.path.basename(base)} yet:")
+            for i in fresh:
+                print("  + " + i)
         if lost:
             print("compat: REGRESSION, these checks passed before:")
             for i in lost:
