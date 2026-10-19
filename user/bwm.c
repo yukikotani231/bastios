@@ -1031,7 +1031,8 @@ int main(int argc, char **argv)
     printf("bwm: ready %ux%u\n", W, H);
     fflush(stdout);
     if (child && fork() == 0) {                               /* -c PROGRAM [ARGS]: start a client */
-        execv(child[0][0] == '/' ? child[0] : (snprintf(path, sizeof path, "/bin/%s", child[0]), path), child);
+        const char *img = strcmp(child[0], "bfiles") == 0 ? "bterm" : child[0];     /* bfiles is bterm under that name */
+        execv(img[0] == '/' ? img : (snprintf(path, sizeof path, "/bin/%s", img), path), child);
         _exit(127);
     }
 

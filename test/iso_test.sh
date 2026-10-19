@@ -747,6 +747,35 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # bfiles opens a file in its viewer, e edits it: typing inserts at the
+        # cursor, Ctrl-S saves, and the shell reads the new contents back.
+        mark = len(out)
+        q.stdin.write(b"echo hello > /tmp/e.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/e.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/e.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) bfiles opens a file given on its command line")
+        fails += not good
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/e.txt", mark)
+            monitor("sendkey x", "sendkey y", "sendkey ret", "sendkey ctrl-s")
+            good = good and until(b"bfiles: saved /tmp/e.txt", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a file edited in bfiles is saved")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/e.txt\r"); q.stdin.flush()
+        good = until(b"xy\r\nhello", mark) or until(b"xy\nhello", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the saved file holds the edit")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
