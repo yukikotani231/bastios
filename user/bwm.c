@@ -3,7 +3,8 @@
  * terminal if there is no event0), gives the pointer a
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
- * closes the window, and what is typed goes to the focused window. Ctrl-T
+ * closes the window, dragging an edge or corner of a resizable window resizes it,
+ * and what is typed goes to the focused window. Ctrl-T
  * (or the Term button of the task bar at the bottom, which also has a button for each window) starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
  * ends bwm (the console comes back when /dev/fb0 closes). The Menu button at the
  * right end of the task bar opens a launcher: Terminal, Hello window, Quit bwm.
@@ -72,6 +73,7 @@ struct fix_info {
 #define MENU_W 52                        /* the Menu button at the right end of the task bar */
 #define MENU_ITEM_W 140                  /* the launcher menu it opens above itself */
 #define MENU_ITEM_H 24
+#define EDGE 4                          /* the strip along each side of a frame that resizes it */
 #define GRIP 14                          /* the resize grip at the corner of a frame */
 #define MIN_CW 64
 #define MIN_CH 32
@@ -96,6 +98,7 @@ struct win {
     int resizable;                       /* has a grip */
     int pend;                            /* a BWM_RESIZE has been sent and not answered */
     int want_cw, want_ch;                /* the size of the contents the pointer is asking for */
+    int keep_r_on, keep_r, keep_b_on, keep_b;   /* a left or top edge is being dragged: the right or bottom edge stays at keep_r / keep_b */
     int cols, rows, cx, cy;
     char text[MAX_ROWS][MAX_COLS];
 };
@@ -107,7 +110,8 @@ static void touch_bar(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
 static struct win *sizing;               /* the window whose grip is held */
-static int sox, soy;                     /* from the pointer to the corner of the frame, when it was taken */
+static int sox, soy;                     /* from the pointer to the edge or corner of the frame it holds, when it was taken */
+static int size_edges;                   /* which: 1 left, 2 right, 4 top, 8 bottom */
 
 struct cli {
     int fd;                              /* -1 when free */
@@ -455,6 +459,20 @@ static void clamp_size(int *cw, int *ch)
     if (*ch > (int)H - TITLE_H - BORDER) *ch = H - TITLE_H - BORDER;
 }
 
+/* Puts the frame where the edge that is being dragged left it: a left or top
+ * edge moves, so the opposite one stays. */
+static void keep_edges(struct win *w)
+{
+    if (w->keep_r_on) {
+        w->x = w->keep_r - w->w;
+        if (w->x < 0) w->x = 0;
+    }
+    if (w->keep_b_on) {
+        w->y = w->keep_b - w->h;
+        if (w->y < 0) w->y = 0;
+    }
+}
+
 /* Gives a window the size its grip is asking for: at once if bwm keeps its
  * contents, else by asking the program, one request at a time. */
 static void request_size(struct win *w)
@@ -475,6 +493,7 @@ static void request_size(struct win *w)
         if (w->rows < 1) w->rows = 1;
         if (w->cx >= w->cols) w->cx = w->cols - 1;
         if (w->cy >= w->rows) w->cy = w->rows - 1;
+        keep_edges(w);
         touch_win(w);
     } else if (!w->pend) {
         struct bwm_resize r = { (uint32_t)w->id, (uint32_t)cw, (uint32_t)ch };
@@ -653,9 +672,12 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         w->w = r.w + 2 * BORDER;
         w->h = r.h + TITLE_H + BORDER;
         w->pend = 0;
+        keep_edges(w);
         touch_win(w);
         if (sizing == w)
             request_size(w);                               /* the pointer may have moved on */
+        else
+            w->keep_r_on = w->keep_b_on = 0;
     } else if (type == BWM_SETTITLE && len == sizeof(struct bwm_settitle)) {
         struct bwm_settitle t;
         memcpy(&t, p, sizeof t);
@@ -1079,7 +1101,14 @@ int main(int argc, char **argv)
                     gx = mx - under->x;
                     gy = my - under->y;
                     int on_close = my < under->y + TITLE_H && mx >= under->x + under->w - BORDER - CLOSE_W && mx < under->x + under->w - BORDER - 2;
-                    int on_grip = under->resizable && mx >= under->x + under->w - GRIP && my >= under->y + under->h - GRIP;
+                    int edges = 0;
+                    if (under->resizable) {
+                        if (mx < under->x + EDGE) edges |= 1;
+                        if (mx >= under->x + under->w - EDGE) edges |= 2;
+                        if (my < under->y + EDGE) edges |= 4;
+                        if (my >= under->y + under->h - EDGE) edges |= 8;
+                        if (mx >= under->x + under->w - GRIP && my >= under->y + under->h - GRIP) edges |= 2 | 8;
+                    }
                     if (on_close) {
                         if (under->cli >= 0) {
                             struct bwm_close cl = { (uint32_t)under->id };
@@ -1095,15 +1124,24 @@ int main(int argc, char **argv)
                             touch_all();
                         }
                         drag = my < under->y + TITLE_H ? under : NULL;
-                        if (on_grip) {
+                        if (edges) {
                             sizing = under;
-                            sox = under->x + under->w - mx;
-                            soy = under->y + under->h - my;
+                            size_edges = edges;
+                            sox = edges & 1 ? mx - under->x : under->x + under->w - mx;
+                            soy = edges & 4 ? my - under->y : under->y + under->h - my;
+                            under->want_cw = cw_of(under);
+                            under->want_ch = ch_of(under);
+                            under->keep_r_on = edges & 1;
+                            under->keep_r = under->x + under->w;
+                            under->keep_b_on = (edges & 4) != 0;
+                            under->keep_b = under->y + under->h;
                             drag = NULL;
                         }
                     }
                 } else if (!down) {
                     drag = NULL;
+                    if (sizing && !sizing->pend)
+                        sizing->keep_r_on = sizing->keep_b_on = 0;     /* else the answer lets go of them */
                     sizing = NULL;
                 }
                 if (drag && down) {
@@ -1111,8 +1149,14 @@ int main(int argc, char **argv)
                     drag->x = mx - gx; drag->y = my - gy;
                     touch_win(drag);
                 } else if (sizing && down) {
-                    sizing->want_cw = mx + sox - sizing->x - 2 * BORDER;
-                    sizing->want_ch = my + soy - sizing->y - TITLE_H - BORDER;
+                    if (size_edges & 2)
+                        sizing->want_cw = mx + sox - sizing->x - 2 * BORDER;
+                    else if (size_edges & 1)
+                        sizing->want_cw = sizing->keep_r - (mx - sox) - 2 * BORDER;
+                    if (size_edges & 8)
+                        sizing->want_ch = my + soy - sizing->y - TITLE_H - BORDER;
+                    else if (size_edges & 4)
+                        sizing->want_ch = sizing->keep_b - (my - soy) - TITLE_H - BORDER;
                     request_size(sizing);
                 } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || (m[0] & 7) != (buttons & 7))) {
                     struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), m[0] & 7u };

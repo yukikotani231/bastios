@@ -485,7 +485,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and at(100, 200) == (0, 255, 0) and at(350, 200) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) dragging the grip resizes the window and the client paints it again")
             fails += not good
-            monitor("mouse_move -6 -165", "mouse_button 1", "mouse_button 0")
+            # The left edge: dragging it 30 right takes 30 off the width and
+            # the right edge stays where it was (the frame is at x 70 to 374).
+            monitor("mouse_move -299 -95", "mouse_button 1", "mouse_move 30 0", "mouse_button 0")
+            good = until(b"bhello: resized 270 160", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(85, 200) != (0, 255, 0) and at(110, 200) == (0, 255, 0) and at(350, 200) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) dragging the left edge resizes the window and keeps its right edge")
+            fails += not good
+            # The top edge: 20 down takes 20 off the height, the bottom stays.
+            monitor("mouse_move 99 -79", "mouse_button 1", "mouse_move 0 20", "mouse_button 0")
+            good = until(b"bhello: resized 270 140", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(200, 200) == (0, 255, 0) and at(200, 245) == (0, 255, 0) and at(200, 74) != (0, 255, 0)
+            print(("ok  " if good else "FAIL"), f"({name}) dragging the top edge resizes the window and keeps its bottom edge")
+            fails += not good
+            monitor("mouse_move 170 154")
+            monitor("mouse_move -6 -145", "mouse_button 1", "mouse_button 0")
             good = until(b"bhello: closed", mark)
             time.sleep(0.5)
             w, h, px = screendump()
