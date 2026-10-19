@@ -2785,6 +2785,7 @@ libctest-functional-tls_init
 libctest-functional-tls_local_exec
 libctest-functional-udiv
 libctest-functional-ungetc
+libctest-functional-utime
 libctest-functional-vfork
 libctest-functional-wcsstr
 libctest-functional-wcstol
