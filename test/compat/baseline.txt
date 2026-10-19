@@ -1628,6 +1628,7 @@ alpine: nvim: the LSP client talks to lua-language-server, a real server, and ge
 alpine: nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
 alpine: nvim: the LSP client talks to gopls, Go's language server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+alpine: network: a poll for a frame ends while the only processes that run are waits going on
 alpine: apk: free the disk, then install python3 over HTTP
 alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
