@@ -706,11 +706,13 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if what == SWITCH {
       sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
     }
-    if disk_hold(&mut s.k, p, EIO) || what == SWITCH || ino_pressed(s.k) {
+    // The exit stop comes before the disk hold: a process that queued a write is
+    // not READY once it sleeps, and pt_sys_exit would then drop its exit stop.
+    // A stopped process is not held (disk_hold sees it is not READY and only
+    // lets the transaction go).
+    let stopped = what == KEEP && pt_sys_exit(&mut s.k, p);   // stopped for its tracer after the call
+    if disk_hold(&mut s.k, p, EIO) || stopped || what == SWITCH || ino_pressed(s.k) {
       return (p + 1) % NPROC;     // (ino_pressed: a reader of a half-full inotify queue goes first)
-    }
-    if what == KEEP && pt_sys_exit(&mut s.k, p) {
-      return (p + 1) % NPROC;               // stopped for its tracer after the call
     }
     return p;
   }

@@ -1142,6 +1142,8 @@ t_ptrace: PTRACE_O_TRACEEXEC reports the exec as PTRACE_EVENT_EXEC
 t_ptrace: PTRACE_GET_SYSCALL_INFO at a SECCOMP_RET_TRACE stop gives the call and the filter's data
 t_ptrace: PTRACE_GET_SYSCALL_INFO at a call's entry gives its number and arguments
 t_ptrace: PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only
+t_ptrace: an fsync that queues a disk transaction is followed by its exit stop with the result
+t_ptrace: and the tracee goes on to its end
 t_ptrace: a buffer that is too small gets what fits, and the full size is the result
 t_ptrace: and at its exit the result, as an error
 t_ptrace: the tracee goes on to its end

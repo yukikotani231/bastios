@@ -485,6 +485,46 @@ int main(int argc, char **argv) {
         EXPECT("the tracee goes on to its end", w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
     }
 
+    /* A call that queues a disk write still has its exit stop: the entry of an
+     * fsync of a written file is followed by its exit with the result. */
+    {
+        char path[40];
+        snprintf(path, sizeof path, "/t_ptrace_w.%d", (int)getpid());
+        pid_t c = fork();
+        if (c == 0) {
+            int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+            if (fd < 0) _exit(10);
+            ptrace(PTRACE_TRACEME, 0, 0, 0);
+            raise(SIGSTOP);
+            if (write(fd, "abc", 3) != 3) _exit(11);
+            if (fsync(fd) != 0) _exit(12);
+            _exit(0);
+        }
+        int sig = 0, st = 0;
+        int ok = wait_stop(c, &sig) && sig == SIGSTOP;
+        int found = 0, bad = 0, paired = 0;
+        struct sysinfo si;
+        for (int i = 0; i < 200 && !bad && !paired; i++) {
+            if (ptrace(PTRACE_SYSCALL, c, 0, 0) != 0) { bad = 1; break; }
+            int w = waitpid(c, &st, 0);
+            if (w != c || !WIFSTOPPED(st)) { bad = 1; break; }
+            memset(&si, 0, sizeof si);
+            ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+            if (found) {
+                paired = si.op == 2 && si.exit.rval == 0;
+                if (!paired) bad = 1;
+            } else if (si.op == 1 && si.entry.nr == SYS_fsync) {
+                found = 1;
+            }
+        }
+        EXPECT("an fsync that queues a disk transaction is followed by its exit stop with the result",
+               ok && found && paired && !bad);
+        ptrace(PTRACE_CONT, c, 0, 0);
+        int w = waitpid(c, &st, 0);
+        EXPECT("and the tracee goes on to its end", w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0);
+        unlink(path);
+    }
+
     /* SECCOMP_RET_TRACE: with PTRACE_O_TRACESECCOMP the tracee stops before
      * the call with the event and the filter's data, and the call runs when
      * it goes on, without the filters again. */
