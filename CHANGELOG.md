@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bfiles` edits a text file in place (`e` in its viewer; Ctrl-S saves, Ctrl-X returns) and opens a file given on its command line.
 - `bwm` keeps new windows inside the screen and above the task bar, `bterm` and `bfiles` open a grid that fits a screen smaller than 80 x 24 cells (a 640 x 480 screen used to refuse the terminal), and `bwm -s WxH` pretends the screen is smaller so `test/iso_test.sh` can check it.
 - `bwm` keeps part of a dragged window's title bar on the screen and above the task bar, so a window cannot be thrown out of reach.
 - `bfiles` (`user/bfiles.h`, run by `bterm` when it is started under that name), a file browser and text viewer for `bwm`, started from the Files entry of the launcher menu: click a directory to enter it, a file to read its first 64 KiB, and scroll with j, k, Space and b. `test/iso_test.sh` opens it from the menu.
