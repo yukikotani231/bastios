@@ -1585,6 +1585,23 @@ fn udp_queued(n: &Net, s: u64) -> u64
   return sk_get(n, s, S_COUNT);
 }
 
+/// The length the oldest datagram queued on socket s came with (0 if none),
+/// before a receive takes the part that fits.
+fn udp_head_len(n: &mut Net, s: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && result <= UDP_MAX
+{
+  net_poll(&mut n);
+  if udp_queued(n, s) == 0 || !udp_slot_ok(n, s) {
+    return 0;
+  }
+  let l = dm_get(n, s, sk_get(n, s, S_HEAD) % RXQ, 0);
+  if l > UDP_MAX {
+    return UDP_MAX;
+  }
+  return l;
+}
+
 /// Binds open, unbound socket s to a free ephemeral port. Returns the
 /// port, or 0 if none was found. There are fewer sockets than tries, so
 /// one of the ports tried is always free.
@@ -1714,8 +1731,9 @@ fn udp_send_more(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64
 /// Takes the oldest datagram queued on socket s, if any: copies up to
 /// `max` bytes of it (and no more than buf holds) to the start of buf and
 /// returns that count, dropping the rest as Linux does; its sender becomes
-/// the socket's peer. NO_SOCK if nothing is queued; it never waits.
-fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
+/// the socket's peer. With peek the datagram stays queued. NO_SOCK if
+/// nothing is queued; it never waits.
+fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
   requires net_ok(n)
   ensures net_ok(n) && blen(buf) == old(blen(buf))
   ensures result == NO_SOCK || (result <= blen(buf) && result <= max)
@@ -1741,8 +1759,10 @@ fn udp_recvfrom(n: &mut Net, s: u64, buf: &mut Bytes, max: u64) -> u64
   bcopy(&mut buf, 0, n.dq, at, l);
   sk_set(&mut n, s, S_PEER_IP, dm_get(n, s, slot, 1));
   sk_set(&mut n, s, S_PEER_PORT, dm_get(n, s, slot, 2));
-  sk_set(&mut n, s, S_HEAD, (slot + 1) % RXQ);
-  sk_set(&mut n, s, S_COUNT, count - 1);
+  if !peek {
+    sk_set(&mut n, s, S_HEAD, (slot + 1) % RXQ);
+    sk_set(&mut n, s, S_COUNT, count - 1);
+  }
   return l;
 }
 
@@ -2442,8 +2462,9 @@ fn sock_corked(c: &Nic, s: u64) -> u64
 }
 
 /// Takes the oldest datagram queued on s into the start of buf (at most max
-/// bytes). Returns its length, or NO_SOCK if none is queued. Never waits.
-fn sock_recvfrom(c: &mut Nic, s: u64, buf: &mut Bytes, max: u64) -> u64
+/// bytes), and leaves it queued if peek. Returns its length, or NO_SOCK if
+/// none is queued. Never waits.
+fn sock_recvfrom(c: &mut Nic, s: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
   requires nic_ok(c)
   ensures nic_ok(c) && blen(buf) == old(blen(buf))
   ensures result == NO_SOCK || (result <= blen(buf) && result <= max)
@@ -2454,7 +2475,25 @@ fn sock_recvfrom(c: &mut Nic, s: u64, buf: &mut Bytes, max: u64) -> u64
       return NO_SOCK;
     },
     Nic::Up(mut n) => {
-      let r = udp_recvfrom(&mut n, s, &mut buf, max);
+      let r = udp_recvfrom(&mut n, s, &mut buf, max, peek);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// The whole length of the oldest datagram queued on s (0 if none).
+fn sock_head_len(c: &mut Nic, s: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && result <= UDP_MAX
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return 0;
+    },
+    Nic::Up(mut n) => {
+      let r = udp_head_len(&mut n, s);
       c = Nic::Up(n);
       return r;
     },
