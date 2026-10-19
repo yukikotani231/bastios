@@ -1001,5 +1001,13 @@ int main(void) {
            ok = ok && open("/bin/cat", O_WRONLY) < 0;
            if (fd >= 0) close(fd);
            ok; }));
+    EXPECT("a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT", ({
+           struct stat st;
+           int ok = stat("/dev/null/x", &st) < 0 && errno == ENOTDIR;
+           ok = ok && stat("/bin/cat/x", &st) < 0 && errno == ENOTDIR;
+           ok = ok && open("/dev/null/x/y", O_RDONLY) < 0 && errno == ENOTDIR;
+           ok = ok && stat("/dev/nonesuch/x", &st) < 0 && errno == ENOENT;
+           ok = ok && stat("/dev/null", &st) == 0 && S_ISCHR(st.st_mode);
+           ok; }));
     return done();
 }

@@ -3,9 +3,11 @@
  * terminal if there is no event0), gives the pointer a
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
- * closes the window, and what is typed goes to the focused window. Ctrl-T
- * starts a terminal (bterm), Alt-Tab brings up the window at the bottom and Ctrl-Q
- * ends bwm (the console comes back when /dev/fb0 closes).
+ * closes the window (the boxes left of it maximize and minimize), dragging an edge or corner of a resizable window resizes it,
+ * and what is typed goes to the focused window. Ctrl-T
+ * (or the Term button of the task bar at the bottom, which also has a button for each window) starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
+ * ends bwm (the console comes back when /dev/fb0 closes). The Menu button at the
+ * right end of the task bar opens a launcher: Terminal, Files, Hello window, Quit bwm.
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
  * each window's pixels, takes rectangles to draw, and sends back keys and
@@ -62,6 +64,19 @@ struct fix_info {
 #define MAX_COLS 80
 #define MAX_ROWS 40
 #define MAXWIN 16
+#define BAR_H 24                         /* the task bar along the bottom */
+#define TERM_X 4                         /* its Term button */
+#define TERM_W 48
+#define BTN_X0 60                        /* and the window buttons after it */
+#define BTN_W 120
+#define BTN_GAP 4
+#define MENU_W 52                        /* the Menu button at the right end of the task bar */
+#define MENU_ITEM_W 140                  /* the launcher menu it opens above itself */
+#define MENU_ITEM_H 24
+#define EDGE 4                          /* the strip along each side of a frame that resizes it */
+#define GRIP 14                          /* the resize grip at the corner of a frame */
+#define MIN_CW 64
+#define MIN_CH 32
 #define MAXCLI 8
 #define RXCAP (BWM_MAX_PAYLOAD + 64)
 
@@ -80,6 +95,14 @@ struct win {
     uint32_t *shm;                       /* the client's memory file, mapped, when it gave one */
     size_t shm_len;
     uint32_t *pix;                       /* a client's contents: (w - 2 * BORDER) * (h - TITLE_H - BORDER) */
+    int resizable;                       /* has a grip */
+    int again;                           /* a size was wanted while a request was pending: ask again when it is answered */
+    int hidden;                          /* minimized: only its task bar button shows */
+    int maxed;                           /* maximized: sx, sy, sw, sh are the frame it goes back to */
+    int sx, sy, sw, sh;
+    int pend;                            /* a BWM_RESIZE has been sent and not answered */
+    int want_cw, want_ch;                /* the size of the contents the pointer is asking for */
+    int keep_r_on, keep_r, keep_b_on, keep_b;   /* a left or top edge is being dragged: the right or bottom edge stays at keep_r / keep_b */
     int cols, rows, cx, cy;
     char text[MAX_ROWS][MAX_COLS];
 };
@@ -87,6 +110,13 @@ static struct win pool[MAXWIN];
 static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
 static int nz;
 static int next_id = 1;
+static void touch_bar(void);
+static struct win *focus(void);
+static int menu_open;                    /* the launcher menu is showing */
+static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
+static struct win *sizing;               /* the window whose grip is held */
+static int sox, soy;                     /* from the pointer to the edge or corner of the frame it holds, when it was taken */
+static int size_edges;                   /* which: 1 left, 2 right, 4 top, 8 bottom */
 
 struct cli {
     int fd;                              /* -1 when free */
@@ -151,6 +181,7 @@ static struct win *win_new(int x, int y, int cw, int ch, const char *title, int 
         w->used = 1;
         w->id = next_id++;
         w->cli = cli;
+        w->resizable = cli < 0;
         w->x = x; w->y = y;
         w->w = cw + 2 * BORDER;
         w->h = ch + TITLE_H + BORDER;
@@ -163,6 +194,7 @@ static struct win *win_new(int x, int y, int cw, int ch, const char *title, int 
         for (int r = 0; r < MAX_ROWS; r++)
             memset(w->text[r], ' ', MAX_COLS);
         z[nz++] = w;
+        touch_bar();
         return w;
     }
     return NULL;
@@ -181,7 +213,10 @@ static void win_free(struct win *w)
     if (w->shm)
         munmap(w->shm, w->shm_len);
     w->shm = NULL;
+    if (sizing == w)
+        sizing = NULL;
     w->used = 0;
+    touch_bar();
 }
 
 static void win_put(struct win *w, int c)
@@ -215,6 +250,25 @@ static void win_say(struct win *w, const char *s)
         win_put(w, *s);
 }
 
+static void draw_grip(const struct win *w)
+{
+    uint32_t c = rgb(120, 120, 140);
+    int x1 = w->x + w->w - BORDER - 1, y1 = w->y + w->h - BORDER - 1;
+    for (int k = 4; k <= 12; k += 4)
+        for (int j = 0; j < k; j++) {
+            int px = x1 - j, py = y1 - (k - 1 - j);
+            if (px >= 0 && py >= 0 && px < (int)W && py < (int)H)
+                scene[py * W + px] = c;
+        }
+}
+
+/* The left edge of title bar button i of a window: 0 is the close box, then
+ * maximize (when it has a grip), then minimize. */
+static int title_btn(const struct win *w, int i)
+{
+    return w->x + w->w - BORDER - CLOSE_W - i * (CLOSE_W + 2);
+}
+
 static void draw_win(const struct win *w, int focused)
 {
     uint32_t bar = focused ? rgb(40, 90, 200) : rgb(110, 110, 120);
@@ -223,6 +277,19 @@ static void draw_win(const struct win *w, int focused)
     fill(scene, w->x + BORDER, w->y + BORDER, w->x + w->w - BORDER, w->y + TITLE_H, bar);
     text(scene, w->x + 8, w->y + BORDER + 1, w->title, rgb(255, 255, 255));
     fill(scene, w->x + w->w - BORDER - CLOSE_W, w->y + BORDER + 2, w->x + w->w - BORDER - 2, w->y + TITLE_H - 2, rgb(200, 60, 60));
+    if (w->resizable) {                  /* maximize: a box, minimize: a bar */
+        int x0 = title_btn(w, 1);
+        fill(scene, x0, w->y + BORDER + 2, x0 + CLOSE_W - 2, w->y + TITLE_H - 2, rgb(70, 160, 90));
+        fill(scene, x0 + 3, w->y + BORDER + 5, x0 + CLOSE_W - 5, w->y + BORDER + 6, rgb(255, 255, 255));
+        fill(scene, x0 + 3, w->y + BORDER + 5, x0 + 4, w->y + TITLE_H - 5, rgb(255, 255, 255));
+        fill(scene, x0 + CLOSE_W - 6, w->y + BORDER + 5, x0 + CLOSE_W - 5, w->y + TITLE_H - 5, rgb(255, 255, 255));
+        fill(scene, x0 + 3, w->y + TITLE_H - 6, x0 + CLOSE_W - 5, w->y + TITLE_H - 5, rgb(255, 255, 255));
+    }
+    {
+        int x0 = title_btn(w, w->resizable ? 2 : 1);
+        fill(scene, x0, w->y + BORDER + 2, x0 + CLOSE_W - 2, w->y + TITLE_H - 2, rgb(200, 160, 40));
+        fill(scene, x0 + 3, w->y + TITLE_H - 7, x0 + CLOSE_W - 5, w->y + TITLE_H - 5, rgb(255, 255, 255));
+    }
     if (w->pix) {
         int cw = cw_of(w), ch = ch_of(w);
         for (int y = 0; y < ch; y++) {
@@ -235,6 +302,8 @@ static void draw_win(const struct win *w, int focused)
                     scene[py * W + px] = w->pix[y * cw + x];
             }
         }
+        if (w->resizable)
+            draw_grip(w);
         return;
     }
     fill(scene, bx, by, w->x + w->w - BORDER, w->y + w->h - BORDER, w->body);
@@ -245,6 +314,75 @@ static void draw_win(const struct win *w, int focused)
     if (focused)
         fill(scene, bx + 4 + w->cx * CELL_W, by + 4 + w->cy * CELL_H + CELL_H - 3,
              bx + 4 + (w->cx + 1) * CELL_W, by + 4 + w->cy * CELL_H + CELL_H - 1, rgb(10, 10, 10));
+    if (w->resizable)
+        draw_grip(w);
+}
+
+/* The task bar: a button that starts a terminal, then one for each window
+ * in the order they were opened, the top one lit. */
+static void draw_bar(void)
+{
+    int y0 = (int)H - BAR_H;
+    fill(scene, 0, y0, W, H, rgb(25, 25, 35));
+    fill(scene, TERM_X, y0 + 3, TERM_X + TERM_W, H - 3, rgb(40, 140, 70));
+    text(scene, TERM_X + 8, y0 + 4, "Term", rgb(255, 255, 255));
+    int n = 0;
+    for (int i = 0; i < MAXWIN; i++) {
+        if (!pool[i].used)
+            continue;
+        int x = BTN_X0 + n * (BTN_W + BTN_GAP);
+        if (x + BTN_W > (int)W - MENU_W - 12)
+            break;
+        fill(scene, x, y0 + 3, x + BTN_W, H - 3, &pool[i] == focus() ? rgb(40, 90, 200) : pool[i].hidden ? rgb(45, 45, 60) : rgb(70, 70, 85));
+        char t[16];
+        snprintf(t, sizeof t, "%.14s", pool[i].title);
+        text(scene, x + 6, y0 + 4, t, rgb(255, 255, 255));
+        n++;
+    }
+    fill(scene, (int)W - MENU_W - 4, y0 + 3, (int)W - 4, H - 3, menu_open ? rgb(40, 90, 200) : rgb(70, 70, 85));
+    text(scene, (int)W - MENU_W + 2, y0 + 4, "Menu", rgb(255, 255, 255));
+}
+
+/* The launcher menu: what it starts, and where its entries are. */
+static const char *const menu_item[] = { "Terminal", "Files", "Hello window", "Quit bwm" };
+#define MENU_N 4
+#define MENU_X0 ((int)W - 4 - MENU_ITEM_W)
+#define MENU_Y0 ((int)H - BAR_H - MENU_N * MENU_ITEM_H)
+
+/* The entry of the menu at (x, y), or -1. */
+static int menu_at(int x, int y)
+{
+    if (x < MENU_X0 || x >= MENU_X0 + MENU_ITEM_W || y < MENU_Y0 || y >= MENU_Y0 + MENU_N * MENU_ITEM_H)
+        return -1;
+    return (y - MENU_Y0) / MENU_ITEM_H;
+}
+
+static void draw_menu(void)
+{
+    if (!menu_open)
+        return;
+    int lit = menu_at(menu_mx, menu_my);
+    fill(scene, MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + MENU_N * MENU_ITEM_H + 1, rgb(200, 200, 210));
+    for (int i = 0; i < MENU_N; i++) {
+        int y = MENU_Y0 + i * MENU_ITEM_H;
+        fill(scene, MENU_X0, y, MENU_X0 + MENU_ITEM_W, y + MENU_ITEM_H, i == lit ? rgb(40, 90, 200) : rgb(45, 45, 60));
+        text(scene, MENU_X0 + 10, y + 4, menu_item[i], rgb(255, 255, 255));
+    }
+}
+
+/* The window whose button is at x in the task bar, or NULL. */
+static struct win *bar_window(int x)
+{
+    int n = 0;
+    for (int i = 0; i < MAXWIN; i++) {
+        if (!pool[i].used)
+            continue;
+        int x0 = BTN_X0 + n * (BTN_W + BTN_GAP);
+        if (x >= x0 && x < x0 + BTN_W)
+            return &pool[i];
+        n++;
+    }
+    return NULL;
 }
 
 static void draw_scene(void)
@@ -255,7 +393,10 @@ static void draw_scene(void)
             scene[y * W + x] = c;
     }
     for (int i = 0; i < nz; i++)
-        draw_win(z[i], i == nz - 1);
+        if (!z[i]->hidden)
+            draw_win(z[i], z[i] == focus());
+    draw_bar();
+    draw_menu();
 }
 
 /* The pointer: '#' black outline, '.' white fill. */
@@ -311,17 +452,28 @@ static void touch(int x0, int y0, int x1, int y1)
 }
 static void touch_win(const struct win *w) { touch(w->x, w->y, w->x + w->w, w->y + w->h); }
 static void touch_all(void) { touch(0, 0, W, H); }
+static void touch_bar(void) { touch(0, (int)H - BAR_H, W, H); }
 
 static struct win *hit(int x, int y)
 {
     for (int i = nz - 1; i >= 0; i--)
-        if (x >= z[i]->x && x < z[i]->x + z[i]->w && y >= z[i]->y && y < z[i]->y + z[i]->h)
+        if (!z[i]->hidden && x >= z[i]->x && x < z[i]->x + z[i]->w && y >= z[i]->y && y < z[i]->y + z[i]->h)
+            return z[i];
+    return NULL;
+}
+
+/* The window that gets the keys: the top one that is not minimized. */
+static struct win *focus(void)
+{
+    for (int i = nz - 1; i >= 0; i--)
+        if (!z[i]->hidden)
             return z[i];
     return NULL;
 }
 
 static void raise_win(struct win *w)
 {
+    w->hidden = 0;
     int i = 0;
     while (i < nz && z[i] != w)
         i++;
@@ -332,6 +484,59 @@ static void raise_win(struct win *w)
 }
 
 /* ---- clients ---- */
+
+static void to_client(int cli, uint32_t type, const void *p, uint32_t len);
+
+static void clamp_size(int *cw, int *ch)
+{
+    if (*cw < MIN_CW) *cw = MIN_CW;
+    if (*ch < MIN_CH) *ch = MIN_CH;
+    if (*cw > (int)W - 2 * BORDER) *cw = W - 2 * BORDER;
+    if (*ch > (int)H - TITLE_H - BORDER) *ch = H - TITLE_H - BORDER;
+}
+
+/* Puts the frame where the edge that is being dragged left it: a left or top
+ * edge moves, so the opposite one stays. */
+static void keep_edges(struct win *w)
+{
+    if (w->keep_r_on) {
+        w->x = w->keep_r - w->w;
+        if (w->x < 0) w->x = 0;
+    }
+    if (w->keep_b_on) {
+        w->y = w->keep_b - w->h;
+        if (w->y < 0) w->y = 0;
+    }
+}
+
+/* Gives a window the size its grip is asking for: at once if bwm keeps its
+ * contents, else by asking the program, one request at a time. */
+static void request_size(struct win *w)
+{
+    int cw = w->want_cw, ch = w->want_ch;
+    clamp_size(&cw, &ch);
+    if (cw == cw_of(w) && ch == ch_of(w))
+        return;
+    if (w->cli < 0) {
+        touch_win(w);
+        w->w = cw + 2 * BORDER;
+        w->h = ch + TITLE_H + BORDER;
+        w->cols = (cw - 8) / CELL_W;
+        w->rows = (ch - 8) / CELL_H;
+        if (w->cols > MAX_COLS) w->cols = MAX_COLS;
+        if (w->rows > MAX_ROWS) w->rows = MAX_ROWS;
+        if (w->cols < 1) w->cols = 1;
+        if (w->rows < 1) w->rows = 1;
+        if (w->cx >= w->cols) w->cx = w->cols - 1;
+        if (w->cy >= w->rows) w->cy = w->rows - 1;
+        keep_edges(w);
+        touch_win(w);
+    } else if (!w->pend) {
+        struct bwm_resize r = { (uint32_t)w->id, (uint32_t)cw, (uint32_t)ch };
+        to_client(w->cli, BWM_RESIZE, &r, sizeof r);
+        w->pend = 1;
+    }
+}
 
 static void to_client(int cli, uint32_t type, const void *p, uint32_t len)
 {
@@ -457,6 +662,60 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
             touch_win(w);
             win_free(w);
         }
+    } else if (type == BWM_RESIZABLE && len == sizeof(struct bwm_resizable)) {
+        struct bwm_resizable r;
+        memcpy(&r, p, sizeof r);
+        struct win *w = by_id(i, r.id);
+        if (w) {
+            w->resizable = 1;
+            touch_win(w);
+        }
+    } else if (type == BWM_RESIZED && len == sizeof(struct bwm_resized)) {
+        struct bwm_resized r;
+        memcpy(&r, p, sizeof r);
+        int mf = clis[i].pend_fd;
+        clis[i].pend_fd = -1;
+        struct win *w = by_id(i, r.id);
+        int ok = w && w->pend && r.w >= MIN_CW && r.h >= MIN_CH && r.w <= W - 2 * BORDER && r.h <= H - TITLE_H - BORDER
+                 && (w->shm ? mf >= 0 : mf < 0);
+        void *m = MAP_FAILED;
+        size_t need = (size_t)r.w * r.h * 4;
+        if (ok && w->shm) {
+            struct stat st;
+            if (fstat(mf, &st) == 0 && st.st_size >= 0 && (size_t)st.st_size >= need)
+                m = mmap(NULL, need, PROT_READ, MAP_SHARED, mf, 0);
+            ok = m != MAP_FAILED;
+        }
+        uint32_t *np = ok ? calloc((size_t)r.w * r.h, 4) : NULL;
+        if (mf >= 0)
+            close(mf);
+        if (!np) {
+            if (m != MAP_FAILED)
+                munmap(m, need);
+            drop_client(i);                                /* an answer that cannot be right */
+            return;
+        }
+        for (size_t k = 0; k < (size_t)r.w * r.h; k++)
+            np[k] = w->body;
+        touch_win(w);
+        free(w->pix);
+        w->pix = np;
+        if (w->shm) {
+            munmap(w->shm, w->shm_len);
+            w->shm = m;
+            w->shm_len = need;
+        }
+        w->w = r.w + 2 * BORDER;
+        w->h = r.h + TITLE_H + BORDER;
+        w->pend = 0;
+        keep_edges(w);
+        touch_win(w);
+        if (sizing == w || w->again) {
+            w->again = 0;
+            request_size(w);                               /* the pointer may have moved on, or a maximize came in */
+        } else {
+            w->keep_r_on = w->keep_b_on = 0;
+        }
     } else if (type == BWM_SETTITLE && len == sizeof(struct bwm_settitle)) {
         struct bwm_settitle t;
         memcpy(&t, p, sizeof t);
@@ -465,6 +724,7 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
             t.title[sizeof t.title - 1] = 0;
             snprintf(w->title, sizeof w->title, "%s", t.title);
             touch_win(w);
+            touch_bar();
         }
     } else {
         drop_client(i);                                    /* not a message we know */
@@ -563,7 +823,7 @@ static long long now_ms(void)
 static long long quit_due;                /* when to end without the ^Q; 0 until Ctrl-Q came as an event */
 static int tty_q;                         /* the ^Q came first */
 
-/* The bytes a key press makes (at most 4) in out; returns how many. */
+/* The bytes a key press makes (at most 6) in out; returns how many. */
 static int key_bytes(unsigned code, char *out)
 {
     static const struct { unsigned code; char final; } nav[] = {
@@ -572,6 +832,16 @@ static int key_bytes(unsigned code, char *out)
         if (nav[i].code == code) {
             out[0] = 27; out[1] = '['; out[2] = nav[i].final;
             return 3;
+        }
+    static const struct { unsigned code; const char *seq; } fkey[] = {
+        { 59, "\033OP" }, { 60, "\033OQ" }, { 61, "\033OR" }, { 62, "\033OS" },
+        { 63, "\033[15~" }, { 64, "\033[17~" }, { 65, "\033[18~" }, { 66, "\033[19~" },
+        { 67, "\033[20~" }, { 68, "\033[21~" }, { 87, "\033[23~" }, { 88, "\033[24~" } };
+    for (unsigned i = 0; i < sizeof fkey / sizeof fkey[0]; i++)
+        if (fkey[i].code == code) {
+            size_t n = strlen(fkey[i].seq);
+            memcpy(out, fkey[i].seq, n);
+            return (int)n;
         }
     if (code == 111) { memcpy(out, "\033[3~", 4); return 4; }        /* Delete */
     if (code == 104) { memcpy(out, "\033[5~", 4); return 4; }        /* Page Up */
@@ -600,6 +870,61 @@ static void launch_terminal(void)
         char *argv[] = { "bterm", NULL };
         signal(SIGCHLD, SIG_DFL);                             /* an ignored SIGCHLD would stay ignored in ash */
         execv("/bin/bterm", argv);
+        _exit(127);
+    }
+}
+
+/* Minimize: the window goes to the bottom of the stack and out of sight,
+ * its task bar button brings it back. */
+static void minimize(struct win *w)
+{
+    int i = 0;
+    while (i < nz && z[i] != w)
+        i++;
+    if (i >= nz)
+        return;
+    touch_win(w);
+    w->hidden = 1;
+    memmove(&z[1], &z[0], i * sizeof z[0]);
+    z[0] = w;
+    if (sizing == w)
+        sizing = NULL;
+    touch_bar();
+}
+
+/* Maximize fills the screen above the task bar; doing it again puts the
+ * window back where it was. */
+static void toggle_max(struct win *w)
+{
+    touch_win(w);
+    w->keep_r_on = w->keep_b_on = 0;
+    if (!w->maxed) {
+        w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
+        w->maxed = 1;
+        w->x = 0; w->y = 0;
+        w->want_cw = (int)W - 2 * BORDER;
+        w->want_ch = (int)H - BAR_H - TITLE_H - BORDER;
+    } else {
+        w->maxed = 0;
+        w->x = w->sx; w->y = w->sy;
+        w->want_cw = w->sw - 2 * BORDER;
+        w->want_ch = w->sh - TITLE_H - BORDER;
+    }
+    if (w->cli >= 0 && w->pend)
+        w->again = 1;
+    request_size(w);
+    touch_win(w);
+}
+
+/* Starts /bin/IMAGE with argv[0] NAME (bfiles is bterm run under that name). */
+static void launch_program(const char *name, const char *image)
+{
+    if (fork() == 0) {
+        char path[64];
+        char *argv[] = { (char *)name, NULL };
+        snprintf(path, sizeof path, "/bin/%s", image);
+        signal(SIGCHLD, SIG_DFL);
+        execv(path, argv);
         _exit(127);
     }
 }
@@ -719,7 +1044,7 @@ int main(int argc, char **argv)
             break;
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
-        struct win *top = nz ? z[nz - 1] : NULL;
+        struct win *top = focus();
         if (p[0].revents & POLLIN) {
             char b[32];
             ssize_t n = read(0, b, sizeof b);
@@ -755,13 +1080,19 @@ int main(int argc, char **argv)
                         k_alt = down;
                     } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
                         if (nz > 1) {
-                            raise_win(z[0]);
+                            if (k_shift) {                              /* the other way: the top one goes to the bottom */
+                                struct win *t = z[nz - 1];
+                                memmove(&z[1], &z[0], (nz - 1) * sizeof z[0]);
+                                z[0] = t;
+                            } else {
+                                raise_win(z[0]);
+                            }
                             touch_all();
                         }
                     } else if (code == 58 && down) {
                         k_caps = !k_caps;
                     } else if (down) {
-                        char out[4];
+                        char out[8];
                         int m = key_bytes(code, out);
                         for (int j = 0; j < m; j++)
                             if (type_byte(top, out[j]))
@@ -779,7 +1110,7 @@ int main(int argc, char **argv)
         if (quit_due && (tty_q || now_ms() >= quit_due))
             running = 0;
         if (rep_code && now_ms() >= rep_due) {
-            char out[4];
+            char out[8];
             int m = key_bytes(rep_code, out);
             for (int j = 0; j < m; j++)
                 if (type_byte(top, out[j]))
@@ -813,11 +1144,56 @@ int main(int argc, char **argv)
                 if (mx >= (int)W) mx = W - 1;
                 if (my >= (int)H) my = H - 1;
                 int down = m[0] & 1;
-                struct win *under = hit(mx, my);
-                if (down && !(buttons & 1) && under) {
+                int in_bar = my >= (int)H - BAR_H;
+                struct win *under = in_bar ? NULL : hit(mx, my);
+                if (menu_open && (dx || dy)) {
+                    touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, (int)H - BAR_H);
+                    menu_mx = mx; menu_my = my;
+                }
+                if (down && !(buttons & 1) && menu_open) {
+                    int it = menu_at(mx, my);            /* a click chooses an entry or, anywhere else, closes the menu */
+                    menu_open = 0;
+                    touch_all();
+                    if (it == 0)
+                        launch_terminal();
+                    else if (it == 1)
+                        launch_program("bfiles", "bterm");
+                    else if (it == 2)
+                        launch_program("bhello", "bhello");
+                    else if (it == 3)
+                        running = 0;
+                    buttons = m[0];
+                    continue;
+                }
+                if (down && !(buttons & 1) && in_bar && mx >= (int)W - MENU_W - 4) {
+                    menu_open = 1;
+                    menu_mx = mx; menu_my = my;
+                    touch_all();
+                } else if (down && !(buttons & 1) && in_bar) {
+                    if (mx >= TERM_X && mx < TERM_X + TERM_W) {
+                        launch_terminal();
+                    } else {
+                        struct win *bw = bar_window(mx);
+                        if (bw && (bw != focus() || bw->hidden)) {
+                            raise_win(bw);
+                            touch_all();
+                        }
+                    }
+                } else if (down && !(buttons & 1) && under) {
                     gx = mx - under->x;
                     gy = my - under->y;
                     int on_close = my < under->y + TITLE_H && mx >= under->x + under->w - BORDER - CLOSE_W && mx < under->x + under->w - BORDER - 2;
+                    int in_title = my >= under->y + BORDER && my < under->y + TITLE_H;
+                    int on_max = under->resizable && in_title && mx >= title_btn(under, 1) && mx < title_btn(under, 1) + CLOSE_W - 2;
+                    int on_min = in_title && mx >= title_btn(under, under->resizable ? 2 : 1) && mx < title_btn(under, under->resizable ? 2 : 1) + CLOSE_W - 2;
+                    int edges = 0;
+                    if (under->resizable) {
+                        if (mx < under->x + EDGE) edges |= 1;
+                        if (mx >= under->x + under->w - EDGE) edges |= 2;
+                        if (my < under->y + EDGE) edges |= 4;
+                        if (my >= under->y + under->h - EDGE) edges |= 8;
+                        if (mx >= under->x + under->w - GRIP && my >= under->y + under->h - GRIP) edges |= 2 | 8;
+                    }
                     if (on_close) {
                         if (under->cli >= 0) {
                             struct bwm_close cl = { (uint32_t)under->id };
@@ -827,23 +1203,61 @@ int main(int argc, char **argv)
                             win_free(under);
                         }
                         under = NULL;
+                    } else if (on_max || on_min) {
+                        if (on_max) {
+                            raise_win(under);
+                            toggle_max(under);
+                        } else {
+                            minimize(under);
+                        }
+                        touch_all();
+                        under = NULL;
                     } else {
-                        if (under != z[nz - 1]) {
+                        if (under != focus()) {
                             raise_win(under);
                             touch_all();
                         }
                         drag = my < under->y + TITLE_H ? under : NULL;
+                        if (drag)
+                            under->maxed = 0;                    /* moved by hand: no longer "maximized" */
+                        if (edges) {
+                            sizing = under;
+                            under->maxed = 0;
+                            size_edges = edges;
+                            sox = edges & 1 ? mx - under->x : under->x + under->w - mx;
+                            soy = edges & 4 ? my - under->y : under->y + under->h - my;
+                            under->want_cw = cw_of(under);
+                            under->want_ch = ch_of(under);
+                            under->keep_r_on = edges & 1;
+                            under->keep_r = under->x + under->w;
+                            under->keep_b_on = (edges & 4) != 0;
+                            under->keep_b = under->y + under->h;
+                            drag = NULL;
+                        }
                     }
                 } else if (!down) {
                     drag = NULL;
+                    if (sizing && !sizing->pend)
+                        sizing->keep_r_on = sizing->keep_b_on = 0;     /* else the answer lets go of them */
+                    sizing = NULL;
                 }
                 if (drag && down) {
                     touch_win(drag);
                     drag->x = mx - gx; drag->y = my - gy;
                     touch_win(drag);
+                } else if (sizing && down) {
+                    if (size_edges & 2)
+                        sizing->want_cw = mx + sox - sizing->x - 2 * BORDER;
+                    else if (size_edges & 1)
+                        sizing->want_cw = sizing->keep_r - (mx - sox) - 2 * BORDER;
+                    if (size_edges & 8)
+                        sizing->want_ch = my + soy - sizing->y - TITLE_H - BORDER;
+                    else if (size_edges & 4)
+                        sizing->want_ch = sizing->keep_b - (my - soy) - TITLE_H - BORDER;
+                    request_size(sizing);
                 } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || (m[0] & 7) != (buttons & 7))) {
                     struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), m[0] & 7u };
-                    if (under == z[nz - 1])
+                    if (under == focus())
                         to_client(under->cli, BWM_MOUSE, &ev, sizeof ev);
                 }
                 buttons = m[0];

@@ -51,16 +51,17 @@ def is_elf(path):
         return f.read(4) == b"\x7fELF"
 
 
-def load_tests(ltp, only, skip, suites=()):
+def load_tests(ltp, only, skip, suites=(), libctest=None):
     """The entries of runtest/syscalls whose program was built: (tag, argv,
     files), files being the programs it needs on the disk: its own, and the
     helper programs next to it that are not tests themselves (execve_child
     and the like, which LTP copies from the directory a test starts in)."""
     progs, dirs = {}, {}
     posix = "posix" in suites
-    names = ["syscalls", *(s for s in suites if s != "posix")]
+    names = ["syscalls", *(s for s in suites if s not in ("posix", "libctest"))]
     for suite in names:
-        for base in (os.path.join(ltp, "testcases", "kernel", suite), os.path.join(ltp, "testcases", suite)):
+        sdir = {"mm": "mem", "dio": "io", "fs_perms_simple": "fs"}.get(suite, suite)   # these runtest files list programs built in another directory
+        for base in (os.path.join(ltp, "testcases", "kernel", sdir), os.path.join(ltp, "testcases", sdir)):
             for root, _, files in os.walk(base):
                 for f in sorted(files):
                     p = os.path.join(root, f)
@@ -90,7 +91,30 @@ def load_tests(ltp, only, skip, suites=()):
                 continue
             progs[prog] = path
             tests.append((tag, [prog], {prog}))
+    if "libctest" in suites and libctest:
+        for tag, prog, path in libctest_tests(libctest):
+            if (only and not re.search(only, tag)) or tag in skip:
+                continue
+            progs[prog] = path
+            tests.append((tag, [prog], {prog}))
     return tests, progs, missing
+
+
+def libctest_tests(base):
+    """musl's libc-test programs (build/libc-test, built by the Makefile as
+    static executables) that were built: (tag, file name, path). A program
+    exits 0 when its checks hold and prints each failed one."""
+    found = []
+    for kind in ("functional", "regression"):
+        d = os.path.join(base, "src", kind)
+        if not os.path.isdir(d):
+            continue
+        for f in sorted(os.listdir(d)):
+            p = os.path.join(d, f)
+            if f.endswith("-static.exe") and os.access(p, os.X_OK) and is_elf(p):
+                name = f[:-len("-static.exe")]
+                found.append((f"libctest-{kind}-{name}", f"lc_{kind[:3]}_{name}", p))
+    return found
 
 
 def posix_tests(ltp):
@@ -316,7 +340,7 @@ def run_guest(args, tests, progs, log, gated):
 
 
 def record(tag, text, status):
-    result, detail = (classify_posix if tag.startswith("posix-") else classify)(status, text)
+    result, detail = (classify_posix if tag.startswith(("posix-", "libctest-")) else classify)(status, text)
     calls = sorted({int(n) for n in NOTE.findall(text)})
     return {"name": tag, "result": result, "detail": detail[:300], "syscalls": calls}
 
@@ -375,6 +399,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kernel", default="build/bastios.elf")
     ap.add_argument("--ltp", default="build/ltp", help="the built LTP tree")
+    ap.add_argument("--libc-test", default="build/libc-test", help="the built musl libc-test tree (--suite libctest)")
     ap.add_argument("--out", default="build/compat/ltp")
     ap.add_argument("--only", help="run only tags matching this regular expression")
     ap.add_argument("--timeout", type=float, default=60)
@@ -383,7 +408,7 @@ def main():
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("--suite", action="append", default=[],
                     help="also run runtest/NAME with the programs in testcases/kernel/NAME (pty, sched, ...); "
-                         "posix is the Open POSIX Test Suite's conformance tests")
+                         "posix is the Open POSIX Test Suite's conformance tests, libctest musl's libc-test")
     args = ap.parse_args()
 
     base = os.path.join(HERE, "ltp_baseline.txt")
@@ -391,7 +416,7 @@ def main():
     if os.path.exists(base) and not args.update_baseline:
         gated = {l.strip() for l in open(base) if l.strip() and not l.startswith("#")}
     skip = load_skip()
-    tests, progs, missing = load_tests(args.ltp, args.only, skip, args.suite)
+    tests, progs, missing = load_tests(args.ltp, args.only, skip, args.suite, args.libc_test)
     os.makedirs(args.out, exist_ok=True)
     t0 = time.time()
     with open(os.path.join(args.out, "serial.log"), "wb") as log:

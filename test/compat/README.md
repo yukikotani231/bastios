@@ -209,12 +209,18 @@ unsupported (`TCONF`: it needs something this system does not claim to
 have, such as a kernel config or a block device), hang (interrupted after
 `--timeout` seconds) or crash. `--only REGEX` runs a subset by tag.
 
-`make compat-ltp` also runs LTP's pseudo-terminal, namespace (container) and
+`make compat-ltp` also runs LTP's file system stress tests (`runtest/fs`: growfiles,
+ftest, stream), the memory tests (`runtest/mm`: mmap stress, shared memory), direct I/O (`runtest/dio`), file permissions (`runtest/fs_perms_simple`), the pthread stress tests (`runtest/sched`), its pseudo-terminal, namespace (container) and
 CVE regression tests, and the Open POSIX Test Suite's conformance tests
 (`--suite posix`; about 1,600 programs named after an interface and an
 assertion, such as `posix-sigaction_1-1`). Those exit 0 for a pass, 1 for a
 failure, 2 when they could not set themselves up, 4 or 5 for something not
 supported here.
+
+`--suite libctest` runs musl's libc-test (`src/functional` and `src/regression`,
+built static against musl at the revision `LIBCTEST_REV` in the Makefile; tags
+are `libctest-functional-NAME` and `libctest-regression-NAME`). An executable
+that exits 0 passes.
 
 The report ranks missing system calls by how many tests they block, as
 `run.py` does, and lists every test that did not pass with its first
