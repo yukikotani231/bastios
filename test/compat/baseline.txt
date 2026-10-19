@@ -1674,3 +1674,7 @@ t_ltp2: a unix stream socket that is bound to a name can still connect, and the 
 t_ltp2: utimensat on a directory sets its access and modification times apart
 t_ltp2: sched_getaffinity of a negative pid is ESRCH, of a pid that is not there too
 t_ltp2: the console keeps a window size set with TIOCSWINSZ
+apps: cpython: tests of its own: select, selectors, poll, timeout, fcntl
+apps: cpython: tests of its own: os, stat, file, fileio, mmap, pipes
+apps: cpython: tests of its own: signal, wait3, wait4, time, resource
+apps: cpython: tests of its own: threading, posix and pty
