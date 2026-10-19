@@ -37,6 +37,8 @@ PHASES = [
     ("make1", "make -j1 of a generated project: one gcc -O1 per file, then a link", None),
     ("make2", "the same with make -j2", None),
     ("tgz", "tar the gcc and header trees through gzip -1 into one file", None),
+    ("git", "git init, add, commit, status and log of the generated project", None),
+    ("python", "five CPython starts importing the standard library, then a compute loop", None),
     ("scan", "find over the whole root, grep -rl over the headers", None),
 ]
 

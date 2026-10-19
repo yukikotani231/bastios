@@ -72,6 +72,23 @@ tgz)
     echo @end tgz $?
     $bb rm -f $R/tmp/x.tgz
     ;;
+git)
+    # git over the generated project: init, add, commit, status, log.
+    chr /sbin/apk add --allow-untrusted -q --no-progress git > /dev/null 2>&1
+    $bb rm -rf $R/root/proj
+    $bb tar -xf /disk/proj.tar -C $R/root
+    echo @begin git
+    chr /bin/sh -c 'cd /root/proj && git init -q . && git add -A && git -c user.name=b -c user.email=b@b commit -q -m x && git status -s && git log --stat | wc -l > /dev/null'
+    echo @end git $?
+    ;;
+python)
+    # CPython: five starts that import a spread of the standard library
+    # (many small reads, compiling the modules once), then a compute loop.
+    chr /sbin/apk add --allow-untrusted -q --no-progress python3 > /dev/null 2>&1
+    echo @begin python
+    chr /bin/sh -c 'for i in 1 2 3 4 5; do python3 -c "import json, re, argparse, decimal, http.client, email.parser"; done; python3 -c "print(sum(i * i % 7 for i in range(2000000)))" > /dev/null'
+    echo @end python $?
+    ;;
 scan)
     # Walk the whole root and grep the headers: path lookup and small reads.
     echo @begin scan
