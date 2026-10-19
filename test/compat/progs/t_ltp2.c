@@ -124,6 +124,29 @@ static void *kick_worker(void *a) {
     return 0;
 }
 
+static pthread_mutex_t pi_m;
+static volatile long pi_count;
+static volatile int pi_state;
+static void *pi_incr(void *a) {
+    (void)a;
+    for (int i = 0; i < 2000; i++) {
+        pthread_mutex_lock(&pi_m);
+        long c = pi_count;
+        if (i % 64 == 0) sched_yield();           // holds the lock across a switch
+        pi_count = c + 1;
+        pthread_mutex_unlock(&pi_m);
+    }
+    return 0;
+}
+static void *pi_holder(void *a) {
+    pthread_mutex_lock(&pi_m);
+    pi_state = 1;
+    while (pi_state != 2) usleep(1000);
+    if (a) return 0;                              // dies holding the lock
+    pthread_mutex_unlock(&pi_m);
+    return 0;
+}
+
 int main(void) {
     setup();
     signal(SIGPIPE, SIG_IGN);
@@ -1000,6 +1023,40 @@ int main(void) {
            ok = ok && open("/bin/nonesuch", O_RDONLY) < 0 && errno == ENOENT;
            ok = ok && open("/bin/cat", O_WRONLY) < 0;
            if (fd >= 0) close(fd);
+           ok; }));
+    EXPECT("a priority-inheritance robust mutex locks, contends, times out and reports its owner's death", ({
+           pthread_mutexattr_t ma;
+           pthread_mutexattr_init(&ma);
+           int ok = pthread_mutexattr_setprotocol(&ma, PTHREAD_PRIO_INHERIT) == 0;
+           ok = ok && pthread_mutexattr_setrobust(&ma, PTHREAD_MUTEX_ROBUST) == 0;
+           ok = ok && pthread_mutex_init(&pi_m, &ma) == 0;
+           ok = ok && pthread_mutex_lock(&pi_m) == 0 && pthread_mutex_trylock(&pi_m) == EBUSY;
+           ok = ok && pthread_mutex_unlock(&pi_m) == 0;
+           pthread_t t[4];
+           pi_count = 0;
+           for (int i = 0; i < 4; i++) pthread_create(&t[i], 0, pi_incr, 0);
+           for (int i = 0; i < 4; i++) pthread_join(t[i], 0);
+           ok = ok && pi_count == 8000;              // no lost update: the lock excluded
+           pthread_t h;
+           pi_state = 0;
+           pthread_create(&h, 0, pi_holder, 0);
+           while (pi_state != 1) usleep(1000);
+           struct timespec ts;
+           clock_gettime(CLOCK_REALTIME, &ts);
+           ts.tv_nsec += 50000000;
+           if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+           ok = ok && pthread_mutex_timedlock(&pi_m, &ts) == ETIMEDOUT;
+           pi_state = 2;
+           pthread_join(h, 0);
+           ok = ok && pthread_mutex_lock(&pi_m) == 0 && pthread_mutex_unlock(&pi_m) == 0;
+           pi_state = 0;
+           pthread_create(&h, 0, pi_holder, (void *)1);   // ends holding the lock
+           while (pi_state != 1) usleep(1000);
+           pi_state = 2;
+           pthread_join(h, 0);
+           ok = ok && pthread_mutex_lock(&pi_m) == EOWNERDEAD;
+           ok = ok && pthread_mutex_consistent(&pi_m) == 0 && pthread_mutex_unlock(&pi_m) == 0;
+           ok = ok && pthread_mutex_lock(&pi_m) == 0 && pthread_mutex_unlock(&pi_m) == 0;
            ok; }));
     EXPECT("a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT", ({
            struct stat st;
