@@ -16,6 +16,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
+- `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
+- `bwm` turns the mouse wheel on (ImPS/2) and hands wheel steps to the window under the pointer; `bfiles` scrolls three lines a step in the viewer and the editor.
 - `bwm` shows the time of day (UTC, `HH:MM`) in the task bar.
 - `bwm` draws a resize cursor over the edges and corners of a resizable window.
 - `bfiles` edits a text file in place (`e` in its viewer; Ctrl-S saves, Ctrl-X returns) and opens a file given on its command line.

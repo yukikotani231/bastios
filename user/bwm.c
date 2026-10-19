@@ -319,6 +319,39 @@ static void draw_win(const struct win *w, int focused)
         draw_grip(w);
 }
 
+/* Reads exactly n bytes of an answer from the (non-blocking) mouse, waiting
+ * a little for each; -1 if they do not come. */
+static int mice_read_n(int fd, unsigned char *p, size_t n)
+{
+    size_t got = 0;
+    while (got < n) {
+        struct pollfd pf = { fd, POLLIN, 0 };
+        if (poll(&pf, 1, 300) <= 0)
+            return -1;
+        ssize_t r = read(fd, p + got, n - got);
+        if (r <= 0)
+            return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
+/* Asks the mouse for the wheel (the IntelliMouse sequence, then its id) and
+ * returns the packet length: 4 if it answered with id 3, else 3. The
+ * kernel keeps only the answer to the last byte written, so the sequence and
+ * the id request are written apart. The answers are read here, so no packet
+ * is mistaken for one. */
+static int mice_wheel(int fd)
+{
+    static const unsigned char seq[] = { 0xF3, 200, 0xF3, 100, 0xF3, 80 };
+    unsigned char got[2];
+    if (write(fd, seq, sizeof seq) != (ssize_t)sizeof seq || mice_read_n(fd, got, 1) < 0 || got[0] != 0xFA)
+        return 3;
+    if (write(fd, "\xF2", 1) != 1 || mice_read_n(fd, got, 2) < 0)
+        return 3;
+    return got[0] == 0xFA && got[1] == 3 ? 4 : 3;
+}
+
 /* The time of day (UTC, as the system keeps it) for the clock in the task bar. */
 static void clock_hm(int *h, int *m)
 {
@@ -898,6 +931,10 @@ static int k_shift, k_ctrl, k_alt, k_caps;
  * until it is released. */
 #define REPEAT_FIRST_MS 400
 #define REPEAT_NEXT_MS  40
+#define DOUBLE_CLICK_MS 400
+static struct win *last_click_win;        /* the window whose title bar was clicked last, and when */
+static long long last_click_ms;
+static int last_click_maxed;              /* whether it was maximized before that click */
 static int clock_shown = -1;              /* the minute of the day the task bar shows */
 static unsigned rep_code;
 static long long rep_due;                 /* when the next repeat is due, in ms; valid while rep_code != 0 */
@@ -1009,6 +1046,27 @@ static void toggle_max(struct win *w)
     touch_win(w);
 }
 
+/* Fills the left (side -1) or right (side 1) half of the screen above the
+ * task bar, or all of it (side 0); the maximize button, or toggle_max, puts the window back. */
+static void snap_win(struct win *w, int side)
+{
+    touch_win(w);
+    w->keep_r_on = w->keep_b_on = 0;
+    if (!w->maxed) {
+        w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
+        w->maxed = 1;
+    }
+    int half = side == 0 ? (int)W : side > 0 ? (int)W - (int)W / 2 : (int)W / 2;
+    w->x = side > 0 ? (int)W / 2 : 0;
+    w->y = 0;
+    w->want_cw = half - 2 * BORDER;
+    w->want_ch = (int)H - BAR_H - TITLE_H - BORDER;
+    if (w->cli >= 0 && w->pend)
+        w->again = 1;
+    request_size(w);
+    touch_win(w);
+}
+
 /* Starts /bin/IMAGE with argv[0] NAME (bfiles is bterm run under that name). */
 static void launch_program(const char *name, const char *image)
 {
@@ -1063,7 +1121,10 @@ int main(int argc, char **argv)
         puts("bwm: no screen (ENODEV)");
         return 2;
     }
-    int mice = open("/dev/input/mice", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int mice = open("/dev/input/mice", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (mice < 0)
+        mice = open("/dev/input/mice", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int pktlen = mice >= 0 ? mice_wheel(mice) : 3;           /* 4 with a wheel */
     int keys = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     struct var_info v;
     struct fix_info f;
@@ -1207,6 +1268,13 @@ int main(int argc, char **argv)
                             }
                             touch_all();
                         }
+                    } else if ((code == 105 || code == 106 || code == 103) && down && k_alt) {
+                        struct win *t = focus();                    /* Alt-Left, Alt-Right: half the screen; Alt-Up: all of it */
+                        if (t && t->resizable) {
+                            raise_win(t);
+                            snap_win(t, code == 103 ? 0 : code == 106 ? 1 : -1);
+                            touch_all();
+                        }
                     } else if (code == 58 && down) {
                         k_caps = !k_caps;
                     } else if (down) {
@@ -1253,9 +1321,10 @@ int main(int argc, char **argv)
             if (icli[i] >= 0 && clis[i].fd >= 0 && (p[icli[i]].revents & (POLLIN | POLLHUP | POLLERR)))
                 client_input(i);
         if (imice >= 0 && (p[imice].revents & POLLIN)) {
-            unsigned char m[3];
-            while (read(mice, m, 3) == 3) {
+            unsigned char m[4] = { 0, 0, 0, 0 };
+            while (read(mice, m, pktlen) == pktlen) {
                 int dx = (signed char)m[1], dy = (signed char)m[2];
+                int wheel = pktlen == 4 ? (signed char)m[3] : 0;
                 mx += dx; my -= dy;
                 if (mx < 0) mx = 0;
                 if (my < 0) my = 0;
@@ -1328,7 +1397,20 @@ int main(int argc, char **argv)
                             raise_win(under);
                             touch_all();
                         }
-                        drag = my < under->y + TITLE_H ? under : NULL;
+                        int on_title = my < under->y + TITLE_H && !edges;
+                        long long now = now_ms();
+                        int dbl = under->resizable && on_title && under == last_click_win && now - last_click_ms < DOUBLE_CLICK_MS;
+                        if (dbl) {                               /* a double click on the title bar: maximize or restore */
+                            under->maxed = last_click_maxed;
+                            toggle_max(under);
+                            touch_all();
+                            last_click_win = NULL;
+                        } else {
+                            last_click_win = on_title ? under : NULL;
+                            last_click_ms = now;
+                            last_click_maxed = under->maxed;
+                        }
+                        drag = !dbl && my < under->y + TITLE_H ? under : NULL;
                         if (drag)
                             under->maxed = 0;                    /* moved by hand: no longer "maximized" */
                         if (edges) {
@@ -1371,9 +1453,10 @@ int main(int argc, char **argv)
                     else if (size_edges & 4)
                         sizing->want_ch = sizing->keep_b - (my - soy) - TITLE_H - BORDER;
                     request_size(sizing);
-                } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || (m[0] & 7) != (buttons & 7))) {
-                    struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), m[0] & 7u };
-                    if (under == focus())
+                } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || wheel || (m[0] & 7) != (buttons & 7))) {
+                    /* the wheel (negative is up) goes in bits 8 to 15 of the buttons, as a signed byte */
+                    struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), (m[0] & 7u) | ((uint32_t)(wheel & 0xFF) << 8) };
+                    if (under == focus() || wheel)
                         to_client(under->cli, BWM_MOUSE, &ev, sizeof ev);
                 }
                 buttons = m[0];

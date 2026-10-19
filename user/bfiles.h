@@ -10,7 +10,8 @@
  * than 64 KiB in place: typing inserts, Enter, Backspace, Delete, the arrow,
  * Home, End and Page keys and a click move and change the text, Ctrl-S saves
  * ("bfiles: saved PATH") and Ctrl-X goes back to the viewer, which shows the
- * file as it is on disk. "bfiles /path/to/file" opens the file in the viewer. Says "bfiles: window ID" when the
+ * file as it is on disk. "bfiles /path/to/file" opens the file in the viewer.
+ * The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
  * window is open and "bfiles: dir PATH" or "bfiles: view PATH" as it
  * moves.
  * It is part of the bterm program, which runs it when started as "bfiles"
@@ -505,8 +506,22 @@ static int bfiles_main(int argc, char **argv)
                 continue;
         } else if (t == BWM_MOUSE) {
             struct bwm_mouse *m = (struct bwm_mouse *)buf;
+            int wheel = (signed char)((m->buttons >> 8) & 0xFF);       /* negative is up */
+            if (wheel) {
+                if (bf_editing) {
+                    be_move_rows(wheel * 3);
+                } else {
+                    bf_scroll(wheel * 3);
+                    printf("bfiles: top %d\n", bf_viewing ? bf_vtop : bf_top);
+                    fflush(stdout);
+                }
+                bf_paint();
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    break;
+                continue;
+            }
             int pressed = (m->buttons & 1) && !(prev & 1);
-            prev = m->buttons;
+            prev = m->buttons & 0xFF;
             if (!pressed)
                 continue;
             if (bf_editing)

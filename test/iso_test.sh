@@ -655,6 +655,34 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = before[:w * 3 * 740] == after[:w * 3 * 740]       # above the bar, where the pointer is
             print(("ok  " if good else "FAIL"), f"({name}) a click on the button of the top window changes nothing")
             fails += not good
+            # Alt-Left and Alt-Right put the window on half of the screen, Alt-Up
+            # on all of it (a title bar along the top shows where it reaches).
+            def snapped(key):
+                monitor(f"sendkey {key}")
+                time.sleep(1.5)
+                w, h, px = screendump()
+                return lambda x: tuple(px[(3 * w + x) * 3:(3 * w + x) * 3 + 3]) == (40, 90, 200)
+            blue = snapped("alt-left")
+            good = blue(300) and not blue(800)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Left puts the window on the left half of the screen")
+            fails += not good
+            blue = snapped("alt-right")
+            good = blue(800) and not blue(300)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Right puts the window on the right half of the screen")
+            fails += not good
+            blue = snapped("alt-up")
+            good = blue(300) and blue(800)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Up makes the window fill the screen")
+            fails += not good
+            # A double click on the title bar of the full-screen window puts it back.
+            for step in ((200, -200), (12, -200), (0, -200), (0, -146)):     # from the task bar button (88, 756) onto the title bar at (300, 10)
+                monitor(f"mouse_move {step[0]} {step[1]}")
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            good = not (tuple(px[(3 * w + 1000) * 3:(3 * w + 1000) * 3 + 3]) == (40, 90, 200))
+            print(("ok  " if good else "FAIL"), f"({name}) a double click on the title bar restores a maximized window")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
@@ -756,6 +784,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = title_at(30, 10) and not title_at(30, 30)
             print(("ok  " if good else "FAIL"), f"({name}) a window dragged off the screen keeps part of its title bar on it")
             fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The mouse wheel scrolls a window under the pointer: bfiles on /bin
+        # (more entries than rows) scrolls three entries for one step down.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /bin\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            # dz of mouse_move is the wheel (1 is up, -1 down); park the pointer inside the window first
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 -1")
+            good = until(b"bfiles: top 3", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the mouse wheel scrolls the window under the pointer")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
