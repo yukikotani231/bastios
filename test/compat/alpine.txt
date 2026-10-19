@@ -559,6 +559,10 @@ built by cmake
 $ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luaproj /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb printf 'local answer = 42\nprint(answer)\n' > /disk/a/root/luaproj/main.lua && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-real-client.lua -o /root/lsp-real-client.lua && timeout 200 nvim -l /root/lsp-real-client.lua >/root/lsreal.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/lsreal.txt
 initialized,hover-integer,stopped
 
+== network: a poll for a frame ends while the only processes that run are waits going on
+$ u=HOSTURL; hp=${u#http://}; (bb printf 'GET /hello.txt HTTP/1.0\r\n\r\n' | bb nc ${hp%:*} ${hp#*:}) | bb tail -n 1 | bb cat
+hello from the host
+
 == apk: free the disk, then install python3 over HTTP
 $ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 2>&1 | bb tail -n 3 | bb cut -c1-180; echo status $?
 status 0
