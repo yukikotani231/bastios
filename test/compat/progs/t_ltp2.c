@@ -678,6 +678,17 @@ int main(void) {
            int b = epoll_ctl(ep, EPOLL_CTL_ADD, z, &ev); int be = errno;
            close(z); close(ep);
            a == -1 && ae == EFAULT && b == -1 && be == EPERM; }));
+    EXPECT("a unix stream socket that is bound to a name can still connect, and the connection carries data", ({
+           unlink("/tmp/t_ltp2_bc_s"); unlink("/tmp/t_ltp2_bc_c");
+           struct sockaddr_un sa = { AF_UNIX, "/tmp/t_ltp2_bc_s" }, ca = { AF_UNIX, "/tmp/t_ltp2_bc_c" };
+           int l = socket(AF_UNIX, SOCK_STREAM, 0), c = socket(AF_UNIX, SOCK_STREAM, 0);
+           int b1 = bind(l, (struct sockaddr *)&sa, sizeof sa), l1 = listen(l, 1);
+           int b2 = bind(c, (struct sockaddr *)&ca, sizeof ca);
+           int cn = connect(c, (struct sockaddr *)&sa, sizeof sa);
+           int a = accept(l, 0, 0);
+           int w = write(c, "x", 1); char m = 0; int r = read(a, &m, 1);
+           close(a); close(c); close(l); unlink("/tmp/t_ltp2_bc_s"); unlink("/tmp/t_ltp2_bc_c");
+           b1 == 0 && l1 == 0 && b2 == 0 && cn == 0 && a >= 0 && w == 1 && r == 1 && m == 'x'; }));
     EXPECT("utimensat on a directory sets its access and modification times apart", ({
            rmdir("/tmp/t_ltp2_ud");
            int m = mkdir("/tmp/t_ltp2_ud", 0755);
@@ -686,6 +697,96 @@ int main(void) {
            struct stat st; int s = stat("/tmp/t_ltp2_ud", &st);
            rmdir("/tmp/t_ltp2_ud");
            m == 0 && u == 0 && s == 0 && st.st_atime == 5 && st.st_mtime == 8; }));
+    EXPECT("sched_getaffinity of a negative pid is ESRCH, of a pid that is not there too", ({
+           unsigned long m[16];
+           int a = syscall(SYS_sched_getaffinity, -1, sizeof m, m); int ae = errno;
+           int b = syscall(SYS_sched_getaffinity, 0, 3, m); int be = errno;
+           a == -1 && ae == ESRCH && b == -1 && be == EINVAL; }));
+    EXPECT("the console keeps a window size set with TIOCSWINSZ", ({
+           struct winsize old, w = { 30, 100, 0, 0 }, got;
+           int g0 = ioctl(0, TIOCGWINSZ, &old);
+           int s = ioctl(0, TIOCSWINSZ, &w);
+           int g1 = ioctl(0, TIOCGWINSZ, &got);
+           ioctl(0, TIOCSWINSZ, &old);
+           g0 == 0 && s == 0 && g1 == 0 && got.ws_row == 30 && got.ws_col == 100; }));
+    EXPECT("getsockname of a UDP socket bound to 127.0.0.1 reads that address, of one bound to none 0.0.0.0", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } }, b = { AF_INET }, g, h;
+           socklen_t gl = sizeof g, hl = sizeof h;
+           int s1 = socket(AF_INET, SOCK_DGRAM, 0), s2 = socket(AF_INET, SOCK_DGRAM, 0);
+           int r1 = bind(s1, (struct sockaddr *)&a, sizeof a), r2 = bind(s2, (struct sockaddr *)&b, sizeof b);
+           int q1 = getsockname(s1, (struct sockaddr *)&g, &gl), q2 = getsockname(s2, (struct sockaddr *)&h, &hl);
+           close(s1); close(s2);
+           r1 == 0 && r2 == 0 && q1 == 0 && q2 == 0 && g.sin_addr.s_addr == htonl(0x7F000001) && g.sin_port != 0 &&
+           h.sin_addr.s_addr == 0 && h.sin_port != 0; }));
+    EXPECT("MSG_PEEK on a UDP socket leaves the datagram queued", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } }, f; socklen_t al = sizeof a, fl = sizeof f;
+           int r = socket(AF_INET, SOCK_DGRAM, 0), s = socket(AF_INET, SOCK_DGRAM, 0);
+           int b = bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &al);
+           int x = sendto(s, "peek", 4, 0, (struct sockaddr *)&a, sizeof a);
+           char m[8] = { 0 }, n[8] = { 0 };
+           int p = recvfrom(r, m, sizeof m, MSG_PEEK, (struct sockaddr *)&f, &fl);
+           int q = recvfrom(r, n, sizeof n, MSG_DONTWAIT, 0, 0);
+           int e = recvfrom(r, n, sizeof n, MSG_DONTWAIT, 0, 0);
+           close(r); close(s);
+           b == 0 && x == 4 && p == 4 && q == 4 && e == -1 && errno == EAGAIN && !memcmp(m, "peek", 4) && !memcmp(n, "peek", 4) &&
+           f.sin_addr.s_addr == htonl(0x7F000001); }));
+    EXPECT("a UDP datagram longer than the buffer sets MSG_TRUNC in recvmsg, and recv with MSG_TRUNC returns its length", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } };
+           socklen_t al = sizeof a;
+           int r = socket(AF_INET, SOCK_DGRAM, 0), s = socket(AF_INET, SOCK_DGRAM, 0);
+           int b = bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &al);
+           int x = sendto(s, "0123456789", 10, 0, (struct sockaddr *)&a, sizeof a);
+           char m[4];
+           struct iovec v = { m, sizeof m };
+           struct msghdr h = { 0 };
+           h.msg_iov = &v; h.msg_iovlen = 1;
+           int p = recvmsg(r, &h, 0); int f1 = h.msg_flags;
+           int y = sendto(s, "0123456789", 10, 0, (struct sockaddr *)&a, sizeof a);
+           int q = recv(r, m, sizeof m, MSG_TRUNC);
+           int z = sendto(s, "abcd", 4, 0, (struct sockaddr *)&a, sizeof a);
+           int t = recvmsg(r, &h, 0); int f2 = h.msg_flags;
+           close(r); close(s);
+           b == 0 && x == 10 && p == 4 && (f1 & MSG_TRUNC) && y == 10 && q == 10 && z == 4 && t == 4 && !(f2 & MSG_TRUNC); }));
+    EXPECT("TCP getsockname reads the bound address, and a connected or accepted socket's local address", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } }, g1, g2, g3, g4;
+           socklen_t al = sizeof a, l1 = sizeof g1, l2 = sizeof g2, l3 = sizeof g3, l4 = sizeof g4;
+           int l = socket(AF_INET, SOCK_STREAM, 0), c = socket(AF_INET, SOCK_STREAM, 0);
+           int b = bind(l, (struct sockaddr *)&a, sizeof a); int ls = listen(l, 1);
+           int q0 = getsockname(l, (struct sockaddr *)&g1, &l1); getsockname(l, (struct sockaddr *)&a, &al);
+           int cn = connect(c, (struct sockaddr *)&a, sizeof a);
+           int s = accept(l, 0, 0);
+           int q1 = getsockname(c, (struct sockaddr *)&g2, &l2), q2 = getsockname(s, (struct sockaddr *)&g3, &l3), q3 = getpeername(s, (struct sockaddr *)&g4, &l4);
+           close(s); close(c); close(l);
+           b == 0 && ls == 0 && q0 == 0 && cn == 0 && s >= 0 && q1 == 0 && q2 == 0 && q3 == 0 &&
+           g1.sin_addr.s_addr == htonl(0x7F000001) && g2.sin_addr.s_addr == htonl(0x7F000001) &&
+           g3.sin_addr.s_addr == htonl(0x7F000001) && g3.sin_port == a.sin_port && g4.sin_port == g2.sin_port; }));
+    EXPECT("an IPV6_V6ONLY listener takes a connection to ::1, and names it ::1", ({
+           struct sockaddr_in6 a = { AF_INET6 }, g;
+           socklen_t al = sizeof a, gl = sizeof g;
+           int l = socket(AF_INET6, SOCK_STREAM, 0), c = socket(AF_INET6, SOCK_STREAM, 0), one = 1;
+           setsockopt(l, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one);
+           int b = bind(l, (struct sockaddr *)&a, sizeof a); int ls = listen(l, 1);
+           getsockname(l, (struct sockaddr *)&a, &al);
+           a.sin6_addr = in6addr_loopback;
+           int cn = connect(c, (struct sockaddr *)&a, sizeof a);
+           int s = accept(l, 0, 0);
+           int q = getsockname(c, (struct sockaddr *)&g, &gl);
+           int w = send(c, "x", 1, 0);
+           close(s); close(c); close(l);
+           b == 0 && ls == 0 && cn == 0 && s >= 0 && q == 0 && w == 1 && !memcmp(&g.sin6_addr, &in6addr_loopback, 16); }));
+    EXPECT("SO_REUSEADDR, SO_REUSEPORT and SO_KEEPALIVE read back as set, and clear again", ({
+           int s = socket(AF_INET, SOCK_STREAM, 0), one = 1, zero = 0, v[4] = { 9, 9, 9, 9 };
+           socklen_t n = sizeof(int);
+           int d0 = getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v[0], &n);
+           setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one); setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+           setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+           n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v[1], &n);
+           n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_REUSEPORT, &v[2], &n);
+           setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &zero, sizeof zero);
+           n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v[3], &n);
+           int ka = 9; n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &ka, &n);
+           close(s);
+           d0 == 0 && v[0] == 0 && v[1] != 0 && v[2] != 0 && v[3] == 0 && ka != 0; }));
     EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
            unlink("/tmp/t_ltp2_dg");
            struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };

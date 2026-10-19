@@ -724,9 +724,65 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = inside and not beyond
             print(("ok  " if good else "FAIL"), f"({name}) its window lies inside the small screen")
             fails += not good
+            # Dragging its title bar far up and to the left stops with some of
+            # the title bar on screen: the window cannot be lost off the edge.
+            def movep(dx, dy):
+                while dx or dy:
+                    sx, sy = max(-200, min(200, dx)), max(-200, min(200, dy))
+                    monitor(f"mouse_move {sx} {sy}")
+                    dx, dy = dx - sx, dy - sy
+            # Over the corner of a window the pointer is a resize cursor, a
+            # white cross-hair at its centre; the arrow has a black outline there.
+            xr = max(x for x in range(0, 640) if title_at(x, 53))
+            movep(xr - 320, 53 - 240)                              # onto the top right corner, in the title bar
+            time.sleep(0.5)
+            w, h, px = screendump()
+            at = (53 * w + xr) * 3
+            good = tuple(px[at:at + 3]) == (255, 255, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) the pointer turns into a resize cursor over a window's edge")
+            fails += not good
+            movep(100 - xr, 7)                                     # on to the title bar, where the drag starts
+            monitor("mouse_button 1")
+            movep(-300, -200)
+            movep(-300, -200)
+            monitor("mouse_button 0")
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = title_at(30, 10) and not title_at(30, 30)
+            print(("ok  " if good else "FAIL"), f"({name}) a window dragged off the screen keeps part of its title bar on it")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # bfiles opens a file in its viewer, e edits it: typing inserts at the
+        # cursor, Ctrl-S saves, and the shell reads the new contents back.
+        mark = len(out)
+        q.stdin.write(b"echo hello > /tmp/e.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/e.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/e.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) bfiles opens a file given on its command line")
+        fails += not good
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/e.txt", mark)
+            monitor("sendkey x", "sendkey y", "sendkey ret", "sendkey ctrl-s")
+            good = good and until(b"bfiles: saved /tmp/e.txt", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a file edited in bfiles is saved")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/e.txt\r"); q.stdin.flush()
+        good = until(b"xy\r\nhello", mark) or until(b"xy\nhello", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the saved file holds the edit")
+        fails += not good
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
