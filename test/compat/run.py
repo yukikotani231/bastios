@@ -1095,8 +1095,11 @@ def main():
                 print("  + " + i)
         if lost:
             print("compat: REGRESSION, these checks passed before:")
+            why = {f"{g}: {c['name']}": c.get("detail", "") for g, cs in results.items() for c in cs if c["result"] != "pass"}
             for i in lost:
                 print("  " + i)
+                if why.get(i):
+                    print("    " + why[i][:700].replace("\n", "\n    "))   # what the check saw, for a log that has no report
             return 1
     return 0
 
