@@ -21,7 +21,7 @@ import argparse, json, os, statistics, sys, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run as R  # noqa: E402
 
-DEFAULT = "syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw"
+DEFAULT = "syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw,open,stat,create,filewrite,fileread"
 
 
 def main():

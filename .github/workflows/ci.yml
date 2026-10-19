@@ -212,6 +212,9 @@ jobs:
             --tests syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw --out build/bench/ab-pcid.json | tee build/bench/ab-pcid.md
           { echo '### bench/ab.py under KVM: boot command line `pcid` (B) against none (A)'; echo; cat build/bench/ab-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: always() && steps.want.outputs.run == 'true'
+        name: Print the full table again, last in the log
+        run: cat build/bench/kvm.md || true
+      - if: always() && steps.want.outputs.run == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: bench-kvm
