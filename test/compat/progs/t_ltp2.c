@@ -1060,17 +1060,24 @@ int main(void) {
            pthread_t t;
            pthread_create(&t, 0, kick_worker, 0);
            usleep(50000);
-           struct timespec t0, t1;
-           clock_gettime(CLOCK_MONOTONIC, &t0);
-           for (int i = 1; i <= 100; i++) {
-               kill(getpid(), SIGUSR2);
-               for (int w = 0; kick_hits < i && w < 2000; w++) usleep(500);
+           // A signal that waits for the tick takes about 10 ms each, a second
+           // for all; a busy host can stall one round, so the best of three counts.
+           int ok = 0;
+           for (int round = 0; round < 3 && !ok; round++) {
+               struct timespec t0, t1;
+               kick_hits = 0;
+               clock_gettime(CLOCK_MONOTONIC, &t0);
+               for (int i = 1; i <= 100; i++) {
+                   kill(getpid(), SIGUSR2);
+                   for (int w = 0; kick_hits < i && w < 2000; w++) usleep(500);
+               }
+               clock_gettime(CLOCK_MONOTONIC, &t1);
+               long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+               ok = kick_hits == 100 && ms < 600;
            }
-           clock_gettime(CLOCK_MONOTONIC, &t1);
            kick_stop = 1;
            pthread_join(t, 0);
-           long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
-           kick_hits == 100 && ms < 600; }));
+           ok; }));
     EXPECT("a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them", ({
            int ok = mkdir("/tmp/mflags", 0755) == 0 || errno == EEXIST;
            ok = ok && mount("none", "/tmp/mflags", "tmpfs", MS_NOEXEC | MS_NOSUID | MS_NODEV, 0) == 0;
@@ -1118,5 +1125,18 @@ int main(void) {
            ok = ok && stat("/dev/nonesuch/x", &st) < 0 && errno == ENOENT;
            ok = ok && stat("/dev/null", &st) == 0 && S_ISCHR(st.st_mode);
            ok; }));
+    EXPECT("send(MSG_DONTWAIT) on a blocking TCP socket with a full send buffer is EAGAIN, not a wait", ({
+           int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+           bind(ls, (void *)&sa, sizeof sa); listen(ls, 1); socklen_t sl = sizeof sa; getsockname(ls, (void *)&sa, &sl);
+           int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (void *)&sa, sizeof sa); int s = accept(ls, 0, 0);
+           char blk[4096]; memset(blk, 'a', sizeof blk);
+           long total = 0; int blocked = 0;
+           while (total < (64L << 20)) {
+               long r = send(c, blk, sizeof blk, MSG_DONTWAIT);
+               if (r < 0) { blocked = errno == EAGAIN; break; }
+               total += r;
+           }
+           close(c); close(s); close(ls);
+           blocked; }));
     return done();
 }

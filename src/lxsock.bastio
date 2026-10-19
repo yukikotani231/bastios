@@ -592,7 +592,11 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
 {
   let more = flags / MSG_MORE % 2 == 1;
   if is_tcp(k, pid, fd) {
-    return lx_tcp_send(&mut k, pid, fd, buf, n, more);
+    let r = lx_tcp_send(&mut k, pid, fd, buf, n, more);
+    if r == SK_WAIT && flags / MSG_DONTWAIT % 2 == 1 {
+      return EAGAIN;                        // MSG_DONTWAIT: a full send buffer does not wait
+    }
+    return r;
   }
   if is_unix(k, pid, fd) {
     return ux_send(&mut k, pid, fd, buf, n, false, addr, alen);
