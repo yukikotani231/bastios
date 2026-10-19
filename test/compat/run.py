@@ -643,7 +643,7 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
         body.append(line)
     if status is None:
         seen = "\n".join(body)[-600:]
-        return {"name": name, "result": "hang", "detail": "did not finish" + (", last output:\n" + seen if seen else ""),
+        return {"name": name, "result": "hang", "detail": "did not finish" + (" (the end mark came, the prompt did not)" if "\n@@end " in text else "") + (", last output:\n" + seen if seen else ""),
                 "syscalls": sorted(set(calls))}
     ok = body == expected
     detail = "" if ok else "got " + json.dumps(clip("\n".join(body))) + ", expected " + json.dumps("\n".join(expected))
