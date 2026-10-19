@@ -768,6 +768,7 @@ def main():
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--python-disk", help="the Python disk (the root of the python:alpine image) for python.txt")
     ap.add_argument("--python-wheels", help="the Python packages python.txt installs, served at HOSTURL/wheels/")
+    ap.add_argument("--oss-dir", help="the git repositories of real projects (ossrepos.sh), served at HOSTURL/oss")
     ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
@@ -815,6 +816,8 @@ def main():
     os.makedirs(args.out, exist_ok=True)
     log = open(os.path.join(args.out, "serial.log"), "wb")
     web = WebServer(args.tcc_src)
+    if args.oss_dir:
+        os.symlink(os.path.abspath(args.oss_dir), os.path.join(web.dir, "oss"))
     # Alpine's cases are spread over four lanes, each on a copy of the disk
     # of its own: a lane runs its cases one after another, and under
     # emulation one lane of them all took longer than the rest of the suite.

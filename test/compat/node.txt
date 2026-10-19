@@ -52,3 +52,10 @@ $ bb chroot /disk/n /usr/local/bin/node -e 'let s = 0; for (let i = 0; i < 50000
 == node: exit status and uncaught exceptions
 $ bb chroot /disk/n /usr/local/bin/node -e 'process.exit(3)'; echo status $?
 status 3
+
+== node: a real package (nanoid) fetched from the host, tested with node --test
+# timeout 300
+$ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/nanoid.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node --test /work/nanoid/test/index.test.js /work/nanoid/test/non-secure.test.js 2>&1 | bb grep -E '^# (tests|pass|fail)'
+# tests 34
+# pass 34
+# fail 0
