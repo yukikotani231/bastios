@@ -678,6 +678,14 @@ int main(void) {
            int b = epoll_ctl(ep, EPOLL_CTL_ADD, z, &ev); int be = errno;
            close(z); close(ep);
            a == -1 && ae == EFAULT && b == -1 && be == EPERM; }));
+    EXPECT("utimensat on a directory sets its access and modification times apart", ({
+           rmdir("/tmp/t_ltp2_ud");
+           int m = mkdir("/tmp/t_ltp2_ud", 0755);
+           struct timespec ts[2] = { { 5, 0 }, { 8, 0 } };
+           int u = utimensat(AT_FDCWD, "/tmp/t_ltp2_ud", ts, 0);
+           struct stat st; int s = stat("/tmp/t_ltp2_ud", &st);
+           rmdir("/tmp/t_ltp2_ud");
+           m == 0 && u == 0 && s == 0 && st.st_atime == 5 && st.st_mtime == 8; }));
     EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
            unlink("/tmp/t_ltp2_dg");
            struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };
