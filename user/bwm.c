@@ -585,13 +585,16 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
             drop_client(i);                                /* a shared window needs its file */
             return;
         }
-        if (c.w < 16 || c.h < 16 || c.w > W - 2 * BORDER || c.h > H - TITLE_H - BORDER) {
+        if (c.w < 16 || c.h < 16 || c.w > W - 2 * BORDER || c.h > H - BAR_H - TITLE_H - BORDER) {
             if (mf >= 0)
                 close(mf);
             drop_client(i);
             return;
         }
-        struct win *w = win_new(40 + 30 * (next_id % 8), 40 + 30 * (next_id % 8), c.w, c.h, c.title, i);
+        int px = 40 + 30 * (next_id % 8), py = 40 + 30 * (next_id % 8);
+        if (px > (int)W - (c.w + 2 * BORDER)) px = (int)W - (c.w + 2 * BORDER);
+        if (py > (int)H - BAR_H - (c.h + TITLE_H + BORDER)) py = (int)H - BAR_H - (c.h + TITLE_H + BORDER);
+        struct win *w = win_new(px < 0 ? 0 : px, py < 0 ? 0 : py, c.w, c.h, c.title, i);
         if (!w) {
             if (mf >= 0)
                 close(mf);
@@ -956,6 +959,14 @@ int main(int argc, char **argv)
         builtin = 0;
         a++;
     }
+    unsigned want_w = 0, want_h = 0;
+    if (a + 1 < argc && strcmp(argv[a], "-s") == 0) {
+        char *end;
+        want_w = strtoul(argv[a + 1], &end, 10);
+        if (*end == 'x')
+            want_h = strtoul(end + 1, NULL, 10);
+        a += 2;
+    }
     char **child = a + 1 < argc && strcmp(argv[a], "-c") == 0 ? &argv[a + 1] : NULL;
     fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
     if (fb < 0 && errno == ENODEV) {
@@ -971,6 +982,13 @@ int main(int argc, char **argv)
         return 1;
     }
     W = v.xres; H = v.yres; PITCH = f.line_length;
+    if (want_w >= 320 && want_w < W && want_h >= 240 && want_h < H) {    /* pretend the screen is smaller */
+        W = want_w;
+        H = want_h;
+    }
+    static char dims[48];
+    snprintf(dims, sizeof dims, "BWM_SCREEN=%ux%u", W, H);
+    putenv(dims);                            /* clients size their first window to fit */
     roff = v.red.offset; goff = v.green.offset; boff = v.blue.offset;
     scene = malloc((size_t)W * H * 4);
     frame = malloc((size_t)W * H * 4);
