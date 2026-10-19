@@ -228,6 +228,41 @@ $ printf '%s\n' 'import urllib.request, hashlib' 'print(urllib.request.urlopen("
 hello from the host
 1048576 85bfb9943e6f0cb09f0f52679e9eac2b
 
+== cpython: tests of its own: select, selectors, poll, timeout, fcntl
+# timeout 300
+$ PYTHONHOME=/disk/py PYTHONPATH=/disk/cpytests /disk/python /disk/cpytests/run.py select selectors poll timeout fcntl 2>&1 | /disk/busybox grep -E "^[a-z0-9]+ (ok|FAILED)"
+select ok
+selectors ok
+poll ok
+timeout ok
+fcntl ok
+
+== cpython: tests of its own: os, stat, file, fileio, mmap, pipes
+# timeout 400
+$ PYTHONHOME=/disk/py PYTHONPATH=/disk/cpytests /disk/python /disk/cpytests/run.py os stat file fileio mmap pipes 2>&1 | /disk/busybox grep -E "^[a-z0-9]+ (ok|FAILED)"
+os ok
+stat ok
+file ok
+fileio ok
+mmap ok
+pipes ok
+
+== cpython: tests of its own: signal, wait3, wait4, time, resource
+# timeout 400
+$ PYTHONHOME=/disk/py PYTHONPATH=/disk/cpytests /disk/python /disk/cpytests/run.py signal wait3 wait4 time resource 2>&1 | /disk/busybox grep -E "^[a-z0-9]+ (ok|FAILED)"
+signal ok
+wait3 ok
+wait4 ok
+time ok
+resource ok
+
+== cpython: tests of its own: threading, posix and pty
+# timeout 600
+$ PYTHONHOME=/disk/py PYTHONPATH=/disk/cpytests /disk/python /disk/cpytests/run.py threading posix pty 2>&1 | /disk/busybox grep -E "^[a-z0-9]+ (ok|FAILED)"
+threading ok
+posix ok
+pty ok
+
 == ripgrep: search with line numbers, honouring .ignore
 $ mkdir -p ca_rg/sub ca_rg/skip && echo 'hello world' > ca_rg/a.txt && echo 'Hello again' >> ca_rg/a.txt && echo 'nothing here' > ca_rg/b.txt && printf 'int main(void) { return 0; }\n// hello from C\n' > ca_rg/sub/c.c && echo 'hello hidden' > ca_rg/skip/d.txt && echo 'skip/' > ca_rg/.ignore && /disk/rg -n --color=never hello ca_rg | /disk/busybox sort; rm -rf ca_rg
 ca_rg/a.txt:1:hello world

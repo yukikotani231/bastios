@@ -522,27 +522,36 @@ fn tcb_init(n: &mut Net, t: u64, st: u64, lport: u64, rip: u64, rport: u64, pare
 }
 
 /// The connection a segment from rip:rport to our lport belongs to: an
-/// exact match first, else a listener on lport; TCBS if neither.
+/// exact match first, else a listener on lport; TCBS if neither. A peer on
+/// loopback is also taken by an IPv6-only listener if no listener of its
+/// own family has the port: ::1 stands for 127.0.0.1 in this stack, so an
+/// IPv6 client of ::1 reaches it as an IPv4 peer.
 fn tcb_find(n: &Net, lport: u64, rip: u64, rport: u64) -> u64
   requires net_ok(n)
   ensures result <= TCBS
 {
   let mut lis = TCBS;
+  let mut lo6 = TCBS;
   let mut t = 0;
   while t < TCBS
-    invariant t <= TCBS && lis <= TCBS
+    invariant t <= TCBS && lis <= TCBS && lo6 <= TCBS
   {
     let st = tw(n, t, W_STATE);
     if st != T_CLOSED && tw(n, t, W_LPORT) == lport && tw(n, t, W_NS) == n.ns {
       if st == T_LISTEN {
         if fam_takes(tw(n, t, W_FAM), is_v6tok(rip)) {
           lis = t;
+        } else if tw(n, t, W_FAM) == FAM_V6 && rip / 16777216 == LO_NET {
+          lo6 = t;
         }
       } else if tw(n, t, W_RIP) == rip && tw(n, t, W_RPORT) == rport {
         return t;
       }
     }
     t = t + 1;
+  }
+  if lis == TCBS {
+    return lo6;
   }
   return lis;
 }
