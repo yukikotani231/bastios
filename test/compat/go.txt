@@ -85,3 +85,10 @@ built
 # timeout 900
 $ export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on; bb chroot /disk/g /usr/local/go/bin/go -C /work/toml test -vet=off ./... 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//' | bb grep -v 'no test files'
 ok  	github.com/BurntSushi/toml
+
+== go: a Go module with vendored dependencies (stretchr/testify), tested with go test -mod=vendor
+# timeout 900
+$ bb wget -q -O - HOSTURL/oss/testify.tar.gz | bb tar -xz -C /disk/g/work; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on; bb chroot /disk/g /usr/local/go/bin/go -C /work/testify test -mod=vendor -vet=off ./assert/... ./require/... 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//' | bb grep -v 'no test files'
+ok  	github.com/stretchr/testify/assert
+ok  	github.com/stretchr/testify/assert/internal/unsafetests
+ok  	github.com/stretchr/testify/require

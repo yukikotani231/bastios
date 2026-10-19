@@ -61,4 +61,20 @@ rs() {  # NAME URL TAG
 
 rs semver https://github.com/dtolnay/semver 1.0.23
 
+# A Go module with its dependencies vendored beside it (go build -mod=vendor).
+gv() {  # NAME URL TAG
+  [ -f "$out/$1.tar.gz" ] && return 0
+  mkdir "$work/gv-$1"
+  git -C "$work/gv-$1" init -q
+  git -C "$work/gv-$1" fetch -q --depth 1 "$2" "$3"
+  git -C "$work/gv-$1" checkout -q FETCH_HEAD
+  rm -rf "$work/gv-$1/.git"
+  (cd "$work/gv-$1" && go mod vendor)
+  mkdir "$work/gv-top-$1"
+  mv "$work/gv-$1" "$work/gv-top-$1/$1"
+  tar -C "$work/gv-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
+}
+
+gv testify https://github.com/stretchr/testify v1.9.0
+
 tb nanoid https://github.com/ai/nanoid 5.0.7
