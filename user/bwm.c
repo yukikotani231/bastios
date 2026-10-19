@@ -70,6 +70,7 @@ struct fix_info {
 #define BTN_X0 60                        /* and the window buttons after it */
 #define BTN_W 120
 #define BTN_GAP 4
+#define CLOCK_W 48                       /* the clock left of it */
 #define MENU_W 52                        /* the Menu button at the right end of the task bar */
 #define MENU_ITEM_W 140                  /* the launcher menu it opens above itself */
 #define MENU_ITEM_H 24
@@ -318,6 +319,14 @@ static void draw_win(const struct win *w, int focused)
         draw_grip(w);
 }
 
+/* The time of day (UTC, as the system keeps it) for the clock in the task bar. */
+static void clock_hm(int *h, int *m)
+{
+    time_t t = time(NULL);
+    *h = (int)(t / 3600 % 24);
+    *m = (int)(t / 60 % 60);
+}
+
 /* The task bar: a button that starts a terminal, then one for each window
  * in the order they were opened, the top one lit. */
 static void draw_bar(void)
@@ -331,7 +340,7 @@ static void draw_bar(void)
         if (!pool[i].used)
             continue;
         int x = BTN_X0 + n * (BTN_W + BTN_GAP);
-        if (x + BTN_W > (int)W - MENU_W - 12)
+        if (x + BTN_W > (int)W - MENU_W - 12 - CLOCK_W)
             break;
         fill(scene, x, y0 + 3, x + BTN_W, H - 3, &pool[i] == focus() ? rgb(40, 90, 200) : pool[i].hidden ? rgb(45, 45, 60) : rgb(70, 70, 85));
         char t[16];
@@ -339,6 +348,11 @@ static void draw_bar(void)
         text(scene, x + 6, y0 + 4, t, rgb(255, 255, 255));
         n++;
     }
+    int hh, mm;
+    clock_hm(&hh, &mm);
+    char ck[8];
+    snprintf(ck, sizeof ck, "%02d:%02d", hh, mm);
+    text(scene, (int)W - MENU_W - 12 - CLOCK_W + 4, y0 + 4, ck, rgb(255, 255, 255));
     fill(scene, (int)W - MENU_W - 4, y0 + 3, (int)W - 4, H - 3, menu_open ? rgb(40, 90, 200) : rgb(70, 70, 85));
     text(scene, (int)W - MENU_W + 2, y0 + 4, "Menu", rgb(255, 255, 255));
 }
@@ -884,6 +898,7 @@ static int k_shift, k_ctrl, k_alt, k_caps;
  * until it is released. */
 #define REPEAT_FIRST_MS 400
 #define REPEAT_NEXT_MS  40
+static int clock_shown = -1;              /* the minute of the day the task bar shows */
 static unsigned rep_code;
 static long long rep_due;                 /* when the next repeat is due, in ms; valid while rep_code != 0 */
 
@@ -1134,10 +1149,19 @@ int main(int argc, char **argv)
             if (wait < 0 || d < wait)
                 wait = d < 0 ? 0 : (int)d;
         }
+        int until_min = (int)(60 - time(NULL) % 60) * 1000;      /* the clock changes at the next minute */
+        if (wait < 0 || until_min < wait)
+            wait = until_min;
         if (poll(p, np, wait) < 0 && errno != EINTR)
             break;
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
+        int clock_h, clock_m;
+        clock_hm(&clock_h, &clock_m);
+        if (clock_h * 60 + clock_m != clock_shown) {
+            clock_shown = clock_h * 60 + clock_m;
+            touch_bar();
+        }
         struct win *top = focus();
         if (p[0].revents & POLLIN) {
             char b[32];
