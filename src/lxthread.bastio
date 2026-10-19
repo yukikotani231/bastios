@@ -28,6 +28,13 @@ const FUTEX_WAIT: u64 = 0;
 const FUTEX_WAKE: u64 = 1;
 const FUTEX_REQUEUE: u64 = 3;
 const FUTEX_CMP_REQUEUE: u64 = 4;
+const EDEADLK: u64 = 18446744073709551581;    // 2^64 - 35
+const FUTEX_LOCK_PI: u64 = 6;
+const FUTEX_UNLOCK_PI: u64 = 7;
+const FUTEX_TRYLOCK_PI: u64 = 8;
+const FUTEX_WAITERS: u64 = 0x80000000;       // in a lock word: someone waits for it
+const FUTEX_OWNER_DIED: u64 = 0x40000000;
+const FUTEX_TID_MASK: u64 = 0x3FFFFFFF;      // the owner's thread id
 const FUTEX_WAIT_BITSET: u64 = 9;
 const FUTEX_WAKE_BITSET: u64 = 10;
 const FUTEX_WOKEN: u64 = 1;         // F_FUTEX of a timed waiter woken on a processor (futex_wake)
@@ -860,6 +867,102 @@ fn user_mapped(k: &mut Kernel, pid: u64, addr: u64) -> bool
   return w.ok;
 }
 
+/// Whether q waits in futex(FUTEX_LOCK_PI): the lock is handed to it, not
+/// just a wake-up.
+fn futex_pi_waiter(procs: &Buf, q: u64) -> bool
+  requires ptab_ok(procs) && q < NPROC
+{
+  return pget(procs, q, F_REGS + R_RSI) & FUTEX_CMD == FUTEX_LOCK_PI;
+}
+
+/// The lock word at uaddr (key) lost its owner, who unlocked it or, with
+/// `died`, ended holding it: the first thread waiting for it in
+/// FUTEX_LOCK_PI owns it now (the word names it, keeping FUTEX_WAITERS if
+/// others wait and FUTEX_OWNER_DIED if `died`) and its call returns 0.
+/// False if none waits. There is no priority to inherit: this kernel's
+/// threads all run at one priority.
+fn futex_pi_handoff(k: &mut Kernel, pid: u64, uaddr: u64, key: u64, died: bool) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let g = futex_group(k.procs, pid, key);
+  let mut first = NPROC;
+  let mut more = false;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && first <= NPROC && kok(k)
+  {
+    if q != pid && futex_pi_waiter(k.procs, q) && (futex_waiting(k.procs, q, g, key) || futex_polling(k.procs, q, g, key)) {
+      if first == NPROC {
+        first = q;
+      } else {
+        more = true;
+      }
+    }
+    q = q + 1;
+  }
+  if first >= NPROC {
+    return false;
+  }
+  let mut w = first;
+  if more {
+    w = w | FUTEX_WAITERS;
+  }
+  if died {
+    w = w | FUTEX_OWNER_DIED;
+  }
+  if !put_user_u32(&mut k, pid, uaddr, w) {
+    return false;
+  }
+  if futex_polling(k.procs, first, g, key) {
+    pset(&mut k.procs, first, F_FUTEX, FUTEX_WOKEN);   // as futex_wake: its next try finds the note
+  } else {
+    let rip = pget(k.procs, first, F_REGS + R_RIP);
+    if rip <= 0xFFFFFFFFFFFFFFF0 {
+      pset(&mut k.procs, first, F_REGS + R_RIP, rip + SYSCALL_LEN);
+    }
+    pset(&mut k.procs, first, F_REGS + R_RET, 0);
+    pset(&mut k.procs, first, F_RESTART, 0);
+    pset(&mut k.procs, first, F_FUTEX, 0);
+    pset(&mut k.procs, first, F_STATE, READY);
+  }
+  return true;
+}
+
+/// Takes the lock word at addr for thread pid if nobody owns it (0), or
+/// says why not: EDEADLK it owns it already, ESRCH the owner is no thread,
+/// EFAULT, or EBUSY another thread owns it (FUTEX_WAITERS is set then, so
+/// its unlock calls the kernel).
+fn futex_pi_try(k: &mut Kernel, pid: u64, addr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let w = user_u32(&mut k, pid, addr);
+  if !w.ok {
+    return EFAULT;
+  }
+  let owner = w.v & FUTEX_TID_MASK;
+  if owner == pid {
+    return EDEADLK;
+  }
+  if owner == 0 {
+    if put_user_u32(&mut k, pid, addr, pid | (w.v & (FUTEX_WAITERS | FUTEX_OWNER_DIED))) {
+      return 0;
+    }
+    return EFAULT;
+  }
+  if owner >= NPROC {
+    return ESRCH;
+  }
+  if state(k.procs, owner) == FREE {
+    return ESRCH;
+  }
+  if w.v & FUTEX_WAITERS == 0 && !put_user_u32(&mut k, pid, addr, w.v | FUTEX_WAITERS) {
+    return EFAULT;
+  }
+  return EBUSY;
+}
+
 /// futex(addr, op, val, timeout or val2, addr2, val3).
 fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
@@ -920,7 +1023,35 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
     }
     return KEEP;
   }
-  if cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET {
+  if cmd == FUTEX_UNLOCK_PI {
+    let w = user_u32(&mut k, pid, addr);
+    if !w.ok {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    if w.v & FUTEX_TID_MASK != pid {
+      ret(&mut k.procs, pid, EPERM);
+      return KEEP;
+    }
+    if w.v & FUTEX_WAITERS == 0 || !futex_pi_handoff(&mut k, pid, addr, key, false) {
+      if !put_user_u32(&mut k, pid, addr, 0) {
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
+    }
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
+  }
+  if cmd == FUTEX_TRYLOCK_PI {
+    let r = futex_pi_try(&mut k, pid, addr);
+    if r == EBUSY {
+      ret(&mut k.procs, pid, EAGAIN);
+    } else {
+      ret(&mut k.procs, pid, r);
+    }
+    return KEEP;
+  }
+  if cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET && cmd != FUTEX_LOCK_PI {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
@@ -928,14 +1059,22 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
   // the wake would have ended the call. Only its deadline is checked.
   let mut dl = FOREVER;
   if was == 0 {
-    let w = user_u32(&mut k, pid, addr);
-    if !w.ok {
-      ret(&mut k.procs, pid, EFAULT);
-      return KEEP;
-    }
-    if w.v != val % 0x100000000 {
-      ret(&mut k.procs, pid, EAGAIN);
-      return KEEP;
+    if cmd == FUTEX_LOCK_PI {
+      let r = futex_pi_try(&mut k, pid, addr);
+      if r != EBUSY {
+        ret(&mut k.procs, pid, r);          // taken, or refused
+        return KEEP;
+      }
+    } else {
+      let w = user_u32(&mut k, pid, addr);
+      if !w.ok {
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
+      if w.v != val % 0x100000000 {
+        ret(&mut k.procs, pid, EAGAIN);
+        return KEEP;
+      }
     }
     if arg4 != 0 {
       let ts = ts_in(&mut k, pid, arg4);
@@ -948,7 +1087,7 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
       // FUTEX_CLOCK_REALTIME on the wall clock, which starts at k.epoch.
       if cmd == FUTEX_WAIT {
         dl = sat_add(k.ns, ts.ns);
-      } else if op & FUTEX_CLOCK_REALTIME != 0 {
+      } else if op & FUTEX_CLOCK_REALTIME != 0 || cmd == FUTEX_LOCK_PI {   // FUTEX_LOCK_PI's is always the wall clock
         if ts.ns > k.epoch {
           dl = ts.ns - k.epoch;
         } else {
@@ -992,9 +1131,6 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
 
 const ROBUST_HEAD: u64 = 24;               // sizeof(struct robust_list_head)
 const ROBUST_LIMIT: u64 = 2048;            // entries walked at most, as Linux
-const FUTEX_WAITERS: u64 = 0x80000000;
-const FUTEX_OWNER_DIED: u64 = 0x40000000;
-const FUTEX_TID_MASK: u64 = 0x3FFFFFFF;
 
 /// set_robust_list(head, len): thread pid's list of held robust futexes,
 /// which its exit walks (robust_exit). len must be the head's size.
@@ -1059,6 +1195,9 @@ fn robust_one(k: &mut Kernel, pid: u64, uaddr: u64)
   let w = user_u32(&mut k, pid, uaddr);
   if !w.ok || w.v & FUTEX_TID_MASK != pid {
     return;
+  }
+  if w.v & FUTEX_WAITERS != 0 && futex_pi_handoff(&mut k, pid, uaddr, uaddr, true) {
+    return;                                 // a FUTEX_LOCK_PI waiter owns it now
   }
   if put_user_u32(&mut k, pid, uaddr, (w.v & FUTEX_WAITERS) | FUTEX_OWNER_DIED) && w.v & FUTEX_WAITERS != 0 {
     let n = futex_wake(&mut k, pid, uaddr, 1);

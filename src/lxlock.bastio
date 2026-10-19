@@ -32,7 +32,6 @@ const F_RDLCK: u64 = 0;
 const F_WRLCK: u64 = 1;
 const FLOCK_SIZE: u64 = 32;               // struct flock
 const ENOLCK: u64 = 18446744073709551579;     // 2^64 - 37
-const EDEADLK: u64 = 18446744073709551581;    // 2^64 - 35
 const LK_SIGN: u64 = 9223372036854775808;     // 2^63: off_t values at or above it are negative
 
 fn lk_get(t: &Buf, i: u64, f: u64) -> u64
