@@ -87,6 +87,8 @@ const DSLOTS: u64 = 262144;           // directory entries, at most (16384 direc
 const BATCH_MAX: u64 = 64;               // blocks a batch of writes makes before it commits (disk_write)
 const OB_MAX: u64 = 72;               // blocks it replaces: at most one per block it makes, and room for a write's five
 const PD_MAX: u64 = 8;                // directory blocks whose entries wait for a commit (ent_lazy)
+const PDD_MAX: u64 = 16;             // directories made since the last commit: their entries are on the disk only after it
+const PDE_MAX: u64 = 16;             // entries made since the last commit inside such a directory
 const BATCH_TICKS: u64 = 10;          // ticks (10 ms each) a batch waits for more writes before disk_pump commits it
 const DENT: u64 = 256;
 const DIR_BYTES: u64 = 67108864;      // DSLOTS * DENT: the most the directory takes in memory
@@ -166,6 +168,12 @@ struct DiskFs {
   pt: u64,              // the tick the batch began
   pd: Buf,              // the directory blocks holding entries changed in memory only (ent_lazy), pdn of PD_MAX: they go to the disk with the next commit
   pdn: u64,
+  pf: Buf,              // per noted block: 1 if it holds an entry of pde (written in the commit's second round)
+  pdd: Buf,             // the directories made since the last commit, pddn of PDD_MAX (entries)
+  pddn: u64,
+  pde: Buf,             // the entries made since the last commit inside a directory of pdd, pden of PDE_MAX: the commit writes them after that directory
+  pden: u64,
+  pek: Buf,             // scratch for the commit: the kinds of the entries of pde, which the first round leaves out
   ppt: u64,             // the tick the first of them was noted
   pr: u64,              // 1 if the batch holds writes of files besides the current one (disk_write retires a file when another is written)
   tick: u64,            // the last tick disk_pump was given
@@ -920,7 +928,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
-    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, ppt: 0, pr: 0, tick: 0,
+    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, pf: alloc(PD_MAX), pdd: alloc(PDD_MAX), pddn: 0, pde: alloc(PDE_MAX), pden: 0, pek: alloc(PDE_MAX), ppt: 0, pr: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
@@ -1113,6 +1121,10 @@ fn disk_unmount_now(d: DiskFs) -> Blk
   free(d.pb);
   free(d.ob);
   free(d.pd);
+  free(d.pf);
+  free(d.pdd);
+  free(d.pde);
+  free(d.pek);
   bits_free(d.used);
   return d.dev;
 }
@@ -1602,10 +1614,11 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
-  // A new file's entry waits for the next commit (ent_lazy). A directory or
-  // a link is written at once: a directory must be on the disk before the
-  // entries inside it, and a link before it names a file.
-  let lazy = !dir && link >= DSLOTS;
+  // A new file's or directory's entry waits for the next commit (ent_lazy).
+  // A directory's entry must be on the disk before the entries inside it:
+  // the commit orders the blocks that way (dep_ok). A link is written at
+  // once, before it names a file.
+  let lazy = link >= DSLOTS;
   if !lazy {
     disk_drain(&mut d);               // queued writes reach the disk first
   }
@@ -1638,6 +1651,9 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
       }
     }
     if i != DTOP && !dent_used(d, i) {
+      if lazy && (!dep_ok(d, p, i) || (dir && d.pddn >= PDD_MAX)) {
+        disk_drain(&mut d);             // everything is on the disk before the entry is made
+      }
       dent_zero(&mut d, i, 0, DENT);
       if dir {
         dent_setb(&mut d, i, E_KIND, 2);
@@ -1671,8 +1687,14 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         return DSLOTS;
       }
       d.free0 = i;
-      if lazy {
+      if lazy && !dir {
         d.pnew = i + 1;
+      }
+      if lazy {
+        dep_add(&mut d, p, i);
+        if dir {
+          pdd_add(&mut d, i);
+        }
       }
       ix_add(&mut d, i);
       return i;
@@ -1729,6 +1751,9 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
     }
     c = dent_parent(d, c);
     steps = steps + 1;
+  }
+  if lazy && p < DSLOTS && p != dent_parent(d, i) && dir_pending(d, p) {
+    disk_drain(&mut d);               // the directory is on the disk before the entry names it
   }
   let mut save = balloc(DENT);
   let mut j = 0;
@@ -2241,6 +2266,108 @@ fn ent_lazy(d: &mut DiskFs, i: u64) -> bool
   return note_dir(&mut d, db);
 }
 
+/// Where directory block db is among the noted blocks, or PD_MAX if it is
+/// not one of them.
+fn pd_find(d: &DiskFs, db: u64) -> u64
+  requires disk_ok(d)
+  ensures result <= PD_MAX
+{
+  let mut j = 0;
+  while j < d.pdn && j < len(d.pd) && j < PD_MAX
+    invariant j <= PD_MAX
+  {
+    if get(d.pd, j) == db {
+      return j;
+    }
+    j = j + 1;
+  }
+  return PD_MAX;
+}
+
+/// Is entry p a directory made since the last commit?
+fn dir_pending(d: &DiskFs, p: u64) -> bool
+  requires disk_ok(d)
+{
+  let mut j = 0;
+  while j < d.pddn && j < len(d.pdd)
+    invariant j <= len(d.pdd)
+  {
+    if get(d.pdd, j) == p {
+      return true;
+    }
+    j = j + 1;
+  }
+  return false;
+}
+
+/// Is entry e one of those made since the last commit inside a directory
+/// that was made since then too?
+fn entry_pending(d: &DiskFs, e: u64) -> bool
+  requires disk_ok(d)
+{
+  let mut j = 0;
+  while j < d.pden && j < len(d.pde)
+    invariant j <= len(d.pde)
+  {
+    if get(d.pde, j) == e {
+      return true;
+    }
+    j = j + 1;
+  }
+  return false;
+}
+
+/// Can entry i, about to name directory p as its parent, wait for the next
+/// commit? The directory's own entry may still be waiting for it, and an
+/// entry inside must not reach the disk first: the commit writes the blocks
+/// twice, first with the entries inside such directories left out, then (after
+/// a flush) the blocks that hold any. That orders two levels (a directory
+/// made since the last commit and what is directly in it). False if that
+/// cannot be kept, or if there is no room to note i's block: the caller
+/// drains (commits everything) first, after which p is on the disk.
+fn dep_ok(d: &DiskFs, p: u64, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
+  let cb = i * DENT / BLOCK;
+  if pd_find(d, cb) >= PD_MAX && d.pdn >= PD_MAX {
+    return false;
+  }
+  if p >= DSLOTS || !dir_pending(d, p) {
+    return true;
+  }
+  if d.pden >= PDE_MAX || entry_pending(d, p) {
+    return false;
+  }
+  return true;
+}
+
+/// Records that entry i (just noted by ent_lazy) follows directory p.
+fn dep_add(d: &mut DiskFs, p: u64, i: u64)
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  if p >= DSLOTS || !dir_pending(d, p) {
+    return;
+  }
+  let jc = pd_find(d, i * DENT / BLOCK);
+  if jc < PD_MAX && jc < len(d.pf) && d.pden < PDE_MAX && d.pden < len(d.pde) {
+    d.pf = set(d.pf, jc, 1);
+    d.pde = set(d.pde, d.pden, i);
+    d.pden = d.pden + 1;
+  }
+}
+
+/// Notes that entry i is a directory made since the last commit.
+fn pdd_add(d: &mut DiskFs, i: u64)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  if d.pddn < PDD_MAX && d.pddn < len(d.pdd) {
+    d.pdd = set(d.pdd, d.pddn, i);
+    d.pddn = d.pddn + 1;
+  }
+}
+
 /// Notes directory block db for the next commit. False, with nothing
 /// changed, if the notes are full.
 fn note_dir(d: &mut DiskFs, db: u64) -> bool
@@ -2263,8 +2390,41 @@ fn note_dir(d: &mut DiskFs, db: u64) -> bool
     d.ppt = d.tick;
   }
   d.pd = set(d.pd, d.pdn, db);
+  if d.pdn < len(d.pf) {
+    d.pf = set(d.pf, d.pdn, 0);
+  }
   d.pdn = d.pdn + 1;
   return true;
+}
+
+/// Blanks the kind of each entry of pde in memory (`on`), keeping it in pek,
+/// or puts the kinds back.
+fn mask_pending(d: &mut DiskFs, on: bool)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots) && d.pden == old(d.pden)
+{
+  let n = d.pden;
+  if n > PDE_MAX || n > len(d.pde) || n > len(d.pek) {
+    return;
+  }
+  let mut x = 0;
+  while x < n
+    invariant x <= n && n == d.pden && n <= PDE_MAX && n <= len(d.pde) && n <= len(d.pek) && disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+  {
+    let e = get(d.pde, x);
+    if e < DSLOTS {
+      if on {
+        d.pek = set(d.pek, x, cast[u64](dent_byte(d, e, E_KIND)));
+        dent_setb(&mut d, e, E_KIND, 0);
+      } else {
+        let k = get(d.pek, x);
+        if k <= 255 {
+          dent_setb(&mut d, e, E_KIND, cast[u8](k));
+        }
+      }
+    }
+    x = x + 1;
+  }
 }
 
 /// Queues the commit of the batch (nothing if there is none). False, with
@@ -2281,7 +2441,7 @@ fn disk_commit(d: &mut DiskFs) -> bool
   if np > PD_MAX || np > len(d.pd) {
     np = 0;                           // (not reached: ent_lazy keeps pdn within pd)
   }
-  if !dq_fits(d.q, 1 + np, d.pn + d.on + np + 4) {
+  if !dq_fits(d.q, 1 + 2 * np, d.pn + d.on + 2 * np + 5) {
     return false;
   }
   let n = d.pn;
@@ -2298,6 +2458,11 @@ fn disk_commit(d: &mut DiskFs) -> bool
   if d.pw != 0 || n != 0 {
     ok = ok && dq_flush(&mut d.q);    // the data is on the disk before any entry names it
   }
+  // Round one leaves out the entries made inside a directory that was made
+  // since the last commit (as free ones, which is what the disk holds), so
+  // no entry reaches the disk before its parent's.
+  let ne = d.pden;
+  mask_pending(&mut d, true);
   if d.pw != 0 {
     let db = (d.pw - 1) * DENT / BLOCK;
     let dbn = dir_block(d, db);
@@ -2318,6 +2483,25 @@ fn disk_commit(d: &mut DiskFs) -> bool
     }
     j = j + 1;
   }
+  mask_pending(&mut d, false);
+  if ne != 0 {
+    // Round two, once the first is on the disk: the blocks that hold them.
+    ok = ok && dq_flush(&mut d.q);
+    j = 0;
+    while j < np
+      invariant j <= np && np <= PD_MAX && np <= len(d.pd) && disk_ok(d)
+    {
+      if j < len(d.pf) && get(d.pf, j) == 1 {
+        let pb = get(d.pd, j);
+        let mut pbn = 0;
+        if pb < d.dcap {
+          pbn = dir_block(d, pb);
+        }
+        ok = ok && pbn != 0 && dq_put(&mut d.q, pbn, d.dir, pb * BLOCK, false);
+      }
+      j = j + 1;
+    }
+  }
   ok = ok && dq_flush(&mut d.q);
   j = 0;
   while j < m
@@ -2332,6 +2516,8 @@ fn disk_commit(d: &mut DiskFs) -> bool
   d.pw = 0;
   d.pr = 0;
   d.pdn = 0;
+  d.pddn = 0;
+  d.pden = 0;
   d.pnew = 0;
   if !ok || t == 0 {
     dq_kill(&mut d.q);                // dq_fits said there was room: not reached
@@ -2378,6 +2564,8 @@ fn settle_batch(d: &mut DiskFs)
     d.pn = 0;
     d.on = 0;
     d.pdn = 0;
+    d.pddn = 0;
+    d.pden = 0;
   }
   d.txn = keep;
 }
