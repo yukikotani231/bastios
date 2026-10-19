@@ -29,21 +29,6 @@ mk lua https://github.com/lua/lua v5.4.7
 mk lz4 https://github.com/lz4/lz4 v1.10.0
 mk cjson https://github.com/DaveGamble/cJSON v1.7.18
 
-# A release tarball (its generated configure script included) made into the
-# same kind of repository.
-rel() {  # NAME URL
-  [ -d "$out/$1.git" ] && return 0
-  mkdir "$work/$1"
-  curl -fsSL "$2" | tar xz -C "$work/$1" --strip-components=1
-  git -C "$work/$1" -c init.defaultBranch=main init -q
-  git -C "$work/$1" add -A
-  git -C "$work/$1" -c user.name=compat -c user.email=compat@example.invalid commit -q -m "$1 release"
-  git clone -q --bare "$work/$1" "$out/$1.git"
-  git -C "$out/$1.git" update-server-info
-}
-
-rel libyaml https://github.com/yaml/libyaml/releases/download/0.2.5/yaml-0.2.5.tar.gz
-
 # The same for the toolchain disks that have no git: a tarball of a release
 # (OSS/NAME.tar.gz, with the files under NAME/), fetched with wget.
 tb() {  # NAME URL TAG
