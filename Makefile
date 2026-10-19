@@ -921,7 +921,8 @@ build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py tes
 	test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
 # Modules of CPython's own regression tests (Lib/test of the source the python
-# above is built from), with the helper modules and data they import, in
+# above is built from; CI restores the python without its source, so it is
+# fetched again, just that directory), with the helper modules and data they import, in
 # build/compat/cpytests, which goes on the disk as /disk/cpytests
 # (test/compat/cpytest.py runs them). test_subprocess and test_socket also
 # run on BastiOS but take minutes.
@@ -929,9 +930,15 @@ CPYTEST_MODS := select selectors poll timeout fcntl os stat file fileio mmap pip
 
 build/compat/cpytests: test/compat/cpytest.py build/compat/python Makefile
 	rm -rf $@ && mkdir -p $@/test
-	L=build/compat/src/cpython/Lib/test; for f in $$L/*.py; do case $$(basename $$f) in test_*) ;; *) cp $$f $@/test/;; esac; done; \
-	  cp -r $$L/support $$L/subprocessdata $@/test/; $(CPYTEST_MODS:%=cp $$L/test_%.py $@/test/;) \
-	  find $@ -name __pycache__ -prune -exec rm -rf {} +
+	set -e; L=build/compat/src/cpython/Lib/test; \
+	if [ ! -d $$L ]; then \
+	  rm -rf build/compat/src/cpython-lib; \
+	  git clone -q --depth 1 --filter=blob:none --sparse --branch $(CPYTHON_TAG) $(CPYTHON_GIT) build/compat/src/cpython-lib; \
+	  git -C build/compat/src/cpython-lib sparse-checkout set Lib/test; L=build/compat/src/cpython-lib/Lib/test; \
+	fi; \
+	for f in $$L/*.py; do case $$(basename $$f) in test_*) ;; *) cp $$f $@/test/;; esac; done; \
+	cp -r $$L/support $$L/subprocessdata $@/test/; $(CPYTEST_MODS:%=cp $$L/test_%.py $@/test/;) \
+	find $@ -name __pycache__ -prune -exec rm -rf {} +
 	cp test/compat/cpytest.py $@/run.py
 
 build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests test/compat/mkdisk.py
