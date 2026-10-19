@@ -1009,6 +1009,27 @@ static void toggle_max(struct win *w)
     touch_win(w);
 }
 
+/* Fills the left (side -1) or right (side 1) half of the screen above the
+ * task bar; the maximize button, or toggle_max, puts the window back. */
+static void snap_win(struct win *w, int side)
+{
+    touch_win(w);
+    w->keep_r_on = w->keep_b_on = 0;
+    if (!w->maxed) {
+        w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
+        w->maxed = 1;
+    }
+    int half = side > 0 ? (int)W - (int)W / 2 : (int)W / 2;
+    w->x = side > 0 ? (int)W / 2 : 0;
+    w->y = 0;
+    w->want_cw = half - 2 * BORDER;
+    w->want_ch = (int)H - BAR_H - TITLE_H - BORDER;
+    if (w->cli >= 0 && w->pend)
+        w->again = 1;
+    request_size(w);
+    touch_win(w);
+}
+
 /* Starts /bin/IMAGE with argv[0] NAME (bfiles is bterm run under that name). */
 static void launch_program(const char *name, const char *image)
 {
@@ -1204,6 +1225,18 @@ int main(int argc, char **argv)
                                 z[0] = t;
                             } else {
                                 raise_win(z[0]);
+                            }
+                            touch_all();
+                        }
+                    } else if ((code == 105 || code == 106 || code == 103) && down && k_alt) {
+                        struct win *t = focus();                    /* Alt-Left, Alt-Right: half the screen; Alt-Up: all of it */
+                        if (t && t->resizable) {
+                            raise_win(t);
+                            if (code == 103) {
+                                if (!t->maxed)
+                                    toggle_max(t);
+                            } else {
+                                snap_win(t, code == 106 ? 1 : -1);
                             }
                             touch_all();
                         }
