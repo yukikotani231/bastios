@@ -173,13 +173,13 @@ build/user/font8x8.h: src/font8x8.bin | build/user
 	(echo 'static const unsigned char font8x8[] = {'; od -An -v -tu1 -w16 $< | sed 's/ \+/,/g; s/^,//; s/$$/,/'; echo '};') > $@
 
 build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
-	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+	$(MUSLCC) -static-pie -O2 -s -Ibuild/user -o $@ $<
 
 build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
-	$(MUSLCC) -static-pie -O2 -o $@ $<
+	$(MUSLCC) -static-pie -O2 -s -o $@ $<
 
 build/user/bterm.elf: user/bterm.c user/bfiles.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
-	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+	$(MUSLCC) -static-pie -O2 -s -Ibuild/user -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
 # also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.

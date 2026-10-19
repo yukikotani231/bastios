@@ -434,6 +434,12 @@ int main(int argc, char **argv)
     const char *base = strrchr(argv[0], '/');
     if (strcmp(base ? base + 1 : argv[0], "bfiles") == 0)
         return bfiles_main(argc, argv);
+    unsigned sw, sh;
+    bwm_screen(&sw, &sh);                         /* a small screen gets a smaller grid than 80 x 24 */
+    if (sw >= 16 + MINC * CW && sh >= 80 + MINR * CH) {
+        if (cols > (int)(sw - 16) / CW) cols = (sw - 16) / CW;
+        if (rows > (int)(sh - 80) / CH) rows = (sh - 80) / CH;
+    }
     int fd = bwm_connect();
     if (fd < 0) {
         puts("bterm: no window server");

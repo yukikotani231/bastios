@@ -711,6 +711,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # A small screen: bwm -s 640x480 pretends the screen is that big. A
+        # terminal gets a grid that fits it (80 columns would not), and the
+        # window opens inside the screen, not past its right and bottom edge.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -s 640x480 -c bterm\r"); q.stdin.flush()
+        good = until(b"bterm: window", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a terminal opens on a 640 x 480 screen")
+        fails += not good
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            def title_at(x, y):
+                at = (y * w + x) * 3
+                return tuple(px[at:at + 3]) == (40, 90, 200)
+            inside = any(title_at(600, y) for y in range(0, 480))
+            beyond = any(title_at(x, y) for x in (660, 700, 1000) for y in range(0, 480)) or any(title_at(x, y) for x in range(0, 640, 8) for y in range(484, 700))
+            good = inside and not beyond
+            print(("ok  " if good else "FAIL"), f"({name}) its window lies inside the small screen")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
