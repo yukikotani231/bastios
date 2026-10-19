@@ -668,6 +668,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         good = until(b"bwm: ready", mark)
         if good:
             time.sleep(1)
+            w, h, px = screendump()
+            # The clock left of the Menu button: white digits on the task bar.
+            clock = any(tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255) for y in range(746, 766) for x in range(915, 965))
+            print(("ok  " if clock else "FAIL"), f"({name}) the task bar shows a clock")
+            fails += not clock
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.7)
