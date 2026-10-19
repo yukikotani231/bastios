@@ -1516,6 +1516,7 @@ go: go: go test
 go: go: fetch a real project from the host
 go: go: a real project (BurntSushi/toml), built with go build
 go: go: a real project (BurntSushi/toml), tested with go test
+go: go: a Go module with vendored dependencies (stretchr/testify), tested with go test -mod=vendor
 go: go: gofmt rewrites a program
 go: go: gopls finds the definition of a function
 go: go: gopls formats a file
