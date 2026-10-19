@@ -1690,7 +1690,13 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   requires disk_ok(d) && i < DSLOTS && from + n <= blen(name)
   ensures disk_ok(d)
 {
-  disk_drain(&mut d);                 // queued writes reach the disk first
+  // A regular file's new name waits for the next commit like its creation
+  // did (ent_lazy): the commit writes the entry whole, name and blocks
+  // together, after the data. Any other kind is written at once.
+  let lazy = i < DSLOTS && dent_byte(d, i, E_KIND) == 1;
+  if !lazy {
+    disk_drain(&mut d);               // queued writes reach the disk first
+  }
   if !dent_live(d, i) {
     return false;
   }
@@ -1742,7 +1748,12 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
     dent_setb(&mut d, i, E_NAME + j, bget(name, k + j));
     j = j + 1;
   }
-  let ok = ent_flush(&mut d, i);
+  let mut ok = false;
+  if lazy {
+    ok = ent_lazy(&mut d, i);
+  } else {
+    ok = ent_flush(&mut d, i);
+  }
   if !ok {
     // As after a failed write: memory keeps the old name.
     j = 0;
