@@ -355,6 +355,10 @@ steps = [
     # and the file still there after an unmount and a second mount.
     ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # Directories made on that file system ride the next commit: a tree of
+    # new directories and the files directly in them survives a remount.
+    ("truncate -s 1M im2; mkfs.bstdisk3 im2 && mkdir mm2 && mount -t bstdisk3 im2 mm2 && mkdir mm2/a mm2/a/b mm2/c && echo 1 > mm2/a/f && echo 2 > mm2/a/b/g && echo 3 > mm2/c/h && umount mm2 && mount -t bstdisk3 im2 mm2 && cat mm2/a/f mm2/a/b/g mm2/c/h; umount mm2; rm im2; rmdir mm2; echo dd$((1+1))",
+     [b"\r\n1\r\n2\r\n3\r\n", b"\r\ndd2\r\n"], b"\n# "),
     # A file in memory past the 64 MiB it was once limited to: grown to
     # 300 MiB (holes cost no pages), then written at its end.
     ("truncate -s 300M bigram; stat -c %s bigram; echo z >> bigram; stat -c %s bigram; rm bigram; echo bg$((1+1))",
