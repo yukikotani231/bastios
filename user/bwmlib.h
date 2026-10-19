@@ -6,6 +6,8 @@
 #define _GNU_SOURCE
 #endif
 #include <errno.h>
+#include <fcntl.h>
+#include <sys/ioctl.h>
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <stdio.h>
@@ -44,6 +46,25 @@ static int bwm_read_all(int fd, void *p, size_t n)
         n -= r;
     }
     return 0;
+}
+
+/* The size of the screen bwm runs on, from the BWM_SCREEN variable it sets
+ * for its children or else from /dev/fb0: 0 x 0 when neither tells. */
+static void bwm_screen(unsigned *w, unsigned *h)
+{
+    *w = *h = 0;
+    const char *e = getenv("BWM_SCREEN");
+    if (e && sscanf(e, "%ux%u", w, h) == 2)
+        return;
+    int fb = open("/dev/fb0", O_RDONLY | O_CLOEXEC);
+    if (fb >= 0) {
+        unsigned v[40];
+        if (ioctl(fb, 0x4600, v) == 0) {
+            *w = v[0];
+            *h = v[1];
+        }
+        close(fb);
+    }
 }
 
 /* A connection to the server, or -1. */
