@@ -417,6 +417,7 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     return EMSGSIZE;
   }
   let peek = flags / MSG_PEEK % 2 == 1;
+  let whole = udp_head(&mut k, pid, fd);    // a UDP datagram's own length
   let unix = is_unix(k, pid, fd);
   let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
   // A description in flight comes out first, so the recv below does not
@@ -594,9 +595,15 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if lx_put_out(&mut k, pid, msg + 40, 8) != 0 {
     return EFAULT;
   }
+  if whole > done {
+    mflags = mflags | MSG_TRUNC;            // the rest of the datagram was dropped
+  }
   xfer_u64(&mut k.fs.xfer, 0, mflags);
   if lx_put_out(&mut k, pid, msg + 48, 4) != 0 {
     return EFAULT;
+  }
+  if whole > done && flags / MSG_TRUNC % 2 == 1 {
+    return whole;
   }
   return done;
 }

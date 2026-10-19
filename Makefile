@@ -920,8 +920,29 @@ build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/co
 build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
+# Modules of CPython's own regression tests (Lib/test of the source the python
+# above is built from; CI restores the python without its source, so it is
+# fetched again, just that directory), with the helper modules and data they import, in
+# build/compat/cpytests, which goes on the disk as /disk/cpytests
+# (test/compat/cpytest.py runs them). test_subprocess and test_socket also
+# run on BastiOS but take minutes.
+CPYTEST_MODS := select selectors poll timeout fcntl os stat file fileio mmap pipes signal wait3 wait4 time resource threading posix pty
+
+build/compat/cpytests: test/compat/cpytest.py build/compat/python Makefile
+	rm -rf $@ && mkdir -p $@/test
+	set -e; L=build/compat/src/cpython/Lib/test; \
+	if [ ! -d $$L ]; then \
+	  rm -rf build/compat/src/cpython-lib; \
+	  git clone -q --depth 1 --filter=blob:none --sparse --branch $(CPYTHON_TAG) $(CPYTHON_GIT) build/compat/src/cpython-lib; \
+	  git -C build/compat/src/cpython-lib sparse-checkout set Lib/test; L=build/compat/src/cpython-lib/Lib/test; \
+	fi; \
+	for f in $$L/*.py; do case $$(basename $$f) in test_*) ;; *) cp $$f $@/test/;; esac; done; \
+	cp -r $$L/support $$L/subprocessdata $@/test/; $(CPYTEST_MODS:%=cp $$L/test_%.py $@/test/;) \
+	find $@ -name __pycache__ -prune -exec rm -rf {} +
+	cp test/compat/cpytest.py $@/run.py
+
+build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py cpytests=build/compat/cpytests
 
 # Node.js, on a sixth disk (test/compat/nodedisk.py) for test/compat/node.txt:
 # the node binary of the official node:22-alpine image and the libraries it
@@ -1014,7 +1035,7 @@ compat-baseline: build/bastios.elf $(COMPAT_DISKS)
 	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
 
 # The same checks on this Linux machine: are the expectations right?
-compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
+compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
 # Power cuts on a disk with a write cache, at every point of two crashme
@@ -1102,7 +1123,7 @@ bench: build/bastios.elf
 
 # Not part of `make test`: whole-program workloads (bench/workloads.py), the
 # same Alpine gcc, make, apk, tar and gzip on BastiOS and on Linux. The disk
-# is the compat suite's Alpine disk cut down to gcc, make and musl-dev, plus
+# is the compat suite's Alpine disk cut down to gcc, make, musl-dev, git and python3, plus
 # the guest script and a generated C project (bench/workloads/).
 BENCH_GCC_IMAGE ?= alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9
 build/bench/wl/proj.tar: bench/workloads/mkproj.py | build/bench/wl
@@ -1112,8 +1133,8 @@ build/bench/wl/wl.sh: bench/workloads/wl.sh | build/bench/wl
 build/bench/wl:
 	mkdir -p $@
 build/bench/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py build/bench/wl/proj.tar build/bench/wl/wl.sh
-	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) \
-	  --disk gcc,musl-dev,make --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
+	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) $(filter alpine/git@% alpine/ansible@%,$(ALPINE_PKGS)) \
+	  --disk gcc,musl-dev,make,git,python3 --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
 bench-workloads: build/bastios.elf build/bench/alpine.img
 	bench/workloads.py $(WORKLOAD_ARGS)
 
