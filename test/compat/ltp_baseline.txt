@@ -2722,3 +2722,6 @@ fs_perms15
 fs_perms16
 fs_perms17
 fs_perms18
+pth_str01
+pth_str02
+pth_str03

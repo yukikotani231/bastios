@@ -35,3 +35,8 @@ gf26 hangs
 fs_perms01 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
 fs_perms02 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
 fs_perms03 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
+starvation times out: it needs a scheduler that shares CPUs by priority
+hackbench01 hits the task limit
+hackbench02 hits the task limit
+time-schedule01 needs scheduler tracing
+trace_sched01 needs scheduler tracing
