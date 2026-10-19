@@ -3,9 +3,11 @@
  * terminal if there is no event0), gives the pointer a
  * cursor, and keeps the windows. A click raises and focuses a window,
  * dragging a title bar moves it, the box at the right of a title bar
- * closes the window, and what is typed goes to the focused window. Ctrl-T
+ * closes the window, dragging an edge or corner of a resizable window resizes it,
+ * and what is typed goes to the focused window. Ctrl-T
  * (or the Term button of the task bar at the bottom, which also has a button for each window) starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
- * ends bwm (the console comes back when /dev/fb0 closes).
+ * ends bwm (the console comes back when /dev/fb0 closes). The Menu button at the
+ * right end of the task bar opens a launcher: Terminal, Hello window, Quit bwm.
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
  * each window's pixels, takes rectangles to draw, and sends back keys and
@@ -68,6 +70,10 @@ struct fix_info {
 #define BTN_X0 60                        /* and the window buttons after it */
 #define BTN_W 120
 #define BTN_GAP 4
+#define MENU_W 52                        /* the Menu button at the right end of the task bar */
+#define MENU_ITEM_W 140                  /* the launcher menu it opens above itself */
+#define MENU_ITEM_H 24
+#define EDGE 4                          /* the strip along each side of a frame that resizes it */
 #define GRIP 14                          /* the resize grip at the corner of a frame */
 #define MIN_CW 64
 #define MIN_CH 32
@@ -92,6 +98,7 @@ struct win {
     int resizable;                       /* has a grip */
     int pend;                            /* a BWM_RESIZE has been sent and not answered */
     int want_cw, want_ch;                /* the size of the contents the pointer is asking for */
+    int keep_r_on, keep_r, keep_b_on, keep_b;   /* a left or top edge is being dragged: the right or bottom edge stays at keep_r / keep_b */
     int cols, rows, cx, cy;
     char text[MAX_ROWS][MAX_COLS];
 };
@@ -100,8 +107,11 @@ static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
 static int nz;
 static int next_id = 1;
 static void touch_bar(void);
+static int menu_open;                    /* the launcher menu is showing */
+static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
 static struct win *sizing;               /* the window whose grip is held */
-static int sox, soy;                     /* from the pointer to the corner of the frame, when it was taken */
+static int sox, soy;                     /* from the pointer to the edge or corner of the frame it holds, when it was taken */
+static int size_edges;                   /* which: 1 left, 2 right, 4 top, 8 bottom */
 
 struct cli {
     int fd;                              /* -1 when free */
@@ -296,13 +306,42 @@ static void draw_bar(void)
         if (!pool[i].used)
             continue;
         int x = BTN_X0 + n * (BTN_W + BTN_GAP);
-        if (x + BTN_W > (int)W)
+        if (x + BTN_W > (int)W - MENU_W - 12)
             break;
         fill(scene, x, y0 + 3, x + BTN_W, H - 3, nz && &pool[i] == z[nz - 1] ? rgb(40, 90, 200) : rgb(70, 70, 85));
         char t[16];
         snprintf(t, sizeof t, "%.14s", pool[i].title);
         text(scene, x + 6, y0 + 4, t, rgb(255, 255, 255));
         n++;
+    }
+    fill(scene, (int)W - MENU_W - 4, y0 + 3, (int)W - 4, H - 3, menu_open ? rgb(40, 90, 200) : rgb(70, 70, 85));
+    text(scene, (int)W - MENU_W + 2, y0 + 4, "Menu", rgb(255, 255, 255));
+}
+
+/* The launcher menu: what it starts, and where its entries are. */
+static const char *const menu_item[] = { "Terminal", "Hello window", "Quit bwm" };
+#define MENU_N 3
+#define MENU_X0 ((int)W - 4 - MENU_ITEM_W)
+#define MENU_Y0 ((int)H - BAR_H - MENU_N * MENU_ITEM_H)
+
+/* The entry of the menu at (x, y), or -1. */
+static int menu_at(int x, int y)
+{
+    if (x < MENU_X0 || x >= MENU_X0 + MENU_ITEM_W || y < MENU_Y0 || y >= MENU_Y0 + MENU_N * MENU_ITEM_H)
+        return -1;
+    return (y - MENU_Y0) / MENU_ITEM_H;
+}
+
+static void draw_menu(void)
+{
+    if (!menu_open)
+        return;
+    int lit = menu_at(menu_mx, menu_my);
+    fill(scene, MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + MENU_N * MENU_ITEM_H + 1, rgb(200, 200, 210));
+    for (int i = 0; i < MENU_N; i++) {
+        int y = MENU_Y0 + i * MENU_ITEM_H;
+        fill(scene, MENU_X0, y, MENU_X0 + MENU_ITEM_W, y + MENU_ITEM_H, i == lit ? rgb(40, 90, 200) : rgb(45, 45, 60));
+        text(scene, MENU_X0 + 10, y + 4, menu_item[i], rgb(255, 255, 255));
     }
 }
 
@@ -331,6 +370,7 @@ static void draw_scene(void)
     for (int i = 0; i < nz; i++)
         draw_win(z[i], i == nz - 1);
     draw_bar();
+    draw_menu();
 }
 
 /* The pointer: '#' black outline, '.' white fill. */
@@ -419,6 +459,20 @@ static void clamp_size(int *cw, int *ch)
     if (*ch > (int)H - TITLE_H - BORDER) *ch = H - TITLE_H - BORDER;
 }
 
+/* Puts the frame where the edge that is being dragged left it: a left or top
+ * edge moves, so the opposite one stays. */
+static void keep_edges(struct win *w)
+{
+    if (w->keep_r_on) {
+        w->x = w->keep_r - w->w;
+        if (w->x < 0) w->x = 0;
+    }
+    if (w->keep_b_on) {
+        w->y = w->keep_b - w->h;
+        if (w->y < 0) w->y = 0;
+    }
+}
+
 /* Gives a window the size its grip is asking for: at once if bwm keeps its
  * contents, else by asking the program, one request at a time. */
 static void request_size(struct win *w)
@@ -439,6 +493,7 @@ static void request_size(struct win *w)
         if (w->rows < 1) w->rows = 1;
         if (w->cx >= w->cols) w->cx = w->cols - 1;
         if (w->cy >= w->rows) w->cy = w->rows - 1;
+        keep_edges(w);
         touch_win(w);
     } else if (!w->pend) {
         struct bwm_resize r = { (uint32_t)w->id, (uint32_t)cw, (uint32_t)ch };
@@ -617,9 +672,12 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         w->w = r.w + 2 * BORDER;
         w->h = r.h + TITLE_H + BORDER;
         w->pend = 0;
+        keep_edges(w);
         touch_win(w);
         if (sizing == w)
             request_size(w);                               /* the pointer may have moved on */
+        else
+            w->keep_r_on = w->keep_b_on = 0;
     } else if (type == BWM_SETTITLE && len == sizeof(struct bwm_settitle)) {
         struct bwm_settitle t;
         memcpy(&t, p, sizeof t);
@@ -774,6 +832,19 @@ static void launch_terminal(void)
         char *argv[] = { "bterm", NULL };
         signal(SIGCHLD, SIG_DFL);                             /* an ignored SIGCHLD would stay ignored in ash */
         execv("/bin/bterm", argv);
+        _exit(127);
+    }
+}
+
+/* Starts /bin/NAME, as launch_terminal does bterm. */
+static void launch_program(const char *name)
+{
+    if (fork() == 0) {
+        char path[64];
+        char *argv[] = { (char *)name, NULL };
+        snprintf(path, sizeof path, "/bin/%s", name);
+        signal(SIGCHLD, SIG_DFL);
+        execv(path, argv);
         _exit(127);
     }
 }
@@ -995,7 +1066,28 @@ int main(int argc, char **argv)
                 int down = m[0] & 1;
                 int in_bar = my >= (int)H - BAR_H;
                 struct win *under = in_bar ? NULL : hit(mx, my);
-                if (down && !(buttons & 1) && in_bar) {
+                if (menu_open && (dx || dy)) {
+                    touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, (int)H - BAR_H);
+                    menu_mx = mx; menu_my = my;
+                }
+                if (down && !(buttons & 1) && menu_open) {
+                    int it = menu_at(mx, my);            /* a click chooses an entry or, anywhere else, closes the menu */
+                    menu_open = 0;
+                    touch_all();
+                    if (it == 0)
+                        launch_terminal();
+                    else if (it == 1)
+                        launch_program("bhello");
+                    else if (it == 2)
+                        running = 0;
+                    buttons = m[0];
+                    continue;
+                }
+                if (down && !(buttons & 1) && in_bar && mx >= (int)W - MENU_W - 4) {
+                    menu_open = 1;
+                    menu_mx = mx; menu_my = my;
+                    touch_all();
+                } else if (down && !(buttons & 1) && in_bar) {
                     if (mx >= TERM_X && mx < TERM_X + TERM_W) {
                         launch_terminal();
                     } else {
@@ -1009,7 +1101,14 @@ int main(int argc, char **argv)
                     gx = mx - under->x;
                     gy = my - under->y;
                     int on_close = my < under->y + TITLE_H && mx >= under->x + under->w - BORDER - CLOSE_W && mx < under->x + under->w - BORDER - 2;
-                    int on_grip = under->resizable && mx >= under->x + under->w - GRIP && my >= under->y + under->h - GRIP;
+                    int edges = 0;
+                    if (under->resizable) {
+                        if (mx < under->x + EDGE) edges |= 1;
+                        if (mx >= under->x + under->w - EDGE) edges |= 2;
+                        if (my < under->y + EDGE) edges |= 4;
+                        if (my >= under->y + under->h - EDGE) edges |= 8;
+                        if (mx >= under->x + under->w - GRIP && my >= under->y + under->h - GRIP) edges |= 2 | 8;
+                    }
                     if (on_close) {
                         if (under->cli >= 0) {
                             struct bwm_close cl = { (uint32_t)under->id };
@@ -1025,15 +1124,24 @@ int main(int argc, char **argv)
                             touch_all();
                         }
                         drag = my < under->y + TITLE_H ? under : NULL;
-                        if (on_grip) {
+                        if (edges) {
                             sizing = under;
-                            sox = under->x + under->w - mx;
-                            soy = under->y + under->h - my;
+                            size_edges = edges;
+                            sox = edges & 1 ? mx - under->x : under->x + under->w - mx;
+                            soy = edges & 4 ? my - under->y : under->y + under->h - my;
+                            under->want_cw = cw_of(under);
+                            under->want_ch = ch_of(under);
+                            under->keep_r_on = edges & 1;
+                            under->keep_r = under->x + under->w;
+                            under->keep_b_on = (edges & 4) != 0;
+                            under->keep_b = under->y + under->h;
                             drag = NULL;
                         }
                     }
                 } else if (!down) {
                     drag = NULL;
+                    if (sizing && !sizing->pend)
+                        sizing->keep_r_on = sizing->keep_b_on = 0;     /* else the answer lets go of them */
                     sizing = NULL;
                 }
                 if (drag && down) {
@@ -1041,8 +1149,14 @@ int main(int argc, char **argv)
                     drag->x = mx - gx; drag->y = my - gy;
                     touch_win(drag);
                 } else if (sizing && down) {
-                    sizing->want_cw = mx + sox - sizing->x - 2 * BORDER;
-                    sizing->want_ch = my + soy - sizing->y - TITLE_H - BORDER;
+                    if (size_edges & 2)
+                        sizing->want_cw = mx + sox - sizing->x - 2 * BORDER;
+                    else if (size_edges & 1)
+                        sizing->want_cw = sizing->keep_r - (mx - sox) - 2 * BORDER;
+                    if (size_edges & 8)
+                        sizing->want_ch = my + soy - sizing->y - TITLE_H - BORDER;
+                    else if (size_edges & 4)
+                        sizing->want_ch = sizing->keep_b - (my - soy) - TITLE_H - BORDER;
                     request_size(sizing);
                 } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || (m[0] & 7) != (buttons & 7))) {
                     struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), m[0] & 7u };
