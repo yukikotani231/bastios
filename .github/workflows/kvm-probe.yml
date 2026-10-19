@@ -1,0 +1,46 @@
+# Temporary: SMP wake-up stress under KVM (not for main).
+name: kvm-probe
+on:
+  push:
+    branches: [claude/project-thread-1mydyo]
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      BASTIOC0: bastiolang/stage0/target/release/bastioc0
+      BASTIOLIB: bastiolang
+    strategy:
+      fail-fast: false
+      matrix:
+        smp: [2, 4]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: yukikotani231/bastiolang
+          ref: main
+          path: bastiolang
+      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools
+      - run: cd bastiolang/stage0 && cargo build --release --locked
+      - name: Restore the proof cache
+        uses: actions/cache/restore@v4
+        with:
+          key: proof-none
+          restore-keys: |
+            proof-x86-64-
+            proof-
+          path: build/proof-cache
+      - run: make build/bastios.elf
+      - run: tools/ci-kvm.sh
+      - run: |
+          musl-gcc -static -O2 -Wall -o build/smp test/kvmprobe/smp.c -lpthread
+          test/compat/mkdisk.py build/kvmprobe.img build/smp
+      - name: stress
+        run: |
+          for t in sem lock cond psel pipe all; do
+            echo "=== $t"
+            timeout 1500 python3 test/kvmprobe/drive.py build/bastios.elf build/kvmprobe.img "/disk/smp $t 50000 15" 1400 ${{ matrix.smp }} 2>&1 | tail -60 || true
+          done
