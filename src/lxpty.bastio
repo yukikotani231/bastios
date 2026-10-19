@@ -52,7 +52,6 @@ const PT_W_TT: u64 = 16;               // the termios, a byte a word (TERMIOS_SI
 
 const SIGHUP: u64 = 1;
 const SIGQUIT: u64 = 3;
-const TIOCSWINSZ: u64 = 0x5414;
 const TIOCSCTTY: u64 = 0x540E;
 const TIOCNOTTY: u64 = 0x5422;
 const TIOCGPTN: u64 = 0x80045430;
