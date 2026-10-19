@@ -27,6 +27,9 @@ def run(name):
         tid = t.id()
         if tid in KNOWN or "No module named '_testcapi'" in tb:
             continue
+        if tid.startswith("unittest.loader."):
+            # The module did not import: say why, on one line.
+            tid += " " + tb.strip().splitlines()[-1]
         bad.append(tid.replace("test.test_" + name + ".", "", 1))
     print(name, "FAILED " + " ".join(sorted(bad)) if bad else "ok", flush=True)
     return not bad
