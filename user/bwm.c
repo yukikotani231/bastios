@@ -7,7 +7,7 @@
  * and what is typed goes to the focused window. Ctrl-T
  * (or the Term button of the task bar at the bottom, which also has a button for each window) starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
  * ends bwm (the console comes back when /dev/fb0 closes). The Menu button at the
- * right end of the task bar opens a launcher: Terminal, Hello window, Quit bwm.
+ * right end of the task bar opens a launcher: Terminal, Files, Hello window, Quit bwm.
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
  * each window's pixels, takes rectangles to draw, and sends back keys and
@@ -344,8 +344,8 @@ static void draw_bar(void)
 }
 
 /* The launcher menu: what it starts, and where its entries are. */
-static const char *const menu_item[] = { "Terminal", "Hello window", "Quit bwm" };
-#define MENU_N 3
+static const char *const menu_item[] = { "Terminal", "Files", "Hello window", "Quit bwm" };
+#define MENU_N 4
 #define MENU_X0 ((int)W - 4 - MENU_ITEM_W)
 #define MENU_Y0 ((int)H - BAR_H - MENU_N * MENU_ITEM_H)
 
@@ -1157,8 +1157,10 @@ int main(int argc, char **argv)
                     if (it == 0)
                         launch_terminal();
                     else if (it == 1)
-                        launch_program("bhello");
+                        launch_program("bfiles");
                     else if (it == 2)
+                        launch_program("bhello");
+                    else if (it == 3)
                         running = 0;
                     buttons = m[0];
                     continue;
