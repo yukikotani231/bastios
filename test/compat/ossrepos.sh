@@ -27,6 +27,7 @@ mk() {  # NAME URL TAG-OR-COMMIT
 mk zlib https://github.com/madler/zlib v1.3.1
 mk lua https://github.com/lua/lua v5.4.7
 mk lz4 https://github.com/lz4/lz4 v1.10.0
+mk cjson https://github.com/DaveGamble/cJSON v1.7.18
 
 # The same for the toolchain disks that have no git: a tarball of a release
 # (OSS/NAME.tar.gz, with the files under NAME/), fetched with wget.
