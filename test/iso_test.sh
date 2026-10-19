@@ -809,6 +809,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Alt-F4 closes the focused window: bhello answers the close request.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bhello\r"); q.stdin.flush()
+        good = until(b"bhello: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey alt-f4")
+            good = until(b"bhello: closed", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Alt-F4 closes the focused window")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bfiles opens a file in its viewer, e edits it: typing inserts at the
         # cursor, Ctrl-S saves, and the shell reads the new contents back.
         mark = len(out)
