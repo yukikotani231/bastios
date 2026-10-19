@@ -110,7 +110,8 @@ fn quieting(procs: &Buf, q: u64) -> bool
 {
   let st = state(procs, q);
   let n = pget(procs, q, F_REGS + R_LXNR);       // the call it will run again (lx_retry)
-  let remap = n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MREMAP || n == LX_MMAP;
+  let remap = n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MREMAP || n == LX_MMAP
+    || n == LX_FORK || n == LX_VFORK || n == LX_CLONE || n == LX_CLONE3;   // copies_space (src/linux.bastio)
   return pget(procs, q, F_QUIET) != 0 && pget(procs, q, F_RESTART) != 0 && remap && (st == READY || st == RUNNING);
 }
 

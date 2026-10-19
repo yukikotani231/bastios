@@ -388,6 +388,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   let mut clear = false;                  // CLONE_CLEAR_SIGHAND (clone3)
   let mut pfdp = c;                       // where CLONE_PIDFD stores the descriptor: clone3 has a word for it
+  if copies_space(&mut k, pid, n, a) && !win_quiet(&mut k, pid) {
+    return lx_retry(&mut k, pid, n);        // fork with another thread of pid on a processor (copies_space)
+  }
   if n == LX_CLONE3 {
     let fw = user_u64(&mut k.spaces, pid, a);
     if fw.ok && fw.v / 0x200000000 % 2 == 1 {
@@ -637,6 +640,32 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   return lx_proc_call(&mut con, &mut k, mmu, pid, n, was, a, b, c, pfdp, ctid, tls, clear);
+}
+
+/// Whether call n (with first argument a) makes a new process with a copy
+/// of pid's address space: fork, vfork (which copies here), and clone or
+/// clone3 without CLONE_VM. The copy is made page by page, so another
+/// thread of pid that ran on a processor meanwhile could write some pages
+/// before they were copied and others after: the child would see a state
+/// the parent never had at any one moment (a lock taken in one page and
+/// what it guards not yet written in another). So these calls first wait,
+/// as munmap does, until no thread of the group runs on the space
+/// (win_quiet); the others are not picked meanwhile (group_free).
+fn copies_space(k: &mut Kernel, pid: u64, n: u64, a: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_FORK || n == LX_VFORK {
+    return true;
+  }
+  if n == LX_CLONE {
+    return a & CLONE_VM == 0;
+  }
+  if n == LX_CLONE3 {
+    let fw = user_u64(&mut k.spaces, pid, a);
+    return fw.ok && fw.v & CLONE_VM == 0;
+  }
+  return false;
 }
 
 /// The process-creating and exec calls, apart from linux_syscall so that its proof stays small.

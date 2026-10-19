@@ -3,6 +3,7 @@
 #include "compat.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -260,6 +261,40 @@ static int spawn_keeps_fds(void) {
     return bad_fd == 0;
 }
 
+/* fork while another thread writes two pages in turn, the lower one first:
+ * the child's copy must be the parent's memory at one moment, as on Linux,
+ * so the higher page never holds a newer count than the lower one. */
+static volatile long *pair_lo, *pair_hi;
+static volatile int pair_go;
+static void *pair_writer(void *x) {
+    (void)x;
+    for (long i = 1; pair_go; i++) { *pair_lo = i; *pair_hi = i; }
+    return 0;
+}
+static int fork_snapshot(void) {
+    char *m = mmap(0, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) return 0;
+    pair_lo = (long *)m;
+    pair_hi = (long *)(m + 2 * 4096);
+    pair_go = 1;
+    pthread_t w;
+    if (pthread_create(&w, 0, pair_writer, 0) != 0) return 0;
+    while (*pair_lo < 1000) {}            /* the writer is running */
+    int bad = 0, rounds = 300;
+    for (int i = 0; i < rounds && !bad; i++) {
+        pid_t c = fork();
+        if (c == 0) _exit(*pair_hi > *pair_lo ? 1 : 0);
+        int st = 0;
+        if (c < 0 || waitpid(c, &st, 0) != c || !WIFEXITED(st)) { bad = -1; break; }
+        if (WEXITSTATUS(st) != 0) bad = i + 1;
+    }
+    pair_go = 0;
+    pthread_join(w, 0);
+    munmap(m, 3 * 4096);
+    if (bad > 0) { fail("fork %d: the child saw the higher page newer than the lower one", bad); return -1; }
+    return bad == 0;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -290,6 +325,10 @@ int main(void) {
     EXPECT("a thread keeps its descriptors while another spawns a child", spawn_keeps_fds());
     EXPECT("clone3: CLONE_CLEAR_SIGHAND, and what it refuses", clone3_clear_sighand());
     EXPECT("clone3: a fork child", clone3_fork());
+    if (begin("fork while another thread writes copies one moment of the parent")) {
+        int r = fork_snapshot();
+        if (r == 1) pass(); else if (r == 0) fail("mmap, pthread_create, fork or waitpid failed");
+    }
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
