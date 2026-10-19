@@ -682,12 +682,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = tuple(px[at:at + 3]) == (45, 45, 60)
             print(("ok  " if good else "FAIL"), f"({name}) the Menu button opens the launcher menu")
             fails += not good
-            monitor("mouse_move -34 -72")                          # onto Terminal
+            monitor("mouse_move -34 -96")                          # onto Terminal
             monitor("mouse_button 1", "mouse_button 0")
             good = until(b"bterm: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the menu's Terminal entry starts a terminal window")
             fails += not good
             time.sleep(1)
+            monitor("mouse_move 34 96")
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.5)
+            monitor("mouse_move -34 -72")                          # onto Files
+            monitor("mouse_button 1", "mouse_button 0")
+            good = until(b"bfiles: dir /", mark) and until(b"bfiles: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the menu's Files entry opens the file browser on /")
+            fails += not good
             monitor("mouse_move 34 72")
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.5)

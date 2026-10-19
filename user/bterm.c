@@ -18,6 +18,7 @@
 
 #include "bwmlib.h"
 #include "font8x8.h"
+#include "bfiles.h"
 
 #define MAXC 160                          /* the most columns and rows the grid can have */
 #define MAXR 60
@@ -428,8 +429,11 @@ static void paste(int m)
     close(f);
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *base = strrchr(argv[0], '/');
+    if (strcmp(base ? base + 1 : argv[0], "bfiles") == 0)
+        return bfiles_main(argc, argv);
     int fd = bwm_connect();
     if (fd < 0) {
         puts("bterm: no window server");
