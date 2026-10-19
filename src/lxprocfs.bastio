@@ -2226,27 +2226,6 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       if w == 10 {
         return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
       }
-      if w == 7 {
-        // PROBE ONLY: the kernel's view of the process's wait.
-        let q = smaller((what - SY_PX) / PXF_N, NPROC - 1);
-        let mut a = put_s(&mut o, 0, "st=");
-        a = put_n(&mut o, a, pget(k.procs, q, F_STATE));
-        a = put_s(&mut o, a, " nr=");
-        a = put_n(&mut o, a, pget(k.procs, q, F_REGS + R_LXNR));
-        a = put_s(&mut o, a, " rs=");
-        a = put_n(&mut o, a, pget(k.procs, q, F_RESTART));
-        a = put_s(&mut o, a, " fx=");
-        a = put_hx16(&mut o, a, pget(k.procs, q, F_FUTEX));
-        a = put_s(&mut o, a, " a1=");
-        a = put_hx16(&mut o, a, pget(k.procs, q, F_REGS + R_RDI));
-        a = put_s(&mut o, a, " a2=");
-        a = put_hx16(&mut o, a, pget(k.procs, q, F_REGS + R_RSI));
-        a = put_s(&mut o, a, " sig=");
-        a = put_hx16(&mut o, a, pget(k.procs, q, F_SIGPEND));
-        a = put_s(&mut o, a, " mask=");
-        a = put_hx16(&mut o, a, pget(k.procs, q, F_SIGMASK));
-        return put_c(&mut o, a, 10);
-      }
       return put_s(&mut o, 0, px_text(w));
     }
     if what >= SY_SC && what < SY_SC + SCT_NUM {
