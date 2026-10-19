@@ -22,6 +22,8 @@
 //              nothing, cut while made). Removing the name a file was made
 //              under while the other remains is the case diskfs commits
 //              with one sector write (disk_take_name).
+//   disk/mK/f  (K a digit) a directory and a file in it, made together (step_dir):
+//              fsck must find no file whose directory is missing.
 //   disk/g/    files 000, 001, ... up to some count and none past it, each
 //              holding its own three digits (the last may be empty, cut
 //              while made). Three more each 16 records, up to GMAX, so
@@ -585,6 +587,37 @@ fn put_g(nm: &mut Bytes, buf: &mut Bytes, k: u64) -> bool
   return ok;
 }
 
+/// Makes directory disk/mK (K = k % 10) and a file in it, after removing
+/// the ones left by ten steps ago. The directory's entry and the file's
+/// entry inside it wait for the same commit, which must write the
+/// directory's block first: a power cut may leave the directory empty or
+/// absent, never the file without its directory (fsck says "parent ... is
+/// not a directory" if it does).
+fn step_dir(buf: &mut Bytes, k: u64) -> bool
+  requires blen(buf) == 4096
+  ensures blen(buf) == 4096
+{
+  let mut d = bfrom("disk/m0");
+  let mut f = bfrom("disk/m0/f");
+  let dg = cast[u8](48 + k % 10);
+  let mut ok = blen(d) == 7 && blen(f) == 9;
+  if ok {
+    bset(&mut d, 6, dg);
+    bset(&mut f, 6, dg);
+    f_unlink(f, 9);
+    f_rmdir(d, 7);
+    ok = f_mkdir(d, 7) != NOT_OK;
+  }
+  if ok {
+    let fd = f_open(f, 9, O_WRITE + O_CREATE + O_TRUNC);
+    ok = fd != NOT_OK && f_write(fd, buf, 3) == 3;
+    f_close(fd);
+  }
+  bfree(d);
+  bfree(f);
+  return ok;
+}
+
 fn bad(con: &Serial, what: Str) -> u64 {
   print_str(con, "crashme: bad ");
   print_str(con, what);
@@ -685,6 +718,11 @@ fn main(con: &mut Serial) -> u64 {
     } else if i % 16 == 11 {
       if !step_links(&mut ln, &mut buf, i / 32 % 2 == 0) {
         code = bad(con, "link");
+      }
+    }
+    if code == 0 && i % 16 == 14 {
+      if !step_dir(&mut buf, i / 16) {
+        code = bad(con, "dir");
       }
     }
     if code == 0 && (i % 16 == 1 || i % 16 == 9 || i % 16 == 13) && g < GMAX {
