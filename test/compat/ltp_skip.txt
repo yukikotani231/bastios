@@ -32,3 +32,6 @@ gf17 hangs
 gf20 hangs
 gf23 hangs
 gf26 hangs
+fs_perms01 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
+fs_perms02 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
+fs_perms03 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
