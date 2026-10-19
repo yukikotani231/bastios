@@ -898,6 +898,10 @@ static int k_shift, k_ctrl, k_alt, k_caps;
  * until it is released. */
 #define REPEAT_FIRST_MS 400
 #define REPEAT_NEXT_MS  40
+#define DOUBLE_CLICK_MS 400
+static struct win *last_click_win;        /* the window whose title bar was clicked last, and when */
+static long long last_click_ms;
+static int last_click_maxed;              /* whether it was maximized before that click */
 static int clock_shown = -1;              /* the minute of the day the task bar shows */
 static unsigned rep_code;
 static long long rep_due;                 /* when the next repeat is due, in ms; valid while rep_code != 0 */
@@ -1356,7 +1360,20 @@ int main(int argc, char **argv)
                             raise_win(under);
                             touch_all();
                         }
-                        drag = my < under->y + TITLE_H ? under : NULL;
+                        int on_title = my < under->y + TITLE_H && !edges;
+                        long long now = now_ms();
+                        int dbl = under->resizable && on_title && under == last_click_win && now - last_click_ms < DOUBLE_CLICK_MS;
+                        if (dbl) {                               /* a double click on the title bar: maximize or restore */
+                            under->maxed = last_click_maxed;
+                            toggle_max(under);
+                            touch_all();
+                            last_click_win = NULL;
+                        } else {
+                            last_click_win = on_title ? under : NULL;
+                            last_click_ms = now;
+                            last_click_maxed = under->maxed;
+                        }
+                        drag = !dbl && my < under->y + TITLE_H ? under : NULL;
                         if (drag)
                             under->maxed = 0;                    /* moved by hand: no longer "maximized" */
                         if (edges) {

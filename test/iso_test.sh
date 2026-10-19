@@ -674,6 +674,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = blue(300) and blue(800)
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Up makes the window fill the screen")
             fails += not good
+            # A double click on the title bar of the full-screen window puts it back.
+            monitor("mouse_move -212 -374")                        # onto the title bar, at x 300
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            good = not (tuple(px[(3 * w + 1000) * 3:(3 * w + 1000) * 3 + 3]) == (40, 90, 200))
+            print(("ok  " if good else "FAIL"), f"({name}) a double click on the title bar restores a maximized window")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
