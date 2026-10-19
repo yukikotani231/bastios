@@ -961,7 +961,10 @@ int main(int argc, char **argv)
     }
     unsigned want_w = 0, want_h = 0;
     if (a + 1 < argc && strcmp(argv[a], "-s") == 0) {
-        sscanf(argv[a + 1], "%ux%u", &want_w, &want_h);
+        char *end;
+        want_w = strtoul(argv[a + 1], &end, 10);
+        if (*end == 'x')
+            want_h = strtoul(end + 1, NULL, 10);
         a += 2;
     }
     char **child = a + 1 < argc && strcmp(argv[a], "-c") == 0 ? &argv[a + 1] : NULL;
@@ -983,9 +986,9 @@ int main(int argc, char **argv)
         W = want_w;
         H = want_h;
     }
-    char dims[32];
-    snprintf(dims, sizeof dims, "%ux%u", W, H);
-    setenv("BWM_SCREEN", dims, 1);                            /* clients size their first window to fit */
+    static char dims[48];
+    snprintf(dims, sizeof dims, "BWM_SCREEN=%ux%u", W, H);
+    putenv(dims);                            /* clients size their first window to fit */
     roff = v.red.offset; goff = v.green.offset; boff = v.blue.offset;
     scene = malloc((size_t)W * H * 4);
     frame = malloc((size_t)W * H * 4);

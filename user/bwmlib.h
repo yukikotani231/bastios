@@ -54,8 +54,15 @@ static void bwm_screen(unsigned *w, unsigned *h)
 {
     *w = *h = 0;
     const char *e = getenv("BWM_SCREEN");
-    if (e && sscanf(e, "%ux%u", w, h) == 2)
-        return;
+    if (e) {
+        char *end;
+        unsigned long a = strtoul(e, &end, 10);
+        if (*end == 'x') {
+            *w = a;
+            *h = strtoul(end + 1, NULL, 10);
+            return;
+        }
+    }
     int fb = open("/dev/fb0", O_RDONLY | O_CLOEXEC);
     if (fb >= 0) {
         unsigned v[40];
