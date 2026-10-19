@@ -730,3 +730,12 @@ Lua 5.4	 3.14
 $ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/lz4.git && cd lz4 && make -j2 >/tmp/c.log 2>&1; echo make=$?; make check >/tmp/chk.log 2>&1; echo check=$?; cd /root && rm -rf lz4'
 make=0
 check=0
+
+== oss: cJSON: clone it, build it with cmake, and run its unit tests with ctest
+# timeout 600
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'apk add --allow-untrusted -q --no-progress -X ALPINEURL cmake >/dev/null 2>&1; command -v cmake; cd /root && git clone -q HOSTURL/oss/cjson.git && cd cjson && cmake -S . -B b -DBUILD_SHARED_LIBS=Off -DENABLE_CJSON_UNINSTALL=Off >/tmp/c.log 2>&1; echo cmake=$?; cmake --build b -j2 >>/tmp/c.log 2>&1; echo build=$?; (cd b && ctest >/tmp/t.log 2>&1; echo ctest=$?; grep "tests passed" /tmp/t.log); cd /root && rm -rf cjson'
+/usr/bin/cmake
+cmake=0
+build=0
+ctest=0
+100% tests passed, 0 tests failed out of 19

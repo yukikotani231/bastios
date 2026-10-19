@@ -1639,6 +1639,7 @@ alpine: oss: install make, and free the disk of what the builds below do not nee
 alpine: oss: zlib: clone it over HTTP, configure, build, and run its test suite
 alpine: oss: Lua: clone it, build the interpreter, and run a program with it
 alpine: oss: LZ4: clone it, build it, and run its test suite
+alpine: oss: cJSON: clone it, build it with cmake, and run its unit tests with ctest
 alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
