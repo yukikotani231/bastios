@@ -699,3 +699,34 @@ abuild=0
 >>> tinycc-dev*: Create tinycc-dev-0.9.28-r0.apk
 >>> tinycc*: Create tinycc-0.9.28-r0.apk
 built by an apk-built tcc
+
+== oss: install make, and free the disk of what the builds below do not need
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL make 2>/dev/null; echo status $?; bb chroot /disk/a /bin/sh -c 'for p in nodejs npm go python3 neovim tmux gdb; do apk info -e $p >/dev/null 2>&1 && apk del -q --no-progress $p 2>/dev/null; done; apk info -e make'
+status 0
+make
+
+== oss: zlib: clone it over HTTP, configure, build, and run its test suite
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/zlib.git && cd zlib && ./configure >/dev/null && make -j2 >/tmp/z.log 2>&1; echo make=$?; make test 2>&1 | grep -o "\*\*\* zlib.* OK \*\*\*"; echo test=$?; cd /root && rm -rf zlib'
+make=0
+*** zlib test OK ***
+*** zlib shared test OK ***
+*** zlib 64-bit test OK ***
+test=0
+
+== oss: Lua: clone it, build the interpreter, and run a program with it
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/lua.git && cd lua && gcc -O2 -DLUA_USE_POSIX -DLUA_USE_DLOPEN -Wl,-E -o lua $(ls *.c | grep -v -e "^luac.c$" -e "^onelua.c$") -lm -ldl >/tmp/l.log 2>&1; echo cc=$?; cd testes && for t in strings math sort nextvar closure; do ../lua -e "_port=true" $t.lua >/tmp/t-$t.log 2>&1; echo $t=$? $(tail -n 1 /tmp/t-$t.log); done; cd ..; ./lua -e "print(_VERSION, string.format(\"%5.2f\", 22/7))"; cd /root && rm -rf lua'
+cc=0
+strings=0 OK
+math=0 OK
+sort=0 OK
+nextvar=0 OK
+closure=0 OK
+Lua 5.4	 3.14
+
+== oss: LZ4: clone it, build it, and run its test suite
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/lz4.git && cd lz4 && make -j2 >/tmp/c.log 2>&1; echo make=$?; make check >/tmp/chk.log 2>&1; echo check=$?; cd /root && rm -rf lz4'
+make=0
+check=0
