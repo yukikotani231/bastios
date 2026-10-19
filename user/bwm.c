@@ -1046,6 +1046,19 @@ static void toggle_max(struct win *w)
     touch_win(w);
 }
 
+/* The close box, or Alt-F4: a client is asked to close the window (it ends
+ * with the answer); bwm's own window goes at once. */
+static void close_win(struct win *w)
+{
+    if (w->cli >= 0) {
+        struct bwm_close cl = { (uint32_t)w->id };
+        to_client(w->cli, BWM_CLOSE, &cl, sizeof cl);
+    } else {
+        touch_win(w);
+        win_free(w);
+    }
+}
+
 /* Fills the left (side -1) or right (side 1) half of the screen above the
  * task bar, or all of it (side 0); the maximize button, or toggle_max, puts the window back. */
 static void snap_win(struct win *w, int side)
@@ -1275,6 +1288,10 @@ int main(int argc, char **argv)
                             snap_win(t, code == 103 ? 0 : code == 106 ? 1 : -1);
                             touch_all();
                         }
+                    } else if (code == 62 && down && k_alt) {      /* Alt-F4: close the focused window */
+                        struct win *t = focus();
+                        if (t)
+                            close_win(t);
                     } else if (code == 58 && down) {
                         k_caps = !k_caps;
                     } else if (down) {
@@ -1375,13 +1392,7 @@ int main(int argc, char **argv)
                     int on_min = in_title && mx >= title_btn(under, under->resizable ? 2 : 1) && mx < title_btn(under, under->resizable ? 2 : 1) + CLOSE_W - 2;
                     int edges = edges_at(under, mx, my);
                     if (on_close) {
-                        if (under->cli >= 0) {
-                            struct bwm_close cl = { (uint32_t)under->id };
-                            to_client(under->cli, BWM_CLOSE, &cl, sizeof cl);
-                        } else {
-                            touch_win(under);
-                            win_free(under);
-                        }
+                        close_win(under);
                         under = NULL;
                     } else if (on_max || on_min) {
                         if (on_max) {
