@@ -712,45 +712,6 @@ fn data_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
   return true;
 }
 
-/// Is slot i's page program text (TXT_PAGE)? Leaves it where it is.
-fn text_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
-  requires pt_level(t) == 1 && mem_ok(m) && i < 512 && pt_leases(t) == 0
-  ensures pt_level(t) == 1 && mem_ok(m) && pt_leases(t) == 0
-{
-  if pt_has(t, i) && pt_shared(t, i) {
-    let s = pt_take_shared(&mut t, i);
-    let r = is_text_page(m, s);
-    pt_put_shared(&mut t, i, s, true);
-    return r;
-  }
-  return false;
-}
-
-/// Is page pg of file h free to be mapped read-only into a private
-/// mapping: not cached, or cached as program text? A page a MAP_SHARED
-/// mapping may write is neither: mprotect would let a private write reach
-/// it. (A cached page that is not text stays out of such mappings.)
-fn pc_text_ok(c: &mut PCache, m: &mut Mem, h: u64, pg: u64) -> bool
-  requires pc_ok(c) && mem_ok(m)
-  ensures pc_ok(c) && mem_ok(m)
-{
-  let s = pc_find(c, h, pg);
-  if s >= PC_N {
-    return true;
-  }
-  let mut ok = false;
-  match pc_take(&mut c) {
-    PcTab::Off => {},
-    PcTab::On(mut t) => {
-      if pt_has(t, s / 512) && pt_lease_count(&mut t) == 0 {
-        ok = pt_borrow(&mut t, s / 512, text_l1, &mut m, s % 512);
-      }
-      pc_put(&mut c, PcTab::On(t));
-    },
-  }
-  return ok;
-}
-
 /// File h was closed for the last time: drops its pages but the program
 /// text ones. Those are what a next run of the program wants, and `mem`
 /// counts them as available; a page a MAP_SHARED mapping wrote is neither.
