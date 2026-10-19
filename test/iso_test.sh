@@ -731,7 +731,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     sx, sy = max(-200, min(200, dx)), max(-200, min(200, dy))
                     monitor(f"mouse_move {sx} {sy}")
                     dx, dy = dx - sx, dy - sy
-            movep(-220, -180)                                      # from the middle onto the title bar (y 52 to 69)
+            # Over the corner of a window the pointer is a resize cursor, a
+            # white cross-hair at its centre; the arrow has a black outline there.
+            xr = max(x for x in range(0, 640) if title_at(x, 53))
+            movep(xr - 320, 53 - 240)                              # onto the top right corner, in the title bar
+            time.sleep(0.5)
+            w, h, px = screendump()
+            at = (53 * w + xr) * 3
+            good = tuple(px[at:at + 3]) == (255, 255, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) the pointer turns into a resize cursor over a window's edge")
+            fails += not good
+            movep(100 - xr, 7)                                     # on to the title bar, where the drag starts
             monitor("mouse_button 1")
             movep(-300, -200)
             movep(-300, -200)

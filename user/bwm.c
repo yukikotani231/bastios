@@ -408,8 +408,83 @@ static const char *arrow[] = {
 #define ARROW_W 12
 #define ARROW_H 17
 
+/* Which edges of a resizable window the point is on: 1 left, 2 right, 4 top, 8 bottom. */
+static int edges_at(const struct win *w, int mx, int my)
+{
+    int edges = 0;
+    if (w->resizable) {
+        if (mx < w->x + EDGE) edges |= 1;
+        if (mx >= w->x + w->w - EDGE) edges |= 2;
+        if (my < w->y + EDGE) edges |= 4;
+        if (my >= w->y + w->h - EDGE) edges |= 8;
+        if (mx >= w->x + w->w - GRIP && my >= w->y + w->h - GRIP) edges |= 2 | 8;
+    }
+    return edges;
+}
+
+static struct win *hit(int x, int y);
+
+/* The resize cursors are drawn, not kept as pictures: a white shape
+ * (a double-headed arrow along the direction the edge moves in) with a black
+ * outline, around the pointer. */
+#define CUR_R 9                          /* they reach this far from the pointer */
+#define CUR_BOX 20                       /* the arrow reaches 17 below and 12 right of it */
+
+static int resize_white(int shape, int dx, int dy)
+{
+    if (shape == 1 || shape == 2) {                /* 1: left and right, 2: up and down */
+        int a = shape == 1 ? dx : dy, b = shape == 1 ? dy : dx;
+        int aa = a < 0 ? -a : a, ab = b < 0 ? -b : b;
+        return aa <= 7 && (ab == 0 || (aa >= 4 && ab <= 7 - aa));
+    }
+    if (shape == 4)                                /* anti-diagonal: the same as the other one, mirrored */
+        dy = -dy;
+    if (dx > 7 || dx < -7 || dy > 7 || dy < -7)
+        return 0;
+    if (dx - dy >= -1 && dx - dy <= 1)
+        return 1;
+    return (dx > 0 && dy > 0 && dx + dy >= 10) || (dx < 0 && dy < 0 && dx + dy <= -10);
+}
+
+/* 0 for the arrow, else 1 to 4 for a resize cursor over the point. */
+static int cursor_shape(int mx, int my)
+{
+    int e = 0;
+    if (sizing)
+        e = size_edges;
+    else if (!menu_open && my < (int)H - BAR_H) {
+        struct win *w = hit(mx, my);
+        if (w)
+            e = edges_at(w, mx, my);
+    }
+    if (e == 1 || e == 2) return 1;
+    if (e == 4 || e == 8) return 2;
+    if (e == (1 | 4) || e == (2 | 8)) return 3;
+    if (e == (1 | 8) || e == (2 | 4)) return 4;
+    return 0;
+}
+
 static void draw_cursor(int mx, int my)
 {
+    int shape = cursor_shape(mx, my);
+    if (shape) {
+        for (int dy = -CUR_R; dy <= CUR_R; dy++)
+            for (int dx = -CUR_R; dx <= CUR_R; dx++) {
+                int px = mx + dx, py = my + dy;
+                if (px < 0 || py < 0 || px >= (int)W || py >= (int)H)
+                    continue;
+                int white = resize_white(shape, dx, dy), black = 0;
+                for (int j = -1; j <= 1 && !white && !black; j++)
+                    for (int i = -1; i <= 1; i++)
+                        if (resize_white(shape, dx + i, dy + j)) {
+                            black = 1;
+                            break;
+                        }
+                if (white || black)
+                    frame[py * W + px] = white ? rgb(255, 255, 255) : rgb(0, 0, 0);
+            }
+        return;
+    }
     for (int y = 0; y < ARROW_H; y++)
         for (int x = 0; x < ARROW_W; x++) {
             char c = arrow[y][x];
@@ -1205,14 +1280,7 @@ int main(int argc, char **argv)
                     int in_title = my >= under->y + BORDER && my < under->y + TITLE_H;
                     int on_max = under->resizable && in_title && mx >= title_btn(under, 1) && mx < title_btn(under, 1) + CLOSE_W - 2;
                     int on_min = in_title && mx >= title_btn(under, under->resizable ? 2 : 1) && mx < title_btn(under, under->resizable ? 2 : 1) + CLOSE_W - 2;
-                    int edges = 0;
-                    if (under->resizable) {
-                        if (mx < under->x + EDGE) edges |= 1;
-                        if (mx >= under->x + under->w - EDGE) edges |= 2;
-                        if (my < under->y + EDGE) edges |= 4;
-                        if (my >= under->y + under->h - EDGE) edges |= 8;
-                        if (mx >= under->x + under->w - GRIP && my >= under->y + under->h - GRIP) edges |= 2 | 8;
-                    }
+                    int edges = edges_at(under, mx, my);
                     if (on_close) {
                         if (under->cli >= 0) {
                             struct bwm_close cl = { (uint32_t)under->id };
@@ -1291,14 +1359,14 @@ int main(int argc, char **argv)
             draw_scene();
             if (flush(dx0, dy0, dx1, dy1, mx, my) != 0)
                 break;
-            if (flush(ox, oy, ox + ARROW_W, oy + ARROW_H, mx, my) != 0)
+            if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
                 break;
         } else if (mx != ox || my != oy) {
-            if (flush(ox, oy, ox + ARROW_W, oy + ARROW_H, mx, my) != 0)
+            if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
                 break;
         }
         if (mx != ox || my != oy)
-            flush(mx, my, mx + ARROW_W, my + ARROW_H, mx, my);
+            flush(mx - CUR_R, my - CUR_R, mx + CUR_BOX, my + CUR_BOX, mx, my);
     }
     if (have_tty)
         tcsetattr(0, TCSANOW, &old);
