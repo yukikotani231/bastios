@@ -1010,7 +1010,7 @@ static void toggle_max(struct win *w)
 }
 
 /* Fills the left (side -1) or right (side 1) half of the screen above the
- * task bar; the maximize button, or toggle_max, puts the window back. */
+ * task bar, or all of it (side 0); the maximize button, or toggle_max, puts the window back. */
 static void snap_win(struct win *w, int side)
 {
     touch_win(w);
@@ -1019,7 +1019,7 @@ static void snap_win(struct win *w, int side)
         w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
         w->maxed = 1;
     }
-    int half = side > 0 ? (int)W - (int)W / 2 : (int)W / 2;
+    int half = side == 0 ? (int)W : side > 0 ? (int)W - (int)W / 2 : (int)W / 2;
     w->x = side > 0 ? (int)W / 2 : 0;
     w->y = 0;
     w->want_cw = half - 2 * BORDER;
@@ -1232,12 +1232,7 @@ int main(int argc, char **argv)
                         struct win *t = focus();                    /* Alt-Left, Alt-Right: half the screen; Alt-Up: all of it */
                         if (t && t->resizable) {
                             raise_win(t);
-                            if (code == 103) {
-                                if (!t->maxed)
-                                    toggle_max(t);
-                            } else {
-                                snap_win(t, code == 106 ? 1 : -1);
-                            }
+                            snap_win(t, code == 103 ? 0 : code == 106 ? 1 : -1);
                             touch_all();
                         }
                     } else if (code == 58 && down) {
