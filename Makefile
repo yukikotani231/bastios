@@ -1025,14 +1025,19 @@ COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.i
 
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
+# Real open-source projects (zlib, Lua, LZ4, toml, semver, nanoid) as git repositories the web
+# server serves, for alpine.txt to clone, build and test.
+build/compat/oss: test/compat/ossrepos.sh
+	test/compat/ossrepos.sh $@
+
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
-compat: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
+compat: build/bastios.elf $(COMPAT_DISKS) build/compat/oss
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests
