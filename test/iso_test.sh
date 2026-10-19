@@ -675,7 +675,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Up makes the window fill the screen")
             fails += not good
             # A double click on the title bar of the full-screen window puts it back.
-            monitor("mouse_move -212 -374")                        # onto the title bar, at x 300
+            for step in ((200, -200), (12, -200), (0, -200), (0, -146)):     # from the task bar button (88, 756) onto the title bar at (300, 10)
+                monitor(f"mouse_move {step[0]} {step[1]}")
             monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
             time.sleep(1.5)
             w, h, px = screendump()
