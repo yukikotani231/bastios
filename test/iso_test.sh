@@ -621,6 +621,42 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The launcher menu: the Menu button at the right end of the task bar
+        # opens a list above it, Terminal starts a terminal window, Quit ends bwm.
+        mark = len(out)
+        q.stdin.write(b"bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            monitor("mouse_move 482 372")                          # onto the Menu button
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            at = (690 * w + 1000) * 3
+            good = tuple(px[at:at + 3]) == (45, 45, 60)
+            print(("ok  " if good else "FAIL"), f"({name}) the Menu button opens the launcher menu")
+            fails += not good
+            monitor("mouse_move -34 -72")                          # onto Terminal
+            monitor("mouse_button 1", "mouse_button 0")
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the menu's Terminal entry starts a terminal window")
+            fails += not good
+            time.sleep(1)
+            monitor("mouse_move 34 72")
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.5)
+            monitor("mouse_move -34 -24")                          # onto Quit bwm
+            monitor("mouse_button 1", "mouse_button 0")
+            good = until(b"bwm: bye", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the menu's Quit entry ends bwm")
+            fails += not good
+        else:
+            monitor("sendkey ctrl-q")
+            until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
