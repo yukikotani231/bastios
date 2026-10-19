@@ -49,6 +49,10 @@ const MSG_NOSIGNAL: u64 = 0x4000;
 const MSG_OOB: u64 = 1;
 const MSG_ERRQUEUE: u64 = 0x2000;
 const SOCKADDR_MAX: u64 = 128;         // sizeof(struct sockaddr_storage)
+const SO_REUSEADDR: u64 = 2;
+const SO_BROADCAST: u64 = 6;
+const SO_KEEPALIVE: u64 = 9;
+const SO_REUSEPORT: u64 = 15;
 const SO_SNDBUF: u64 = 7;
 const SO_RCVBUF: u64 = 8;
 const SIN_LEN: u64 = 16;               // struct sockaddr_in
@@ -414,10 +418,7 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if !sock_bind(&mut k.nic, sk.s, sin.port) {
     return EADDRINUSE;
   }
-  // The address, for getsockname (the stack demultiplexes on the port
-  // alone). OF_ACC has only its low three bits in use, and a socket sets
-  // none of them.
-  of_set(&mut k.ofd, sk.h, OF_ACC, 8 * sin.ip);
+  sock_bound(&mut k, sk.h, sin.ip);
   return 0;
 }
 
@@ -463,6 +464,76 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
       mark = 2;
     }
     k.inet6 = set(k.inet6, sk.h, mark + 8 * ofd_hlim(k, sk.h));
+  }
+  return 0;
+}
+
+/// What a socket's description keeps in OF_ACC, whose low three bits no
+/// socket uses: in bits 3..10 the SOL_SOCKET options that only read back
+/// (SOF_*), from bit 11 the address bind was given, for getsockname (the
+/// stack demultiplexes on the port alone).
+const SOF_REUSEADDR: u64 = 1;
+const SOF_REUSEPORT: u64 = 2;
+const SOF_KEEPALIVE: u64 = 4;
+const SOF_BROADCAST: u64 = 8;
+const SOF_SPAN: u64 = 256;
+const SOF_BASE: u64 = 8;
+const SOF_IP: u64 = 2048;
+
+/// Records that the socket of description h was bound to ip.
+fn sock_bound(k: &mut Kernel, h: u64, ip: u64)
+  requires kok(k) && h < OFD_N && ip <= 4294967295
+  ensures kok(k)
+{
+  of_set(&mut k.ofd, h, OF_ACC, of_get(k.ofd, h, OF_ACC) % SOF_IP + SOF_IP * ip);
+}
+
+/// The address the socket of description h was bound to, 0 for none.
+fn sock_bound_ip(k: &Kernel, h: u64) -> u64
+  requires kok(k) && h < OFD_N
+{
+  return of_get(k.ofd, h, OF_ACC) / SOF_IP;
+}
+
+/// Whether option bit (SOF_*) is set on the socket of description h.
+fn sock_flag(k: &Kernel, h: u64, bit: u64) -> bool
+  requires kok(k) && bit >= 1 && bit <= 8
+{
+  return h < OFD_N && of_get(k.ofd, h, OF_ACC) % SOF_IP / SOF_BASE / bit % 2 == 1;
+}
+
+/// Sets or clears option bit (SOF_*) on the socket of description h.
+fn sock_flag_set(k: &mut Kernel, h: u64, bit: u64, on: bool)
+  requires kok(k) && h < OFD_N && bit >= 1 && bit <= 8
+  ensures kok(k)
+{
+  let acc = of_get(k.ofd, h, OF_ACC);
+  let low = acc % SOF_IP;
+  let mut f = low / SOF_BASE;
+  let had = f / bit % 2 == 1;
+  if on && !had {
+    f = f + bit;
+  } else if !on && had && f >= bit {
+    f = f - bit;
+  }
+  of_set(&mut k.ofd, h, OF_ACC, acc / SOF_IP % 0x100000000 * SOF_IP + f * SOF_BASE + low % SOF_BASE);
+}
+
+/// The SOF_* bit of SOL_SOCKET option name, or 0.
+fn sof_of(name: u64) -> u64
+  ensures result <= 8
+{
+  if name == SO_REUSEADDR {
+    return SOF_REUSEADDR;
+  }
+  if name == SO_REUSEPORT {
+    return SOF_REUSEPORT;
+  }
+  if name == SO_KEEPALIVE {
+    return SOF_KEEPALIVE;
+  }
+  if name == SO_BROADCAST {
+    return SOF_BROADCAST;
   }
   return 0;
 }
@@ -725,7 +796,7 @@ fn sockname_of(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     // A connected socket has the source address its route picked, which
     // C libraries read back (getaddrinfo sorts by it).
     let mut me = 0;
-    let bound = of_get(k.ofd, sk.h, OF_ACC) / 8;
+    let bound = sock_bound_ip(k, sk.h);
     if bound != 0 && bound <= 4294967295 {
       me = bound;
     } else if p / 65536 != 0 && p / 65536 <= 4294967295 {
@@ -810,7 +881,8 @@ fn mcast_opt(k: &mut Kernel, pid: u64, fd: u64, name: u64, va: u64, ln: u64) -> 
 }
 
 /// setsockopt(fd, level, name, val, len): checked, then ignored
-/// (SO_REUSEADDR, TCP_NODELAY and the like change nothing here). A
+/// (TCP_NODELAY and the like change nothing here; SO_REUSEADDR and a few
+/// more only read back). A
 /// SOL_SOCKET option needs an int's room and a readable value; IP and
 /// IPv6 options go on any internet socket, TCP ones on TCP and UDP ones
 /// on UDP; anything else is ENOPROTOOPT.
@@ -834,6 +906,11 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     }
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
       return EFAULT;
+    }
+    let bit = sof_of(name);
+    let h = fd_ofd(k, pid, fd);
+    if bit >= 1 && h < OFD_N {
+      sock_flag_set(&mut k, h, bit, get_u64(k.fs.xfer, 0) % 0x100000000 != 0);
     }
     return 0;
   }
@@ -950,6 +1027,10 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     if ofd_v6only(k, h) {
       v = 1;
     }
+  }
+  let sof = sof_of(name);
+  if level == SOL_SOCKET && sof >= 1 && sock_flag(k, fd_ofd(k, pid, fd), sof) {
+    v = 1;
   }
   if level == SOL_SOCKET && (name == SO_SNDBUF || name == SO_RCVBUF) {
     v = 4096;                               // a unix channel; a TCP buffer is as big

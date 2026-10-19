@@ -747,6 +747,46 @@ int main(void) {
            int t = recvmsg(r, &h, 0); int f2 = h.msg_flags;
            close(r); close(s);
            b == 0 && x == 10 && p == 4 && (f1 & MSG_TRUNC) && y == 10 && q == 10 && z == 4 && t == 4 && !(f2 & MSG_TRUNC); }));
+    EXPECT("TCP getsockname reads the bound address, and a connected or accepted socket's local address", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } }, g1, g2, g3, g4;
+           socklen_t al = sizeof a, l1 = sizeof g1, l2 = sizeof g2, l3 = sizeof g3, l4 = sizeof g4;
+           int l = socket(AF_INET, SOCK_STREAM, 0), c = socket(AF_INET, SOCK_STREAM, 0);
+           int b = bind(l, (struct sockaddr *)&a, sizeof a); int ls = listen(l, 1);
+           int q0 = getsockname(l, (struct sockaddr *)&g1, &l1); getsockname(l, (struct sockaddr *)&a, &al);
+           int cn = connect(c, (struct sockaddr *)&a, sizeof a);
+           int s = accept(l, 0, 0);
+           int q1 = getsockname(c, (struct sockaddr *)&g2, &l2), q2 = getsockname(s, (struct sockaddr *)&g3, &l3), q3 = getpeername(s, (struct sockaddr *)&g4, &l4);
+           close(s); close(c); close(l);
+           b == 0 && ls == 0 && q0 == 0 && cn == 0 && s >= 0 && q1 == 0 && q2 == 0 && q3 == 0 &&
+           g1.sin_addr.s_addr == htonl(0x7F000001) && g2.sin_addr.s_addr == htonl(0x7F000001) &&
+           g3.sin_addr.s_addr == htonl(0x7F000001) && g3.sin_port == a.sin_port && g4.sin_port == g2.sin_port; }));
+    EXPECT("an IPV6_V6ONLY listener takes a connection to ::1, and names it ::1", ({
+           struct sockaddr_in6 a = { AF_INET6 }, g;
+           socklen_t al = sizeof a, gl = sizeof g;
+           int l = socket(AF_INET6, SOCK_STREAM, 0), c = socket(AF_INET6, SOCK_STREAM, 0), one = 1;
+           setsockopt(l, IPPROTO_IPV6, IPV6_V6ONLY, &one, sizeof one);
+           int b = bind(l, (struct sockaddr *)&a, sizeof a); int ls = listen(l, 1);
+           getsockname(l, (struct sockaddr *)&a, &al);
+           a.sin6_addr = in6addr_loopback;
+           int cn = connect(c, (struct sockaddr *)&a, sizeof a);
+           int s = accept(l, 0, 0);
+           int q = getsockname(c, (struct sockaddr *)&g, &gl);
+           int w = send(c, "x", 1, 0);
+           close(s); close(c); close(l);
+           b == 0 && ls == 0 && cn == 0 && s >= 0 && q == 0 && w == 1 && !memcmp(&g.sin6_addr, &in6addr_loopback, 16); }));
+    EXPECT("SO_REUSEADDR, SO_REUSEPORT and SO_KEEPALIVE read back as set, and clear again", ({
+           int s = socket(AF_INET, SOCK_STREAM, 0), one = 1, zero = 0, v[4] = { 9, 9, 9, 9 };
+           socklen_t n = sizeof(int);
+           int d0 = getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v[0], &n);
+           setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one); setsockopt(s, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+           setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one);
+           n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v[1], &n);
+           n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_REUSEPORT, &v[2], &n);
+           setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &zero, sizeof zero);
+           n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_REUSEADDR, &v[3], &n);
+           int ka = 9; n = sizeof(int); getsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &ka, &n);
+           close(s);
+           d0 == 0 && v[0] == 0 && v[1] != 0 && v[2] != 0 && v[3] == 0 && ka != 0; }));
     EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
            unlink("/tmp/t_ltp2_dg");
            struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };
