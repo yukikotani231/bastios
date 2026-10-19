@@ -1088,7 +1088,7 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
   let w = user_page_writable(&mut k.spaces, pid, USER_BASE + from * 4096);
   // The tail first, so running out of memory leaves the mapping as it was.
   win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
-  let r = lx_map_file_shared(&mut k, pid, at + have, want - have, f, off + have * 4096);
+  let r = lx_map_file_shared(&mut k, pid, at + have, want - have, f, off + have * 4096, true);
   if r != 0 {
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + want, 0);
     if !fresh {
@@ -1866,7 +1866,7 @@ fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64,
 /// mmap MAP_SHARED of file f from offset off at window pages first ..
 /// first + pages: each page is the page cache's page for that part of the
 /// file, read in now if no process has it yet. 0, or ENOMEM.
-fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, off: u64) -> u64
+fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, off: u64, rw: bool) -> u64
   requires kok(k) && pid < NPROC && first <= WPAGES && pages <= WPAGES - first && off % 4096 == 0
   ensures kok(k)
   ensures result == 0 || result == ENOMEM
@@ -1885,9 +1885,9 @@ fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, 
           got = 0;
         }
       }
-      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got, false);
+      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got, !rw);
     }
-    if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot, true) {
+    if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot, rw) {
       return ENOMEM;
     }
     j = j + 1;
