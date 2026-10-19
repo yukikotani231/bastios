@@ -1031,7 +1031,7 @@ LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
 # Besides runtest/syscalls: the file system stress tests, the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
-LTP_SUITES ?= --suite fs --suite mm --suite dio --suite pty --suite containers --suite cve --suite posix
+LTP_SUITES ?= --suite fs --suite mm --suite dio --suite fs_perms_simple --suite pty --suite containers --suite cve --suite posix
 
 build/ltp/configure: | build
 	rm -rf build/ltp
