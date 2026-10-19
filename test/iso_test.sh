@@ -476,6 +476,34 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bhello: mouse 78 50 1", mark)
             print(("ok  " if good else "FAIL"), f"({name}) a click inside the window reaches the client, in its own coordinates")
             fails += not good
+            # Maximize (the box left of the close box) takes the whole screen
+            # above the task bar, and a second click puts the window back.
+            monitor("mouse_move 95 -60", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: resized 1020 722", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the maximize button gives the window the whole screen above the task bar")
+            fails += not good
+            monitor("mouse_move 375 -35", "mouse_move 375 -35", "mouse_button 1", "mouse_button 0")
+            good = until(b"bhello: resized 200 100", mark)
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = good and at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) maximizing again puts the window back")
+            fails += not good
+            # Minimize (the bar left of the maximize box) hides the window; its
+            # button in the task bar brings it back.
+            monitor("mouse_move -384 35", "mouse_move -384 35", "mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = at(80, 100) != (0, 255, 0) and at(260, 100) != (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) the minimize button hides the window")
+            fails += not good
+            monitor("mouse_move -64 338", "mouse_move -63 338", "mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) its task bar button shows the window again")
+            fails += not good
+            monitor("mouse_move 25 -308", "mouse_move 25 -308")                          # back to where the next step starts
             # The grip at the corner of the frame: dragging it 100 right and 60
             # down asks the client for a 300 x 160 window, which it paints again.
             monitor("mouse_move 120 45", "mouse_button 1", "mouse_move 100 60", "mouse_button 0")
