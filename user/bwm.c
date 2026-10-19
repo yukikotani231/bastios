@@ -1262,6 +1262,11 @@ int main(int argc, char **argv)
                 if (drag && down) {
                     touch_win(drag);
                     drag->x = mx - gx; drag->y = my - gy;
+                    /* The title bar stays reachable: some of it on screen, all of it above the task bar. */
+                    if (drag->x > (int)W - 60) drag->x = (int)W - 60;
+                    if (drag->x < 60 - drag->w) drag->x = 60 - drag->w;
+                    if (drag->y > (int)H - BAR_H - TITLE_H) drag->y = (int)H - BAR_H - TITLE_H;
+                    if (drag->y < 0) drag->y = 0;
                     touch_win(drag);
                 } else if (sizing && down) {
                     if (size_edges & 2)

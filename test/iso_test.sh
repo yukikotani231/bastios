@@ -724,6 +724,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = inside and not beyond
             print(("ok  " if good else "FAIL"), f"({name}) its window lies inside the small screen")
             fails += not good
+            # Dragging its title bar far up and to the left stops with some of
+            # the title bar on screen: the window cannot be lost off the edge.
+            def movep(dx, dy):
+                while dx or dy:
+                    sx, sy = max(-200, min(200, dx)), max(-200, min(200, dy))
+                    monitor(f"mouse_move {sx} {sy}")
+                    dx, dy = dx - sx, dy - sy
+            movep(-220, -180)                                      # from the middle onto the title bar (y 52 to 69)
+            monitor("mouse_button 1")
+            movep(-300, -200)
+            movep(-300, -200)
+            monitor("mouse_button 0")
+            time.sleep(0.5)
+            w, h, px = screendump()
+            good = title_at(30, 10) and not title_at(30, 30)
+            print(("ok  " if good else "FAIL"), f"({name}) a window dragged off the screen keeps part of its title bar on it")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
