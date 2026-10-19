@@ -129,9 +129,6 @@ fn prog_image(i: u64) -> Str {
   if i == 41 {
     return include_bytes("../../../build/user/mkeyev.elf");
   }
-  if i == 42 {
-    return include_bytes("../../../build/user/bfiles.elf");
-  }
   return include_bytes("../../../build/user/fault.bin");
 }
 

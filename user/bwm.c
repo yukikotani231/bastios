@@ -916,13 +916,13 @@ static void toggle_max(struct win *w)
     touch_win(w);
 }
 
-/* Starts /bin/NAME, as launch_terminal does bterm. */
-static void launch_program(const char *name)
+/* Starts /bin/IMAGE with argv[0] NAME (bfiles is bterm run under that name). */
+static void launch_program(const char *name, const char *image)
 {
     if (fork() == 0) {
         char path[64];
         char *argv[] = { (char *)name, NULL };
-        snprintf(path, sizeof path, "/bin/%s", name);
+        snprintf(path, sizeof path, "/bin/%s", image);
         signal(SIGCHLD, SIG_DFL);
         execv(path, argv);
         _exit(127);
@@ -1157,9 +1157,9 @@ int main(int argc, char **argv)
                     if (it == 0)
                         launch_terminal();
                     else if (it == 1)
-                        launch_program("bfiles");
+                        launch_program("bfiles", "bterm");
                     else if (it == 2)
-                        launch_program("bhello");
+                        launch_program("bhello", "bhello");
                     else if (it == 3)
                         running = 0;
                     buttons = m[0];
