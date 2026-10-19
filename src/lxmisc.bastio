@@ -974,6 +974,45 @@ fn lx_munmap_locked(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// statfs(path, buf): the file system the path names.
+fn lx_statfs_path(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
+  let mut pfd = NO_RESULT;
+  if pn != NO_RESULT && pn <= XFER {
+    pfd = proc_fd(k.procs, k.fs.xfer, pn);   // /proc/PID/fd/N: the file system of what the descriptor holds
+  }
+  if pn == NO_RESULT {
+    r = k.perr;
+  } else if pfd != NO_RESULT {
+    let d = fd_look(k, pfd / LXNFD, pfd % LXNFD);
+    if tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) {
+      r = EACCES;
+    } else if d.kind == K_BAD {
+      r = ENOENT;
+    } else {
+      r = lx_fstatfs(&mut k, pid, d, b);
+    }
+  } else if !path_there(&mut k, pn) {
+    r = ENOENT;
+  } else if cg_under(k, pn) {
+    r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC, 0);
+  } else if pn >= 4 && xfer_is(k.fs.xfer, 0, 4, "proc") && (pn == 4 || bget(k.fs.xfer, 4) == 47) {
+    r = lx_statfs(&mut k, pid, b, PROC_MAGIC, 0);
+  } else if vfs_in_mount(&mut k.fs, pn, false) {
+    let mf = vfs_path_mflags(&mut k.fs, pn);
+    r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC, mf);
+  } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
+    r = lx_statfs_disk(&mut k, pid, b);   // disk/ itself, or a name under it
+  } else {
+    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC, 0);
+  }
+  return r;
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -1073,36 +1112,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_SYSINFO {
     r = lx_sysinfo(&mut k, pid, a);
   } else if n == LX_STATFS {
-    let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
-    let mut pfd = NO_RESULT;
-    if pn != NO_RESULT && pn <= XFER {
-      pfd = proc_fd(k.procs, k.fs.xfer, pn);   // /proc/PID/fd/N: the file system of what the descriptor holds
-    }
-    if pn == NO_RESULT {
-      r = k.perr;
-    } else if pfd != NO_RESULT {
-      let d = fd_look(k, pfd / LXNFD, pfd % LXNFD);
-      if tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) {
-        r = EACCES;
-      } else if d.kind == K_BAD {
-        r = ENOENT;
-      } else {
-        r = lx_fstatfs(&mut k, pid, d, b);
-      }
-    } else if !path_there(&mut k, pn) {
-      r = ENOENT;
-    } else if cg_under(k, pn) {
-      r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC, 0);
-    } else if pn >= 4 && xfer_is(k.fs.xfer, 0, 4, "proc") && (pn == 4 || bget(k.fs.xfer, 4) == 47) {
-      r = lx_statfs(&mut k, pid, b, PROC_MAGIC, 0);
-    } else if vfs_in_mount(&mut k.fs, pn, false) {
-      let mf = vfs_path_mflags(&mut k.fs, pn);
-      r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC, mf);
-    } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
-      r = lx_statfs_disk(&mut k, pid, b);   // disk/ itself, or a name under it
-    } else {
-      r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC, 0);
-    }
+    r = lx_statfs_path(&mut k, pid, a, b);
   } else if n == LX_FSTATFS {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
