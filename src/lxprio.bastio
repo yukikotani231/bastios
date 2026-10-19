@@ -332,11 +332,11 @@ fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   ensures kok(k)
 {
   let t = sched_target(k.procs, pid, who);
-  if t == NPROC || size < 8 || size % 8 != 0 {
+  if size < 8 || size % 8 != 0 {
     return EINVAL;
   }
-  if t > NPROC {
-    return ESRCH;
+  if t >= NPROC {
+    return ESRCH;                           // none by that id; a negative id too, unlike the other sched calls
   }
   xfer_u64(&mut k.fs.xfer, 0, 1);
   let r = lx_put_out(&mut k, pid, mask, 8);
