@@ -149,6 +149,10 @@ def main():
     print(table(results))
 
 
+def ratio(a, b):
+    return f"{a / b:.2f}x" if b else "n/a"
+
+
 def table(results):
     oses = list(results["os"])
     lines = [f"QEMU {results['accel'].upper()}, -smp {results['smp']}, -m {results['mem']}, "
@@ -161,13 +165,13 @@ def table(results):
             r = results["os"][o].get(phase)
             if r is None:
                 break
-            cells.append(f"{r['seconds']:.2f}" if "seconds" in r else "error")
+            cells.append(f"{r['seconds']:.3f}" if "seconds" in r else "error")
             vals.append(r.get("seconds"))
         if len(cells) != len(oses):
             continue
         row = f"| {phase} | {desc} | " + " | ".join(cells) + " |"
         if len(oses) == 2:
-            row += f" {vals[0] / vals[1]:.2f}x |" if None not in vals else " |"
+            row += f" {ratio(vals[0], vals[1])} |" if None not in vals else " |"
         lines.append(row)
     # The first run starts with a cold cache; the later ones find what it read
     # already cached, so a system whose cache holds the working set speeds up.
@@ -175,10 +179,10 @@ def table(results):
     for phase, desc in results["phases"].items():
         runs = [results["os"][o].get(phase, {}).get("runs", []) for o in oses]
         if all(len(r) > 1 for r in runs):
-            cells = [f"{r[0]:.2f} / {statistics.median(r[1:]):.2f}" for r in runs]
+            cells = [f"{r[0]:.3f} / {statistics.median(r[1:]):.3f}" for r in runs]
             row = f"| {phase} | " + " | ".join(cells) + " |"
             if len(oses) == 2:
-                row += f" {runs[0][0] / runs[1][0]:.2f}x / {statistics.median(runs[0][1:]) / statistics.median(runs[1][1:]):.2f}x |"
+                row += f" {ratio(runs[0][0], runs[1][0])} / {ratio(statistics.median(runs[0][1:]), statistics.median(runs[1][1:]))} |"
             cold.append(row)
     if cold:
         lines += ["", "First run (cold cache) / median of the later runs (warm), in seconds:", "",
