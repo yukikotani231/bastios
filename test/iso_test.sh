@@ -575,7 +575,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bterm: window 1", mark)
         print(("ok  " if good else "FAIL"), f"({name}) Ctrl-T in bwm starts a terminal window")
         fails += not good
-        monitor("sendkey ctrl-q")
+        # A second terminal window: bwm must still see the keys (a poll
+        # asleep on the key events was not woken while the shells kept
+        # retrying their waits).
+        if good:
+            time.sleep(1)
+            mark2 = len(out)
+            monitor("sendkey ctrl-t")
+            good = until(b"bterm: window", mark2)
+            time.sleep(1)
+            monitor("sendkey ctrl-q")
+            good = good and until(b"bwm: bye", mark2)
+            print(("ok  " if good else "FAIL"), f"({name}) bwm still gets keys with two terminal windows open")
+            fails += not good
+        else:
+            monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
         mark = len(out)
