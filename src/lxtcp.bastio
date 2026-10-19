@@ -112,6 +112,7 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     }
   }
   of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, port, TM_NEW));
+  sock_bound(&mut k, tk.h, sin.ip);
   return 0;
 }
 
@@ -509,8 +510,17 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
       port = tcp_local_port(k.nic, tk.t);   // word 3 only says whether connect reported it
     }
     let mut me = 0;
-    if tk.mode == TM_CONN && tk.t < TCBS && is_v6tok(tcp_peer_ip(k.nic, tk.t)) {
-      me = V6_SELF;                         // connected over IPv6: our address there
+    let bound = sock_bound_ip(k, tk.h);
+    if bound != 0 && bound <= 4294967295 && tk.mode != TM_CONN {
+      me = bound;
+    }
+    if tk.mode == TM_CONN && tk.t < TCBS {
+      let pip = tcp_peer_ip(k.nic, tk.t);
+      if is_v6tok(pip) {
+        me = V6_SELF;                       // connected over IPv6: our address there
+      } else if pip != 0 && pip <= 4294967295 {
+        me = local_for(k.nic, pip);         // the source address its route picked
+      }
     }
     return sin_out(&mut k, pid, addr, lenp, me, port, ofd_v6(k, tk.h));
   }
