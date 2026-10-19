@@ -1031,7 +1031,7 @@ LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
 # Besides runtest/syscalls: the file system stress tests, the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
-LTP_SUITES ?= --suite fs --suite mm --suite dio --suite fs_perms_simple --suite pty --suite containers --suite cve --suite posix
+LTP_SUITES ?= --suite fs --suite mm --suite dio --suite fs_perms_simple --suite sched --suite pty --suite containers --suite cve --suite posix
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -1057,6 +1057,7 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/testcases/kernel/fs -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/mem -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/io -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/sched -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
 	$(MAKE) -C build/ltp/testcases/cve -s -k || true
 	# The Open POSIX Test Suite is configured on its own; a few tests do not
