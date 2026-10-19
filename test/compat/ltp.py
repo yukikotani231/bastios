@@ -60,7 +60,8 @@ def load_tests(ltp, only, skip, suites=()):
     posix = "posix" in suites
     names = ["syscalls", *(s for s in suites if s != "posix")]
     for suite in names:
-        for base in (os.path.join(ltp, "testcases", "kernel", suite), os.path.join(ltp, "testcases", suite)):
+        sdir = {"mm": "mem"}.get(suite, suite)   # runtest/mm lists the programs built in kernel/mem
+        for base in (os.path.join(ltp, "testcases", "kernel", sdir), os.path.join(ltp, "testcases", sdir)):
             for root, _, files in os.walk(base):
                 for f in sorted(files):
                     p = os.path.join(root, f)
