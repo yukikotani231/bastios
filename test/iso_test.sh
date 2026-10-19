@@ -150,7 +150,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
-    deadline = time.time() + 120
+    deadline = time.time() + 360
     def until(marker, start):
         nonlocal out
         while marker not in out[start:]:
@@ -788,6 +788,46 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            monitor("sendkey ctrl-q")
+            until(b"bwm: bye", mark)
+            time.sleep(0.5)
+            # Copy and paste, in a fresh bwm (the pointer starts at the centre):
+            # dragging over text selects and copies it, the middle button types
+            # the copy into the terminal.
+            mark = len(out)
+            q.stdin.write(b"\r"); q.stdin.flush()
+            until(b"# ", mark)
+            mark = len(out)
+            q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+            good = until(b"bterm: window", mark)
+            if good:
+                time.sleep(2)
+                typed("echo copied")
+                time.sleep(1.5)
+                w, h, px = screendump()
+                lines = screen_text_at(px, w, 72, 90, 80, 24)
+                row = next((i for i, l in enumerate(lines) if l.strip() == "copied"), None)
+                good = row is not None
+            if good:
+                def movep(dx, dy):
+                    n = max(1, (max(abs(dx), abs(dy)) + 199) // 200)
+                    monitor(*[f"mouse_move {dx * (i + 1) // n - dx * i // n} {dy * (i + 1) // n - dy * i // n}" for i in range(n)])
+                ty = 90 + row * 16 + 8
+                movep(74 - 512, ty - 384)
+                monitor("mouse_button 1")
+                movep(126 - 74, 0)
+                monitor("mouse_button 0")
+                time.sleep(0.7)
+                monitor("mouse_button 4", "mouse_button 0", "mouse_move 200 200")   # and the pointer off the text
+                time.sleep(1)
+                w, h, px = screendump()
+                lines2 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copied" for l in lines2)
+                if not good:
+                    print("\n".join(l for l in lines2 if l))
+            print(("ok  " if good else "FAIL"), f"({name}) a selection is copied and the middle button pastes it")
+            fails += not good
+            time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)

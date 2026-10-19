@@ -47,6 +47,9 @@ static int top, bot = 23;           /* the scroll region, inclusive */
 static int saved_cx, saved_cy;
 static struct cell main_grid[MAXR][MAXC];
 static int main_cx, main_cy, alt;
+static int sel_on, selecting;             /* a selection is lit; the button is still down */
+static int sel_ar, sel_ac, sel_br, sel_bc;   /* where it began and where the pointer is, as cells */
+#define CLIP_FILE "/tmp/bwm.clip"         /* what is selected, for any terminal to paste */
 
 static void put_cell(int r, int c, unsigned char ch)
 {
@@ -120,12 +123,31 @@ static void set_alt(int on)
     memset(dirty, 1, sizeof dirty);
 }
 
+/* Whether cell (r, c) is inside the selection (reading order). */
+static int selected(int r, int c)
+{
+    if (!sel_on)
+        return 0;
+    int ar = sel_ar, ac = sel_ac, br = sel_br, bc = sel_bc;
+    if (br < ar || (br == ar && bc < ac)) {
+        int t = ar; ar = br; br = t;
+        t = ac; ac = bc; bc = t;
+    }
+    if (r < ar || r > br)
+        return 0;
+    if (r == ar && c < ac)
+        return 0;
+    if (r == br && c > bc)
+        return 0;
+    return 1;
+}
+
 static void draw_cell(int r, int c, int cursor)
 {
     struct cell *e = &grid[r][c];
     int fg = e->fg, bg = e->bg;
     uint32_t f = palette[fg & 15], b = palette[bg & 15];
-    if (cursor) {
+    if (cursor || selected(r, c)) {
         uint32_t t = f;
         f = b;
         b = t;
@@ -364,6 +386,48 @@ static int repaint(int fd, int id, int *old_cx, int *old_cy)
     return 0;
 }
 
+/* Writes the selected text to CLIP_FILE, a line to a row with the trailing
+ * blanks cut off. */
+static void copy_selection(void)
+{
+    int ar = sel_ar, ac = sel_ac, br = sel_br, bc = sel_bc;
+    if (br < ar || (br == ar && bc < ac)) {
+        int t = ar; ar = br; br = t;
+        t = ac; ac = bc; bc = t;
+    }
+    static char text[MAXR * (MAXC + 1) + 1];
+    size_t n = 0;
+    for (int r = ar; r <= br && r < rows; r++) {
+        int c0 = r == ar ? ac : 0, c1 = r == br ? bc : cols - 1;
+        if (c1 >= cols) c1 = cols - 1;
+        size_t start = n;
+        for (int c = c0; c <= c1; c++)
+            text[n++] = grid[r][c].ch >= 32 && grid[r][c].ch < 127 ? grid[r][c].ch : ' ';
+        while (n > start && text[n - 1] == ' ')
+            n--;
+        if (r < br)
+            text[n++] = '\n';
+    }
+    int f = open(CLIP_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (f >= 0) {
+        (void)!write(f, text, n);
+        close(f);
+    }
+}
+
+/* Types the clipboard into the shell. */
+static void paste(int m)
+{
+    int f = open(CLIP_FILE, O_RDONLY);
+    if (f < 0)
+        return;
+    char b[512];
+    ssize_t n;
+    while ((n = read(f, b, sizeof b)) > 0)
+        (void)!write(m, b, n);
+    close(f);
+}
+
 int main(void)
 {
     int fd = bwm_connect();
@@ -412,7 +476,7 @@ int main(void)
     for (int r = 0; r < rows; r++)
         clear_cells(r, 0, cols);
     memset(dirty, 1, sizeof dirty);
-    int ocx = 0, ocy = 0;
+    int ocx = 0, ocy = 0, mid = 0;
     repaint(fd, id, &ocx, &ocy);
     printf("bterm: window %d\n", id);
     fflush(stdout);
@@ -429,6 +493,10 @@ int main(void)
             }
             for (ssize_t i = 0; i < n; i++)
                 feed(b[i]);
+            if (sel_on && !selecting) {
+                sel_on = 0;                       /* new output: the lit text may be gone */
+                memset(dirty, 1, sizeof dirty);
+            }
             if (repaint(fd, id, &ocx, &ocy) != 0)
                 break;
         }
@@ -439,6 +507,35 @@ int main(void)
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
                 if (write(m, &c, 1) != 1)
+                    break;
+            } else if (t == BWM_MOUSE) {
+                struct bwm_mouse *e = (struct bwm_mouse *)buf;
+                int er = e->y / CH, ec = e->x / CW;
+                if (er >= rows) er = rows - 1;
+                if (ec >= cols) ec = cols - 1;
+                if ((e->buttons & 1) && !selecting) {
+                    selecting = 1;               /* a press begins a selection */
+                    sel_on = 1;
+                    sel_ar = sel_br = er;
+                    sel_ac = sel_bc = ec;
+                    memset(dirty, 1, sizeof dirty);
+                } else if ((e->buttons & 1) && selecting && (er != sel_br || ec != sel_bc)) {
+                    sel_br = er;
+                    sel_bc = ec;
+                    memset(dirty, 1, sizeof dirty);
+                } else if (!(e->buttons & 1) && selecting) {
+                    selecting = 0;               /* the release ends it: a drag is copied, a click only clears */
+                    if (sel_ar != sel_br || sel_ac != sel_bc)
+                        copy_selection();
+                    else
+                        sel_on = 0;
+                    memset(dirty, 1, sizeof dirty);
+                }
+                if ((e->buttons & 4) && !mid) {
+                    paste(m);                    /* the middle button */
+                }
+                mid = e->buttons & 4;
+                if (repaint(fd, id, &ocx, &ocy) != 0)
                     break;
             } else if (t == BWM_RESIZE) {
                 struct bwm_resize *r = (struct bwm_resize *)buf;
