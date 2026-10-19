@@ -210,7 +210,7 @@ have, such as a kernel config or a block device), hang (interrupted after
 `--timeout` seconds) or crash. `--only REGEX` runs a subset by tag.
 
 `make compat-ltp` also runs LTP's file system stress tests (`runtest/fs`: growfiles,
-ftest, stream), the memory tests (`runtest/mm`: mmap stress, shared memory), direct I/O (`runtest/dio`), file permissions (`runtest/fs_perms_simple`), its pseudo-terminal, namespace (container) and
+ftest, stream), the memory tests (`runtest/mm`: mmap stress, shared memory), direct I/O (`runtest/dio`), file permissions (`runtest/fs_perms_simple`), the pthread stress tests (`runtest/sched`), its pseudo-terminal, namespace (container) and
 CVE regression tests, and the Open POSIX Test Suite's conformance tests
 (`--suite posix`; about 1,600 programs named after an interface and an
 assertion, such as `posix-sigaction_1-1`). Those exit 0 for a pass, 1 for a
