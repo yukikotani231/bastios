@@ -1118,5 +1118,18 @@ int main(void) {
            ok = ok && stat("/dev/nonesuch/x", &st) < 0 && errno == ENOENT;
            ok = ok && stat("/dev/null", &st) == 0 && S_ISCHR(st.st_mode);
            ok; }));
+    EXPECT("send(MSG_DONTWAIT) on a blocking TCP socket with a full send buffer is EAGAIN, not a wait", ({
+           int ls = socket(AF_INET, SOCK_STREAM, 0); struct sockaddr_in sa = { .sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+           bind(ls, (void *)&sa, sizeof sa); listen(ls, 1); socklen_t sl = sizeof sa; getsockname(ls, (void *)&sa, &sl);
+           int c = socket(AF_INET, SOCK_STREAM, 0); connect(c, (void *)&sa, sizeof sa); int s = accept(ls, 0, 0);
+           char blk[4096]; memset(blk, 'a', sizeof blk);
+           long total = 0; int blocked = 0;
+           while (total < (64L << 20)) {
+               long r = send(c, blk, sizeof blk, MSG_DONTWAIT);
+               if (r < 0) { blocked = errno == EAGAIN; break; }
+               total += r;
+           }
+           close(c); close(s); close(ls);
+           blocked; }));
     return done();
 }

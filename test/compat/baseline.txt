@@ -1684,3 +1684,4 @@ apps: cpython: tests of its own: select, selectors, poll, timeout, fcntl
 apps: cpython: tests of its own: os, stat, file, fileio, mmap, pipes
 apps: cpython: tests of its own: signal, wait3, wait4, time, resource
 apps: cpython: tests of its own: threading, posix and pty
+t_ltp2: send(MSG_DONTWAIT) on a blocking TCP socket with a full send buffer is EAGAIN, not a wait
