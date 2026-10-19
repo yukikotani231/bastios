@@ -797,15 +797,9 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         good = until(b"bfiles: window", mark)
         if good:
             time.sleep(1)
-            wq = socket.socket(socket.AF_UNIX)
-            wq.connect(qmp_path)
-            wf = wq.makefile("rw")
-            wf.readline()
-            for c in ({"execute": "qmp_capabilities"},
-                      {"execute": "input-send-event", "arguments": {"events": [{"type": "btn", "data": {"down": True, "button": "wheel-down"}}]}},
-                      {"execute": "input-send-event", "arguments": {"events": [{"type": "btn", "data": {"down": False, "button": "wheel-down"}}]}}):
-                wf.write(json.dumps(c) + "\n"); wf.flush(); wf.readline()
-            wq.close()
+            # dz of mouse_move is the wheel (1 is up, -1 down); park the pointer inside the window first
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 -1")
             good = until(b"bfiles: top 3", mark)
         print(("ok  " if good else "FAIL"), f"({name}) the mouse wheel scrolls the window under the pointer")
         fails += not good

@@ -319,26 +319,37 @@ static void draw_win(const struct win *w, int focused)
         draw_grip(w);
 }
 
+/* Reads exactly n bytes of an answer from the (non-blocking) mouse, waiting
+ * a little for each; -1 if they do not come. */
+static int mice_read_n(int fd, unsigned char *p, size_t n)
+{
+    size_t got = 0;
+    while (got < n) {
+        struct pollfd pf = { fd, POLLIN, 0 };
+        if (poll(&pf, 1, 300) <= 0)
+            return -1;
+        ssize_t r = read(fd, p + got, n - got);
+        if (r <= 0)
+            return -1;
+        got += (size_t)r;
+    }
+    return 0;
+}
+
 /* Asks the mouse for the wheel (the IntelliMouse sequence, then its id) and
  * returns the packet length: 4 if it answered with id 3, else 3. The
- * answers are read here, so no packet is mistaken for one. */
+ * kernel keeps only the answer to the last byte written, so the sequence and
+ * the id request are written apart. The answers are read here, so no packet
+ * is mistaken for one. */
 static int mice_wheel(int fd)
 {
-    static const unsigned char ask[] = { 0xF3, 200, 0xF3, 100, 0xF3, 80, 0xF2 };
-    if (write(fd, ask, sizeof ask) != (ssize_t)sizeof ask)
+    static const unsigned char seq[] = { 0xF3, 200, 0xF3, 100, 0xF3, 80 };
+    unsigned char got[2];
+    if (write(fd, seq, sizeof seq) != (ssize_t)sizeof seq || mice_read_n(fd, got, 1) < 0 || got[0] != 0xFA)
         return 3;
-    unsigned char got[16];
-    size_t n = 0;
-    while (n < 8) {
-        struct pollfd p = { fd, POLLIN, 0 };
-        if (poll(&p, 1, 300) <= 0)
-            break;
-        ssize_t r = read(fd, got + n, sizeof got - n);
-        if (r <= 0)
-            break;
-        n += (size_t)r;
-    }
-    return n >= 8 && got[7] == 3 ? 4 : 3;
+    if (write(fd, "\xF2", 1) != 1 || mice_read_n(fd, got, 2) < 0)
+        return 3;
+    return got[0] == 0xFA && got[1] == 3 ? 4 : 3;
 }
 
 /* The time of day (UTC, as the system keeps it) for the clock in the task bar. */
