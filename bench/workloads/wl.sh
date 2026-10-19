@@ -40,6 +40,22 @@ hello)
     chr /bin/sh -c 'cd /root/proj && gcc -O2 -o hello hello.c'
     echo @end hello $?
     ;;
+hello_*)
+    # The stages of `hello`, ten times each so that a stage is long enough
+    # to time: the preprocessor, cc1, as, the link, and a bare exec.
+    $bb tar -xf /disk/proj.tar -C $R/root 2>/dev/null
+    case $phase in
+    hello_e) cmd='gcc -E -o /tmp/h.i hello.c' ;;
+    hello_s) cmd='gcc -O2 -S -o /tmp/h.s hello.c' ;;
+    hello_c) cmd='gcc -O2 -c -o /tmp/h.o hello.c' ;;
+    hello_x) cmd='/bin/true' ;;
+    esac
+    [ $phase = hello_l ] && chr /bin/sh -c 'cd /root/proj && gcc -O2 -c -o /tmp/h.o hello.c'
+    [ $phase = hello_l ] && cmd='gcc -o /tmp/h /tmp/h.o'
+    echo @begin $phase
+    chr /bin/sh -c "cd /root/proj && for i in 1 2 3 4 5 6 7 8 9 10; do $cmd; done"
+    echo @end $phase $?
+    ;;
 make1|make2)
     # make builds the generated project: one gcc per file, then a link.
     j=${phase#make}
