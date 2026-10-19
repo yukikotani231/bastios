@@ -49,7 +49,8 @@
 // unnamed; and no descriptors or credentials travel with datagrams to a
 // name. A name reads back (in getsockname and recvfrom) as the canonical
 // path, not as bound (less the reading process's root, so a chroot sees the
-// name it bound).
+// name it bound). A stream socket bound to a name that then connects gives
+// the name up.
 
 import "linux.bastio";
 
@@ -1031,8 +1032,8 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if u.mode == UM_CONN {
     return EISCONN;
   }
-  if u.mode != UM_NEW {
-    return EINVAL;
+  if u.mode != UM_NEW && u.mode != UM_BOUND {
+    return EINVAL;                          // listening
   }
   let mut n = sun_in(&mut k, pid, addr, alen);
   if n > UX_PATH {
@@ -1088,6 +1089,13 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   uc_set_cred(&mut k, x % UX_N, get(k.ux, UXLC0 + 2 * l), get(k.ux, UXLC0 + 2 * l + 1));
   // Our description takes over the first end; the one ux_pair made for it
   // is dropped.
+  if u.mode == UM_BOUND {
+    // A socket bound to a name before it connects (Python's test_socket
+    // does): the connection takes the place of the bind, and the name is
+    // released. Different from Linux, getsockname then reads it as unnamed.
+    ul_set(&mut k, u.x, 0, UL_FREE);
+    ul_set(&mut k, u.x, 3, 0);
+  }
   of_set(&mut k.ofd, u.h, 2, of_get(k.ofd, mine, 2));
   of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_CONN + ux_dgbit(u.dg));
   of_set(&mut k.ofd, mine, 0, OF_FREE);

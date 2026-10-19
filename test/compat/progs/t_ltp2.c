@@ -678,6 +678,17 @@ int main(void) {
            int b = epoll_ctl(ep, EPOLL_CTL_ADD, z, &ev); int be = errno;
            close(z); close(ep);
            a == -1 && ae == EFAULT && b == -1 && be == EPERM; }));
+    EXPECT("a unix stream socket that is bound to a name can still connect, and the connection carries data", ({
+           unlink("/tmp/t_ltp2_bc_s"); unlink("/tmp/t_ltp2_bc_c");
+           struct sockaddr_un sa = { AF_UNIX, "/tmp/t_ltp2_bc_s" }, ca = { AF_UNIX, "/tmp/t_ltp2_bc_c" };
+           int l = socket(AF_UNIX, SOCK_STREAM, 0), c = socket(AF_UNIX, SOCK_STREAM, 0);
+           int b1 = bind(l, (struct sockaddr *)&sa, sizeof sa), l1 = listen(l, 1);
+           int b2 = bind(c, (struct sockaddr *)&ca, sizeof ca);
+           int cn = connect(c, (struct sockaddr *)&sa, sizeof sa);
+           int a = accept(l, 0, 0);
+           int w = write(c, "x", 1); char m = 0; int r = read(a, &m, 1);
+           close(a); close(c); close(l); unlink("/tmp/t_ltp2_bc_s"); unlink("/tmp/t_ltp2_bc_c");
+           b1 == 0 && l1 == 0 && b2 == 0 && cn == 0 && a >= 0 && w == 1 && r == 1 && m == 'x'; }));
     EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
            unlink("/tmp/t_ltp2_dg");
            struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };
