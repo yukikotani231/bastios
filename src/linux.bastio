@@ -1010,6 +1010,7 @@ const TCGETA: u64 = 0x5405;           // struct termio: the first four flag word
 const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
+const TIOCSWINSZ: u64 = 0x5414;
 const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
@@ -1287,9 +1288,22 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if req == TIOCGWINSZ {
     lx_fill(&mut k, 0, WINSIZE_SIZE);
-    bset(&mut k.fs.xfer, 0, 24);            // ws_row
-    bset(&mut k.fs.xfer, 2, 80);            // ws_col
+    let ws = get(k.line, TT_WS);
+    if ws != 0 {
+      xfer_u64(&mut k.fs.xfer, 0, ws % 4294967296);   // ws_row, ws_col as TIOCSWINSZ left them
+    } else {
+      bset(&mut k.fs.xfer, 0, 24);          // ws_row
+      bset(&mut k.fs.xfer, 2, 80);          // ws_col
+    }
     return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
+  }
+  if req == TIOCSWINSZ {
+    // Only remembered: the console is not resized, and no SIGWINCH goes out.
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, WINSIZE_SIZE) != WINSIZE_SIZE {
+      return EFAULT;
+    }
+    k.line = set(k.line, TT_WS, 4294967296 + get_u64(k.fs.xfer, 0) % 4294967296);
+    return 0;
   }
   return ENOTTY;                            // a request the terminal does not know
 }
