@@ -642,7 +642,9 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
             continue
         body.append(line)
     if status is None:
-        return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
+        seen = "\n".join(body)[-600:]
+        return {"name": name, "result": "hang", "detail": "did not finish" + (", last output:\n" + seen if seen else ""),
+                "syscalls": sorted(set(calls))}
     ok = body == expected
     detail = "" if ok else "got " + json.dumps(clip("\n".join(body))) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
