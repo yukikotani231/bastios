@@ -689,6 +689,14 @@ int main(void) {
            int w = write(c, "x", 1); char m = 0; int r = read(a, &m, 1);
            close(a); close(c); close(l); unlink("/tmp/t_ltp2_bc_s"); unlink("/tmp/t_ltp2_bc_c");
            b1 == 0 && l1 == 0 && b2 == 0 && cn == 0 && a >= 0 && w == 1 && r == 1 && m == 'x'; }));
+    EXPECT("utimensat on a directory sets its access and modification times apart", ({
+           rmdir("/tmp/t_ltp2_ud");
+           int m = mkdir("/tmp/t_ltp2_ud", 0755);
+           struct timespec ts[2] = { { 5, 0 }, { 8, 0 } };
+           int u = utimensat(AT_FDCWD, "/tmp/t_ltp2_ud", ts, 0);
+           struct stat st; int s = stat("/tmp/t_ltp2_ud", &st);
+           rmdir("/tmp/t_ltp2_ud");
+           m == 0 && u == 0 && s == 0 && st.st_atime == 5 && st.st_mtime == 8; }));
     EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
            unlink("/tmp/t_ltp2_dg");
            struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };

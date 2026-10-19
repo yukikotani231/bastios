@@ -22,7 +22,9 @@
 
 
 #define BF_COLS 60
-#define BF_ROWS 24
+static int bf_rows = 24;
+#define BF_ROWS bf_rows
+#define BF_MAXROWS 24
 #define BF_CW 8
 #define BF_CH 16
 #define BF_WIDTH (BF_COLS * BF_CW)
@@ -33,7 +35,7 @@
 
 struct bf_ent { char name[NAME_MAX + 1]; int dir; off_t size; };
 
-static uint32_t bf_pix[BF_WIDTH * BF_HEIGHT];
+static uint32_t bf_pix[BF_WIDTH * BF_MAXROWS * BF_CH];
 static struct bf_ent bf_ents[BF_MAXENT];
 static int bf_nent, bf_top;                     /* the entries (".." is the first) and the first one shown */
 static char bf_cwd[PATH_MAX] = "/";
@@ -229,6 +231,10 @@ static int bfiles_main(int argc, char **argv)
 {
     if (argc > 1 && argv[1][0] == '/')
         snprintf(bf_cwd, sizeof bf_cwd, "%s", argv[1]);
+    unsigned sw, sh;
+    bwm_screen(&sw, &sh);                              /* fewer rows on a short screen */
+    if (sh >= 80 + 4 * BF_CH && bf_rows > (int)(sh - 80) / BF_CH)
+        bf_rows = (sh - 80) / BF_CH;
     int fd = bwm_connect();
     if (fd < 0) {
         puts("bfiles: no window server");
