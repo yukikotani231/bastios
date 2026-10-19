@@ -319,6 +319,28 @@ static void draw_win(const struct win *w, int focused)
         draw_grip(w);
 }
 
+/* Asks the mouse for the wheel (the IntelliMouse sequence, then its id) and
+ * returns the packet length: 4 if it answered with id 3, else 3. The
+ * answers are read here, so no packet is mistaken for one. */
+static int mice_wheel(int fd)
+{
+    static const unsigned char ask[] = { 0xF3, 200, 0xF3, 100, 0xF3, 80, 0xF2 };
+    if (write(fd, ask, sizeof ask) != (ssize_t)sizeof ask)
+        return 3;
+    unsigned char got[16];
+    size_t n = 0;
+    while (n < 8) {
+        struct pollfd p = { fd, POLLIN, 0 };
+        if (poll(&p, 1, 300) <= 0)
+            break;
+        ssize_t r = read(fd, got + n, sizeof got - n);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+    }
+    return n >= 8 && got[7] == 3 ? 4 : 3;
+}
+
 /* The time of day (UTC, as the system keeps it) for the clock in the task bar. */
 static void clock_hm(int *h, int *m)
 {
@@ -1088,7 +1110,10 @@ int main(int argc, char **argv)
         puts("bwm: no screen (ENODEV)");
         return 2;
     }
-    int mice = open("/dev/input/mice", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int mice = open("/dev/input/mice", O_RDWR | O_NONBLOCK | O_CLOEXEC);
+    if (mice < 0)
+        mice = open("/dev/input/mice", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    int pktlen = mice >= 0 ? mice_wheel(mice) : 3;           /* 4 with a wheel */
     int keys = open("/dev/input/event0", O_RDONLY | O_NONBLOCK | O_CLOEXEC);
     struct var_info v;
     struct fix_info f;
@@ -1285,9 +1310,10 @@ int main(int argc, char **argv)
             if (icli[i] >= 0 && clis[i].fd >= 0 && (p[icli[i]].revents & (POLLIN | POLLHUP | POLLERR)))
                 client_input(i);
         if (imice >= 0 && (p[imice].revents & POLLIN)) {
-            unsigned char m[3];
-            while (read(mice, m, 3) == 3) {
+            unsigned char m[4] = { 0, 0, 0, 0 };
+            while (read(mice, m, pktlen) == pktlen) {
                 int dx = (signed char)m[1], dy = (signed char)m[2];
+                int wheel = pktlen == 4 ? (signed char)m[3] : 0;
                 mx += dx; my -= dy;
                 if (mx < 0) mx = 0;
                 if (my < 0) my = 0;
@@ -1416,9 +1442,10 @@ int main(int argc, char **argv)
                     else if (size_edges & 4)
                         sizing->want_ch = sizing->keep_b - (my - soy) - TITLE_H - BORDER;
                     request_size(sizing);
-                } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || (m[0] & 7) != (buttons & 7))) {
-                    struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), m[0] & 7u };
-                    if (under == focus())
+                } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || wheel || (m[0] & 7) != (buttons & 7))) {
+                    /* the wheel (negative is up) goes in bits 8 to 15 of the buttons, as a signed byte */
+                    struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), (m[0] & 7u) | ((uint32_t)(wheel & 0xFF) << 8) };
+                    if (under == focus() || wheel)
                         to_client(under->cli, BWM_MOUSE, &ev, sizeof ev);
                 }
                 buttons = m[0];

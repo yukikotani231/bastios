@@ -790,6 +790,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The mouse wheel scrolls a window under the pointer: bfiles on /bin
+        # (more entries than rows) scrolls three entries for one step down.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /bin\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            wq = socket.socket(socket.AF_UNIX)
+            wq.connect(qmp_path)
+            wf = wq.makefile("rw")
+            wf.readline()
+            for c in ({"execute": "qmp_capabilities"},
+                      {"execute": "input-send-event", "arguments": {"events": [{"type": "btn", "data": {"down": True, "button": "wheel-down"}}]}},
+                      {"execute": "input-send-event", "arguments": {"events": [{"type": "btn", "data": {"down": False, "button": "wheel-down"}}]}}):
+                wf.write(json.dumps(c) + "\n"); wf.flush(); wf.readline()
+            wq.close()
+            good = until(b"bfiles: top 3", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the mouse wheel scrolls the window under the pointer")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bfiles opens a file in its viewer, e edits it: typing inserts at the
         # cursor, Ctrl-S saves, and the shell reads the new contents back.
         mark = len(out)
