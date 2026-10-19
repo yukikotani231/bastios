@@ -1602,12 +1602,10 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
   requires disk_ok(d) && from + n <= blen(name)
   ensures disk_ok(d) && result <= DSLOTS
 {
-  // A new file's or directory's entry goes with a commit (ent_lazy). A
-  // file's waits for the next one; a directory's is committed now, behind
-  // a flush, so it is on the disk before any entry inside it is queued
-  // (the queue keeps its order), without this call waiting for the disk. A
-  // link is written at once: it must be on the disk before it names a file.
-  let lazy = link >= DSLOTS;
+  // A new file's entry waits for the next commit (ent_lazy). A directory or
+  // a link is written at once: a directory must be on the disk before the
+  // entries inside it, and a link before it names a file.
+  let lazy = !dir && link >= DSLOTS;
   if !lazy {
     disk_drain(&mut d);               // queued writes reach the disk first
   }
@@ -1665,9 +1663,6 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
       let mut written = false;
       if lazy {
         written = ent_lazy(&mut d, i);
-        if written && dir {
-          settle_batch(&mut d);
-        }
       } else {
         written = ent_flush(&mut d, i);
       }
@@ -1676,7 +1671,7 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         return DSLOTS;
       }
       d.free0 = i;
-      if lazy && !dir {
+      if lazy {
         d.pnew = i + 1;
       }
       ix_add(&mut d, i);
