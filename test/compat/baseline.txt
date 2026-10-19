@@ -1672,3 +1672,5 @@ alpine: nvim: the LSP client talks to the YAML language server under node and ge
 t_ltp2: a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT
 t_ltp2: a unix stream socket that is bound to a name can still connect, and the connection carries data
 t_ltp2: utimensat on a directory sets its access and modification times apart
+t_ltp2: sched_getaffinity of a negative pid is ESRCH, of a pid that is not there too
+t_ltp2: the console keeps a window size set with TIOCSWINSZ

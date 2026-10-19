@@ -697,6 +697,18 @@ int main(void) {
            struct stat st; int s = stat("/tmp/t_ltp2_ud", &st);
            rmdir("/tmp/t_ltp2_ud");
            m == 0 && u == 0 && s == 0 && st.st_atime == 5 && st.st_mtime == 8; }));
+    EXPECT("sched_getaffinity of a negative pid is ESRCH, of a pid that is not there too", ({
+           unsigned long m[16];
+           int a = syscall(SYS_sched_getaffinity, -1, sizeof m, m); int ae = errno;
+           int b = syscall(SYS_sched_getaffinity, 0, 3, m); int be = errno;
+           a == -1 && ae == ESRCH && b == -1 && be == EINVAL; }));
+    EXPECT("the console keeps a window size set with TIOCSWINSZ", ({
+           struct winsize old, w = { 30, 100, 0, 0 }, got;
+           int g0 = ioctl(0, TIOCGWINSZ, &old);
+           int s = ioctl(0, TIOCSWINSZ, &w);
+           int g1 = ioctl(0, TIOCGWINSZ, &got);
+           ioctl(0, TIOCSWINSZ, &old);
+           g0 == 0 && s == 0 && g1 == 0 && got.ws_row == 30 && got.ws_col == 100; }));
     EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
            unlink("/tmp/t_ltp2_dg");
            struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };
