@@ -1018,6 +1018,7 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx
   ser_drop(&mut s.k, sacc);                 // what the last round sent to the USB serial port (src/lxserial.bastio)
   ser_push(&mut s.k, sx, sn);               // and what it received
   let mut typed = rn > 0;
+  let mut fresh = rn > 0 || mn > 0 || sn > 0;   // input that a waiting poll or read may be for
   let mut i = 0;
   while i < rn && i < blen(rx)
     invariant sys_ok(s)
@@ -1035,16 +1036,27 @@ fn exchange(s: &mut Sys, tx: &mut Bytes, gx: &mut Bytes, rx: &Bytes, rn: u64, mx
     if c < 256 {
       q_push(&mut s.k.q, c);
       typed = true;
+      fresh = true;
       k = k + 1;
     } else if c >= SER_PKT {
       ser_put(&mut s.k, c - SER_PKT);       // a byte from a USB serial port
+      fresh = true;
       k = k + 1;
     } else if c > 256 {
       mice_put(&mut s.k, c - MOUSE_PKT);
+      fresh = true;
       k = k + 1;
     } else {
       k = CHUNK;
     }
+  }
+  if fresh {
+    // A process asleep in poll on the key events, the mouse or a serial
+    // port (wait_asleep) is woken only by a trap of a process that is not
+    // itself waiting, or by an idle processor's interrupt. While other
+    // processes keep retrying waits, neither comes, and the input sits
+    // unseen.
+    sleepers_wake(&mut s.k);
   }
   if typed {
     tty_intr(&mut s.con, &mut s.k);
