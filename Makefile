@@ -1102,7 +1102,7 @@ bench: build/bastios.elf
 
 # Not part of `make test`: whole-program workloads (bench/workloads.py), the
 # same Alpine gcc, make, apk, tar and gzip on BastiOS and on Linux. The disk
-# is the compat suite's Alpine disk cut down to gcc, make and musl-dev, plus
+# is the compat suite's Alpine disk cut down to gcc, make, musl-dev, git and python3, plus
 # the guest script and a generated C project (bench/workloads/).
 BENCH_GCC_IMAGE ?= alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9
 build/bench/wl/proj.tar: bench/workloads/mkproj.py | build/bench/wl
@@ -1112,8 +1112,8 @@ build/bench/wl/wl.sh: bench/workloads/wl.sh | build/bench/wl
 build/bench/wl:
 	mkdir -p $@
 build/bench/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py build/bench/wl/proj.tar build/bench/wl/wl.sh
-	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) \
-	  --disk gcc,musl-dev,make --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
+	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) $(filter alpine/git@% alpine/ansible@%,$(ALPINE_PKGS)) \
+	  --disk gcc,musl-dev,make,git,python3 --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
 bench-workloads: build/bastios.elf build/bench/alpine.img
 	bench/workloads.py $(WORKLOAD_ARGS)
 
