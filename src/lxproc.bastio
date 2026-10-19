@@ -1389,6 +1389,8 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   let mut atime = m.mtime;
   if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {
     atime = atime_of(&mut k, m.ino - INO_FILES, m.mtime);   // set by utime, else the modification time
+  } else if m.ino > DIR_VFS && m.ino - 1 - DIR_VFS < HFILES {
+    atime = atime_of(&mut k, m.ino - 1 - DIR_VFS, m.mtime);   // a directory of the file layer is a handle too
   }
   xfer_u64(&mut k.fs.xfer, 72, atime);        // st_atime
   xfer_u64(&mut k.fs.xfer, 88, m.mtime);      // st_mtime
