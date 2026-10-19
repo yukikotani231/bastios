@@ -1674,3 +1674,6 @@ t_ltp2: a unix stream socket that is bound to a name can still connect, and the 
 t_ltp2: utimensat on a directory sets its access and modification times apart
 t_ltp2: sched_getaffinity of a negative pid is ESRCH, of a pid that is not there too
 t_ltp2: the console keeps a window size set with TIOCSWINSZ
+t_ltp2: getsockname of a UDP socket bound to 127.0.0.1 reads that address, of one bound to none 0.0.0.0
+t_ltp2: MSG_PEEK on a UDP socket leaves the datagram queued
+t_ltp2: a UDP datagram longer than the buffer sets MSG_TRUNC in recvmsg, and recv with MSG_TRUNC returns its length

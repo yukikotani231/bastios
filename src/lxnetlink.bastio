@@ -103,7 +103,6 @@ fn netns_gc(k: &mut Kernel)
 
 const NETLINK_ROUTE: u64 = 0;
 const SOCKADDR_NL: u64 = 12;            // struct sockaddr_nl
-const MSG_TRUNC: u64 = 0x20;
 
 /// Is fd a netlink socket? Its slot, or NLS.
 fn nl_of(k: &Kernel, pid: u64, fd: u64) -> u64

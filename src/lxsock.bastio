@@ -44,6 +44,7 @@ const SOCK_CLOEXEC: u64 = 0x80000;
 const MSG_DONTWAIT: u64 = 0x40;
 const MSG_MORE: u64 = 0x8000;
 const MSG_PEEK: u64 = 2;
+const MSG_TRUNC: u64 = 0x20;
 const MSG_NOSIGNAL: u64 = 0x4000;
 const MSG_OOB: u64 = 1;
 const MSG_ERRQUEUE: u64 = 0x2000;
@@ -413,6 +414,10 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if !sock_bind(&mut k.nic, sk.s, sin.port) {
     return EADDRINUSE;
   }
+  // The address, for getsockname (the stack demultiplexes on the port
+  // alone). OF_ACC has only its low three bits in use, and a socket sets
+  // none of them.
+  of_set(&mut k.ofd, sk.h, OF_ACC, 8 * sin.ip);
   return 0;
 }
 
@@ -619,7 +624,8 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   if sk.err != 0 {
     return sk.err;
   }
-  let got = sock_recvfrom(&mut k.nic, sk.s, &mut k.fs.xfer, smaller(n, XFER));
+  let full = sock_head_len(&mut k.nic, sk.s);
+  let got = sock_recvfrom(&mut k.nic, sk.s, &mut k.fs.xfer, smaller(n, XFER), flags / MSG_PEEK % 2 == 1);
   if got == NO_SOCK {
     if flags / MSG_DONTWAIT % 2 == 1 || of_get(k.ofd, sk.h, 3) % 2 == 1 {
       return EAGAIN;
@@ -635,10 +641,29 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   if r != 0 {
     return r;
   }
+  if flags / MSG_TRUNC % 2 == 1 && full > got {
+    return full;                            // MSG_TRUNC: the datagram's real length
+  }
   return got;
 }
 
-/// getsockname (the bound port; the address reads as 0.0.0.0) and
+/// The length of the datagram a receive on fd would take, if fd is a UDP
+/// or raw socket with one queued, else 0.
+fn udp_head(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= UDP_MAX
+{
+  if is_tcp(k, pid, fd) || is_unix(k, pid, fd) || is_nl(k, pid, fd) {
+    return 0;
+  }
+  let sk = sk_look(k, pid, fd);
+  if sk.err != 0 {
+    return 0;
+  }
+  return sock_head_len(&mut k.nic, sk.s);
+}
+
+/// getsockname (the bound address and port; 0.0.0.0 if bound to none) and
 /// getpeername (the connected peer).
 fn lx_sockname(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bool) -> u64
   requires kok(k) && pid < NPROC
@@ -700,7 +725,10 @@ fn sockname_of(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
     // A connected socket has the source address its route picked, which
     // C libraries read back (getaddrinfo sorts by it).
     let mut me = 0;
-    if p / 65536 != 0 && p / 65536 <= 4294967295 {
+    let bound = of_get(k.ofd, sk.h, OF_ACC) / 8;
+    if bound != 0 && bound <= 4294967295 {
+      me = bound;
+    } else if p / 65536 != 0 && p / 65536 <= 4294967295 {
       me = local_for(k.nic, p / 65536);
       if is_v6tok(p / 65536) && ofd_v6(k, sk.h) {
         me = V6_SELF;

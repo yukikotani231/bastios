@@ -709,6 +709,44 @@ int main(void) {
            int g1 = ioctl(0, TIOCGWINSZ, &got);
            ioctl(0, TIOCSWINSZ, &old);
            g0 == 0 && s == 0 && g1 == 0 && got.ws_row == 30 && got.ws_col == 100; }));
+    EXPECT("getsockname of a UDP socket bound to 127.0.0.1 reads that address, of one bound to none 0.0.0.0", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } }, b = { AF_INET }, g, h;
+           socklen_t gl = sizeof g, hl = sizeof h;
+           int s1 = socket(AF_INET, SOCK_DGRAM, 0), s2 = socket(AF_INET, SOCK_DGRAM, 0);
+           int r1 = bind(s1, (struct sockaddr *)&a, sizeof a), r2 = bind(s2, (struct sockaddr *)&b, sizeof b);
+           int q1 = getsockname(s1, (struct sockaddr *)&g, &gl), q2 = getsockname(s2, (struct sockaddr *)&h, &hl);
+           close(s1); close(s2);
+           r1 == 0 && r2 == 0 && q1 == 0 && q2 == 0 && g.sin_addr.s_addr == htonl(0x7F000001) && g.sin_port != 0 &&
+           h.sin_addr.s_addr == 0 && h.sin_port != 0; }));
+    EXPECT("MSG_PEEK on a UDP socket leaves the datagram queued", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } }, f; socklen_t al = sizeof a, fl = sizeof f;
+           int r = socket(AF_INET, SOCK_DGRAM, 0), s = socket(AF_INET, SOCK_DGRAM, 0);
+           int b = bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &al);
+           int x = sendto(s, "peek", 4, 0, (struct sockaddr *)&a, sizeof a);
+           char m[8] = { 0 }, n[8] = { 0 };
+           int p = recvfrom(r, m, sizeof m, MSG_PEEK, (struct sockaddr *)&f, &fl);
+           int q = recvfrom(r, n, sizeof n, MSG_DONTWAIT, 0, 0);
+           int e = recvfrom(r, n, sizeof n, MSG_DONTWAIT, 0, 0);
+           close(r); close(s);
+           b == 0 && x == 4 && p == 4 && q == 4 && e == -1 && errno == EAGAIN && !memcmp(m, "peek", 4) && !memcmp(n, "peek", 4) &&
+           f.sin_addr.s_addr == htonl(0x7F000001); }));
+    EXPECT("a UDP datagram longer than the buffer sets MSG_TRUNC in recvmsg, and recv with MSG_TRUNC returns its length", ({
+           struct sockaddr_in a = { AF_INET, 0, { htonl(0x7F000001) } };
+           socklen_t al = sizeof a;
+           int r = socket(AF_INET, SOCK_DGRAM, 0), s = socket(AF_INET, SOCK_DGRAM, 0);
+           int b = bind(r, (struct sockaddr *)&a, sizeof a); getsockname(r, (struct sockaddr *)&a, &al);
+           int x = sendto(s, "0123456789", 10, 0, (struct sockaddr *)&a, sizeof a);
+           char m[4];
+           struct iovec v = { m, sizeof m };
+           struct msghdr h = { 0 };
+           h.msg_iov = &v; h.msg_iovlen = 1;
+           int p = recvmsg(r, &h, 0); int f1 = h.msg_flags;
+           int y = sendto(s, "0123456789", 10, 0, (struct sockaddr *)&a, sizeof a);
+           int q = recv(r, m, sizeof m, MSG_TRUNC);
+           int z = sendto(s, "abcd", 4, 0, (struct sockaddr *)&a, sizeof a);
+           int t = recvmsg(r, &h, 0); int f2 = h.msg_flags;
+           close(r); close(s);
+           b == 0 && x == 10 && p == 4 && (f1 & MSG_TRUNC) && y == 10 && q == 10 && z == 4 && t == 4 && !(f2 & MSG_TRUNC); }));
     EXPECT("AF_UNIX SOCK_DGRAM: a bound socket gets datagrams from sendto and from a connected sender", ({
            unlink("/tmp/t_ltp2_dg");
            struct sockaddr_un a = { AF_UNIX, "/tmp/t_ltp2_dg" };
