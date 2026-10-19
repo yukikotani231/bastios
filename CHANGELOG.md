@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` draws a resize cursor over the edges and corners of a resizable window.
 - `bfiles` edits a text file in place (`e` in its viewer; Ctrl-S saves, Ctrl-X returns) and opens a file given on its command line.
 - `bwm` keeps new windows inside the screen and above the task bar, `bterm` and `bfiles` open a grid that fits a screen smaller than 80 x 24 cells (a 640 x 480 screen used to refuse the terminal), and `bwm -s WxH` pretends the screen is smaller so `test/iso_test.sh` can check it.
 - `bwm` keeps part of a dragged window's title bar on the screen and above the task bar, so a window cannot be thrown out of reach.
