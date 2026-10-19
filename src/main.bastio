@@ -886,14 +886,17 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
 // What `turn` hands back: the next job, and where the round robin goes on.
 struct Next { job: Job, from: u64 }
 
-/// After finish handled process p's trap: the trap may have ended a timed
-/// wait (sleepers_wake), unless it was a wait that goes on (its restart
-/// word is set, lx_retry), which changed nothing.
-fn after_trap(s: &mut Sys, p: u64)
+/// After finish handled process p's trap (vector v): the trap may have ended
+/// a timed wait (sleepers_wake), unless it was a wait that goes on (its
+/// restart word is set, lx_retry), which changed nothing. A timer tick wakes
+/// them either way: when every process that runs is such a wait (two pipe
+/// readers trying their reads again), no other trap would, and a poll for a
+/// frame that came in would sleep to its deadline.
+fn after_trap(s: &mut Sys, p: u64, v: u64)
   requires sys_ok(s) && p < NPROC
   ensures sys_ok(s)
 {
-  if pget(s.k.procs, p, F_RESTART) == 0 {
+  if v == V_TIMER || pget(s.k.procs, p, F_RESTART) == 0 {
     sleepers_wake(&mut s.k);
   }
 }
@@ -909,7 +912,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   ensures !(result.job is Job::Run) ==> mmu_root(mmu) == KERNEL_ROOT
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
-  after_trap(&mut s, p);
+  after_trap(&mut s, p, v);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
   atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
@@ -990,7 +993,7 @@ fn finish_p(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64, p
   ensures sys_ok(s) && result < NPROC
 {
   let c = finish(&mut s, &mut cpu, mmu, p, fpu, v);
-  after_trap(&mut s, p);
+  after_trap(&mut s, p, v);
   atomic_store(pend, s.con.r.n + gfx_pending(s.k));
   return c;
 }
