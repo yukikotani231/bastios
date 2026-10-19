@@ -1031,7 +1031,23 @@ LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
 # Besides runtest/syscalls: the file system stress tests, the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
-LTP_SUITES ?= --suite fs --suite mm --suite dio --suite fs_perms_simple --suite sched --suite pty --suite containers --suite cve --suite posix
+LTP_SUITES ?= --suite fs --suite mm --suite dio --suite fs_perms_simple --suite sched --suite pty --suite containers --suite cve --suite posix --suite libctest
+
+# musl's libc-test (MIT, not part of this repository), fetched at a pinned
+# revision of a mirror and built as static executables against musl.
+LIBCTEST_GIT ?= https://github.com/kraj/libc-test
+LIBCTEST_REV ?= b7ec467969a53756258778fa7d9b045f912d1c93
+
+build/libc-test/.built: | build
+	rm -rf build/libc-test && mkdir -p build/libc-test
+	cd build/libc-test && git init -q && git fetch -q --depth 1 $(LIBCTEST_GIT) $(LIBCTEST_REV) && git checkout -q FETCH_HEAD
+	printf '%s\n' 'CFLAGS += -pipe -std=c99 -D_POSIX_C_SOURCE=200809L -Wall -Wno-unused-function -Wno-missing-braces -Wno-unused -Wno-overflow' \
+	  'CFLAGS += -Wno-unknown-pragmas -fno-builtin -frounding-math -O1' \
+	  'CFLAGS += -Werror=implicit-function-declaration -Werror=implicit-int -Werror=pointer-sign -Werror=pointer-arith' \
+	  'LDLIBS += -lpthread -lm -lrt' > build/libc-test/config.mak
+	cd build/libc-test && $(MAKE) -k -s CC=$(MUSLCC) LDFLAGS=-static src/common/libtest.a \
+	  $$(ls src/functional/*.c src/regression/*.c | sed 's/\.c$$/-static.exe/') >/dev/null 2>&1 || true
+	touch $@
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -1071,10 +1087,10 @@ build/ltp/.built: build/ltp/configure
 # Not part of `make test`: a full run boots the kernel once per 63 programs
 # (25 boots, three at a time; about 10 minutes on four processors). Fails
 # only if a test in ltp_baseline.txt stops passing.
-compat-ltp: build/bastios.elf build/ltp/.built
+compat-ltp: build/bastios.elf build/ltp/.built build/libc-test/.built
 	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
 
-compat-ltp-baseline: build/bastios.elf build/ltp/.built
+compat-ltp-baseline: build/bastios.elf build/ltp/.built build/libc-test/.built
 	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
 
 # Not part of `make test`: the same micro-benchmarks (bench/osbench.c) on

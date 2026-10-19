@@ -217,6 +217,11 @@ assertion, such as `posix-sigaction_1-1`). Those exit 0 for a pass, 1 for a
 failure, 2 when they could not set themselves up, 4 or 5 for something not
 supported here.
 
+`--suite libctest` runs musl's libc-test (`src/functional` and `src/regression`,
+built static against musl at the revision `LIBCTEST_REV` in the Makefile; tags
+are `libctest-functional-NAME` and `libctest-regression-NAME`). An executable
+that exits 0 passes.
+
 The report ranks missing system calls by how many tests they block, as
 `run.py` does, and lists every test that did not pass with its first
 `TFAIL`/`TBROK` line. `make compat-ltp` fails only if a test listed in
