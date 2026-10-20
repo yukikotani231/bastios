@@ -939,6 +939,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # The wheel scrolls back through what has gone off the top (and
+            # forward again), three lines a step.
+            typed("printf '" + "".join(f"l{i:02d}\\n" for i in range(1, 31)) + "'")
+            time.sleep(2)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 1")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l09" for l in lines) and not any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the mouse wheel scrolls the terminal back through its history")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("mouse_move 0 0 -1")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the wheel scrolls forward again")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)

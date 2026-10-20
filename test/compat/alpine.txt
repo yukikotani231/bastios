@@ -739,3 +739,11 @@ cmake=0
 build=0
 ctest=0
 100% tests passed, 0 tests failed out of 19
+
+== oss: libyaml: clone a release, configure it, build it, and run make check
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/libyaml.git && cd libyaml && ./configure >/tmp/cf.log 2>&1; echo configure=$?; timeout 400 make -j2 >/tmp/c.log 2>&1; r=$?; [ $r = 0 ] || { echo make=$r; tail -n 25 /tmp/c.log; }; make check >/tmp/chk.log 2>&1; echo check=$?; grep -E "^# (PASS|FAIL)" /tmp/chk.log; cd /root && rm -rf libyaml'
+configure=0
+check=0
+# PASS:  2
+# FAIL:  0
