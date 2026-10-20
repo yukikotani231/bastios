@@ -424,16 +424,30 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             # Alt-Tab brings up the window at the bottom: the picture changes,
             # and with three windows, three of them bring it back.
+            # On a loaded host bwm can take longer than monitor's pause to
+            # redraw, so the picture is read again until it is the one
+            # wanted (10 s at most).
+            def settle(want):
+                end = time.time() + 10
+                while True:
+                    w, h, px = screendump()
+                    if want(px) or time.time() > end:
+                        return px
             w, h, before = screendump()
+            for _ in range(20):                 # the picture before, once it stops changing
+                w, h, px = screendump()
+                if px == before:
+                    break
+                before = px
             monitor("sendkey alt-tab")
-            w, h, once = screendump()
+            once = settle(lambda px: px != before)
             monitor("sendkey alt-tab", "sendkey alt-tab")
-            w, h, thrice = screendump()
+            thrice = settle(lambda px: px == before)
             good = once != before and thrice == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Tab cycles the windows")
             fails += not good
             monitor("sendkey alt-tab", "sendkey alt-shift-tab")
-            w, h, back = screendump()
+            back = settle(lambda px: px == before)
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
             fails += not good

@@ -266,9 +266,14 @@ def main():
         elif not a.rounds:
             fails.append(f"only {len(rows)} rounds in {a.secs} s: too few to judge")
         if not fails:
-            mark = len(out)
-            send(b"exit\r")
-            read_until(b"bastios> ", mark, 30)
+            # Leave ash for the kernel's shell. A line typed while ash
+            # resets the terminal after Ctrl-C can be lost, so `exit` is
+            # typed again until the kernel's prompt shows.
+            for _ in range(3):
+                mark = len(out)
+                send(b"exit\r")
+                if read_until(b"bastios> ", mark, 20):
+                    break
             mark = len(out)
             send(b"halt\r")
             if read_until(b"pages free at power off", mark, 60):
