@@ -65,11 +65,15 @@ static int bf_esc, bf_escnum;                   /* where we are in an ESC [ ... 
 static size_t bf_erow[BF_MAXLINES + 1];         /* where each display row starts while editing */
 static int bf_nerow;
 
+static int bf_by_size;                          /* 1: files largest first, 0: by name */
+
 static int bf_cmp(const void *a, const void *b)
 {
     const struct bf_ent *x = a, *y = b;
     if (x->dir != y->dir)
         return y->dir - x->dir;
+    if (bf_by_size && x->size != y->size)
+        return x->size < y->size ? 1 : -1;
     return strcmp(x->name, y->name);
 }
 
@@ -675,7 +679,12 @@ static int bfiles_main(int argc, char **argv)
                 be_start();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
-            else if (c == 'h' && !bf_viewing) {
+            else if (c == 's' && !bf_viewing) {
+                bf_by_size = !bf_by_size;
+                printf("bfiles: sorted by %s\n", bf_by_size ? "size" : "name");
+                fflush(stdout);
+                bf_load_dir();
+            } else if (c == 'h' && !bf_viewing) {
                 bf_hidden = !bf_hidden;
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);
