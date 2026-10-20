@@ -679,7 +679,11 @@ static int bfiles_main(int argc, char **argv)
                 be_start();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
-            else if (c == 's' && !bf_viewing) {
+            else if (c == 'R' && !bf_viewing) {
+                bf_load_dir();
+                printf("bfiles: reloaded %d entries\n", bf_nent);
+                fflush(stdout);
+            } else if (c == 's' && !bf_viewing) {
                 bf_by_size = !bf_by_size;
                 printf("bfiles: sorted by %s\n", bf_by_size ? "size" : "name");
                 fflush(stdout);

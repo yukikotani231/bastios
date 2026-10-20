@@ -918,6 +918,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bfiles: sorted by name", mark)
         print(("ok  " if good else "FAIL"), f"({name}) s in bfiles toggles the sort order")
         fails += not good
+        # R in the list reads the directory again (so a file made elsewhere shows).
+        if good:
+            monitor("sendkey shift-r")
+            good = until(b"bfiles: reloaded", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) R in bfiles reloads the list")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
