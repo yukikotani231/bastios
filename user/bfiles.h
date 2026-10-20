@@ -50,6 +50,7 @@ static int bf_confirm;                    /* D was pressed once in the viewer: a
 static int bf_renaming;                   /* r was pressed in the viewer: the new name is being typed */
 static char bf_rname[NAME_MAX + 1];
 static int bf_rlen;
+static int bf_hidden = 1;                 /* names starting with a dot are left out of the list (h toggles) */
 static int bf_stale;                      /* a file was made: the list must be read again */
 static char bf_vpath[PATH_MAX];
 static char bf_vtext[BF_VIEWMAX];
@@ -101,6 +102,8 @@ static void bf_load_dir(void)
     struct dirent *e;
     while ((e = readdir(d)) != NULL && bf_nent < BF_MAXENT) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (bf_hidden && e->d_name[0] == '.')
             continue;
         char p[PATH_MAX + NAME_MAX + 2];
         struct stat st;
@@ -605,7 +608,12 @@ static int bfiles_main(int argc, char **argv)
                 be_start();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
-            else if (c == 'N' && !bf_viewing)
+            else if (c == 'h' && !bf_viewing) {
+                bf_hidden = !bf_hidden;
+                printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
+                fflush(stdout);
+                bf_load_dir();
+            } else if (c == 'N' && !bf_viewing)
                 bf_new_dir();
             else if (c == 'j')
                 bf_scroll(1);
