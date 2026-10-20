@@ -28,6 +28,74 @@
 
 extern char **environ;
 
+/* Half a page of file, mapped MAP_SHARED, the rest of the page written
+ * through the mapping (past the end of the file), unmapped and closed;
+ * then the file grows by ftruncate (how 0), a write at the end of the
+ * page (1) or a write past it (2), or stays as it is (3). The bytes past
+ * the old end must read as zeros, by read and by a new mapping: they were
+ * never the file's (POSIX: the partial page is zero-filled, and what is
+ * written past the end is never written out). */
+static int grow_zero(int how) {
+    const long ps = 4096;
+    char buf[4096];
+    int ok = 1, fd = open("cm_grow", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 0;
+    memset(buf, 'a', ps / 2);
+    char *m = write(fd, buf, ps / 2) == ps / 2 ? mmap(0, ps, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (m == MAP_FAILED) { close(fd); unlink("cm_grow"); return 0; }
+    memset(m + ps / 2, 'b', ps / 2);
+    munmap(m, ps);
+    close(fd);
+    fd = open("cm_grow", O_RDWR);
+    if (how == 0) ok = ftruncate(fd, ps) == 0;
+    else if (how == 1) ok = pwrite(fd, "", 1, ps - 1) == 1;
+    else if (how == 2) ok = pwrite(fd, "z", 1, 2 * ps) == 1;
+    if (how != 3) {
+        ok = ok && pread(fd, buf, ps - 1, 0) == ps - 1;
+        for (long i = ps / 2; ok && i < ps - 1; i++) ok = buf[i] == 0;
+    }
+    m = mmap(0, ps, PROT_READ, MAP_SHARED, fd, 0);
+    ok = ok && m != MAP_FAILED;
+    for (long i = ps / 2; ok && i < ps - 1; i++) ok = m[i] == 0;
+    if (m != MAP_FAILED) munmap(m, ps);
+    close(fd);
+    unlink("cm_grow");
+    return ok;
+}
+
+/* Eighty named semaphores, each mapped with its descriptor closed at once
+ * (as sem_open does), then the last one mapped again by name: the new
+ * mapping must be the same page. Past a process's 64 recorded shared
+ * mappings the page cache used to drop the page at that close, and
+ * another process opening the semaphore by name (multiprocessing's spawn)
+ * got a page of its own. */
+static int sem_many(void) {
+    enum { N = 80 };
+    sem_t *s[N];
+    char n[32];
+    int made = 0, ok = 1;
+    for (; made < N && ok; made++) {
+        snprintf(n, sizeof n, "/cm_many%d", made);
+        sem_unlink(n);
+        s[made] = sem_open(n, O_CREAT | O_EXCL, 0600, 0);
+        if (s[made] == SEM_FAILED) { ok = 0; break; }
+    }
+    if (ok) {
+        int f = open("/dev/shm/cm_many79", O_RDWR), v = -1;
+        sem_t *m = f >= 0 ? mmap(0, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED, f, 0) : MAP_FAILED;
+        if (f >= 0) close(f);
+        ok = m != MAP_FAILED && sem_post(s[N - 1]) == 0 && sem_getvalue(m, &v) == 0 && v == 1 &&
+             sem_trywait(m) == 0 && sem_trywait(s[N - 1]) == -1 && errno == EAGAIN;
+        if (m != MAP_FAILED) munmap(m, sizeof(sem_t));
+    }
+    for (int i = 0; i < made; i++) {
+        snprintf(n, sizeof n, "/cm_many%d", i);
+        sem_close(s[i]);
+        sem_unlink(n);
+    }
+    return ok;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1)
         return 7;                                   /* run by the posix_spawn check */
@@ -136,5 +204,7 @@ int main(int argc, char **argv) {
            stat("cm_fsd", &b) == 0 && a.st_ino == b.st_ino && a.st_dev == b.st_dev && rmdir("cm_fsd") == 0; }));
     EXPECT("sem_open in /dev/shm", ({ sem_t *m = sem_open("/cm_sem", O_CREAT | O_EXCL, 0600, 1);
            m != SEM_FAILED && sem_wait(m) == 0 && sem_post(m) == 0 && sem_close(m) == 0 && sem_unlink("/cm_sem") == 0; }));
+    EXPECT("sem_open past 64 mappings: mapping one again by name gives the same page", sem_many());
+    EXPECT("what a mapping wrote past the end of a file reads as zeros", grow_zero(0) && grow_zero(1) && grow_zero(2) && grow_zero(3));
     return done();
 }

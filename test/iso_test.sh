@@ -426,16 +426,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             # and with three windows, three of them bring it back.
             # On a loaded host bwm can take longer than monitor's pause to
             # redraw, so the picture is read again until it is the one
-            # wanted (10 s at most).
+            # wanted (10 s at most). Only the part above the task bar is
+            # compared: the bar's clock changes when a minute turns over.
+            def above_bar():
+                w, h, px = screendump()
+                return px[:w * 3 * 740]
             def settle(want):
                 end = time.time() + 10
                 while True:
-                    w, h, px = screendump()
+                    px = above_bar()
                     if want(px) or time.time() > end:
                         return px
-            w, h, before = screendump()
+            before = above_bar()
             for _ in range(20):                 # the picture before, once it stops changing
-                w, h, px = screendump()
+                px = above_bar()
                 if px == before:
                     break
                 before = px
