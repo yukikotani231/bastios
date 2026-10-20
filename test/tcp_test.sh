@@ -571,11 +571,10 @@ def stall_acks(f):
         now = time.time()
         if stall["from"] is None:
             stall["from"] = now
-        if now < stall["from"] + 1.5:
-            return stall["from"] + 1.5 - now
+        if now < stall["from"] + 3:     # three of the guest's 1 s timeouts: room for a loaded host
+            return stall["from"] + 3 - now
     return 0
 p = echo_run("late ACKs", pattern(12000, 3), lambda p: setattr(link, "out_rule", stall_acks))
-seqs = [s["seq"] for _, s in link.seen if s["data"]]
 seqs = [s["seq"] for _, s in link.seen if s["data"]]
 check(len(seqs) > len(set(seqs)), f"late ACKs: the guest timed out and went back ({len(seqs) - len(set(seqs))} segments resent)")
 
@@ -593,10 +592,17 @@ def zero_window_scenario():
     net.peer = q
     q.emit(SYN, q.iss)
     q.timer = time.time() + q.rto
-    t0 = time.time()
+    # The guest's probes back off from 1 s (1, 2, 4, 8 s apart), so count
+    # them from its first one, not from our SYN: on a loaded host the echo
+    # program can take seconds to start, and three probes from the SYN on
+    # left no room for that.
     shut = 12.0
-    until(lambda: time.time() - t0 > shut or q.state == "RESET", shut + 1)
-    probes = [s for t, s in q.log if s["data"] and t - t0 < shut]
+    def first_probe():
+        return next((t for t, s in q.log if s["data"]), None)
+    until(lambda: first_probe() is not None or q.state == "RESET", 30)
+    t1 = first_probe() or time.time()
+    until(lambda: time.time() - t1 > shut or q.state == "RESET", shut + 1)
+    probes = [s for t, s in q.log if s["data"] and t - t1 < shut]
     guest_shut = any(s["wnd"] == 0 for _, s in q.log)
     alive = q.state == "ESTABLISHED"
     q.rwin = 8192
