@@ -1,0 +1,84 @@
+# git's own tests (t/tNNNN-*.sh) that the gitsuite lane of run.py runs on
+# BastiOS, in Alpine's root, against the git that make builds
+# (build/compat/gitsuite.tar, packed by gitsuite.sh). One name per line. A
+# script is a check: it passes if it exits 0 (the tests that do not pass are
+# marked known breakages) and ran a test. The list is the scripts that take
+# under a minute and pass every time, from a run of all of t0-t8; the others
+# need things this image lacks (po files, a real sshd), need more time than
+# CI has, or are tests of the build's own options.
+t0006
+t0012
+t0019
+t0030
+t0040
+t0041
+t0060
+t0061
+t0063
+t0066
+t0070
+t0091
+t0095
+t0300
+t0302
+t0303
+t0500
+t1007
+t1014
+t1305
+t1306
+t1307
+t1308
+t1402
+t1406
+t1451
+t1501
+t1502
+t1504
+t1506
+t1508
+t1800
+t2000
+t2004
+t2204
+t3000
+t3001
+t3011
+t3013
+t3101
+t3103
+t3105
+t3203
+t3300
+t3422
+t4022
+t4026
+t4051
+t4052
+t4054
+t4063
+t4100
+t4139
+t4209
+t5000
+t5001
+t5002
+t5003
+t5573
+t6021
+t6102
+t6135
+t6403
+t7006
+t7030
+t7031
+t7061
+t7101
+t7301
+t7510
+t7528
+t7612
+t7812
+t7815
+t7816
+t8007

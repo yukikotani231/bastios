@@ -345,6 +345,7 @@ t_file: /dev/zero read
 t_file: 12 open descriptors
 t_file: O_APPEND
 t_file: O_EXCL on existing
+t_file: O_EXCL on a dangling symbolic link is EEXIST and makes nothing
 t_file: O_RDONLY refuses write
 t_file: XATTR_CREATE of an existing name is EEXIST
 t_file: XATTR_REPLACE changes the value
