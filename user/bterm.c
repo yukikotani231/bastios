@@ -542,6 +542,21 @@ int main(int argc, char **argv)
             if (t == BWM_KEY) {
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
+                if (k->ch == BWM_KEY_SCROLL_UP || k->ch == BWM_KEY_SCROLL_DOWN) {
+                    if (!alt) {
+                        int nb = back + (k->ch == BWM_KEY_SCROLL_UP ? rows - 1 : -(rows - 1));
+                        nb = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
+                        if (nb != back) {
+                            back = nb;
+                            memset(dirty, 1, sizeof dirty);
+                            printf("bterm: back %d\n", back);
+                            fflush(stdout);
+                            if (repaint(fd, id, &ocx, &ocy) != 0)
+                                break;
+                        }
+                    }
+                    continue;
+                }
                 if (back) {
                     back = 0;                    /* typing brings the live screen back */
                     memset(dirty, 1, sizeof dirty);
