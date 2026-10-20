@@ -86,25 +86,32 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-${{ matrix.cache }}-none
+          key: prooftar-${{ matrix.cache }}-none
           restore-keys: |
-            proof-${{ matrix.cache }}-
-            proof-
-          path: build/proof-cache
+            prooftar-${{ matrix.cache }}-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make test BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
         env:
           AARCH64_REQUIRED: 1
           LANES: ${{ matrix.lanes }}
-      # Keyed by the run, not by hashFiles over the cache: on the cache's
-      # tens of thousands of files hashFiles failed ("Fail to hash files")
-      # on every push, so nothing was saved and each run started from an
-      # old cache. The restore above takes the newest key with the prefix.
+      # Saved as one tar file and keyed by the run: on the cache's tens of
+      # thousands of files hashFiles failed ("Fail to hash files") and the
+      # save itself overflowed its stack ("Maximum call stack size
+      # exceeded"), so nothing was saved and each run started from an old
+      # cache. The restores take the newest key with the prefix.
+      - name: Pack the proof cache
+        if: always() && github.event_name == 'push'
+        run: tar -cf build/proof-cache.tar -C build proof-cache
+        continue-on-error: true
       - name: Save the proof cache
         if: always() && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          key: proof-${{ matrix.cache }}-${{ github.run_id }}-${{ strategy.job-index }}-${{ github.run_attempt }}
-          path: build/proof-cache
+          key: prooftar-${{ matrix.cache }}-${{ github.run_id }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: build/proof-cache.tar
         continue-on-error: true
   # The same suite with the kernel and the Bastio user programs built by the
   # native x86-64 backend, so no C compiler sees any proved code (the C
@@ -128,11 +135,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make test NATIVE=1 LANES='a b ce' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       # The AArch64 port's kernel and Bastio user programs (shell, hello, spin,
       # true) built by the native AArch64 backend, booted once on QEMU virt.
@@ -182,11 +191,14 @@ jobs:
         name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        if: steps.want.outputs.run == 'true'
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - if: steps.want.outputs.run == 'true'
         run: make build/bastios.elf BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       - if: steps.want.outputs.run == 'true'
@@ -284,11 +296,14 @@ jobs:
         name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        if: steps.want.outputs.run == 'true'
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - if: steps.want.outputs.run == 'true'
         run: make build/bastios.elf
       - if: steps.want.outputs.run == 'true'
@@ -342,11 +357,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make build/bastios.elf
       - run: tools/ci-kvm.sh
       - name: CR4.PCIDE follows the command line
@@ -421,11 +438,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make build/bastios.elf
       - run: NIC=ena test/dhcp_test.sh
       - run: NIC=ena test/tcp_test.sh
@@ -525,11 +544,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - name: Wait for room
         run: |
           while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 5; done
@@ -650,11 +671,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-aarch64-
-            proof-
-          path: build/proof-cache
+            prooftar-aarch64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - name: Cache keys
         id: keys
         run: |
@@ -765,11 +788,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make -j4 build/bastios.elf build/ltp/.built
       - name: Save LTP
         if: steps.ltp.outputs.cache-hit != 'true'
