@@ -22,6 +22,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bterm` selects and copies the word under the pointer on a double click and the whole row on a triple click.
 - `bterm` scrolls back and forward a page on Shift-Page Up and Shift-Page Down (`bwm` sends the keys `BWM_KEY_SCROLL_UP` and `BWM_KEY_SCROLL_DOWN`, 0x101 and 0x102, to the focused client).
 - `bfiles` leaves out names that start with a dot, and `h` in the list shows or hides them.
+- `bfiles` opens a terminal window in the directory shown on `t` in the list.
 - `bfiles` makes a new empty directory on `N` in the directory list.
 - `bfiles` renames the file it is showing on `r`: the new name is typed in the title bar, Enter renames and Escape cancels.
 - `bfiles` deletes the file it is showing on `D` pressed twice (the title bar asks first; any other key cancels).
