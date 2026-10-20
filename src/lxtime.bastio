@@ -219,15 +219,44 @@ fn time_out(k: &mut Kernel, pid: u64, va: u64, t: u64, unit: u64) -> u64
   return 0;
 }
 
-/// The CPU time process (or thread) p has used, in ns.
-fn cpu_ns(k: &Kernel, p: u64) -> u64
-  requires kok(k) && p < NPROC
+/// The CPU time thread p has used, or with `group` its process (all its
+/// threads, live or ended), in ns.
+fn cpu_ns(procs: &Buf, sys: &Buf, p: u64, group: bool) -> u64
+  requires ptab_ok(procs) && len(sys) == SYS_LEN && p < NPROC
 {
-  let t = pget(k.procs, p, F_TICKS);
+  let mut t = pget(procs, p, F_TICKS);
+  if group {
+    t = group_time(procs, sys, p, 0);
+  }
   if t >= FOREVER / NS_PER_TICK {
     return FOREVER - 1;
   }
   return t * NS_PER_TICK;
+}
+
+/// clock_now for the CPU-time clocks, apart so that clock_now stays small
+/// (it is in the timer tick's path) and gets the process table and k.sys
+/// alone: a `&Kernel` would be copied at every call.
+fn cpu_clock(procs: &Buf, sys: &Buf, pid: u64, clk: u64) -> u64
+  requires ptab_ok(procs) && len(sys) == SYS_LEN && pid < NPROC
+{
+  if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
+    return cpu_ns(procs, sys, pid, clk == CLOCK_PROCESS_CPUTIME_ID);
+  }
+  if clk % 4 == 3 {
+    return FOREVER;
+  }
+  let mut t = (!clk) >> 3;
+  if t == 0 {
+    t = pid;
+  }
+  if t >= NPROC || state(procs, t) == FREE {
+    return FOREVER;
+  }
+  if clk % 8 >= 4 && tgid(procs, t) != tgid(procs, pid) {
+    return FOREVER;                       // a thread of another process
+  }
+  return cpu_ns(procs, sys, t, clk % 8 < 4);
 }
 
 /// What clock `clk` reads now, or FOREVER for a clock there is not. A
@@ -238,24 +267,8 @@ fn cpu_ns(k: &Kernel, p: u64) -> u64
 fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
   requires kok(k) && pid < NPROC
 {
-  if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
-    return cpu_ns(k, pid);
-  }
-  if clk >= 0x8000000000000000 {
-    if clk % 4 == 3 {
-      return FOREVER;
-    }
-    let mut t = (!clk) >> 3;
-    if t == 0 {
-      t = pid;
-    }
-    if t >= NPROC || state(k.procs, t) == FREE {
-      return FOREVER;
-    }
-    if clk % 8 >= 4 && tgid(k.procs, t) != tgid(k.procs, pid) {
-      return FOREVER;                       // a thread of another process
-    }
-    return cpu_ns(k, t);
+  if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID || clk >= 0x8000000000000000 {
+    return cpu_clock(k.procs, k.sys, pid, clk);
   }
   // The coarse clocks move a tick at a time, as Linux's do (they read
   // the time of the last tick), and clock_getres says so.

@@ -916,6 +916,40 @@ fn pc_map(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64, w: bool) -> boo
   return ok;
 }
 
+fn text_l1(t: &mut PageTable, j: u64, m: &mut Mem) -> bool
+  requires pt_level(t) == 1 && j < 512 && mem_ok(m)
+  ensures pt_level(t) == 1 && mem_ok(m)
+{
+  if pt_has(t, j) && pt_shared(t, j) {
+    let s = pt_dup_shared(t, j);
+    let r = is_text_page(m, s);
+    drop_shared(&mut m, s);
+    return r;
+  }
+  return false;
+}
+
+/// Is the page in slot `slot` marked TXT_PAGE (pc_add's `text`), so that
+/// mprotect gives a process a copy of its own before it may write it?
+/// A page a MAP_SHARED mapping added is not, and is not mapped read-only
+/// for a private mapping.
+fn pc_slot_text(c: &mut PCache, m: &mut Mem, slot: u64) -> bool
+  requires pc_ok(c) && mem_ok(m) && slot < PC_N
+  ensures pc_ok(c) && mem_ok(m)
+{
+  let mut r = false;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_has(t, slot / 512) {
+        r = pt_borrow(&mut t, slot / 512, text_l1, slot % 512, &mut m);
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return r;
+}
+
 /// Maps the page in slot `slot` at slot i of a process's level-1 table l1,
 /// writable (mprotect and read_only narrow it after). False if i is in use
 /// or the slot holds nothing.

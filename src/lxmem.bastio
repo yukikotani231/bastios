@@ -1863,6 +1863,40 @@ fn cached_l2(l2: &mut PageTable, m: &mut Mem, p: u64, c: &mut PCache, slot: u64,
   return pt_borrow(&mut l2, t, pc_map, &mut c, slot, p % 512, w);
 }
 
+/// mmap MAP_PRIVATE without PROT_WRITE of file f from offset off at window
+/// pages first .. first + pages: the leading pages that the file fills whole
+/// are the page cache's pages, read-only and marked as program text (as exec
+/// maps a program's code: mprotect gives the process a copy of its own
+/// before it may write one, l2_protect), read in now if no process has them
+/// yet. Returns how many pages it mapped; the caller copies the rest.
+fn lx_map_file_text(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, off: u64) -> u64
+  requires kok(k) && pid < NPROC && first <= WPAGES && pages <= WPAGES - first && off % 4096 == 0
+  ensures kok(k)
+  ensures result <= pages
+{
+  let mut j = 0;
+  let mut go = true;
+  while go && j < pages
+    invariant j <= pages && kok(k) && pid < NPROC && first + pages <= WPAGES
+  {
+    let fpg = off / 4096 + j;
+    let mut slot = pc_get(&mut k.fs.pc, f, fpg);
+    if slot < PC_N {
+      if !pc_slot_text(&mut k.fs.pc, &mut k.mem, slot) {
+        slot = PC_NONE;                       // a MAP_SHARED mapping's page: this one is copied
+      }
+    } else if fpg <= 0xFFFFFFFFFFFFF && vfs_read_at(&mut k.fs, f, fpg * 4096, XFER) == XFER {
+      slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, XFER, true);
+    }
+    if slot >= PC_N || !lx_map_cached(&mut k.mem, &mut k.spaces, pid, first + j, &mut k.fs.pc, slot, false) {
+      go = false;
+    } else {
+      j = j + 1;
+    }
+  }
+  return j;
+}
+
 /// mmap MAP_SHARED of file f from offset off at window pages first ..
 /// first + pages: each page is the page cache's page for that part of the
 /// file, read in now if no process has it yet. 0, or ENOMEM.
