@@ -187,6 +187,18 @@ instructions on both. Where BastiOS is behind:
   disk in turn, since a directory's entries are not stored together; `getdents`
   now skips over the slots of other directories in one tight loop, which took the
   same run on this host from 0.16-0.18 s to 0.14 s.
+  Measured on 2026-10-20 (TCG, `-smp 2`, 512 MiB, median of 3): `git` 1.52 s
+  against Linux's 1.23 s (1.24x) and `scan` 0.92 s against 0.60 s (1.54x;
+  2.0x on the first, cold run). Split up, `find` over the 1,900 entries of the
+  root takes about 190 us an entry against Linux's 85 us, and `grep -rl` over
+  the headers is within 20% of Linux's. Every `stat` counted the hard links to its
+  file by walking all the directory's slots once the disk held any link; a
+  flag table now skips the walk for files that have none (`scan` 0.81 to
+  0.73 s). What is left is the path lookup itself: `stat` of a short path
+  is about 9,000 instructions, a third in `dent_named`, `disk_find`,
+  `disk_child` and `vfs_lookup` (one hash probe per component) and the rest
+  spread over the call's entry, path copy and `put_stat`, with no one function
+  above 4%.
 - `hello` was 3.6x off Linux when run again (3.65 s against 1.02 s), and
   slower the second time than the first. The time was in the emulator, not
   the disk: the page cache that shares program code between runs
