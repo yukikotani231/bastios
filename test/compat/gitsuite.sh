@@ -19,6 +19,7 @@ for f in "$src"/git-*; do
     [ -f "$f" ] || continue
     if [ "$(stat -c %i "$f")" = "$(stat -c %i "$src/git")" ]; then ln -s git "$gt/$b"; else cp "$f" "$gt/$b"; fi
 done
+cp "$src/COPYING" "$gt/COPYING"
 mkdir -p "$gt/contrib" && cp -r "$src/contrib/workdir" "$gt/contrib/workdir" && cp -r "$src/mergetools" "$gt/mergetools"
 cp "$src/t/helper/test-tool" "$src/t/helper/test-fake-ssh" "$gt/t/helper/"
 cp -r "$src/templates/blt" "$gt/templates/blt"
