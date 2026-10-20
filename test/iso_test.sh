@@ -901,6 +901,27 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # r in the viewer of bfiles renames the file shown.
+        mark = len(out)
+        q.stdin.write(b"echo x > /tmp/nf/ab; bwm -n -c bfiles /tmp/nf/ab\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey r", "sendkey backspace", "sendkey backspace", "sendkey c", "sendkey d", "sendkey ret")
+            good = until(b"bfiles: renamed /tmp/nf/ab to /tmp/nf/cd", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) r in the bfiles viewer renames the file")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"[ -f /tmp/nf/cd ] && [ ! -e /tmp/nf/ab ] && echo i$((1+1))s\r"); q.stdin.flush()
+        good = until(b"i2s", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the renamed file is under its new name")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # D twice in the viewer of bfiles deletes the file it shows.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf/untitled\r"); q.stdin.flush()
