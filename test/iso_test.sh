@@ -898,6 +898,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # t in the list of bfiles opens a terminal in that directory.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey t")
+            good = until(b"bfiles: terminal in /tmp/nf", mark) and until(b"bterm: window", mark)
+        if good:
+            time.sleep(2)
+            for ch in "pwd > /tmp/nf/pwd.out":
+                monitor("sendkey " + {" ": "spc", ">": "shift-dot", "/": "slash", ".": "dot"}.get(ch, ch))
+            monitor("sendkey ret")
+            time.sleep(1.5)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/nf/pwd.out\r"); q.stdin.flush()
+        good = good and until(b"\n/tmp/nf", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) t in bfiles opens a terminal in the directory")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # N in the list of bfiles makes a new directory.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
