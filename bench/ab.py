@@ -35,7 +35,7 @@ def main():
     ap.add_argument("--mem", default="512M")
     ap.add_argument("--cpu", default="")
     ap.add_argument("--accel", default=R.accel())
-    ap.add_argument("--append", default="", help="the kernels' command line (for example pcid)")
+    ap.add_argument("--append", default="", help="the kernels' command line (for example nopcid)")
     ap.add_argument("--append-b", default=None, help="the command line of B (default: --append)")
     ap.add_argument("--out", default=os.path.join(R.B, "ab.json"))
     args = ap.parse_args()

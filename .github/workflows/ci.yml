@@ -212,9 +212,9 @@ jobs:
       - if: steps.want.outputs.run == 'true'
         name: Compare PCIDs on and off, the same kernel
         run: |
-          bench/ab.py --a build/bastios.elf --b build/bastios.elf --append-b pcid --rounds 5 --runs 3 \
+          bench/ab.py --a build/bastios.elf --b build/bastios.elf --append nopcid --append-b "" --rounds 5 --runs 3 \
             --tests syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw --out build/bench/ab-pcid.json | tee build/bench/ab-pcid.md
-          { echo '### bench/ab.py under KVM: boot command line `pcid` (B) against none (A)'; echo; cat build/bench/ab-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '### bench/ab.py under KVM: default PCIDs (B) against boot command line `nopcid` (A)'; echo; cat build/bench/ab-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: always() && steps.want.outputs.run == 'true'
         name: Print the full table again, last in the log
         run: cat build/bench/kvm.md || true
@@ -311,15 +311,14 @@ jobs:
             build/bench/workloads.json
             build/bench/workloads.md
           if-no-files-found: ignore
-  # Process-context identifiers (boot/boot.S, boot/platform.c), off unless the
-  # boot command line says `pcid`. QEMU's TCG has no PCID, so only a KVM guest
+  # Process-context identifiers (boot/boot.S, boot/platform.c), on when the
+  # processor has them, unless the boot command line says `nopcid`. QEMU's TCG has no PCID, so only a KVM guest
   # can run them: this job checks that CR4.PCIDE follows the command line, runs
   # the system call benchmark both ways, then the memory, process, thread,
   # signal, ptrace, IPC and file programs of the compat suite with PCIDs on
   # (test/compat/progs/t_mem.c has the checks that a translation cached
   # before munmap or mprotect must not survive it). It does not fail the
-  # workflow yet: the default stays off until this job has been green for a
-  # while.
+  # workflow.
   pcid-kvm:
     needs: changes
     if: needs.changes.outputs.code == 'true'
