@@ -47,6 +47,9 @@ static int bf_nent, bf_top;                     /* the entries (".." is the firs
 static char bf_cwd[PATH_MAX] = "/";
 static int bf_viewing;
 static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
+static int bf_renaming;                   /* r was pressed in the viewer: the new name is being typed */
+static char bf_rname[NAME_MAX + 1];
+static int bf_rlen;
 static int bf_stale;                      /* a file was made: the list must be read again */
 static char bf_vpath[PATH_MAX];
 static char bf_vtext[BF_VIEWMAX];
@@ -175,11 +178,13 @@ static void bf_paint(void)
     uint32_t bg = 0x00101018, fg = 0x00D8D8D8, hd = 0x00305090;
     if (bf_viewing) {
         char h[BF_COLS + 1];
-        if (bf_confirm)
+        if (bf_renaming)
+            snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
+        else if (bf_confirm)
             snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_vpath);
         else
             snprintf(h, sizeof h, "%s", bf_vpath);
-        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm ? 0x00A03030 : hd);
+        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
             char t[BF_COLS + 1];
@@ -364,6 +369,34 @@ static void bf_new_dir(void)
     }
 }
 
+/* r in the viewer: type a new name (in the same directory), Enter renames,
+ * Escape cancels. */
+static void bf_rename_key(int c)
+{
+    if (c == 27) {
+        bf_renaming = 0;
+    } else if (c == '\r' || c == '\n') {
+        char *sl = strrchr(bf_vpath, '/');
+        char to[PATH_MAX];
+        snprintf(to, sizeof to, "%.*s%s", (int)(sl - bf_vpath + 1), bf_vpath, bf_rname);
+        bf_renaming = 0;
+        if (bf_rlen > 0 && strchr(bf_rname, '/') == NULL && rename(bf_vpath, to) == 0) {
+            printf("bfiles: renamed %s to %s\n", bf_vpath, to);
+            snprintf(bf_vpath, sizeof bf_vpath, "%s", to);
+            bf_stale = 1;
+        } else {
+            printf("bfiles: cannot rename %s\n", bf_vpath);
+        }
+        fflush(stdout);
+    } else if (c == 127 || c == 8) {
+        if (bf_rlen > 0)
+            bf_rname[--bf_rlen] = 0;
+    } else if (c >= 32 && c < 127 && bf_rlen < NAME_MAX) {
+        bf_rname[bf_rlen++] = (char)c;
+        bf_rname[bf_rlen] = 0;
+    }
+}
+
 static void be_key(int c)
 {
     int page = BF_ROWS - 2;
@@ -539,6 +572,13 @@ static int bfiles_main(int argc, char **argv)
             break;
         if (t == BWM_KEY) {
             int c = ((struct bwm_key *)buf)->ch;
+            if (bf_renaming) {
+                bf_rename_key(c);
+                bf_paint();
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    break;
+                continue;
+            }
             int was_confirm = bf_confirm;
             bf_confirm = 0;
             if (c == 'D' && bf_viewing && !bf_editing) {
@@ -556,7 +596,12 @@ static int bfiles_main(int argc, char **argv)
                 }
             } else if (bf_editing)
                 be_key(c);
-            else if (c == 'e' && bf_viewing)
+            else if (c == 'r' && bf_viewing) {
+                const char *b = strrchr(bf_vpath, '/');
+                snprintf(bf_rname, sizeof bf_rname, "%s", b ? b + 1 : bf_vpath);
+                bf_rlen = strlen(bf_rname);
+                bf_renaming = 1;
+            } else if (c == 'e' && bf_viewing)
                 be_start();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
