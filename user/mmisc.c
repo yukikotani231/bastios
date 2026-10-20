@@ -8,7 +8,8 @@
  * page from the file when the program first runs it (src/lazy.bastio), so
  * the pages of far_code and far_more, each alone on a page and run only at
  * the end, come from a file that has no name any more, one of them after
- * mprotect. */
+ * mprotect. A read-only private mapping of a file shares the kernel's
+ * cached pages of it until mprotect lets the process write one. */
 #include <errno.h>
 #include <fcntl.h>
 #include <sched.h>
@@ -208,6 +209,61 @@ static int private_copy(void)
     return 0;
 }
 
+/* A private read-only mapping of a file reads the file's bytes, whole pages
+ * and the zero-filled tail alike; mprotect then lets the process write a
+ * page without touching the file, another mapping of it, or (after fork)
+ * the parent's. */
+#define FM_SIZE (3 * 4096 + 100)
+static unsigned char fm_byte(long i)
+{
+    return (unsigned char)(i * 7 + i / 4096 + 1);
+}
+
+static int file_map_ok(const unsigned char *m)
+{
+    for (long i = 0; i < 4 * 4096; i++)
+        if (m[i] != (i < FM_SIZE ? fm_byte(i) : 0))
+            return 0;
+    return 1;
+}
+
+static int private_file_map(void)
+{
+    static unsigned char buf[FM_SIZE];
+    for (long i = 0; i < FM_SIZE; i++)
+        buf[i] = fm_byte(i);
+    int fd = open("mf", O_CREAT | O_RDWR | O_TRUNC, 0644);
+    if (fd < 0 || write(fd, buf, FM_SIZE) != FM_SIZE)
+        return fail("file for a private mapping");
+    unsigned char *a = mmap(0, 4 * 4096, PROT_READ, MAP_PRIVATE, fd, 0);
+    unsigned char *b = mmap(0, 4 * 4096, PROT_READ | PROT_EXEC, MAP_PRIVATE, fd, 0);
+    if (a == MAP_FAILED || b == MAP_FAILED || !file_map_ok(a) || !file_map_ok(b))
+        return fail("a read-only private file mapping");
+    if (mprotect(a + 4096, 4096, PROT_READ | PROT_WRITE) != 0)
+        return fail("mprotect a private file mapping");
+    a[4096 + 5] = 0xEE;
+    unsigned char got;
+    if (a[4096 + 5] != 0xEE || b[4096 + 5] != fm_byte(4096 + 5)
+        || pread(fd, &got, 1, 4096 + 5) != 1 || got != fm_byte(4096 + 5))
+        return fail("a written private file page stays private");
+    pid_t c = fork();
+    if (c == 0) {
+        if (mprotect(b, 4096, PROT_READ | PROT_WRITE) != 0)
+            _exit(2);
+        b[0] = 0x55;
+        _exit(b[0] == 0x55 ? 0 : 3);
+    }
+    int st;
+    if (c < 0 || waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+        return fail("write a private file page in a child");
+    if (b[0] != fm_byte(0) || a[0] != fm_byte(0))
+        return fail("a child's private file page stays its own");
+    if (munmap(a, 4 * 4096) != 0 || munmap(b, 4 * 4096) != 0)
+        return fail("munmap a private file mapping");
+    close(fd);
+    return unlink("mf") == 0 ? 0 : fail("unlink the mapped file");
+}
+
 /* Code on pages of its own, run only at the end. */
 __attribute__((noinline, aligned(4096))) static int far_code(int x)
 {
@@ -298,7 +354,7 @@ int main(int argc, char **argv)
     int held = pipes();
     if (held < 0)
         return fail("pipe capacity");
-    if (private_copy() != 0 || late_code() != 0)
+    if (private_copy() != 0 || private_file_map() != 0 || late_code() != 0)
         return 1;
     printf("mmisc: ok on %s %s, signals, pipe %d\n", u.sysname, u.machine, held);
     return 0;
