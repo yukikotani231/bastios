@@ -1256,6 +1256,9 @@ session("virtio", True, [
     # registers behind in the process table; the line typed after ash ends
     # must still reach the native shell, not be taken for the dead reader's.
     ("cat /dev/input/event0 > /tmp/evk & kill $!; echo ended", b"ended", b"\n# "),
+    # The same for a reader that is still waiting when ash ends: its timed
+    # wait is not one of the console's, so the next line is not taken for it.
+    ("cat /dev/input/event0 > /tmp/evk2 & echo waiting", b"waiting", b"\n# "),
     ("exit", b""),
     ("hello", b"hello from user mode, pid "),
 ], halt=True, ready=lambda: irq_found("virtio"))
