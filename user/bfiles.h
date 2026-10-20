@@ -343,6 +343,27 @@ static void bf_new_file(void)
     }
 }
 
+/* N in the directory list: makes an empty directory ("newdir", "newdir2",
+ * ...) here and shows it in the list. */
+static void bf_new_dir(void)
+{
+    char path[PATH_MAX];
+    for (int i = 1; i < 100; i++) {
+        char name[32];
+        if (i == 1)
+            snprintf(name, sizeof name, "newdir");
+        else
+            snprintf(name, sizeof name, "newdir%d", i);
+        bf_path_of(name, path, sizeof path);
+        if (mkdir(path, 0755) != 0)
+            continue;
+        printf("bfiles: mkdir %s\n", path);
+        fflush(stdout);
+        bf_load_dir();
+        return;
+    }
+}
+
 static void be_key(int c)
 {
     int page = BF_ROWS - 2;
@@ -539,6 +560,8 @@ static int bfiles_main(int argc, char **argv)
                 be_start();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
+            else if (c == 'N' && !bf_viewing)
+                bf_new_dir();
             else if (c == 'j')
                 bf_scroll(1);
             else if (c == 'k')

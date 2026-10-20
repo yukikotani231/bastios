@@ -19,6 +19,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
 - `bfiles` makes a new empty file on `n` in the directory list and opens it in the editor.
+- `bfiles` makes a new empty directory on `N` in the directory list.
 - `bfiles` deletes the file it is showing on `D` pressed twice (the title bar asks first; any other key cancels).
 - `bterm` pastes the copy on Shift-Insert and Ctrl-Shift-V, as the middle button does (`bwm` sends a key `BWM_KEY_PASTE`, 0x100, to the focused client).
 - `bterm` keeps the last 200 lines that scrolled off the top and shows them again when the mouse wheel is turned up (turned down, it comes forward); typing or a click returns to the live screen. The alternate screen has no history.
