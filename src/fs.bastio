@@ -605,7 +605,8 @@ fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
 /// Node `node` of file system `fs` (handle h) lost a row or a hold. The
 /// last close of a file removed while open frees it, and its cached pages.
 /// A closed file that still exists keeps its pages in the page cache, so
-/// the next run of a program finds its code there. A handle can be freed
+/// the next run of a program finds its code there, and the next mmap of a
+/// MAP_SHARED page the page that other processes may still map. A handle can be freed
 /// with pages cached (a file removed while closed); whatever makes a new
 /// file under it drops them first (pc_forget at each create), so a handle
 /// never names another file's pages.
@@ -624,8 +625,6 @@ fn node_settle(v: &mut Vfs, mem: &mut Mem, fs: u64, node: u64, h: u64)
       pc_forget(&mut v.pc, &mut mem, h);
       disk_remove(&mut v.lo, node);
       lo_settle(&mut v);
-    } else {
-      pc_close(&mut v.pc, &mut mem, h);
     }
   }
 }

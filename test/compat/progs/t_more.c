@@ -28,6 +28,39 @@
 
 extern char **environ;
 
+/* Eighty named semaphores, each mapped with its descriptor closed at once
+ * (as sem_open does), then the last one mapped again by name: the new
+ * mapping must be the same page. Past a process's 64 recorded shared
+ * mappings the page cache used to drop the page at that close, and
+ * another process opening the semaphore by name (multiprocessing's spawn)
+ * got a page of its own. */
+static int sem_many(void) {
+    enum { N = 80 };
+    sem_t *s[N];
+    char n[32];
+    int made = 0, ok = 1;
+    for (; made < N && ok; made++) {
+        snprintf(n, sizeof n, "/cm_many%d", made);
+        sem_unlink(n);
+        s[made] = sem_open(n, O_CREAT | O_EXCL, 0600, 0);
+        if (s[made] == SEM_FAILED) { ok = 0; break; }
+    }
+    if (ok) {
+        int f = open("/dev/shm/cm_many79", O_RDWR), v = -1;
+        sem_t *m = f >= 0 ? mmap(0, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED, f, 0) : MAP_FAILED;
+        if (f >= 0) close(f);
+        ok = m != MAP_FAILED && sem_post(s[N - 1]) == 0 && sem_getvalue(m, &v) == 0 && v == 1 &&
+             sem_trywait(m) == 0 && sem_trywait(s[N - 1]) == -1 && errno == EAGAIN;
+        if (m != MAP_FAILED) munmap(m, sizeof(sem_t));
+    }
+    for (int i = 0; i < made; i++) {
+        snprintf(n, sizeof n, "/cm_many%d", i);
+        sem_close(s[i]);
+        sem_unlink(n);
+    }
+    return ok;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1)
         return 7;                                   /* run by the posix_spawn check */
@@ -136,5 +169,6 @@ int main(int argc, char **argv) {
            stat("cm_fsd", &b) == 0 && a.st_ino == b.st_ino && a.st_dev == b.st_dev && rmdir("cm_fsd") == 0; }));
     EXPECT("sem_open in /dev/shm", ({ sem_t *m = sem_open("/cm_sem", O_CREAT | O_EXCL, 0600, 1);
            m != SEM_FAILED && sem_wait(m) == 0 && sem_post(m) == 0 && sem_close(m) == 0 && sem_unlink("/cm_sem") == 0; }));
+    EXPECT("sem_open past 64 mappings: mapping one again by name gives the same page", sem_many());
     return done();
 }
