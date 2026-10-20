@@ -854,6 +854,32 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # n in the list of bfiles makes a new empty file and edits it.
+        mark = len(out)
+        q.stdin.write(b"mkdir /tmp/nf\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/nf", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey n")
+            good = until(b"bfiles: edit /tmp/nf/untitled", mark)
+            monitor("sendkey h", "sendkey i", "sendkey ctrl-s")
+            good = good and until(b"bfiles: saved /tmp/nf/untitled", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) n in bfiles makes a new file and edits it")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/nf/untitled\r"); q.stdin.flush()
+        good = until(b"hi", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the new file holds what was typed")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
