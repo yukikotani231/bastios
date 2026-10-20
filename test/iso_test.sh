@@ -952,6 +952,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # bview shows a PPM: a 2 x 2 red image becomes a block of pure red.
+        mark = len(out)
+        q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nf/t.ppm; bwm -n -c bview /tmp/nf/t.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            red = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = red > 1000
+        print(("ok  " if good else "FAIL"), f"({name}) bview shows an image")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # t in the list of bfiles opens a terminal in that directory.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
