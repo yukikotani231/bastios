@@ -113,6 +113,7 @@ exec setsid cttyhack sh
 
 def linux_initrd(osbench, tmp):
     root = os.path.join(tmp, "root")
+    shutil.rmtree(root, ignore_errors=True)         # a second boot in the same directory
     for d in ("bin", "proc", "sys", "dev", "tmp", "disk"):
         os.makedirs(os.path.join(root, d))
     bb = shutil.which("busybox") or "/bin/busybox"
