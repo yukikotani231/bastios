@@ -149,6 +149,53 @@ static int task_fd(void) {
     return ok && n == 1;
 }
 
+/* /proc/self/fd/N read from another thread after the process's chroot:
+ * names inside the new root read from it ("/tt_sub", not "/tt_root/tt_sub"),
+ * whichever thread reads them (runc reads its /sys/fs/cgroup descriptor back
+ * this way). The descriptors are read through /proc/self/fd opened before
+ * the chroot, as the root has no /proc. */
+static int rl_pipe[2], rl_dfd, rl_ffd, rl_pfd;
+static void *rl_reader(void *a) {
+    (void)a;
+    char c, b[64];
+    if (read(rl_pipe[0], &c, 1) != 1) return 0;
+    char n1[16], n2[16];
+    snprintf(n1, sizeof n1, "%d", rl_dfd);
+    snprintf(n2, sizeof n2, "%d", rl_ffd);
+    ssize_t n = readlinkat(rl_pfd, n1, b, sizeof b - 1);
+    int ok = n == 7 && memcmp(b, "/tt_sub", 7) == 0;
+    n = readlinkat(rl_pfd, n2, b, sizeof b - 1);
+    ok = ok && n == 5 && memcmp(b, "/tt_f", 5) == 0;
+    return (void *)(long)ok;
+}
+static int fd_link_after_chroot(void) {
+    pid_t c = fork();
+    if (c == 0) {
+        mkdir("tt_root", 0755);
+        mkdir("tt_root/tt_sub", 0755);
+        int f = open("tt_root/tt_f", O_CREAT | O_WRONLY, 0644);
+        if (f < 0 || pipe(rl_pipe) != 0) _exit(2);
+        close(f);
+        rl_pfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+        pthread_t t;
+        void *r = 0;
+        if (rl_pfd < 0 || pthread_create(&t, 0, rl_reader, 0) != 0) _exit(3);
+        usleep(20000);                    /* the reader runs, then waits */
+        if (chroot("tt_root") != 0 || chdir("/") != 0) _exit(4);
+        rl_dfd = open("/tt_sub", O_RDONLY | O_DIRECTORY);
+        rl_ffd = open("/tt_f", O_RDONLY);
+        if (rl_dfd < 0 || rl_ffd < 0 || write(rl_pipe[1], "x", 1) != 1) _exit(5);
+        if (pthread_join(t, &r) != 0) _exit(6);
+        _exit(r ? 0 : 1);
+    }
+    int st;
+    int ok = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    unlink("tt_root/tt_f");
+    rmdir("tt_root/tt_sub");
+    rmdir("tt_root");
+    return ok;
+}
+
 /* A thread that has ended does not hand its id to the next one at once. */
 static void *tid_of(void *a) { (void)a; return (void *)(long)gettid(); }
 static int tids_differ(void) {
@@ -346,6 +393,7 @@ int main(void) {
     EXPECT("/proc/self/task lists the threads, and /proc/self/task/TID has their files", task_dir());
     EXPECT("/proc/self/task/TID/fd/N and ns/ are the process's", task_fd());
     EXPECT("threads that ended and began one after another have different ids", tids_differ());
+    EXPECT("/proc/self/fd/N read by another thread after a chroot names the file from the new root", fd_link_after_chroot());
     EXPECT("a thread keeps its descriptors while another spawns a child", spawn_keeps_fds());
     EXPECT("clone3: CLONE_CLEAR_SIGHAND, and what it refuses", clone3_clear_sighand());
     EXPECT("clone3: a fork child", clone3_fork());
