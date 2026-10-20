@@ -880,6 +880,27 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # N in the list of bfiles makes a new directory.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey shift-n")
+            good = until(b"bfiles: mkdir /tmp/nf/newdir", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) N in bfiles makes a new directory")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"[ -d /tmp/nf/newdir ] && echo i$((1+1))s\r"); q.stdin.flush()
+        good = until(b"i2s", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the new directory exists")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # D twice in the viewer of bfiles deletes the file it shows.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf/untitled\r"); q.stdin.flush()
