@@ -84,8 +84,10 @@ import "core/bitmap.bastio";
 import "core/bytes.bastio";
 
 const DSLOTS: u64 = 262144;           // directory entries, at most (16384 directory blocks: 512 named by the superblock, the rest by extension blocks)
-const BATCH_MAX: u64 = 64;               // blocks a batch of writes makes before it commits (disk_write)
-const OB_MAX: u64 = 72;               // blocks it replaces: at most one per block it makes, and room for a write's five
+const BATCH_MAX: u64 = 256;              // blocks a batch of writes makes before it commits, at most (disk_write)
+const BATCH_LOW: u64 = 64;               // the same on a machine with a small block cache (a batch holds its blocks in it)
+const OB_MAX: u64 = 264;              // blocks it replaces: at most one per block it makes, and room for a write's five
+const DIR_GROW: u64 = 8;             // directory blocks added at once when the table is full (disk_entry)
 const PD_MAX: u64 = 8;                // directory blocks whose entries wait for a commit (ent_lazy)
 const PDD_MAX: u64 = 16;             // directories made since the last commit: their entries are on the disk only after it
 const PDE_MAX: u64 = 16;             // entries made since the last commit inside such a directory
@@ -163,6 +165,7 @@ struct DiskFs {
   pw: u64,              // 1 + the entry whose writes are batched and not committed yet (0: none); see disk_write
   pb: Buf,              // the blocks the batch made: nothing on the disk names them yet (pn of BATCH_MAX)
   pn: u64,
+  bmax: u64,            // the blocks a batch holds before it commits: BATCH_MAX with a big cache, else BATCH_LOW
   ob: Buf,              // the blocks the batch replaced: the disk still names them (on of OB_MAX)
   on: u64,
   pt: u64,              // the tick the batch began
@@ -197,7 +200,7 @@ spec fn disk_ok(d: &DiskFs) -> bool {
   blk_ok(d.dev) && d.plo <= PLO_MAX && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK && blen(d.sp) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
-    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= BATCH_MAX && d.on <= OB_MAX && d.pw <= DSLOTS && d.free0 <= DSLOTS
+    && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= d.bmax && d.on <= d.bmax + 8 && d.bmax <= BATCH_MAX && d.bmax >= BATCH_LOW && d.pw <= DSLOTS && d.free0 <= DSLOTS
     && (blen(d.ix) == 0 || blen(d.ix) == IX_BYTES) && d.ixn <= IX_CELLS
 }
 
@@ -927,8 +930,12 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   if n < DATA_B0 + 16 || mode == DM_RAW {
     nc = NC_MIN;      // no file system to cache: a loop mount that no file backs
   }
+  let mut bmax = BATCH_LOW;
+  if nc >= IX_BIG_NC {
+    bmax = BATCH_MAX;    // room in the cache for a batch of that many held blocks
+  }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
-    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, pf: alloc(PD_MAX), pdd: alloc(PDD_MAX), pddn: 0, pde: alloc(PDE_MAX), pden: 0, pek: alloc(PDE_MAX), ppt: 0, pr: 0, tick: 0,
+    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, bmax: bmax, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, pf: alloc(PD_MAX), pdd: alloc(PDD_MAX), pddn: 0, pde: alloc(PDE_MAX), pden: 0, pek: alloc(PDE_MAX), ppt: 0, pr: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
@@ -1649,6 +1656,15 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
       if !dir_grow(&mut d) {
         return DSLOTS;                  // the directory is full, or so is the disk
       }
+      // A few more blocks while nothing is queued: each growth costs a
+      // commit of the batch, so growing by one block per sixteen entries
+      // made unpacking a tree commit again and again.
+      let mut more = 1;
+      while more < DIR_GROW && d.slots < DSLOTS && dir_grow(&mut d)
+        invariant disk_ok(d) && more <= DIR_GROW
+      {
+        more = more + 1;
+      }
     }
     if i != DTOP && !dent_used(d, i) {
       if lazy && (!dep_ok(d, p, i) || (dir && d.pddn >= PDD_MAX)) {
@@ -2083,7 +2099,8 @@ fn read_ahead(d: &mut DiskFs, root: u64, b: u64, size: u64)
 }
 
 /// disk_read for callers that cannot sleep (loading a program, mmap):
-/// waits for the queue instead.
+/// waits for the queue instead. A batch of writes that is not queued yet
+/// keeps waiting: the read needs only the blocks it queued.
 fn disk_read_wait(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> u64
   requires disk_ok(d) && i < DSLOTS && n <= blen(buf)
   ensures disk_ok(d) && blen(buf) == old(blen(buf))
@@ -2098,7 +2115,7 @@ fn disk_read_wait(d: &mut DiskFs, i: u64, off: u64, buf: &mut Bytes, n: u64) -> 
     if r != DISK_MISS {
       return r;
     }
-    disk_drain(&mut d);
+    disk_wait(&mut d);                // (the read is queued; the batch of writes stays as it is)
     tries = tries + 1;
   }
   return NO_DISK_FILE;
@@ -2207,7 +2224,7 @@ fn batch_pick(d: &mut DiskFs, prev: u64) -> u64
 /// block `now`: if that is a new block, the batch made it, and the block it
 /// replaced (if any) goes when the batch commits. Room: disk_write checked.
 fn batch_made(d: &mut DiskFs, prev: u64, now: u64)
-  requires disk_ok(d) && d.pn < BATCH_MAX && d.on < OB_MAX
+  requires disk_ok(d) && d.pn < d.bmax && d.on < d.bmax + 8
   ensures disk_ok(d) && d.pn <= old(d.pn) + 1 && d.on <= old(d.on) + 1
 {
   if now == prev {
@@ -2654,20 +2671,20 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   // A write to another file leaves the batch's file behind in it: its
   // entry's directory block is noted for the commit, like a lazy entry's,
   // and the batch goes on. It commits when it is full or the notes are.
-  if d.pw != 0 && d.pw != i + 1 && d.pn + 6 <= BATCH_MAX && d.on + 6 <= OB_MAX {
+  if d.pw != 0 && d.pw != i + 1 && d.pn + 6 <= d.bmax && d.on + 6 <= d.bmax + 8 {
     let rdb = (d.pw - 1) * DENT / BLOCK;
     if rdb < d.dcap && dir_block(d, rdb) != 0 && note_dir(&mut d, rdb) {
       d.pr = 1;
       d.pw = 0;
     }
   }
-  if d.pw != 0 && (d.pw != i + 1 || d.pn + 6 > BATCH_MAX || d.on + 6 > OB_MAX) {
+  if d.pw != 0 && (d.pw != i + 1 || d.pn + 6 > d.bmax || d.on + 6 > d.bmax + 8) {
     if !disk_commit(&mut d) {
       return DISK_MISS;
     }
     d.txn = 0;
   }
-  if d.pn + 6 > BATCH_MAX || d.on + 6 > OB_MAX {
+  if d.pn + 6 > d.bmax || d.on + 6 > d.bmax + 8 {
     return DISK_MISS;                 // (not reached: a commit empties the batch)
   }
   let fresh = d.pn == 0;             // this write begins the batch
