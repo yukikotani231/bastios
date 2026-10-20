@@ -27,6 +27,22 @@ mk() {  # NAME URL TAG-OR-COMMIT
 mk zlib https://github.com/madler/zlib v1.3.1
 mk lua https://github.com/lua/lua v5.4.7
 mk lz4 https://github.com/lz4/lz4 v1.10.0
+mk cjson https://github.com/DaveGamble/cJSON v1.7.18
+
+# A release tarball (its generated configure script included) made into the
+# same kind of repository.
+rel() {  # NAME URL
+  [ -d "$out/$1.git" ] && return 0
+  mkdir "$work/$1"
+  curl -fsSL "$2" | tar xz -C "$work/$1" --strip-components=1
+  git -C "$work/$1" -c init.defaultBranch=main init -q
+  git -C "$work/$1" add -A
+  git -C "$work/$1" -c user.name=compat -c user.email=compat@example.invalid commit -q -m "$1 release"
+  git clone -q --bare "$work/$1" "$out/$1.git"
+  git -C "$out/$1.git" update-server-info
+}
+
+rel libyaml https://github.com/yaml/libyaml/releases/download/0.2.5/yaml-0.2.5.tar.gz
 
 # The same for the toolchain disks that have no git: a tarball of a release
 # (OSS/NAME.tar.gz, with the files under NAME/), fetched with wget.
@@ -59,5 +75,21 @@ rs() {  # NAME URL TAG
 }
 
 rs semver https://github.com/dtolnay/semver 1.0.23
+
+# A Go module with its dependencies vendored beside it (go build -mod=vendor).
+gv() {  # NAME URL TAG
+  [ -f "$out/$1.tar.gz" ] && return 0
+  mkdir "$work/gv-$1"
+  git -C "$work/gv-$1" init -q
+  git -C "$work/gv-$1" fetch -q --depth 1 "$2" "$3"
+  git -C "$work/gv-$1" checkout -q FETCH_HEAD
+  rm -rf "$work/gv-$1/.git"
+  (cd "$work/gv-$1" && go mod vendor)
+  mkdir "$work/gv-top-$1"
+  mv "$work/gv-$1" "$work/gv-top-$1/$1"
+  tar -C "$work/gv-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
+}
+
+gv testify https://github.com/stretchr/testify v1.9.0
 
 tb nanoid https://github.com/ai/nanoid 5.0.7
