@@ -455,7 +455,11 @@ class Guest:
         again, by Ctrl-C or a reboot)."""
         mark = len(self.out)
         self.send(line.encode() + b"\r")
-        done = self.read_until(b"\n@@end ", mark, timeout) and self.read_until(PROMPT, mark, 10)
+        done = self.read_until(b"\n@@end ", mark, timeout)
+        if done:
+            # The prompt that follows the end mark, not a "# " line of the
+            # program's own output before it: the status digits come with it.
+            done = self.read_until(PROMPT, mark + self.out[mark:].index(b"\n@@end "), 10)
         text = self.out[mark:].decode(errors="replace").replace("\r", "")
         if done:
             m = re.search(r"\n@@end (\d+)", text)
