@@ -1141,6 +1141,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 if not good:
                     print("\n".join(l for l in lines3 if l))
                 fails += not good
+            if good:
+                # A double click selects the word under the pointer and copies it.
+                erow = next((i for i, l in enumerate(lines3) if l.strip() == "# echo copied"), None)
+                good = erow is not None
+            if good:
+                # the pointer is at (326, ty + 200) after the paste
+                movep(100 - 326, (90 + erow * 16 + 8) - (90 + row * 16 + 8 + 200))
+                monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
+                time.sleep(0.7)
+                monitor("mouse_button 4", "mouse_button 0", "mouse_move 200 200")   # the middle button types the copy
+                time.sleep(1)
+                w, h, px = screendump()
+                lines4 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copiedcopiedecho" for l in lines4)
+                print(("ok  " if good else "FAIL"), f"({name}) a double click selects a word and copies it")
+                if not good:
+                    print("\n".join(l for l in lines4 if l))
+                fails += not good
             time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
