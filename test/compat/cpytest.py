@@ -19,6 +19,20 @@ KNOWN = {
     "test.test_fcntl.TestFcntl.test_fcntl_64_bit": "F_NOTIFY (dnotify) is not implemented",
 }
 
+# Tests that time a short stretch of CPU time against a fixed bound (under
+# 20 ms across a 0.1 s sleep). Clocks count 10 ms ticks, and on a busy
+# host the emulated processor can be slow enough around the sleep to be
+# charged two of them. Such a test runs again, up to twice, and fails only
+# if it fails every time.
+TIMING = {
+    "test.test_time.TimeTestCase.test_process_time",
+    "test.test_time.TimeTestCase.test_thread_time",
+}
+
+def passes(tid):
+    t = unittest.defaultTestLoader.loadTestsFromName(tid)
+    return unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(t).wasSuccessful()
+
 def run(name):
     suite = unittest.defaultTestLoader.loadTestsFromName("test.test_" + name)
     res = unittest.TextTestRunner(stream=io.StringIO(), verbosity=0).run(suite)
@@ -26,6 +40,8 @@ def run(name):
     for t, tb in res.failures + res.errors:
         tid = t.id()
         if tid in KNOWN or "No module named '_testcapi'" in tb:
+            continue
+        if tid in TIMING and (passes(tid) or passes(tid)):
             continue
         if tid.startswith("unittest.loader."):
             # The module did not import: say why, on one line.
