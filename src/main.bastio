@@ -1368,6 +1368,7 @@ fn tick(t: u64) -> u64 {
 }
 
 fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, cpu: &mut Cpu) -> u64 {
+  let exp_t0 = cpu_tsc(cpu);
   // Every device the kernel drives, with the I/O ports it owns. The ports
   // are claimed here, once: no two drivers can own the same port, and no
   // code can touch a port that was not claimed. The ACPI registers first,
@@ -1442,6 +1443,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   pit_init(&mut pit, 100);
   let pool_pages = pool_size(pool);
+  puts(&mut con, "\r\nexp-tsc: main ");
+  put_num(&mut con, exp_t0);
+  puts(&mut con, " banner ");
+  put_num(&mut con, cpu_tsc(cpu));
+  puts(&mut con, " ns ");
+  put_num(&mut con, tsc_now(tsc, 0, cpu));
   puts(&mut con, "\r\nBastiOS 0.2: ");
   put_num(&mut con, pool_pages);
   puts(&mut con, " pages of memory, ");
