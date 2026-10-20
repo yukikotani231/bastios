@@ -46,6 +46,7 @@ static struct bf_ent bf_ents[BF_MAXENT];
 static int bf_nent, bf_top;                     /* the entries (".." is the first) and the first one shown */
 static char bf_cwd[PATH_MAX] = "/";
 static int bf_viewing;
+static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
 static int bf_stale;                      /* a file was made: the list must be read again */
 static char bf_vpath[PATH_MAX];
 static char bf_vtext[BF_VIEWMAX];
@@ -174,8 +175,11 @@ static void bf_paint(void)
     uint32_t bg = 0x00101018, fg = 0x00D8D8D8, hd = 0x00305090;
     if (bf_viewing) {
         char h[BF_COLS + 1];
-        snprintf(h, sizeof h, "%s", bf_vpath);
-        bf_put_row(0, h, strlen(h), 0x00FFFFFF, hd);
+        if (bf_confirm)
+            snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_vpath);
+        else
+            snprintf(h, sizeof h, "%s", bf_vpath);
+        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
             char t[BF_COLS + 1];
@@ -514,7 +518,22 @@ static int bfiles_main(int argc, char **argv)
             break;
         if (t == BWM_KEY) {
             int c = ((struct bwm_key *)buf)->ch;
-            if (bf_editing)
+            int was_confirm = bf_confirm;
+            bf_confirm = 0;
+            if (c == 'D' && bf_viewing && !bf_editing) {
+                if (was_confirm) {
+                    if (unlink(bf_vpath) == 0) {
+                        printf("bfiles: deleted %s\n", bf_vpath);
+                        bf_viewing = 0;
+                        bf_load_dir();
+                    } else {
+                        printf("bfiles: cannot delete %s\n", bf_vpath);
+                    }
+                    fflush(stdout);
+                } else {
+                    bf_confirm = 1;
+                }
+            } else if (bf_editing)
                 be_key(c);
             else if (c == 'e' && bf_viewing)
                 be_start();

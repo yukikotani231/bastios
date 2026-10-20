@@ -880,6 +880,30 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # D twice in the viewer of bfiles deletes the file it shows.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf/untitled\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey shift-d")
+            time.sleep(0.5)
+            monitor("sendkey shift-d")
+            good = until(b"bfiles: deleted /tmp/nf/untitled", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) D twice in the bfiles viewer deletes the file")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"ls /tmp/nf; echo d$((1+1))\r"); q.stdin.flush()
+        until(b"d2", mark)
+        good = b"untitled" not in bytes(out[mark:]).replace(b"ls /tmp/nf", b"")
+        print(("ok  " if good else "FAIL"), f"({name}) the deleted file is gone")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
