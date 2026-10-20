@@ -219,11 +219,15 @@ fn time_out(k: &mut Kernel, pid: u64, va: u64, t: u64, unit: u64) -> u64
   return 0;
 }
 
-/// The CPU time process (or thread) p has used, in ns.
-fn cpu_ns(k: &Kernel, p: u64) -> u64
+/// The CPU time thread p has used, or with `group` its process (all its
+/// threads, live or ended), in ns.
+fn cpu_ns(k: &Kernel, p: u64, group: bool) -> u64
   requires kok(k) && p < NPROC
 {
-  let t = pget(k.procs, p, F_TICKS);
+  let mut t = pget(k.procs, p, F_TICKS);
+  if group {
+    t = group_time(k, p, 0);
+  }
   if t >= FOREVER / NS_PER_TICK {
     return FOREVER - 1;
   }
@@ -239,7 +243,7 @@ fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
   requires kok(k) && pid < NPROC
 {
   if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
-    return cpu_ns(k, pid);
+    return cpu_ns(k, pid, clk == CLOCK_PROCESS_CPUTIME_ID);
   }
   if clk >= 0x8000000000000000 {
     if clk % 4 == 3 {
@@ -255,7 +259,7 @@ fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
     if clk % 8 >= 4 && tgid(k.procs, t) != tgid(k.procs, pid) {
       return FOREVER;                       // a thread of another process
     }
-    return cpu_ns(k, t);
+    return cpu_ns(k, t, clk % 8 < 4);
   }
   // The coarse clocks move a tick at a time, as Linux's do (they read
   // the time of the last tick), and clock_getres says so.

@@ -273,6 +273,9 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
     c = c + 1;
   }
   pr_clear(&mut k, q);
+  if g < NPROC {
+    td_fold(&mut k, q, g);                // its CPU times stay with the process (src/lxrlimit.bastio)
+  }
   pset(&mut k.procs, q, F_TGID, 0);
   pset(&mut k.procs, q, F_CTID, 0);
   pset(&mut k.procs, q, F_FUTEX, 0);

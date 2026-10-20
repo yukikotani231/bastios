@@ -15,6 +15,8 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <stdint.h>
+#include <sys/resource.h>
+#include <time.h>
 
 static int counter;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -295,6 +297,28 @@ static int fork_snapshot(void) {
     return bad == 0;
 }
 
+/* The process's CPU clock, times() and getrusage(RUSAGE_SELF) count every
+   thread, those that ended too: a thread spins for 0.3 s of its own CPU
+   time and is joined, and the process has used at least that much more
+   than the main thread. */
+static double cpu_clock(clockid_t c) { struct timespec t; clock_gettime(c, &t); return t.tv_sec + t.tv_nsec / 1e9; }
+static void *spin_cpu(void *a) {
+    (void)a;
+    while (cpu_clock(CLOCK_THREAD_CPUTIME_ID) < 0.3) {}
+    return 0;
+}
+static int process_cpu(void) {
+    pthread_t x;
+    if (pthread_create(&x, 0, spin_cpu, 0) != 0 || pthread_join(x, 0) != 0) return 0;
+    double proc = cpu_clock(CLOCK_PROCESS_CPUTIME_ID), self = cpu_clock(CLOCK_THREAD_CPUTIME_ID);
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    double ru_user = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6;
+    if (proc - self < 0.25) { fail("CLOCK_PROCESS_CPUTIME_ID %.3f s, the main thread %.3f s", proc, self); return -1; }
+    if (ru_user < 0.25) { fail("getrusage user time %.3f s", ru_user); return -1; }
+    return 1;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -325,6 +349,10 @@ int main(void) {
     EXPECT("a thread keeps its descriptors while another spawns a child", spawn_keeps_fds());
     EXPECT("clone3: CLONE_CLEAR_SIGHAND, and what it refuses", clone3_clear_sighand());
     EXPECT("clone3: a fork child", clone3_fork());
+    if (begin("the process's CPU time counts its threads, those that ended too")) {
+        int r = process_cpu();
+        if (r == 1) pass(); else if (r == 0) fail("pthread_create or pthread_join failed");
+    }
     if (begin("fork while another thread writes copies one moment of the parent")) {
         int r = fork_snapshot();
         if (r == 1) pass(); else if (r == 0) fail("mmap, pthread_create, fork or waitpid failed");

@@ -1576,6 +1576,7 @@ t_sys: aio: bad context, bad descriptor, bad pointer, and an empty pipe finishes
 t_thread: a thread keeps its descriptors while another spawns a child
 t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
 t_thread: clone3: a fork child
+t_thread: the process's CPU time counts its threads, those that ended too
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input

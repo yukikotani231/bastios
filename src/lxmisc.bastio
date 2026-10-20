@@ -194,14 +194,14 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
 }
 
 /// getrusage(who, usage): the user and system times (see tm_ticks) of the
-/// caller, or with RUSAGE_CHILDREN of its waited-for children; the rest
+/// caller's process, all its threads, or with RUSAGE_CHILDREN of its waited-for children; the rest
 /// is zero (ru_maxrss too, for the children).
 fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let mut t = smaller(pget(k.procs, pid, F_TICKS), 0xFFFFFFFFFFFF);
-  let mut st = smaller(tm_ticks(k, pid, 0), 0xFFFFFFFFFFFF);
+  let mut t = smaller(group_time(k, pid, 0), 0xFFFFFFFFFFFF);
+  let mut st = smaller(group_sys_ticks(k, pid), 0xFFFFFFFFFFFF);
   if children {
     t = smaller(tm_ticks(k, pid, 1), 0xFFFFFFFFFFFF);
     st = smaller(tm_ticks(k, pid, 2), 0xFFFFFFFFFFFF);
