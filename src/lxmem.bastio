@@ -1487,9 +1487,16 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
     let foff = sat_add(off, (p - first) * 4096);
     if foff < size {
       let n = smaller(4096, size - foff);
+      // The page mapped here is most often the page cache's page for this
+      // part of the file. Then the write must not copy the bytes into the
+      // cache: they were read a moment ago, and another process, on
+      // another processor, may have changed the page since (a semaphore's
+      // count), which the copy would undo.
+      let up = user_shared_page(&mut k.spaces, k.mem.bm, pid, USER_BASE + p * 4096);
+      let own = up != NO_RESULT && up == pc_page(&mut k.fs.pc, &mut k.mem, vfs_row_file(k.fs, row), foff / 4096);
       if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, USER_BASE + p * 4096, &mut k.fs.xfer, n) == n {
         vfs_seek(&mut k.fs, row, foff);
-        let mut w = vfs_write(&mut k.fs, &mut k.mem, row, n);
+        let mut w = flush_write(&mut k, row, n, own);
         let mut tries = 0;
         while w == VFS_MISS && tries < 64
           invariant tries <= 64 && kok(k) && row < FD_ROWS
@@ -1499,7 +1506,7 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
           // larger than the disk's queue would never get to its end.
           disk_wait(&mut k.fs.disk);
           vfs_seek(&mut k.fs, row, foff);
-          w = vfs_write(&mut k.fs, &mut k.mem, row, n);
+          w = flush_write(&mut k, row, n, own);
           tries = tries + 1;
         }
         if w == VFS_MISS {
@@ -1511,6 +1518,19 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
   }
   vfs_seek(&mut k.fs, row, was);
   return r;
+}
+
+/// map_flush's write of the transfer buffer: past the page cache if the
+/// page it came from is the cache's own (`own`).
+fn flush_write(k: &mut Kernel, row: u64, n: u64, own: bool) -> u64
+  requires kok(k) && row < FD_ROWS && n <= XFER
+  ensures kok(k)
+  ensures result <= n || result == NO_FD || result == VFS_MISS
+{
+  if own {
+    return write_row(&mut k.fs, &mut k.mem, row, n);
+  }
+  return vfs_write(&mut k.fs, &mut k.mem, row, n);
 }
 
 /// Drops record i of process pid and its reference on the file.

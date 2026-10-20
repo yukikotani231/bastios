@@ -902,6 +902,40 @@ fn pc_slot_text(c: &mut PCache, m: &mut Mem, slot: u64) -> bool
   return r;
 }
 
+fn id_l1(t: &mut PageTable, j: u64, m: &mut Mem) -> u64
+  requires pt_level(t) == 1 && j < 512 && mem_ok(m)
+  ensures pt_level(t) == 1 && mem_ok(m)
+{
+  if pt_has(t, j) && pt_shared(t, j) {
+    let s = pt_dup_shared(t, j);
+    let r = shared_id(s);
+    drop_shared(&mut m, s);                 // never the last: the cache holds one
+    return r;
+  }
+  return PC_NONE;
+}
+
+/// The page number of the page cached for page pg of file h, or PC_NONE.
+fn pc_page(c: &mut PCache, m: &mut Mem, h: u64, pg: u64) -> u64
+  requires pc_ok(c) && mem_ok(m)
+  ensures pc_ok(c) && mem_ok(m)
+{
+  let slot = pc_find(c, h, pg);
+  let mut r = PC_NONE;
+  if slot < PC_N {
+    match pc_take(&mut c) {
+      PcTab::Off => {},
+      PcTab::On(mut t) => {
+        if pt_has(t, slot / 512) {
+          r = pt_borrow(&mut t, slot / 512, id_l1, slot % 512, &mut m);
+        }
+        pc_put(&mut c, PcTab::On(t));
+      },
+    }
+  }
+  return r;
+}
+
 /// Maps the page in slot `slot` at slot i of a process's level-1 table l1,
 /// writable (mprotect and read_only narrow it after). False if i is in use
 /// or the slot holds nothing.
