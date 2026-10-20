@@ -880,6 +880,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # h in the list of bfiles shows and hides the names that start with a dot.
+        mark = len(out)
+        q.stdin.write(b"touch /tmp/nf/.dot; bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey h")
+            good = until(b"bfiles: dotfiles shown", mark)
+            monitor("sendkey h")
+            good = good and until(b"bfiles: dotfiles hidden", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # N in the list of bfiles makes a new directory.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()

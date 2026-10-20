@@ -19,6 +19,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
 - `bfiles` makes a new empty file on `n` in the directory list and opens it in the editor.
+- `bfiles` leaves out names that start with a dot, and `h` in the list shows or hides them.
 - `bfiles` makes a new empty directory on `N` in the directory list.
 - `bfiles` renames the file it is showing on `r`: the new name is typed in the title bar, Enter renames and Escape cancels.
 - `bfiles` deletes the file it is showing on `D` pressed twice (the title bar asks first; any other key cancels).
