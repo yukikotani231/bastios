@@ -455,7 +455,11 @@ class Guest:
         again, by Ctrl-C or a reboot)."""
         mark = len(self.out)
         self.send(line.encode() + b"\r")
-        done = self.read_until(b"\n@@end ", mark, timeout) and self.read_until(PROMPT, mark, 10)
+        done = self.read_until(b"\n@@end ", mark, timeout)
+        if done:
+            # The prompt that follows the end mark, not a "# " line of the
+            # program's own output before it: the status digits come with it.
+            done = self.read_until(PROMPT, mark + self.out[mark:].index(b"\n@@end "), 10)
         text = self.out[mark:].decode(errors="replace").replace("\r", "")
         if done:
             m = re.search(r"\n@@end (\d+)", text)
@@ -642,7 +646,9 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
             continue
         body.append(line)
     if status is None:
-        return {"name": name, "result": "hang", "detail": "did not finish", "syscalls": sorted(set(calls))}
+        seen = "\n".join(body)[-600:]
+        return {"name": name, "result": "hang", "detail": "did not finish" + (" (the end mark came, the prompt did not)" if "\n@@end " in text else "") + (", last output:\n" + seen if seen else ""),
+                "syscalls": sorted(set(calls))}
     ok = body == expected
     detail = "" if ok else "got " + json.dumps(clip("\n".join(body))) + ", expected " + json.dumps("\n".join(expected))
     return {"name": name, "result": "pass" if ok else "fail", "detail": detail, "syscalls": sorted(set(calls))}
