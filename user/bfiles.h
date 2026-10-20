@@ -447,12 +447,14 @@ static void bf_copy_file(void)
 
 /* t in the directory list: opens a terminal window in the directory shown.
  * The terminal is a grandchild, so nothing is left to be waited for. */
-static void bf_terminal(void)
+/* Starts /bin/bterm in the directory shown under the name NAME with ARG, from a double
+ * fork so that it needs no wait; says "bfiles: MSG". */
+static void bf_spawn(const char *name, const char *arg, const char *msg)
 {
     pid_t p = fork();
     if (p == 0) {
         if (fork() == 0) {
-            char *argv[] = { "bterm", NULL };
+            char *argv[] = { (char *)name, (char *)arg, NULL };
             for (int fd = 3; fd < 64; fd++)
                 close(fd);
             if (chdir(bf_cwd) == 0)
@@ -464,7 +466,7 @@ static void bf_terminal(void)
     if (p > 0) {
         int st;
         waitpid(p, &st, 0);
-        printf("bfiles: terminal in %s\n", bf_cwd);
+        printf("bfiles: %s %s\n", msg, arg ? arg : bf_cwd);
         fflush(stdout);
     }
 }
@@ -675,6 +677,8 @@ static int bfiles_main(int argc, char **argv)
                 bf_renaming = 1;
             } else if (c == 'c' && bf_viewing)
                 bf_copy_file();
+            else if (c == 'i' && bf_viewing)
+                bf_spawn("bview", bf_vpath, "image");
             else if (c == 'e' && bf_viewing)
                 be_start();
             else if (c == 'n' && !bf_viewing)
@@ -694,7 +698,7 @@ static int bfiles_main(int argc, char **argv)
                 fflush(stdout);
                 bf_load_dir();
             } else if (c == 't' && !bf_viewing) {
-                bf_terminal();
+                bf_spawn("bterm", NULL, "terminal in");
             } else if (c == 'N' && !bf_viewing)
                 bf_new_dir();
             else if (c == 'g' || c == 'G') {

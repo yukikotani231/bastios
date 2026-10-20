@@ -20,6 +20,8 @@
 #include "bwmlib.h"
 #include "font8x8.h"
 #include "bfiles.h"
+#include "bsys.h"
+#include "bview.h"
 
 #define MAXC 160                          /* the most columns and rows the grid can have */
 #define MAXR 60
@@ -499,6 +501,10 @@ int main(int argc, char **argv)
     const char *base = strrchr(argv[0], '/');
     if (strcmp(base ? base + 1 : argv[0], "bfiles") == 0)
         return bfiles_main(argc, argv);
+    if (strcmp(base ? base + 1 : argv[0], "bsys") == 0)
+        return bsys_main();
+    if (strcmp(base ? base + 1 : argv[0], "bview") == 0)
+        return bview_main(argc, argv);
     unsigned sw, sh;
     bwm_screen(&sw, &sh);                         /* a small screen gets a smaller grid than 80 x 24 */
     if (sw >= 16 + MINC * CW && sh >= 80 + MINR * CH) {

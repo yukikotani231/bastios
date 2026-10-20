@@ -727,19 +727,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = tuple(px[at:at + 3]) == (45, 45, 60)
             print(("ok  " if good else "FAIL"), f"({name}) the Menu button opens the launcher menu")
             fails += not good
-            monitor("mouse_move -34 -96")                          # onto Terminal
+            monitor("mouse_move -34 -120")                         # onto Terminal
             monitor("mouse_button 1", "mouse_button 0")
             good = until(b"bterm: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the menu's Terminal entry starts a terminal window")
             fails += not good
             time.sleep(1)
-            monitor("mouse_move 34 96")
+            monitor("mouse_move 34 120")
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.5)
-            monitor("mouse_move -34 -72")                          # onto Files
+            monitor("mouse_move -34 -96")                          # onto Files
             monitor("mouse_button 1", "mouse_button 0")
             good = until(b"bfiles: dir /", mark) and until(b"bfiles: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the menu's Files entry opens the file browser on /")
+            fails += not good
+            monitor("mouse_move 34 96")
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.5)
+            monitor("mouse_move -34 -72")                          # onto System
+            monitor("mouse_button 1", "mouse_button 0")
+            good = until(b"bsys: window", mark)
+            if good:
+                time.sleep(1)
+                monitor("sendkey r")
+                good = until(b"bsys: refreshed", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the menu's System entry opens the System window and r refreshes it")
             fails += not good
             monitor("mouse_move 34 72")
             monitor("mouse_button 1", "mouse_button 0")
@@ -933,6 +945,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey g")
             good = good and until(b"bfiles: top 0", mark2)
         print(("ok  " if good else "FAIL"), f"({name}) g and G in bfiles jump to the top and the end")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # bview shows a PPM: a 2 x 2 red image becomes a block of pure red.
+        mark = len(out)
+        q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nf/t.ppm; bwm -n -c bview /tmp/nf/t.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            red = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = red > 1000
+        print(("ok  " if good else "FAIL"), f"({name}) bview shows an image")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
