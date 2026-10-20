@@ -906,6 +906,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bfiles: dotfiles hidden", mark)
         print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
         fails += not good
+        # s in the list sorts the files by size (largest first) or back by name.
+        if good:
+            monitor("sendkey s")
+            good = until(b"bfiles: sorted by size", mark)
+            monitor("sendkey s")
+            good = good and until(b"bfiles: sorted by name", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) s in bfiles toggles the sort order")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
