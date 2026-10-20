@@ -742,10 +742,11 @@ ctest=0
 
 == oss: libyaml: clone a release, configure it, build it, and run make check
 # timeout 900
-$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/libyaml.git && cd libyaml && ./configure >/tmp/cf.log 2>&1; echo configure=$?; timeout 400 make -j2 >/tmp/c.log 2>&1; r=$?; [ $r = 0 ] || { echo make=$r; tail -n 25 /tmp/c.log; }; make check >/tmp/chk.log 2>&1; echo check=$?; grep -E "^# (PASS|FAIL)" /tmp/chk.log; echo removing; cd /root && rm -rf libyaml; echo removed=$?' & p=$!; i=0; while kill -0 $p 2>/dev/null && [ $i -lt 120 ]; do sleep 1; i=$((i+1)); done; kill -0 $p 2>/dev/null && { echo STUCK; ps; }; wait $p
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/libyaml.git && cd libyaml && ./configure >/tmp/cf.log 2>&1; echo configure=$?; timeout 400 make -j2 >/tmp/c.log 2>&1; r=$?; [ $r = 0 ] || { echo make=$r; tail -n 25 /tmp/c.log; }; make check >/tmp/chk.log 2>&1; echo check=$?; grep -E "^# (PASS|FAIL)" /tmp/chk.log; echo removing; cd /root && rm -rf libyaml; echo removed=$?; sync; echo synced' & p=$!; i=0; while kill -0 $p 2>/dev/null && [ $i -lt 120 ]; do sleep 1; i=$((i+1)); done; kill -0 $p 2>/dev/null && { echo STUCK; ps; }; wait $p
 configure=0
 check=0
 # PASS:  2
 # FAIL:  0
 removing
 removed=0
+synced
