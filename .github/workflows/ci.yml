@@ -492,6 +492,7 @@ jobs:
             build/compat/micropython
             build/compat/kilo
             build/compat/git
+            build/compat/gitsuite.tar
             build/compat/perl
             build/compat/perllib
             build/compat/py

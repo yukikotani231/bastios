@@ -345,6 +345,7 @@ t_file: /dev/zero read
 t_file: 12 open descriptors
 t_file: O_APPEND
 t_file: O_EXCL on existing
+t_file: O_EXCL on a dangling symbolic link is EEXIST and makes nothing
 t_file: O_RDONLY refuses write
 t_file: XATTR_CREATE of an existing name is EEXIST
 t_file: XATTR_REPLACE changes the value
@@ -1700,3 +1701,87 @@ apps: cpython: tests of its own: os, stat, file, fileio, mmap, pipes
 apps: cpython: tests of its own: signal, wait3, wait4, time, resource
 apps: cpython: tests of its own: threading, posix and pty
 t_ltp2: send(MSG_DONTWAIT) on a blocking TCP socket with a full send buffer is EAGAIN, not a wait
+gitsuite: t0006
+gitsuite: t0012
+gitsuite: t0019
+gitsuite: t0030
+gitsuite: t0040
+gitsuite: t0041
+gitsuite: t0060
+gitsuite: t0061
+gitsuite: t0063
+gitsuite: t0066
+gitsuite: t0070
+gitsuite: t0091
+gitsuite: t0095
+gitsuite: t0300
+gitsuite: t0302
+gitsuite: t0303
+gitsuite: t0500
+gitsuite: t1007
+gitsuite: t1014
+gitsuite: t1305
+gitsuite: t1306
+gitsuite: t1307
+gitsuite: t1308
+gitsuite: t1402
+gitsuite: t1406
+gitsuite: t1451
+gitsuite: t1501
+gitsuite: t1502
+gitsuite: t1504
+gitsuite: t1506
+gitsuite: t1508
+gitsuite: t1800
+gitsuite: t2000
+gitsuite: t2004
+gitsuite: t2204
+gitsuite: t3000
+gitsuite: t3001
+gitsuite: t3011
+gitsuite: t3013
+gitsuite: t3101
+gitsuite: t3103
+gitsuite: t3105
+gitsuite: t3203
+gitsuite: t3300
+gitsuite: t3422
+gitsuite: t3901
+gitsuite: t4022
+gitsuite: t4026
+gitsuite: t4051
+gitsuite: t4052
+gitsuite: t4054
+gitsuite: t4063
+gitsuite: t4100
+gitsuite: t4115
+gitsuite: t4139
+gitsuite: t4201
+gitsuite: t4209
+gitsuite: t4254
+gitsuite: t5000
+gitsuite: t5001
+gitsuite: t5002
+gitsuite: t5003
+gitsuite: t5100
+gitsuite: t5573
+gitsuite: t6006
+gitsuite: t6021
+gitsuite: t6102
+gitsuite: t6135
+gitsuite: t6403
+gitsuite: t7006
+gitsuite: t7030
+gitsuite: t7031
+gitsuite: t7061
+gitsuite: t7101
+gitsuite: t7102
+gitsuite: t7301
+gitsuite: t7510
+gitsuite: t7528
+gitsuite: t7609
+gitsuite: t7612
+gitsuite: t7812
+gitsuite: t7815
+gitsuite: t7816
+gitsuite: t8007

@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <termios.h>
 
 #include "bwmlib.h"
@@ -52,6 +53,8 @@ static int main_cx, main_cy, alt;
 static struct cell hist[HIST][MAXC];
 static int hist_n, hist_head;             /* how many are kept; where the next one goes */
 static int back;                          /* how many lines the view is scrolled back (0 is the live screen) */
+static int clicks, click_r, click_c;       /* clicks in a row on one cell (a double click selects a word, a triple one the line) */
+static long click_ms;
 static int sel_on, selecting;             /* a selection is lit; the button is still down */
 static int sel_ar, sel_ac, sel_br, sel_bc;   /* where it began and where the pointer is, as cells */
 #define CLIP_FILE "/tmp/bwm.clip"         /* what is selected, for any terminal to paste */
@@ -442,6 +445,42 @@ static void copy_selection(void)
     }
 }
 
+/* A click on cell (r, c) that follows another within 400 ms on the same cell
+ * is a double click: it selects the run of non-blank characters under it. A
+ * third makes the whole row the selection. */
+static void click_select(int r, int c)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long now = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+    if (clicks > 0 && r == click_r && c == click_c && now - click_ms < 400)
+        clicks++;
+    else
+        clicks = 1;
+    click_r = r; click_c = c; click_ms = now;
+    if (clicks < 2 || r >= rows)
+        return;
+    if (clicks >= 3) {
+        sel_ar = sel_br = r;
+        sel_ac = 0;
+        sel_bc = cols - 1;
+        clicks = 0;
+    } else {
+        if (grid[r][c].ch <= ' ')
+            return;
+        int a = c, b = c;
+        while (a > 0 && grid[r][a - 1].ch > ' ')
+            a--;
+        while (b < cols - 1 && grid[r][b + 1].ch > ' ')
+            b++;
+        sel_ar = sel_br = r;
+        sel_ac = a;
+        sel_bc = b;
+    }
+    sel_on = 1;
+    copy_selection();
+}
+
 /* Types the clipboard into the shell. */
 static void paste(int m)
 {
@@ -542,6 +581,21 @@ int main(int argc, char **argv)
             if (t == BWM_KEY) {
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
+                if (k->ch == BWM_KEY_SCROLL_UP || k->ch == BWM_KEY_SCROLL_DOWN) {
+                    if (!alt) {
+                        int nb = back + (k->ch == BWM_KEY_SCROLL_UP ? rows - 1 : -(rows - 1));
+                        nb = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
+                        if (nb != back) {
+                            back = nb;
+                            memset(dirty, 1, sizeof dirty);
+                            printf("bterm: back %d\n", back);
+                            fflush(stdout);
+                            if (repaint(fd, id, &ocx, &ocy) != 0)
+                                break;
+                        }
+                    }
+                    continue;
+                }
                 if (back) {
                     back = 0;                    /* typing brings the live screen back */
                     memset(dirty, 1, sizeof dirty);
@@ -587,10 +641,13 @@ int main(int argc, char **argv)
                     memset(dirty, 1, sizeof dirty);
                 } else if (!(e->buttons & 1) && selecting) {
                     selecting = 0;               /* the release ends it: a drag is copied, a click only clears */
-                    if (sel_ar != sel_br || sel_ac != sel_bc)
+                    if (sel_ar != sel_br || sel_ac != sel_bc) {
                         copy_selection();
-                    else
+                        clicks = 0;
+                    } else {
                         sel_on = 0;
+                        click_select(er, ec);
+                    }
                     memset(dirty, 1, sizeof dirty);
                 }
                 if ((e->buttons & 4) && !mid) {

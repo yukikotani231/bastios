@@ -1072,6 +1072,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # Shift-Page Up and Shift-Page Down page through the history.
+            monitor("sendkey shift-pgup")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = not any(l.strip() == "l30" for l in lines) and any(l.strip().startswith("l") and len(l.strip()) == 3 for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Shift-Page Up scrolls the terminal back a page")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey shift-pgdn")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Shift-Page Down scrolls forward a page")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
@@ -1121,6 +1140,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print(("ok  " if good else "FAIL"), f"({name}) Shift-Insert pastes the copy into the terminal")
                 if not good:
                     print("\n".join(l for l in lines3 if l))
+                fails += not good
+            if good:
+                # A double click selects the word under the pointer and copies it.
+                erow = next((i for i, l in enumerate(lines3) if l.strip() == "# echo copied"), None)
+                good = erow is not None
+            if good:
+                # the pointer is at (326, ty + 200) after the paste
+                movep(100 - 326, (90 + erow * 16 + 8) - (90 + row * 16 + 8 + 200))
+                monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
+                time.sleep(0.7)
+                monitor("mouse_button 4", "mouse_button 0", "mouse_move 200 200")   # the middle button types the copy
+                time.sleep(1)
+                w, h, px = screendump()
+                lines4 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copiedcopiedecho" for l in lines4)
+                print(("ok  " if good else "FAIL"), f"({name}) a double click selects a word and copies it")
+                if not good:
+                    print("\n".join(l for l in lines4 if l))
                 fails += not good
             time.sleep(1)
             monitor("sendkey ctrl-q")
