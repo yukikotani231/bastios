@@ -1449,6 +1449,12 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   put_num(&mut con, cpu_tsc(cpu));
   puts(&mut con, " ns ");
   put_num(&mut con, tsc_now(tsc, 0, cpu));
+  puts(&mut con, " base ");
+  put_num(&mut con, tsc.base);
+  puts(&mut con, " at ");
+  put_num(&mut con, tsc.at);
+  puts(&mut con, " mult ");
+  put_num(&mut con, tsc.mult);
   puts(&mut con, "\r\nBastiOS 0.2: ");
   put_num(&mut con, pool_pages);
   puts(&mut con, " pages of memory, ");
