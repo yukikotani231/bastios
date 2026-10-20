@@ -323,6 +323,38 @@ docs/architecture.md), and a compile is mostly `exec`, file creation and
 reads. That is a guess from the fit, not a profile. It is not part of
 `make bench`, which runs the same program on Linux; this one is BastiOS alone.
 
+## Under KVM
+
+The same table from CI's `bench-kvm` job on a GitHub-hosted runner (4 host
+CPUs, `-smp 2`, `-m 512M`, median of 3 runs, 2026-10-20, with PCIDs on as
+they are by default). TCG's software TLB made every system call cost tens of
+microseconds in the tables above; under KVM the cost is the kernel's own.
+
+| Test | Unit | BastiOS | Linux | BastiOS / Linux |
+|---|---|---:|---:|---:|
+| syscall | ns | 829 | 76.1 | 10.89x |
+| open@tmp | us | 2.46 | 0.82 | 3.01x |
+| stat@tmp | us | 1.51 | 0.54 | 2.80x |
+| create@disk | us | 11.8 | 12.5 | 0.94x |
+| filemap@disk | ns/page | 306 | 229 | 1.34x |
+| fileread@disk | MiB/s | 7261 | 20844 | 2.87x |
+| filewrite@disk | MiB/s | 1004 | 2605 | 2.60x |
+| fork | us | 22.5 | 56.4 | 0.40x |
+| exec | us | 54.7 | 123 | 0.44x |
+| fault | ns/page | 1027 | 1033 | 0.99x |
+| pipelat | us | 4.15 | 21.1 | 0.20x |
+| tcplat | us | 10.1 | 26.9 | 0.37x |
+
+Where BastiOS is behind, the gap follows the number of system calls: a
+program that makes many small calls (`tar` reading 512-byte blocks, `git`
+checking out files) pays about 0.8 us for each, against 0.08 us on Linux. An
+`open` or `stat` does about as much work in the kernel as Linux does in the
+whole call. A call's 830 ns is mostly not instructions: a call executes about
+2300 of them (`bench/insnprof.py`, roughly 250 ns). The rest has not been
+measured; the candidates are the two CR3 loads, the user translations that
+the shadow table's load flushes, `sysret` and the atomic operations of the
+lock.
+
 ## Process-context identifiers (boot option `nopcid`)
 
 Every trap from user mode loads CR3 twice: the kernel's table on the way in
