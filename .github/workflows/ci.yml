@@ -95,11 +95,15 @@ jobs:
         env:
           AARCH64_REQUIRED: 1
           LANES: ${{ matrix.lanes }}
+      # Keyed by the run, not by hashFiles over the cache: on the cache's
+      # tens of thousands of files hashFiles failed ("Fail to hash files")
+      # on every push, so nothing was saved and each run started from an
+      # old cache. The restore above takes the newest key with the prefix.
       - name: Save the proof cache
         if: always() && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          key: proof-${{ matrix.cache }}-${{ hashFiles('build/proof-cache/**') }}
+          key: proof-${{ matrix.cache }}-${{ github.run_id }}-${{ strategy.job-index }}-${{ github.run_attempt }}
           path: build/proof-cache
         continue-on-error: true
   # The same suite with the kernel and the Bastio user programs built by the
