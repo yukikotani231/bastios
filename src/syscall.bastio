@@ -432,7 +432,6 @@ fn disk_hold(k: &mut Kernel, p: u64, fail: u64) -> bool
     return false;
   }
   k.fs.disk.txn = 0;
-  if true { return false; }
   if state(k.procs, p) != READY || t >= RETRY_BIT {
     disk_wake(&mut k);
     return false;
