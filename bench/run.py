@@ -136,6 +136,7 @@ class Guest:
     def __init__(self, cmd, prompt, logpath):
         self.prompt = prompt
         self.log = open(logpath, "wb")
+        self.t0 = time.monotonic()
         self.q = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.out = b""
         self.marks = []                     # (offset in out, host time)
@@ -211,8 +212,10 @@ def boot(osname, args, osbench, tmp):
         if getattr(args, "append", ""):
             cmd += ["-append", args.append]
         g = Guest(cmd, "# ", log)
-        if not g.until(rb"bastios> ", 0, 300):
+        m = g.until(rb"bastios> ", 0, 300)
+        if not m:
             raise SystemExit("bench: BastiOS gave no prompt")
+        g.boot_ns = (g.time_at(m.start()) - g.t0) * 1e9
         at = len(g.out)
         g.send("ash")
         if not g.until(rb"# ", at, 60):
@@ -224,8 +227,10 @@ def boot(osname, args, osbench, tmp):
                "-append", "console=ttyS0 quiet panic=-1 mitigations=off transparent_hugepage=never rdinit=/init",
                "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"] + common
         g = Guest(cmd, "# ", log)
-        if not g.until(rb"READY", 0, 600):
+        m = g.until(rb"READY", 0, 600)
+        if not m:
             raise SystemExit("bench: Linux did not reach its shell")
+        g.boot_ns = (g.time_at(m.start()) - g.t0) * 1e9
         g.until(rb"# ", len(g.out) - 1, 30)
         g.send("stty -echo 2>/dev/null; PS1='# '")
         time.sleep(1)
@@ -307,6 +312,7 @@ def main():
         for osname in args.os.split(","):
             g = boot(osname, args, osbench, tmp)
             res = results["os"][osname] = {}
+            res["boot"] = {"host": g.boot_ns, "guest": g.boot_ns, "runs": [round(g.boot_ns / 1e6, 1)]}
             try:
                 for test, unit, scale, isfile in TESTS:
                     if want and test not in want:
@@ -343,7 +349,7 @@ def table(results):
              f"median of {results['runs']} runs, {'instruction count (--icount)' if ICOUNT else 'host time'} ({results['date']}, {results['host_cpus']} host CPUs).", "",
              "| Test | Unit | " + " | ".join(oses) + (" | BastiOS / Linux |" if len(oses) == 2 else " |"),
              "|---|---|" + "---:|" * len(oses) + ("---:|" if len(oses) == 2 else "")]
-    for test, unit, scale, isfile in TESTS:
+    for test, unit, scale, isfile in [("boot", "ms", 1e-6, False)] + TESTS:
         for where in (("tmp", "disk") if isfile else ("tmp",)):
             key = f"{test}@{where}" if isfile else test
             cells, vals = [], []
