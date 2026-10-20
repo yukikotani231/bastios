@@ -401,6 +401,46 @@ static void bf_rename_key(int c)
     }
 }
 
+/* c in the viewer: copies the file shown to "NAME.copy" ("NAME.copy2", ...)
+ * next to it. */
+static void bf_copy_file(void)
+{
+    int in = open(bf_vpath, O_RDONLY);
+    if (in < 0)
+        return;
+    char to[PATH_MAX];
+    int out = -1;
+    for (int i = 1; i < 100 && out < 0; i++) {
+        if (i == 1)
+            snprintf(to, sizeof to, "%s.copy", bf_vpath);
+        else
+            snprintf(to, sizeof to, "%s.copy%d", bf_vpath, i);
+        out = open(to, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    }
+    if (out < 0) {
+        close(in);
+        return;
+    }
+    char buf[4096];
+    ssize_t n;
+    int bad = 0;
+    while ((n = read(in, buf, sizeof buf)) > 0)
+        if (write(out, buf, (size_t)n) != n) {
+            bad = 1;
+            break;
+        }
+    close(in);
+    close(out);
+    if (bad || n < 0) {
+        unlink(to);
+        printf("bfiles: cannot copy %s\n", bf_vpath);
+    } else {
+        printf("bfiles: copied %s to %s\n", bf_vpath, to);
+        bf_stale = 1;
+    }
+    fflush(stdout);
+}
+
 /* t in the directory list: opens a terminal window in the directory shown.
  * The terminal is a grandchild, so nothing is left to be waited for. */
 static void bf_terminal(void)
@@ -629,7 +669,9 @@ static int bfiles_main(int argc, char **argv)
                 snprintf(bf_rname, sizeof bf_rname, "%s", b ? b + 1 : bf_vpath);
                 bf_rlen = strlen(bf_rname);
                 bf_renaming = 1;
-            } else if (c == 'e' && bf_viewing)
+            } else if (c == 'c' && bf_viewing)
+                bf_copy_file();
+            else if (c == 'e' && bf_viewing)
                 be_start();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
