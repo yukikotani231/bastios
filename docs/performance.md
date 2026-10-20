@@ -27,6 +27,7 @@ system. Without `/dev/kvm`, `bench/run.py` downloads the kernel with
 | Test | What one operation is |
 |---|---|
 | boot | from starting QEMU until the system's first prompt (BastiOS's `bastios> `, Linux's init printing READY), once per system; the host stamps the line |
+| boot1 | the same with one processor (`-smp 1`), after a first boot that is thrown away because it reads its files cold; the difference to `boot` is what starting the other processors costs |
 | cpu | one step of a 64-bit LCG, no system calls: the emulated CPU's speed |
 | memcpy | copying 1 MiB between two 256 KiB buffers that are already mapped |
 | syscall | `getppid` |
