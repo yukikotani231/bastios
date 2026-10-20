@@ -350,9 +350,10 @@ program that makes many small calls (`tar` reading 512-byte blocks, `git`
 checking out files) pays about 0.8 us for each, against 0.08 us on Linux. An
 `open` or `stat` does about as much work in the kernel as Linux does in the
 whole call. A call's 830 ns is mostly not instructions: a call executes about
-2300 of them (`bench/insnprof.py`, roughly 250 ns), and the rest is the two
-CR3 loads, the user translations the shadow table's load flushes, `sysret`
-and the atomic operations of the lock.
+2300 of them (`bench/insnprof.py`, roughly 250 ns). The rest has not been
+measured; the candidates are the two CR3 loads, the user translations that
+the shadow table's load flushes, `sysret` and the atomic operations of the
+lock.
 
 ## Process-context identifiers (boot option `nopcid`)
 
