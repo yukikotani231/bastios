@@ -924,6 +924,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bfiles: reloaded", mark)
         print(("ok  " if good else "FAIL"), f"({name}) R in bfiles reloads the list")
         fails += not good
+        # G jumps to the end of the list and g back to the top.
+        if good:
+            mark2 = len(out)
+            monitor("sendkey shift-g")
+            good = until(b"bfiles: top", mark2)
+            mark2 = len(out)
+            monitor("sendkey g")
+            good = good and until(b"bfiles: top 0", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) g and G in bfiles jump to the top and the end")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)

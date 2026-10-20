@@ -697,7 +697,11 @@ static int bfiles_main(int argc, char **argv)
                 bf_terminal();
             } else if (c == 'N' && !bf_viewing)
                 bf_new_dir();
-            else if (c == 'j')
+            else if (c == 'g' || c == 'G') {
+                bf_scroll(c == 'g' ? -1000000 : 1000000);
+                printf("bfiles: top %d\n", bf_viewing ? bf_vtop : bf_top);
+                fflush(stdout);
+            } else if (c == 'j')
                 bf_scroll(1);
             else if (c == 'k')
                 bf_scroll(-1);
