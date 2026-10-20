@@ -965,6 +965,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # c in the viewer of bfiles copies the file shown.
+        mark = len(out)
+        q.stdin.write(b"echo xyz > /tmp/nf/cp; bwm -n -c bfiles /tmp/nf/cp\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey c")
+            good = until(b"bfiles: copied /tmp/nf/cp to /tmp/nf/cp.copy", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/nf/cp.copy\r"); q.stdin.flush()
+        good = good and until(b"xyz", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) c in the bfiles viewer copies the file")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # D twice in the viewer of bfiles deletes the file it shows.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf/untitled\r"); q.stdin.flush()
