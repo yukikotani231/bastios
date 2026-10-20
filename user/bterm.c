@@ -548,7 +548,9 @@ int main(int argc, char **argv)
                     if (repaint(fd, id, &ocx, &ocy) != 0)
                         break;
                 }
-                if (write(m, &c, 1) != 1)
+                if (k->ch == BWM_KEY_PASTE)
+                    paste(m);
+                else if (write(m, &c, 1) != 1)
                     break;
             } else if (t == BWM_MOUSE) {
                 struct bwm_mouse *e = (struct bwm_mouse *)buf;

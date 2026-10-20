@@ -1001,6 +1001,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     print("\n".join(l for l in lines2 if l))
             print(("ok  " if good else "FAIL"), f"({name}) a selection is copied and the middle button pastes it")
             fails += not good
+            if good:
+                # Shift-Insert pastes the copy from the keyboard.
+                monitor("sendkey shift-insert")
+                time.sleep(1)
+                w, h, px = screendump()
+                lines3 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copiedcopied" for l in lines3)
+                print(("ok  " if good else "FAIL"), f"({name}) Shift-Insert pastes the copy into the terminal")
+                if not good:
+                    print("\n".join(l for l in lines3 if l))
+                fails += not good
             time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)

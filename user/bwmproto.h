@@ -33,7 +33,8 @@ struct bwm_created { uint32_t id, w, h; };
 struct bwm_draw { uint32_t id, x, y, w, h; };                  /* then w * h pixels, or none for a shared window */
 struct bwm_destroy { uint32_t id; };
 struct bwm_settitle { uint32_t id; char title[24]; };
-struct bwm_key { uint32_t id, ch; };
+struct bwm_key { uint32_t id, ch; };                            /* ch is a byte, or BWM_KEY_PASTE for Shift-Insert and Ctrl-Shift-V */
+#define BWM_KEY_PASTE 0x100
 struct bwm_mouse { uint32_t id, x, y, buttons; };              /* x, y inside the contents */
 struct bwm_close { uint32_t id; };
 struct bwm_resizable { uint32_t id; };
