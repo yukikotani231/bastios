@@ -191,7 +191,7 @@ instructions on both. Where BastiOS is behind:
   against Linux's 1.23 s (1.24x) and `scan` 0.92 s against 0.60 s (1.54x;
   2.0x on the first, cold run). Split up, `find` over the 1,900 entries of the
   root takes about 190 us an entry against Linux's 85 us, and `grep -rl` over
-  the headers is as fast as Linux's. Every `stat` counted the hard links to its
+  the headers is within 20% of Linux's. Every `stat` counted the hard links to its
   file by walking all the directory's slots once the disk held any link; a
   flag table now skips the walk for files that have none (`scan` 0.81 to
   0.73 s). What is left is the path lookup itself: `stat` of a short path
