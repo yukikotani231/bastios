@@ -77,21 +77,24 @@ gv() {  # NAME URL TAG
 
 gv testify https://github.com/stretchr/testify v1.9.0
 
-# An npm package with its dependencies installed beside it (npm install, run
-# build step), for a test runner that is itself one of the dependencies.
-nm() {  # NAME URL TAG
+# An npm package built on the host and shipped with its dependencies and one
+# test runner installed beside it (node_modules), nothing else of its tooling.
+nm() {  # NAME URL TAG RUNNER
   [ -f "$out/$1.tar.gz" ] && return 0
   mkdir "$work/nm-$1"
   git -C "$work/nm-$1" init -q
   git -C "$work/nm-$1" fetch -q --depth 1 "$2" "$3"
   git -C "$work/nm-$1" checkout -q FETCH_HEAD
   rm -rf "$work/nm-$1/.git"
-  (cd "$work/nm-$1" && npm install --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 && npm run build >/dev/null 2>&1)
+  (cd "$work/nm-$1" && npm install --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 && npm run build >/dev/null 2>&1 \
+    && npm pkg delete devDependencies scripts >/dev/null && rm -rf node_modules package-lock.json \
+    && npm install --ignore-scripts --omit=dev --no-audit --no-fund >/dev/null 2>&1 \
+    && npm install --no-save --ignore-scripts --no-audit --no-fund "$4" >/dev/null 2>&1)
   mkdir "$work/nm-top-$1"
   mv "$work/nm-$1" "$work/nm-top-$1/$1"
   tar -C "$work/nm-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
 }
 
-nm mri https://github.com/lukeed/mri v1.2.0
+nm mri https://github.com/lukeed/mri v1.2.0 tape@4.13.3
 
 tb nanoid https://github.com/ai/nanoid 5.0.7
