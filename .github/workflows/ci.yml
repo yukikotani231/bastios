@@ -113,7 +113,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # It takes 18 to 29 minutes on main (proving and building the kernel
+    # natively is 8 of them), so 30 cut off runs that were only slow.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
