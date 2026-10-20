@@ -11,7 +11,8 @@
  * Home, End and Page keys and a click move and change the text, Ctrl-S saves
  * ("bfiles: saved PATH") and Ctrl-X goes back to the viewer, which shows the
  * file as it is on disk. "bfiles /path/to/file" opens the file in the viewer.
- * The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
+ * In the list n makes an empty file (untitled, untitled2, ...) and opens it
+ * in the editor. The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
  * window is open and "bfiles: dir PATH" or "bfiles: view PATH" as it
  * moves.
  * It is part of the bterm program, which runs it when started as "bfiles"
@@ -45,6 +46,8 @@ static struct bf_ent bf_ents[BF_MAXENT];
 static int bf_nent, bf_top;                     /* the entries (".." is the first) and the first one shown */
 static char bf_cwd[PATH_MAX] = "/";
 static int bf_viewing;
+static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
+static int bf_stale;                      /* a file was made: the list must be read again */
 static char bf_vpath[PATH_MAX];
 static char bf_vtext[BF_VIEWMAX];
 static const char *bf_vline[BF_MAXLINES];       /* each line of the file, cut at COLS characters */
@@ -172,8 +175,11 @@ static void bf_paint(void)
     uint32_t bg = 0x00101018, fg = 0x00D8D8D8, hd = 0x00305090;
     if (bf_viewing) {
         char h[BF_COLS + 1];
-        snprintf(h, sizeof h, "%s", bf_vpath);
-        bf_put_row(0, h, strlen(h), 0x00FFFFFF, hd);
+        if (bf_confirm)
+            snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_vpath);
+        else
+            snprintf(h, sizeof h, "%s", bf_vpath);
+        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
             char t[BF_COLS + 1];
@@ -312,6 +318,31 @@ static void be_start(void)
     fflush(stdout);
 }
 
+/* n in the directory list: makes an empty file ("untitled", "untitled2",
+ * ...) here and opens it in the editor. */
+static void bf_new_file(void)
+{
+    char path[PATH_MAX];
+    for (int i = 1; i < 100; i++) {
+        char name[32];
+        if (i == 1)
+            snprintf(name, sizeof name, "untitled");
+        else
+            snprintf(name, sizeof name, "untitled%d", i);
+        bf_path_of(name, path, sizeof path);
+        int f = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (f < 0)
+            continue;
+        close(f);
+        printf("bfiles: new %s\n", path);
+        fflush(stdout);
+        bf_load_file(path);
+        be_start();
+        bf_stale = 1;
+        return;
+    }
+}
+
 static void be_key(int c)
 {
     int page = BF_ROWS - 2;
@@ -420,6 +451,10 @@ static void bf_click(int row)
 {
     if (bf_viewing) {
         bf_viewing = 0;
+        if (bf_stale) {
+            bf_stale = 0;
+            bf_load_dir();
+        }
         return;
     }
     if (row < 1)
@@ -483,10 +518,27 @@ static int bfiles_main(int argc, char **argv)
             break;
         if (t == BWM_KEY) {
             int c = ((struct bwm_key *)buf)->ch;
-            if (bf_editing)
+            int was_confirm = bf_confirm;
+            bf_confirm = 0;
+            if (c == 'D' && bf_viewing && !bf_editing) {
+                if (was_confirm) {
+                    if (unlink(bf_vpath) == 0) {
+                        printf("bfiles: deleted %s\n", bf_vpath);
+                        bf_viewing = 0;
+                        bf_load_dir();
+                    } else {
+                        printf("bfiles: cannot delete %s\n", bf_vpath);
+                    }
+                    fflush(stdout);
+                } else {
+                    bf_confirm = 1;
+                }
+            } else if (bf_editing)
                 be_key(c);
             else if (c == 'e' && bf_viewing)
                 be_start();
+            else if (c == 'n' && !bf_viewing)
+                bf_new_file();
             else if (c == 'j')
                 bf_scroll(1);
             else if (c == 'k')
@@ -496,9 +548,13 @@ static int bfiles_main(int argc, char **argv)
             else if (c == 'b')
                 bf_scroll(-(BF_ROWS - 2));
             else if (c == 127 || c == 8) {
-                if (bf_viewing)
+                if (bf_viewing) {
                     bf_viewing = 0;
-                else {
+                    if (bf_stale) {
+                        bf_stale = 0;
+                        bf_load_dir();
+                    }
+                } else {
                     bf_go_up();
                     bf_load_dir();
                 }

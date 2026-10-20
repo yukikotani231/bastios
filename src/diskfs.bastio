@@ -83,6 +83,7 @@ import "core/endian.bastio";
 import "core/bitmap.bastio";
 import "core/bytes.bastio";
 
+const LK_BYTES: u64 = 4096;            // the flags of disk_links' filter (DiskFs.lkb)
 const DSLOTS: u64 = 262144;           // directory entries, at most (16384 directory blocks: 512 named by the superblock, the rest by extension blocks)
 const BATCH_MAX: u64 = 256;              // blocks a batch of writes makes before it commits, at most (disk_write)
 const BATCH_LOW: u64 = 64;               // the same on a machine with a small block cache (a batch holds its blocks in it)
@@ -194,10 +195,11 @@ struct DiskFs {
   plo: u64,             // the file system's first sector on the device: 0 for a whole disk, the start of the BastiOS partition of a GPT otherwise (a multiple of BSECT, at most PLO_MAX)
   raw: bool,            // mounted with no file system, left for raw sector access (the boot option `install`)
   links: bool,          // a hard link entry may exist: false lets disk_links skip counting them
+  lkb: Bytes,           // LK_BYTES flags: byte t % LK_BYTES is set once an entry t may have had a hard link made to it, so that disk_links can tell most files have none without counting
 }
 
 spec fn disk_ok(d: &DiskFs) -> bool {
-  blk_ok(d.dev) && d.plo <= PLO_MAX && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK && blen(d.sp) == BLOCK
+  blk_ok(d.dev) && d.plo <= PLO_MAX && d.dcap >= DIR_START && d.dcap <= DIR_BLOCKS && blen(d.dir) == d.dcap * BLOCK && d.slots <= d.dcap * DPB && blen(d.sb) == BLOCK && blen(d.lkb) == LK_BYTES && d.ecap >= EXT_START && d.ecap <= EXT_MAX && blen(d.ext) == d.ecap * BLOCK && d.next <= d.ecap && blen(d.sec) == SECTOR && blen(d.root) == BLOCK && blen(d.sp) == BLOCK
     && blen(d.la) == BLOCK && blen(d.lb) == BLOCK && blen(d.data) == BLOCK && blen(d.d2) == BLOCK && dq_ok(d.q)
     && bits_ok(d.used) && d.blocks <= d.used.n && d.used.n <= MAX_BLOCKS && d.slots <= DSLOTS
     && len(d.pb) == BATCH_MAX && len(d.ob) == OB_MAX && d.pn <= d.bmax && d.on <= d.bmax + 8 && d.bmax <= BATCH_MAX && d.bmax >= BATCH_LOW && d.pw <= DSLOTS && d.free0 <= DSLOTS
@@ -936,7 +938,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, bmax: bmax, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, pf: alloc(PD_MAX), pdd: alloc(PDD_MAX), pddn: 0, pde: alloc(PDE_MAX), pden: 0, pek: alloc(PDE_MAX), ppt: 0, pr: 0, tick: 0,
-    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, psz: total, plo: 0, raw: mode == DM_RAW };
+    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, lkb: balloc(LK_BYTES), psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
   }
@@ -1062,6 +1064,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   {
     if cast[u64](dent_byte(d, i, E_KIND)) == K_LINK {
       seen = true;
+      lk_mark(&mut d, get_u64(d.dir, i * DENT + E_LINK));
     }
     if dent_byte(d, i, E_KIND) == 1 {
       let r = tree_in(d, d.dir, i * DENT + E_ROOT);
@@ -1119,6 +1122,7 @@ fn disk_unmount_now(d: DiskFs) -> Blk
   bfree(d.sb);
   bfree(d.ext);
   bfree(d.ix);
+  bfree(d.lkb);
   bfree(d.sec);
   bfree(d.root);
   bfree(d.sp);
@@ -1521,12 +1525,21 @@ fn disk_link_to(d: &DiskFs, t: u64) -> u64
   return DSLOTS;
 }
 
+/// Notes that a hard link may name entry t (any number: a value that is
+/// no entry marks a flag that only costs a count later).
+fn lk_mark(d: &mut DiskFs, t: u64)
+  requires disk_ok(d)
+  ensures disk_ok(d)
+{
+  bset(&mut d.lkb, t % LK_BYTES, 1);
+}
+
 /// How many hard links name entry t, besides its own name.
 fn disk_links(d: &DiskFs, t: u64) -> u64
   requires disk_ok(d)
   ensures result <= DSLOTS
 {
-  if !d.links {
+  if !d.links || bget(d.lkb, t % LK_BYTES) == 0 {
     return 0;
   }
   let mut c = 0;
@@ -1678,6 +1691,7 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         dent_setb(&mut d, i, E_KIND, cast[u8](K_LINK));
         dent_set(&mut d, i, E_LINK, link);
         d.links = true;
+        lk_mark(&mut d, link);
       } else {
         dent_setb(&mut d, i, E_KIND, 1);
         dent_set(&mut d, i, E_MODE, MODE_FILE);
