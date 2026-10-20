@@ -314,8 +314,16 @@ def main():
                "host_cpus": os.cpu_count(), "date": time.strftime("%Y-%m-%d %H:%M:%S"), "os": {}}
     with tempfile.TemporaryDirectory() as tmp:
         for osname in args.os.split(","):
-            g = boot(osname, args, osbench, tmp)
             res = results["os"][osname] = {}
+            if args.smp > 1:
+                # One processor: what the extra ones cost to start (the delays of boot/smp.c)
+                a1 = argparse.Namespace(**vars(args))
+                a1.smp = 1
+                boot(osname, a1, osbench, tmp).stop()     # the first boot of a system reads its files cold
+                g1 = boot(osname, a1, osbench, tmp)
+                res["boot1"] = {"host": g1.boot_ns, "guest": g1.boot_ns, "runs": [round(g1.boot_ns / 1e6, 1)]}
+                g1.stop()
+            g = boot(osname, args, osbench, tmp)
             res["boot"] = {"host": g.boot_ns, "guest": g.boot_ns, "runs": [round(g.boot_ns / 1e6, 1)]}
             try:
                 for test, unit, scale, isfile in TESTS:
@@ -353,7 +361,7 @@ def table(results):
              f"median of {results['runs']} runs, {'instruction count (--icount)' if ICOUNT else 'host time'} ({results['date']}, {results['host_cpus']} host CPUs).", "",
              "| Test | Unit | " + " | ".join(oses) + (" | BastiOS / Linux |" if len(oses) == 2 else " |"),
              "|---|---|" + "---:|" * len(oses) + ("---:|" if len(oses) == 2 else "")]
-    for test, unit, scale, isfile in [("boot", "ms", 1e-6, False)] + TESTS:
+    for test, unit, scale, isfile in [("boot", "ms", 1e-6, False), ("boot1", "ms", 1e-6, False)] + TESTS:
         for where in (("tmp", "disk") if isfile else ("tmp",)):
             key = f"{test}@{where}" if isfile else test
             cells, vals = [], []
