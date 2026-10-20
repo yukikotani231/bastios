@@ -52,7 +52,7 @@ kernel function through QEMU's `-perfmap`, or to QEMU itself.
 
 ## Results
 
-BastiOS main (ed8a934). QEMU 8.2 TCG, `-smp 2`, `-m 512M`, median of 3
+BastiOS main (f9609d9), 2026-10-20. QEMU 8.2 TCG, `-smp 2`, `-m 512M`, median of 3
 runs, on a 4-processor cloud container with no KVM. The ratio column is
 BastiOS's time divided by Linux's for the same work, so a figure above 1
 means BastiOS is slower. Compare the ratios, not the absolute figures:
@@ -60,34 +60,34 @@ TCG time depends on the host.
 
 | Test | Unit | BastiOS | Linux | BastiOS / Linux |
 |---|---|---:|---:|---:|
-| cpu | ns/iter | 1.09 | 1.27 | 0.86x |
-| memcpy | us/MiB | 54.5 | 61.3 | 0.89x |
-| syscall | ns | 16009 | 459 | 34.90x |
-| clock | ns | 104 | 999 | 0.10x |
-| open@tmp | us | 46.6 | 7.52 | 6.19x |
-| open@disk | us | 65.1 | 7.73 | 8.42x |
-| stat@tmp | us | 28.6 | 4.83 | 5.91x |
-| stat@disk | us | 31.7 | 4.29 | 7.38x |
-| create@tmp | us | 108 | 151 | 0.72x |
-| create@disk | us | 1326 | 444 | 2.99x |
-| filemap@tmp | ns/page | 3800 | 1704 | 2.23x |
-| filemap@disk | ns/page | 4246 | 1984 | 2.14x |
-| filewrite@tmp | MiB/s | 486.6 | 352.9 | 0.73x |
-| filewrite@disk | MiB/s | 76.2 | 202.4 | 2.66x |
-| fileread@tmp | MiB/s | 961.3 | 2371.0 | 2.47x |
-| fileread@disk | MiB/s | 930.0 | 2595.9 | 2.79x |
-| fork | us | 281 | 1259 | 0.22x |
-| forkbig | us | 412 | 2177 | 0.19x |
-| exec | us | 746 | 4239 | 0.18x |
-| spawn | us | 733 | 3645 | 0.20x |
-| fault | ns/page | 13612 | 9815 | 1.39x |
-| pipelat | us | 62.5 | 97.2 | 0.64x |
-| pipebw | MiB/s | 508.8 | 485.1 | 0.95x |
-| tcplat | us | 165 | 249 | 0.66x |
-| tcpbw | MiB/s | 189.1 | 413.4 | 2.19x |
-| sleep | us | 1031 | 1171 | 0.88x |
-| epwait | us | 1097 | 1164 | 0.94x |
-| idle | % host CPU | 11.3 | 1.00 | 11.34x |
+| cpu | ns/iter | 2.75 | 3.01 | 0.91x |
+| memcpy | us/MiB | 95.3 | 131 | 0.73x |
+| syscall | ns | 30892 | 902 | 34.25x |
+| clock | ns | 97.2 | 2176 | 0.04x |
+| open@tmp | us | 90.3 | 15.5 | 5.84x |
+| open@disk | us | 108 | 16.9 | 6.38x |
+| stat@tmp | us | 51.0 | 9.14 | 5.59x |
+| stat@disk | us | 62.0 | 8.52 | 7.28x |
+| create@tmp | us | 210 | 271 | 0.77x |
+| create@disk | us | 292 | 626 | 0.47x |
+| filemap@tmp | ns/page | 7859 | 3565 | 2.20x |
+| filemap@disk | ns/page | 10386 | 4080 | 2.55x |
+| filewrite@tmp | MiB/s | 365.8 | 276.9 | 0.76x |
+| filewrite@disk | MiB/s | 65.5 | 112.7 | 1.72x |
+| fileread@tmp | MiB/s | 497.0 | 1065.4 | 2.14x |
+| fileread@disk | MiB/s | 499.0 | 1417.6 | 2.84x |
+| fork | us | 600 | 1851 | 0.32x |
+| forkbig | us | 926 | 3332 | 0.28x |
+| exec | us | 3028 | 7490 | 0.40x |
+| spawn | us | 3309 | 6547 | 0.51x |
+| fault | ns/page | 28951 | 20511 | 1.41x |
+| pipelat | us | 134 | 229 | 0.58x |
+| pipebw | MiB/s | 330.8 | 208.3 | 0.63x |
+| tcplat | us | 330 | 470 | 0.70x |
+| tcpbw | MiB/s | 150.7 | 233.7 | 1.55x |
+| sleep | us | 1058 | 1291 | 0.82x |
+| epwait | us | 1219 | 1308 | 0.93x |
+| idle | % host CPU | 2.66 | 0.67 | 4.00x |
 
 ### Whole programs
 
@@ -187,6 +187,18 @@ instructions on both. Where BastiOS is behind:
   disk in turn, since a directory's entries are not stored together; `getdents`
   now skips over the slots of other directories in one tight loop, which took the
   same run on this host from 0.16-0.18 s to 0.14 s.
+  Measured on 2026-10-20 (TCG, `-smp 2`, 512 MiB, median of 3): `git` 1.52 s
+  against Linux's 1.23 s (1.24x) and `scan` 0.92 s against 0.60 s (1.54x;
+  2.0x on the first, cold run). Split up, `find` over the 1,900 entries of the
+  root takes about 190 us an entry against Linux's 85 us, and `grep -rl` over
+  the headers is within 20% of Linux's. Every `stat` counted the hard links to its
+  file by walking all the directory's slots once the disk held any link; a
+  flag table now skips the walk for files that have none (`scan` 0.81 to
+  0.73 s). What is left is the path lookup itself: `stat` of a short path
+  is about 9,000 instructions, a third in `dent_named`, `disk_find`,
+  `disk_child` and `vfs_lookup` (one hash probe per component) and the rest
+  spread over the call's entry, path copy and `put_stat`, with no one function
+  above 4%.
 - `hello` was 3.6x off Linux when run again (3.65 s against 1.02 s), and
   slower the second time than the first. The time was in the emulator, not
   the disk: the page cache that shares program code between runs

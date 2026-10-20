@@ -522,7 +522,7 @@ steps = [
     # any file, and kept on the disk across boots (disk/pf, for the virtio
     # boot below).
     ("mkfifo pp; ls -l pp; echo hi > pp & cat pp; wait; mv pp pq; rm pq; ls pq; mkfifo disk/pf; stat -c %F disk/pf", [b"prw", b"\r\nhi\r\n", b"pq: No such file", b"fifo"], b"\n# "),
-    ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n2\r\n"], b"\n# "),
+    ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 disk/hk3; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n3\r\n"], b"\n# "),
     # A file removed while its last writes are still in a batch that was
     # never queued (the disk never sees them), and one removed after a
     # second batch over blocks the disk has: both give every block back.
@@ -1228,6 +1228,8 @@ session("virtio", True, [
     ("rm disk/pf", b""),
     # The user made at the first boot, kept on the disk.
     ("ash", b"built-in shell (ash)", b"\n# "),
+    # The two names left of the file that had three are counted after the remount.
+    ("stat -c %h disk/hk2 disk/hk3; rm disk/hk3", b"\r\n2\r\n2\r\n", b"\n# "),
     ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
     # seccomp (src/lxseccomp.bastio): programs that read outside seccomp_data
     # or jump out of themselves are refused at load; filters answer with an
@@ -1256,6 +1258,9 @@ session("virtio", True, [
     # registers behind in the process table; the line typed after ash ends
     # must still reach the native shell, not be taken for the dead reader's.
     ("cat /dev/input/event0 > /tmp/evk & kill $!; echo ended", b"ended", b"\n# "),
+    # The same for a reader that is still waiting when ash ends: its timed
+    # wait is not one of the console's, so the next line is not taken for it.
+    ("cat /dev/input/event0 > /tmp/evk2 & echo waiting", b"waiting", b"\n# "),
     ("exit", b""),
     ("hello", b"hello from user mode, pid "),
 ], halt=True, ready=lambda: irq_found("virtio"))

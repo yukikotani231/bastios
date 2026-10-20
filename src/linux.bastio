@@ -1561,7 +1561,7 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
-  if !lx_reading(k.procs) {
+  if !lx_reading(k) {
     return;
   }
   if !tt_canon(k.line) {
@@ -1595,24 +1595,26 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
 /// Whether some process is blocked in a Linux read of the console, or
 /// waits in poll (which may be for the console: a poll on pipes or sockets
 /// alone also lets typed bytes go to the Linux line).
-fn lx_reading(procs: &Buf) -> bool
-  requires ptab_ok(procs)
+fn lx_reading(k: &Kernel) -> bool
+  requires kok(k)
 {
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
   {
-    if state(procs, p) == LXREADING {
+    if state(k.procs, p) == LXREADING {
       return true;
     }
-    let n = pget(procs, p, F_REGS + R_LXNR);
-    let st = state(procs, p);
+    let n = pget(k.procs, p, F_REGS + R_LXNR);
+    let st = state(k.procs, p);
+    let fd = fd_look(k, p, pget(k.procs, p, F_REGS + R_RDI));
     // A process that ended keeps its registers and restart word until its
     // row is used again: it must not count (it would take the next typed line).
-    if st != FREE && st != ZOMBIE && pget(procs, p, F_RESTART) >= 2
+    if st != FREE && st != ZOMBIE && pget(k.procs, p, F_RESTART) >= 2
       && (n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
-        || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 || n == LX_READ) {
-      return true;                          // a timed read is one of the console's (console_read); the waits may be for it
+        || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2
+        || (n == LX_READ && fd.kind == K_CONSOLE)) {
+      return true;                          // a timed read of the console (console_read; the key events and the mouse sleep the same way but are not its); the waits may be for it
     }
     p = p + 1;
   }

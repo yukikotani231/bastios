@@ -48,6 +48,10 @@ static int top, bot = 23;           /* the scroll region, inclusive */
 static int saved_cx, saved_cy;
 static struct cell main_grid[MAXR][MAXC];
 static int main_cx, main_cy, alt;
+#define HIST 200                          /* lines that scrolled off the top, kept for the wheel */
+static struct cell hist[HIST][MAXC];
+static int hist_n, hist_head;             /* how many are kept; where the next one goes */
+static int back;                          /* how many lines the view is scrolled back (0 is the live screen) */
 static int sel_on, selecting;             /* a selection is lit; the button is still down */
 static int sel_ar, sel_ac, sel_br, sel_bc;   /* where it began and where the pointer is, as cells */
 #define CLIP_FILE "/tmp/bwm.clip"         /* what is selected, for any terminal to paste */
@@ -77,6 +81,16 @@ static void scroll_region(int n)
     int k = n < 0 ? -n : n;
     if (k > h)
         k = h;
+    if (n > 0 && top == 0 && !alt) {
+        for (int i = 0; i < k; i++) {
+            memcpy(hist[hist_head], grid[i], sizeof hist[0]);
+            hist_head = (hist_head + 1) % HIST;
+            if (hist_n < HIST)
+                hist_n++;
+            if (back > 0 && back < hist_n)
+                back++;                       /* a scrolled-back view stays on the same text */
+        }
+    }
     if (n > 0)
         memmove(grid[top], grid[top + k], sizeof grid[0] * (h - k));
     else
@@ -108,6 +122,7 @@ static void set_alt(int on)
     if (on == alt)
         return;
     alt = on;
+    back = 0;
     if (on) {
         memcpy(main_grid, grid, sizeof grid);
         main_cx = cx;
@@ -143,12 +158,22 @@ static int selected(int r, int c)
     return 1;
 }
 
+/* The cells drawn on row r: the live screen, or lines of the history when
+ * the view is scrolled back. */
+static const struct cell *view_row(int r)
+{
+    int v = r - back;
+    if (v >= 0)
+        return grid[v];
+    return hist[(hist_head + HIST + v) % HIST];
+}
+
 static void draw_cell(int r, int c, int cursor)
 {
-    struct cell *e = &grid[r][c];
+    const struct cell *e = &view_row(r)[c];
     int fg = e->fg, bg = e->bg;
     uint32_t f = palette[fg & 15], b = palette[bg & 15];
-    if (cursor || selected(r, c)) {
+    if (!back && (cursor || selected(r, c))) {
         uint32_t t = f;
         f = b;
         b = t;
@@ -356,6 +381,7 @@ static void resize_grid(int nc, int nr)
             }
     cols = nc;
     rows = nr;
+    back = 0;
     if (cx > cols) cx = cols;
     if (cy >= rows) cy = rows - 1;
     if (main_cx > cols) main_cx = cols;
@@ -516,10 +542,36 @@ int main(int argc, char **argv)
             if (t == BWM_KEY) {
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
-                if (write(m, &c, 1) != 1)
+                if (back) {
+                    back = 0;                    /* typing brings the live screen back */
+                    memset(dirty, 1, sizeof dirty);
+                    if (repaint(fd, id, &ocx, &ocy) != 0)
+                        break;
+                }
+                if (k->ch == BWM_KEY_PASTE)
+                    paste(m);
+                else if (write(m, &c, 1) != 1)
                     break;
             } else if (t == BWM_MOUSE) {
                 struct bwm_mouse *e = (struct bwm_mouse *)buf;
+                int wheel = (signed char)((e->buttons >> 8) & 0xFF);       /* negative is up */
+                if (wheel && !alt) {
+                    int nb = back - wheel * 3;
+                    nb = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
+                    if (nb != back) {
+                        back = nb;
+                        memset(dirty, 1, sizeof dirty);
+                        printf("bterm: back %d\n", back);
+                        fflush(stdout);
+                        if (repaint(fd, id, &ocx, &ocy) != 0)
+                            break;
+                    }
+                    continue;
+                }
+                if (back && (e->buttons & 1)) {
+                    back = 0;                    /* a click works on the live screen */
+                    memset(dirty, 1, sizeof dirty);
+                }
                 int er = e->y / CH, ec = e->x / CW;
                 if (er >= rows) er = rows - 1;
                 if (ec >= cols) ec = cols - 1;

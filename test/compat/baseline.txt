@@ -1502,6 +1502,7 @@ alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
 alpine-tty: nvim: :terminal runs a shell in a window, takes typed keys, and the shell's exit closes it
 node: node: a hot loop is compiled and gives the right sum
 node: node: a real package (nanoid) fetched from the host, tested with node --test
+node: node: a real package with its installed dependencies (mri, tape), tested with tape
 node: node: a script with arrays and JSON
 node: node: an expression
 node: node: exit status and uncaught exceptions
@@ -1642,6 +1643,7 @@ alpine: oss: zlib: clone it over HTTP, configure, build, and run its test suite
 alpine: oss: Lua: clone it, build the interpreter, and run a program with it
 alpine: oss: LZ4: clone it, build it, and run its test suite
 alpine: oss: cJSON: clone it, build it with cmake, and run its unit tests with ctest
+alpine: oss: libyaml: clone a release, configure it, build it, and run make check
 alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib

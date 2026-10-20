@@ -854,6 +854,56 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # n in the list of bfiles makes a new empty file and edits it.
+        mark = len(out)
+        q.stdin.write(b"mkdir /tmp/nf\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/nf", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey n")
+            good = until(b"bfiles: edit /tmp/nf/untitled", mark)
+            monitor("sendkey h", "sendkey i", "sendkey ctrl-s")
+            good = good and until(b"bfiles: saved /tmp/nf/untitled", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) n in bfiles makes a new file and edits it")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/nf/untitled\r"); q.stdin.flush()
+        good = until(b"hi", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the new file holds what was typed")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # D twice in the viewer of bfiles deletes the file it shows.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf/untitled\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey shift-d")
+            time.sleep(0.5)
+            monitor("sendkey shift-d")
+            good = until(b"bfiles: deleted /tmp/nf/untitled", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) D twice in the bfiles viewer deletes the file")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"ls /tmp/nf; echo d$((1+1))\r"); q.stdin.flush()
+        until(b"d2", mark)
+        good = b"untitled" not in bytes(out[mark:]).replace(b"ls /tmp/nf", b"")
+        print(("ok  " if good else "FAIL"), f"({name}) the deleted file is gone")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
@@ -939,6 +989,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # The wheel scrolls back through what has gone off the top (and
+            # forward again), three lines a step.
+            typed("printf '" + "".join(f"l{i:02d}\\n" for i in range(1, 31)) + "'")
+            time.sleep(2)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 1")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l09" for l in lines) and not any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the mouse wheel scrolls the terminal back through its history")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("mouse_move 0 0 -1")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the wheel scrolls forward again")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
@@ -978,6 +1051,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     print("\n".join(l for l in lines2 if l))
             print(("ok  " if good else "FAIL"), f"({name}) a selection is copied and the middle button pastes it")
             fails += not good
+            if good:
+                # Shift-Insert pastes the copy from the keyboard.
+                monitor("sendkey shift-insert")
+                time.sleep(1)
+                w, h, px = screendump()
+                lines3 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copiedcopied" for l in lines3)
+                print(("ok  " if good else "FAIL"), f"({name}) Shift-Insert pastes the copy into the terminal")
+                if not good:
+                    print("\n".join(l for l in lines3 if l))
+                fails += not good
             time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)

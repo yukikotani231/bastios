@@ -29,6 +29,21 @@ mk lua https://github.com/lua/lua v5.4.7
 mk lz4 https://github.com/lz4/lz4 v1.10.0
 mk cjson https://github.com/DaveGamble/cJSON v1.7.18
 
+# A release tarball (its generated configure script included) made into the
+# same kind of repository.
+rel() {  # NAME URL
+  [ -d "$out/$1.git" ] && return 0
+  mkdir "$work/$1"
+  curl -fsSL "$2" | tar xz -C "$work/$1" --strip-components=1
+  git -C "$work/$1" -c init.defaultBranch=main init -q
+  git -C "$work/$1" add -A
+  git -C "$work/$1" -c user.name=compat -c user.email=compat@example.invalid commit -q -m "$1 release"
+  git clone -q --bare "$work/$1" "$out/$1.git"
+  git -C "$out/$1.git" update-server-info
+}
+
+rel libyaml https://github.com/yaml/libyaml/releases/download/0.2.5/yaml-0.2.5.tar.gz
+
 # The same for the toolchain disks that have no git: a tarball of a release
 # (OSS/NAME.tar.gz, with the files under NAME/), fetched with wget.
 tb() {  # NAME URL TAG
@@ -76,5 +91,25 @@ gv() {  # NAME URL TAG
 }
 
 gv testify https://github.com/stretchr/testify v1.9.0
+
+# An npm package built on the host and shipped with its dependencies and one
+# test runner installed beside it (node_modules), nothing else of its tooling.
+nm() {  # NAME URL TAG RUNNER
+  [ -f "$out/$1.tar.gz" ] && return 0
+  mkdir "$work/nm-$1"
+  git -C "$work/nm-$1" init -q
+  git -C "$work/nm-$1" fetch -q --depth 1 "$2" "$3"
+  git -C "$work/nm-$1" checkout -q FETCH_HEAD
+  rm -rf "$work/nm-$1/.git"
+  (cd "$work/nm-$1" && npm install --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 && npm run build >/dev/null 2>&1 \
+    && npm pkg delete devDependencies scripts >/dev/null && rm -rf node_modules package-lock.json \
+    && npm install --ignore-scripts --omit=dev --no-audit --no-fund >/dev/null 2>&1 \
+    && npm install --no-save --ignore-scripts --no-audit --no-fund "$4" >/dev/null 2>&1)
+  mkdir "$work/nm-top-$1"
+  mv "$work/nm-$1" "$work/nm-top-$1/$1"
+  tar -C "$work/nm-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
+}
+
+nm mri https://github.com/lukeed/mri v1.2.0 tape@4.13.3
 
 tb nanoid https://github.com/ai/nanoid 5.0.7

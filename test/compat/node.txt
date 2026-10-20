@@ -59,3 +59,9 @@ $ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/nanoid.tar.gz | bb tar -
 # tests 34
 # pass 34
 # fail 0
+
+== node: a real package with its installed dependencies (mri, tape), tested with tape
+# timeout 300
+$ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/mri.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node /work/mri/node_modules/tape/bin/tape /work/mri/test/index.js /work/mri/test/num.js /work/mri/test/unknown.js 2>&1 | bb grep -E '^# (tests|pass|fail)'
+# tests 84
+# pass  84
