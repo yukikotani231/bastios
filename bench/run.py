@@ -133,6 +133,37 @@ def linux_initrd(osbench, tmp):
     return img, disk
 
 
+WRAP = []
+
+
+def strace_boot(args, osbench, tmp):
+    """EXPERIMENT: when does QEMU open the kernel, create the vCPU and first run it?"""
+    global WRAP
+    subprocess.run("sudo apt-get install -y strace >/dev/null 2>&1", shell=True)
+    out = os.path.join(tmp, "strace.txt")
+    WRAP = ["strace", "-f", "-ttt", "-e", "trace=execve,openat,ioctl,write", "-o", out]
+    try:
+        a1 = argparse.Namespace(**vars(args))
+        a1.smp = 1
+        boot("bastios", a1, osbench, tmp).stop()
+    finally:
+        WRAP = []
+    ev, t0 = {}, None
+    for line in open(out, errors="replace"):
+        f = line.split(None, 2)
+        if len(f) < 3:
+            continue
+        try:
+            t = float(f[1])
+        except ValueError:
+            continue
+        t0 = t0 or t
+        for key, pat in (("kernel", "bastios.elf"), ("kvm", "/dev/kvm"), ("vcpu", "KVM_CREATE_VCPU"), ("run", "KVM_RUN"), ("banner", "BastiOS 0.2")):
+            if pat in line and key not in ev:
+                ev[key] = t - t0
+    print("strace (s after execve): " + ", ".join(f"{k} {v:.3f}" for k, v in ev.items()), file=sys.stderr, flush=True)
+
+
 class Guest:
     def __init__(self, cmd, prompt, logpath):
         self.prompt = prompt
@@ -212,7 +243,7 @@ def boot(osname, args, osbench, tmp):
                "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"] + common
         if getattr(args, "append", ""):
             cmd += ["-append", args.append]
-        g = Guest(cmd, "# ", log)
+        g = Guest(WRAP + cmd, "# ", log)
         m = g.until(rb"bastios> ", 0, 300)
         if not m:
             raise SystemExit("bench: BastiOS gave no prompt")
@@ -316,6 +347,8 @@ def main():
     results = {"accel": args.accel, "smp": args.smp, "mem": args.mem, "runs": args.runs,
                "host_cpus": os.cpu_count(), "date": time.strftime("%Y-%m-%d %H:%M:%S"), "os": {}}
     with tempfile.TemporaryDirectory() as tmp:
+        if "bastios" in args.os.split(",") and args.accel == "kvm":
+            strace_boot(args, osbench, tmp)
         for osname in args.os.split(","):
             res = results["os"][osname] = {}
             if args.smp > 1:
