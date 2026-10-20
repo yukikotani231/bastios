@@ -1060,14 +1060,23 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if flags & LO_NOFOLLOW != 0 && flags & LO_PATH == 0 {
-    // O_NOFOLLOW: a symbolic link at the end is ELOOP, as on Linux.
+  let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
+  if (flags & LO_NOFOLLOW != 0 || excl) && flags & LO_PATH == 0 {
+    // O_NOFOLLOW: a symbolic link at the end is ELOOP, as on Linux. With
+    // O_CREAT | O_EXCL the link is never followed, even a dangling one:
+    // the name exists, so EEXIST (git apply --reject relies on it).
     let m = lx_path_at_nf(&mut k, pid, dirfd, path);
     if m == NO_RESULT {
       return k.perr;
     }
     let f = vfs_lookup(&mut k.fs, m);
-    if (f != NO_FILE && vfs_is_link(&mut k.fs, f)) || is_exe_file(proc_node(k, m)) {
+    if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+      if excl {
+        return EEXIST;
+      }
+      return ELOOP;
+    }
+    if flags & LO_NOFOLLOW != 0 && is_exe_file(proc_node(k, m)) {
       return ELOOP;
     }
   }
