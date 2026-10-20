@@ -24,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 
@@ -400,6 +401,30 @@ static void bf_rename_key(int c)
     }
 }
 
+/* t in the directory list: opens a terminal window in the directory shown.
+ * The terminal is a grandchild, so nothing is left to be waited for. */
+static void bf_terminal(void)
+{
+    pid_t p = fork();
+    if (p == 0) {
+        if (fork() == 0) {
+            char *argv[] = { "bterm", NULL };
+            for (int fd = 3; fd < 64; fd++)
+                close(fd);
+            if (chdir(bf_cwd) == 0)
+                execv("/bin/bterm", argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (p > 0) {
+        int st;
+        waitpid(p, &st, 0);
+        printf("bfiles: terminal in %s\n", bf_cwd);
+        fflush(stdout);
+    }
+}
+
 static void be_key(int c)
 {
     int page = BF_ROWS - 2;
@@ -613,6 +638,8 @@ static int bfiles_main(int argc, char **argv)
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);
                 bf_load_dir();
+            } else if (c == 't' && !bf_viewing) {
+                bf_terminal();
             } else if (c == 'N' && !bf_viewing)
                 bf_new_dir();
             else if (c == 'j')
