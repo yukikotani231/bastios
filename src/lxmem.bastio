@@ -1517,6 +1517,10 @@ fn map_flush(k: &mut Kernel, pid: u64, i: u64, from: u64, to: u64) -> u64
     p = p + 1;
   }
   vfs_seek(&mut k.fs, row, was);
+  // What the mapping wrote past the end of the file stays out of it, and
+  // out of the cached page a later mapping gets (POSIX's mmap: the partial
+  // page past the end is zero-filled and never written out).
+  pc_zero_tail(&mut k.fs.pc, vfs_row_file(k.fs, row), size);
   return r;
 }
 

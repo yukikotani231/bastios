@@ -652,13 +652,14 @@ fn pc_any(c: &PCache, h: u64) -> bool
   return h < PC_NONE - 1 && (h >= PC_HN || bget(c.has, h) != 0);
 }
 
-/// File h grows from `from` bytes: zeroes the bytes past `from` on its cached
-/// page that holds the old end. A MAP_SHARED mapping may have written them,
-/// but they are not the file's (nothing past the end is written back), and
-/// the file must read as zeros there once it grows over them. The page
-/// stays in the cache after the mapping goes, so it cannot be left to a
-/// fresh read of the file.
-fn pc_grow(c: &mut PCache, h: u64, from: u64)
+/// Zeroes the bytes past `from` on the cached page of file h that holds
+/// offset `from`, the file's end: a MAP_SHARED mapping may have written
+/// them, but they are not the file's. A file that grows over them must read
+/// zeros there (vfs_truncate, vfs_write), and a write-back zeroes them too
+/// (map_flush), as Linux's does, so a later mapping does not see them. The
+/// page stays in the cache after the mapping goes, so this cannot be left
+/// to a fresh read of the file.
+fn pc_zero_tail(c: &mut PCache, h: u64, from: u64)
   requires pc_ok(c)
   ensures pc_ok(c)
 {

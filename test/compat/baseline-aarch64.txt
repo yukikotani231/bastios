@@ -726,7 +726,6 @@ t_more: fstatat with AT_SYMLINK_NOFOLLOW
 t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
-t_more: growing a file reads zeros where a mapping wrote past its end
 t_more: ioctl FIOCLEX and FIONCLEX
 t_more: ioctl FIONBIO makes a read EAGAIN
 t_more: memfd_create
@@ -1623,6 +1622,7 @@ t_userns: the root of a user namespace gives up capabilities
 t_userns: a user namespace made inside one mounts in a mount namespace of its own
 t_userns: an unprivileged user mounts nothing
 t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
+t_more: what a mapping wrote past the end of a file reads as zeros
 t_inotify: two hundred and fifty timerfds at once
 t_timens: an offset that overflows the clock is ERANGE
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows

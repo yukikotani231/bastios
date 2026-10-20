@@ -31,8 +31,10 @@ extern char **environ;
 /* Half a page of file, mapped MAP_SHARED, the rest of the page written
  * through the mapping (past the end of the file), unmapped and closed;
  * then the file grows by ftruncate (how 0), a write at the end of the
- * page (1) or a write past it (2). The bytes past the old end must read
- * as zeros, by read and by a new mapping: they were never the file's. */
+ * page (1) or a write past it (2), or stays as it is (3). The bytes past
+ * the old end must read as zeros, by read and by a new mapping: they were
+ * never the file's (POSIX: the partial page is zero-filled, and what is
+ * written past the end is never written out). */
 static int grow_zero(int how) {
     const long ps = 4096;
     char buf[4096];
@@ -47,9 +49,11 @@ static int grow_zero(int how) {
     fd = open("cm_grow", O_RDWR);
     if (how == 0) ok = ftruncate(fd, ps) == 0;
     else if (how == 1) ok = pwrite(fd, "", 1, ps - 1) == 1;
-    else ok = pwrite(fd, "z", 1, 2 * ps) == 1;
-    ok = ok && pread(fd, buf, ps - 1, 0) == ps - 1;
-    for (long i = ps / 2; ok && i < ps - 1; i++) ok = buf[i] == 0;
+    else if (how == 2) ok = pwrite(fd, "z", 1, 2 * ps) == 1;
+    if (how != 3) {
+        ok = ok && pread(fd, buf, ps - 1, 0) == ps - 1;
+        for (long i = ps / 2; ok && i < ps - 1; i++) ok = buf[i] == 0;
+    }
     m = mmap(0, ps, PROT_READ, MAP_SHARED, fd, 0);
     ok = ok && m != MAP_FAILED;
     for (long i = ps / 2; ok && i < ps - 1; i++) ok = m[i] == 0;
@@ -201,6 +205,6 @@ int main(int argc, char **argv) {
     EXPECT("sem_open in /dev/shm", ({ sem_t *m = sem_open("/cm_sem", O_CREAT | O_EXCL, 0600, 1);
            m != SEM_FAILED && sem_wait(m) == 0 && sem_post(m) == 0 && sem_close(m) == 0 && sem_unlink("/cm_sem") == 0; }));
     EXPECT("sem_open past 64 mappings: mapping one again by name gives the same page", sem_many());
-    EXPECT("growing a file reads zeros where a mapping wrote past its end", grow_zero(0) && grow_zero(1) && grow_zero(2));
+    EXPECT("what a mapping wrote past the end of a file reads as zeros", grow_zero(0) && grow_zero(1) && grow_zero(2) && grow_zero(3));
     return done();
 }

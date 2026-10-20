@@ -766,7 +766,6 @@ t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
 t_more: getrusage self reports a maximum resident size
-t_more: growing a file reads zeros where a mapping wrote past its end
 t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
 t_more: /proc/PID/status has VmRSS and the context switch counts
 t_more: /proc/meminfo has Active, Inactive and Shmem
@@ -799,6 +798,7 @@ t_more: utimensat
 t_more: utimensat and llistxattr act on a dangling link itself
 t_more: vfork + _exit
 t_more: vmsplice into a pipe, EAGAIN on an empty tee
+t_more: what a mapping wrote past the end of a file reads as zeros
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
