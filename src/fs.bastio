@@ -839,10 +839,17 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result <= n || result == NO_FD || result == VFS_MISS
 {
+  let f = vfs_row_file(v, row);
+  let mut was = NO_FILE;
+  if pc_any(v.pc, f) {
+    was = vfs_size(&mut v, f);
+  }
   let w = write_row(&mut v, &mut mem, row, n);
   let end = fget(v.ftab, row, FD_OFF);
   if w <= n && w <= end {
-    let f = vfs_row_file(v, row);
+    if was != NO_FILE && end > was {
+      pc_grow(&mut v.pc, f, was);
+    }
     pc_wrote(&mut v.pc, f, end - w, v.xfer, w);
     if fget(v.ftab, row, FD_FS) == FS_DISK {
       // The pages this write filled whole are what a reader of the file, or
@@ -922,9 +929,17 @@ fn vfs_truncate(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
   ensures vfs_ok(v) && mem_ok(mem)
 {
+  let f = vfs_row_file(v, row);
+  let mut was = NO_FILE;
+  if pc_any(v.pc, f) {
+    was = vfs_size(&mut v, f);
+  }
   let ok = truncate_row(&mut v, &mut mem, row, size_to);
   if ok {
-    pc_resize(&mut v.pc, &mut mem, vfs_row_file(v, row), size_to);
+    if was != NO_FILE && size_to > was {
+      pc_grow(&mut v.pc, f, was);
+    }
+    pc_resize(&mut v.pc, &mut mem, f, size_to);
   }
   return ok;
 }

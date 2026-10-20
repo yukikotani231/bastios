@@ -28,6 +28,37 @@
 
 extern char **environ;
 
+/* Half a page of file, mapped MAP_SHARED, the rest of the page written
+ * through the mapping (past the end of the file), unmapped and closed;
+ * then the file grows by ftruncate (how 0), a write at the end of the
+ * page (1) or a write past it (2). The bytes past the old end must read
+ * as zeros, by read and by a new mapping: they were never the file's. */
+static int grow_zero(int how) {
+    const long ps = 4096;
+    char buf[4096];
+    int ok = 1, fd = open("cm_grow", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 0;
+    memset(buf, 'a', ps / 2);
+    char *m = write(fd, buf, ps / 2) == ps / 2 ? mmap(0, ps, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (m == MAP_FAILED) { close(fd); unlink("cm_grow"); return 0; }
+    memset(m + ps / 2, 'b', ps / 2);
+    munmap(m, ps);
+    close(fd);
+    fd = open("cm_grow", O_RDWR);
+    if (how == 0) ok = ftruncate(fd, ps) == 0;
+    else if (how == 1) ok = pwrite(fd, "", 1, ps - 1) == 1;
+    else ok = pwrite(fd, "z", 1, 2 * ps) == 1;
+    ok = ok && pread(fd, buf, ps - 1, 0) == ps - 1;
+    for (long i = ps / 2; ok && i < ps - 1; i++) ok = buf[i] == 0;
+    m = mmap(0, ps, PROT_READ, MAP_SHARED, fd, 0);
+    ok = ok && m != MAP_FAILED;
+    for (long i = ps / 2; ok && i < ps - 1; i++) ok = m[i] == 0;
+    if (m != MAP_FAILED) munmap(m, ps);
+    close(fd);
+    unlink("cm_grow");
+    return ok;
+}
+
 /* Eighty named semaphores, each mapped with its descriptor closed at once
  * (as sem_open does), then the last one mapped again by name: the new
  * mapping must be the same page. Past a process's 64 recorded shared
@@ -170,5 +201,6 @@ int main(int argc, char **argv) {
     EXPECT("sem_open in /dev/shm", ({ sem_t *m = sem_open("/cm_sem", O_CREAT | O_EXCL, 0600, 1);
            m != SEM_FAILED && sem_wait(m) == 0 && sem_post(m) == 0 && sem_close(m) == 0 && sem_unlink("/cm_sem") == 0; }));
     EXPECT("sem_open past 64 mappings: mapping one again by name gives the same page", sem_many());
+    EXPECT("growing a file reads zeros where a mapping wrote past its end", grow_zero(0) && grow_zero(1) && grow_zero(2));
     return done();
 }

@@ -726,6 +726,7 @@ t_more: fstatat with AT_SYMLINK_NOFOLLOW
 t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
+t_more: growing a file reads zeros where a mapping wrote past its end
 t_more: ioctl FIOCLEX and FIONCLEX
 t_more: ioctl FIONBIO makes a read EAGAIN
 t_more: memfd_create
