@@ -216,6 +216,10 @@ def boot(osname, args, osbench, tmp):
         if not m:
             raise SystemExit("bench: BastiOS gave no prompt")
         g.boot_ns = (g.time_at(m.start()) - g.t0) * 1e9
+        print("boot stages (s after starting QEMU): " + ", ".join(
+            f"{name} {g.time_at(g.out.find(pat)) - g.t0:.3f}"
+            for name, pat in (("banner", b"BastiOS 0.2:"), ("acpi", b"acpi:"), ("disk", b"disk:"), ("net", b"net:"), ("prompt", b"bastios> "))
+            if g.out.find(pat) >= 0), file=sys.stderr, flush=True)
         at = len(g.out)
         g.send("ash")
         if not g.until(rb"# ", at, 60):
