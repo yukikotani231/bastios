@@ -619,8 +619,8 @@ fn tm_clear(k: &mut Kernel, c: u64)
   tm_set(&mut k, c, 0, 0);
   tm_set(&mut k, c, 1, 0);
   tm_set(&mut k, c, 2, 0);
-  k.sys = set(k.sys, SYS_TD + 2 * c, 0);
-  k.sys = set(k.sys, SYS_TD + 2 * c + 1, 0);
+  pset(&mut k.procs, c, F_TDUSER, 0);
+  pset(&mut k.procs, c, F_TDSYS, 0);
 }
 
 /// Process p's system time in timer ticks, its children's user time in
@@ -634,14 +634,14 @@ fn tm_ticks(k: &Kernel, p: u64, i: u64) -> u64
   return tm_get(k, p, i) / NS_PER_TICK;
 }
 
-// A thread that ends leaves its times with its group's leader, two words
-// from SYS_TD: its user ticks and its system ns. The process's times are
+// A thread that ends leaves its times with its group's leader, in its
+// row (F_TDUSER, F_TDSYS): its user ticks and its system ns. The process's times are
 // those of all its threads, live or ended, as on Linux.
 
 fn td_get(k: &Kernel, p: u64, i: u64) -> u64
   requires kok(k) && p < NPROC && i < 2
 {
-  return get(k.sys, SYS_TD + 2 * p + i);
+  return pget(k.procs, p, F_TDUSER + i);
 }
 
 /// Thread q of the group led by g ends (thread_free, src/lxthread.bastio):
@@ -651,8 +651,8 @@ fn td_fold(k: &mut Kernel, q: u64, g: u64)
   ensures kok(k)
 {
   if q != g {
-    k.sys = set(k.sys, SYS_TD + 2 * g, sat_add(td_get(k, g, 0), pget(k.procs, q, F_TICKS)));
-    k.sys = set(k.sys, SYS_TD + 2 * g + 1, sat_add(td_get(k, g, 1), tm_get(k, q, 0)));
+    pset(&mut k.procs, g, F_TDUSER, sat_add(td_get(k, g, 0), pget(k.procs, q, F_TICKS)));
+    pset(&mut k.procs, g, F_TDSYS, sat_add(td_get(k, g, 1), tm_get(k, q, 0)));
   }
 }
 
