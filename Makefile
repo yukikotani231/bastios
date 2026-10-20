@@ -759,6 +759,25 @@ build/compat/git: | build/compat/src
 	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates git >/dev/null
 	cp build/compat/src/git/git $@
 
+# git's own test suite (t/) with the build it tests, for the gitsuite lane of
+# test/compat/run.py (the scripts it runs are listed in test/compat/gitsuite.txt).
+# A tree of its own: the tests want every program git builds (the dashed
+# commands, the test helpers, the scripts), and a build with iconv, which
+# musl provides, for the tests of commit encodings; build/compat/git is the
+# smaller program apps.txt checks. test/compat/gitsuite.sh packs it.
+build/compat/gitsuite.tar: test/compat/gitsuite.sh | build/compat/src
+	rm -rf build/compat/src/zlib-suite build/compat/src/zlib-suite-out build/compat/src/git-suite
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) build/compat/src/zlib-suite
+	cd build/compat/src/zlib-suite && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" ./configure --static --prefix=$(CURDIR)/build/compat/src/zlib-suite-out >/dev/null
+	$(MAKE) -C build/compat/src/zlib-suite -s install >/dev/null
+	git clone -q --depth 1 --branch $(GIT_TAG) $(GIT_GIT) build/compat/src/git-suite
+	$(MAKE) -C build/compat/src/git-suite -s CC=$(MUSLCC) CFLAGS="-O2 -fPIE -I$(CURDIR)/build/compat/src/zlib-suite-out/include" \
+	  LDFLAGS="-static-pie -L$(CURDIR)/build/compat/src/zlib-suite-out/lib" NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_REGEX=NeedsStartEnd \
+	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates \
+	  all t/helper/test-tool t/helper/test-fake-ssh bin-wrappers/git GIT-BUILD-OPTIONS >/dev/null
+	test/compat/gitsuite.sh $@ build/compat/src/git-suite
+
 # perl, statically linked with its XS modules, and the pure-Perl modules
 # test/compat/apps.txt uses (with what they load) in build/compat/perllib,
 # which goes on the disk as /disk/perllib.
@@ -1021,8 +1040,9 @@ build/compat/podman.img: test/compat/podmandisk.py test/compat/alpinedisk.py tes
 # made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
 # COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
 # and run a part of the suite: the images of its lanes, and those lanes.
-COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/python.img build/compat/podman.img
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/gitsuite.tar
 
+GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
 # Real open-source projects (zlib, Lua, LZ4, toml, semver, nanoid) as git repositories the web
@@ -1033,11 +1053,11 @@ build/compat/oss: test/compat/ossrepos.sh
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
 compat: build/bastios.elf $(COMPAT_DISKS) build/compat/oss
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests
