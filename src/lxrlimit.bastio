@@ -216,7 +216,7 @@ fn rl_cpu_tick(k: &mut Kernel, p: u64)
     return;
   }
   let per = NS_PER_S / NS_PER_TICK;
-  let t = group_time(k, p, 0);          // a process limit: all its threads count
+  let t = group_time(k.procs, k.sys, p, 0);          // a process limit: all its threads count
   if per == 0 || t % per != 0 {
     return;
   }
@@ -605,8 +605,8 @@ fn tm_reap(k: &mut Kernel, parent: u64, c: u64)
   requires kok(k) && parent < NPROC && c < NPROC
   ensures kok(k)
 {
-  let u = sat_add(group_time(k, c, 0), tm_get(k, c, 1));
-  let s = sat_add(group_time(k, c, 1), tm_get(k, c, 2));
+  let u = sat_add(group_time(k.procs, k.sys, c, 0), tm_get(k, c, 1));
+  let s = sat_add(group_time(k.procs, k.sys, c, 1), tm_get(k, c, 2));
   tm_set(&mut k, parent, 1, sat_add(tm_get(k, parent, 1), u));
   tm_set(&mut k, parent, 2, sat_add(tm_get(k, parent, 2), s));
 }
@@ -638,12 +638,6 @@ fn tm_ticks(k: &Kernel, p: u64, i: u64) -> u64
 // row (F_TDUSER, F_TDSYS): its user ticks and its system ns. The process's times are
 // those of all its threads, live or ended, as on Linux.
 
-fn td_get(k: &Kernel, p: u64, i: u64) -> u64
-  requires kok(k) && p < NPROC && i < 2
-{
-  return pget(k.procs, p, F_TDUSER + i);
-}
-
 /// Thread q of the group led by g ends (thread_free, src/lxthread.bastio):
 /// its times stay with g.
 fn td_fold(k: &mut Kernel, q: u64, g: u64)
@@ -651,33 +645,35 @@ fn td_fold(k: &mut Kernel, q: u64, g: u64)
   ensures kok(k)
 {
   if q != g {
-    pset(&mut k.procs, g, F_TDUSER, sat_add(td_get(k, g, 0), pget(k.procs, q, F_TICKS)));
-    pset(&mut k.procs, g, F_TDSYS, sat_add(td_get(k, g, 1), tm_get(k, q, 0)));
+    pset(&mut k.procs, g, F_TDUSER, sat_add(pget(k.procs, g, F_TDUSER), pget(k.procs, q, F_TICKS)));
+    pset(&mut k.procs, g, F_TDSYS, sat_add(pget(k.procs, g, F_TDSYS), get(k.sys, SYS_TM + 3 * q)));
   }
 }
 
 /// Process p's user time in ticks (i 0) or its system time in ns (i 1):
-/// that of every thread of its group, live or ended.
-fn group_time(k: &Kernel, p: u64, i: u64) -> u64
-  requires kok(k) && p < NPROC && i < 2
+/// that of every thread of its group, live or ended. It reads the process
+/// table and k.sys only, which are passed alone: a `&Kernel` would be copied
+/// at every call, and clock reads and timer ticks make many.
+fn group_time(procs: &Buf, sys: &Buf, p: u64, i: u64) -> u64
+  requires ptab_ok(procs) && len(sys) == SYS_LEN && p < NPROC && i < 2
 {
-  let g = tgid(k.procs, p);
-  let mut t = td_get(k, g, i);
-  if pget(k.procs, g, F_TGID) == 0 {
+  let g = tgid(procs, p);
+  let mut t = pget(procs, g, F_TDUSER + i);
+  if pget(procs, g, F_TGID) == 0 {
     if i == 0 {
-      return sat_add(t, pget(k.procs, g, F_TICKS));
+      return sat_add(t, pget(procs, g, F_TICKS));
     }
-    return sat_add(t, tm_get(k, g, 0));
+    return sat_add(t, get(sys, SYS_TM + 3 * g));
   }
   let mut q = 1;
   while q < NPROC
-    invariant 1 <= q && q <= NPROC && kok(k)
+    invariant 1 <= q && q <= NPROC && ptab_ok(procs) && len(sys) == SYS_LEN
   {
-    if q == g || in_group(k.procs, q, g) {
+    if q == g || in_group(procs, q, g) {
       if i == 0 {
-        t = sat_add(t, pget(k.procs, q, F_TICKS));
+        t = sat_add(t, pget(procs, q, F_TICKS));
       } else {
-        t = sat_add(t, tm_get(k, q, 0));
+        t = sat_add(t, get(sys, SYS_TM + 3 * q));
       }
     }
     q = q + 1;
@@ -686,10 +682,10 @@ fn group_time(k: &Kernel, p: u64, i: u64) -> u64
 }
 
 /// Process p's system time in timer ticks: all its threads'.
-fn group_sys_ticks(k: &Kernel, p: u64) -> u64
-  requires kok(k) && p < NPROC
+fn group_sys_ticks(procs: &Buf, sys: &Buf, p: u64) -> u64
+  requires ptab_ok(procs) && len(sys) == SYS_LEN && p < NPROC
 {
-  return group_time(k, p, 1) / NS_PER_TICK;
+  return group_time(procs, sys, p, 1) / NS_PER_TICK;
 }
 
 /// The bytes process p has locked, for /proc/<pid>/status.

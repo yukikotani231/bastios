@@ -1132,8 +1132,8 @@ fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
 {
   if buf != 0 {
     lx_fill(&mut k, 0, 32);
-    xfer_u64(&mut k.fs.xfer, 0, group_time(k, pid, 0));
-    xfer_u64(&mut k.fs.xfer, 8, group_sys_ticks(k, pid));
+    xfer_u64(&mut k.fs.xfer, 0, group_time(k.procs, k.sys, pid, 0));
+    xfer_u64(&mut k.fs.xfer, 8, group_sys_ticks(k.procs, k.sys, pid));
     xfer_u64(&mut k.fs.xfer, 16, tm_ticks(k, pid, 1));
     xfer_u64(&mut k.fs.xfer, 24, tm_ticks(k, pid, 2));
     if lx_put_out(&mut k, pid, buf, 32) != 0 {
