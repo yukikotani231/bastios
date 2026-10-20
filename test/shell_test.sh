@@ -12,11 +12,8 @@ KERNEL=${KERNEL:-build/bastios.elf}
 # steps added since it ran past 240 s: the step being run then, and every one
 # after it, failed with no output (main's native job, on whichever of the
 # thread steps was running). So the limit is only there to end a hang, not to
-# tell slow from broken. The virtio boot, the longest of the sessions, ran
-# out of its 600 s on loaded hosts (a shell test of 914 s and 960 s against
-# the usual 400 s), and its last step, `hello`, and the power-off check after
-# it failed with no output, on main too.
-TIMEOUT=${TIMEOUT:-1200}
+# tell slow from broken.
+TIMEOUT=${TIMEOUT:-600}
 SMP=${SMP:-4}
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
