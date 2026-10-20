@@ -7,7 +7,7 @@
  * and what is typed goes to the focused window. Ctrl-T
  * (or the Term button of the task bar at the bottom, which also has a button for each window) starts a terminal (bterm), Alt-Tab brings up the window at the bottom (with Shift, it sends the top one to the bottom) and Ctrl-Q
  * ends bwm (the console comes back when /dev/fb0 closes). The Menu button at the
- * right end of the task bar opens a launcher: Terminal, Files, Hello window, Quit bwm.
+ * right end of the task bar opens a launcher: Terminal, Files, System, Hello window, Quit bwm.
  *
  * Programs open windows over a UNIX socket (user/bwmproto.h): bwm keeps
  * each window's pixels, takes rectangles to draw, and sends back keys and
@@ -391,8 +391,8 @@ static void draw_bar(void)
 }
 
 /* The launcher menu: what it starts, and where its entries are. */
-static const char *const menu_item[] = { "Terminal", "Files", "Hello window", "Quit bwm" };
-#define MENU_N 4
+static const char *const menu_item[] = { "Terminal", "Files", "System", "Hello window", "Quit bwm" };
+#define MENU_N 5
 #define MENU_X0 ((int)W - 4 - MENU_ITEM_W)
 #define MENU_Y0 ((int)H - BAR_H - MENU_N * MENU_ITEM_H)
 
@@ -1195,7 +1195,7 @@ int main(int argc, char **argv)
     printf("bwm: ready %ux%u\n", W, H);
     fflush(stdout);
     if (child && fork() == 0) {                               /* -c PROGRAM [ARGS]: start a client */
-        const char *img = strcmp(child[0], "bfiles") == 0 ? "bterm" : child[0];     /* bfiles is bterm under that name */
+        const char *img = strcmp(child[0], "bfiles") == 0 || strcmp(child[0], "bsys") == 0 ? "bterm" : child[0];     /* bfiles is bterm under that name */
         execv(img[0] == '/' ? img : (snprintf(path, sizeof path, "/bin/%s", img), path), child);
         _exit(127);
     }
@@ -1373,8 +1373,10 @@ int main(int argc, char **argv)
                     else if (it == 1)
                         launch_program("bfiles", "bterm");
                     else if (it == 2)
-                        launch_program("bhello", "bhello");
+                        launch_program("bsys", "bterm");
                     else if (it == 3)
+                        launch_program("bhello", "bhello");
+                    else if (it == 4)
                         running = 0;
                     buttons = m[0];
                     continue;
