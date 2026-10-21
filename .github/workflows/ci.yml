@@ -455,11 +455,14 @@ jobs:
   # are cached. The third-party programs are used only when every input
   # they were built from is unchanged: the pinned versions (every `?=`
   # setting in the Makefile), the BusyBox configuration, the patches and
-  # pyzip.py. A change to a recipe alone is not seen: bump CACHE_V to
-  # rebuild. Alpine's images are kept by digest and alpinedisk.py checks
-  # each layer against its digest when it reads it from the cache, so an
-  # older entry is restored when there is no exact one, and only the images
-  # it lacks are fetched; they are saved from main only (an entry saved by a
+  # pyzip.py, gitsuite.sh. A change to a recipe alone is not seen: bump
+  # CACHE_V to rebuild. The save step lists the same paths as the restore
+  # step: the paths are part of an entry's version, so a different list
+  # never hits, and the save then finds the key taken. Alpine's images are
+  # kept by digest and alpinedisk.py checks each layer against its digest
+  # when it reads it from the cache, so an older entry is restored when
+  # there is no exact one, and only the images it lacks are fetched; they
+  # are saved from main only (an entry saved by a
   # pull request serves no other branch and fills the repository's cache
   # space). Disk images and everything built from this repository are never
   # cached. The caches are saved only after the build step succeeded, so a
@@ -501,7 +504,7 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -561,7 +564,7 @@ jobs:
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -576,6 +579,7 @@ jobs:
             build/compat/micropython
             build/compat/kilo
             build/compat/git
+            build/compat/gitsuite.tar
             build/compat/perl
             build/compat/perllib
             build/compat/py
