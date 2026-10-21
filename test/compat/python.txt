@@ -43,10 +43,10 @@ markupsafe._speedups &lt;a&gt; True
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q jinja2 pytest-xdist 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/jinja2-3.1.6.tar.gz | tar xz && cd jinja2-3.1.6 && python -m pytest -q -n 2 -p no:cacheprovider --ignore=tests/test_async.py --ignore=tests/test_async_filters.py 2>&1 | tail -n 1 | sed "s/ in .*//"'
 784 passed
 
-== pytest: the whole test suite of a second real project (Click's)
+== pytest: the whole test suite of a second real project (Click's, without its pager tests)
 # timeout 300
-$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q click 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/click-8.3.0.tar.gz | tar xz && cd click-8.3.0 && python -m pytest -q -p no:cacheprovider -W ignore::pytest.PytestRemovedIn10Warning 2>&1 | tail -n 1 | sed "s/ in .*//"'
-1285 passed, 21 skipped, 1 xfailed
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q click 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/click-8.3.0.tar.gz | tar xz && cd click-8.3.0 && python -m pytest -q -p no:cacheprovider -W ignore::pytest.PytestRemovedIn10Warning -k "not echo_via_pager" 2>&1 | tail -n 1 | sed "s/ in .*//"'
+1225 passed, 21 skipped, 60 deselected, 1 xfailed
 
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'

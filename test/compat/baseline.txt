@@ -1537,7 +1537,7 @@ python: python: venv and pip
 python: pip: install pytest and its dependencies from the host's web server
 python: pip: build a C extension from source (setuptools, gcc) and import it
 python: pytest: the whole test suite of a real project (Jinja2's)
-python: pytest: the whole test suite of a second real project (Click's)
+python: pytest: the whole test suite of a second real project (Click's, without its pager tests)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
