@@ -1176,6 +1176,26 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print(plain, lean)
             fails += not good
+            # Mouse reporting (xterm 1000 and 1006): a click at the pointer (cell 55, 18) reaches the program as
+            # ESC [ < 0 ; 56 ; 19 M, 11 bytes; cat reads them with the Enter after them (12 bytes in all).
+            keys[">"] = "shift-dot"; keys["/"] = "slash"; keys["."] = "dot"
+            typed("printf '\\033[2J\\033[H\\033[?1000h\\033[?1006h'; cat > /tmp/ms.out; printf '\\033[?1000l\\033[?1006l'; wc -c /tmp/ms.out")
+            time.sleep(1.5)
+            monitor("mouse_button 1")
+            time.sleep(1)
+            monitor("sendkey ret")
+            time.sleep(0.5)
+            monitor("sendkey ctrl-d")
+            time.sleep(1)
+            monitor("mouse_button 0")
+            time.sleep(1)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip().startswith("12 /tmp/ms.out") for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal reports a click to a program that asked for the mouse")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             # A key held down repeats (bwm does it, the events have none).
             monitor("sendkey z 2500")
             time.sleep(1.2)
