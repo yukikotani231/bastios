@@ -1121,6 +1121,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # 256 colours (38;5;N and 48;5;N) and 24-bit colours (48;2;R;G;B, drawn as the nearest of them).
+            keys[";"] = "semicolon"
+            typed("printf '\\033[48;5;196m      \\033[48;5;21m      \\033[48;2;0;255;0m      \\033[0m'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            cnt = {c: 0 for c in ((255, 0, 0), (0, 0, 255), (0, 255, 0))}
+            for i in range(0, len(px) - 2, 3):
+                t = tuple(px[i:i + 3])
+                if t in cnt:
+                    cnt[t] += 1
+            good = all(v > 300 for v in cnt.values())
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal draws 256 and 24-bit colours")
+            if not good:
+                print(cnt)
+            fails += not good
             # A key held down repeats (bwm does it, the events have none).
             monitor("sendkey z 2500")
             time.sleep(1.2)

@@ -39,6 +39,29 @@ static const uint32_t palette[16] = {
     0x666666, 0xF14C4C, 0x23D18B, 0xF5F543, 0x3B8EEA, 0xD670D6, 0x29B8DB, 0xFFFFFF,
 };
 
+/* The colour of index i of the xterm 256-colour palette: the 16 above, a 6 x 6 x 6 cube, then 24 greys. */
+static uint32_t pal256(int i)
+{
+    if (i < 16)
+        return palette[i];
+    if (i >= 232) {
+        unsigned g = 8 + 10 * (i - 232);
+        return g << 16 | g << 8 | g;
+    }
+    static const unsigned char lv[6] = { 0, 95, 135, 175, 215, 255 };
+    i -= 16;
+    return (uint32_t)lv[i / 36] << 16 | (uint32_t)lv[i / 6 % 6] << 8 | lv[i % 6];
+}
+
+/* The nearest cube index to a 24-bit colour. */
+static int nearest256(int r, int g, int b)
+{
+    int q[3] = { r, g, b };
+    for (int k = 0; k < 3; k++)
+        q[k] = q[k] < 48 ? 0 : q[k] < 115 ? 1 : (q[k] - 35) / 40;
+    return 16 + 36 * q[0] + 6 * q[1] + q[2];
+}
+
 struct cell { unsigned char ch, fg, bg; };
 static struct cell grid[MAXR][MAXC];
 static uint32_t *pix;            /* the window's pixels: bwm's shared memory when it gave some */
@@ -177,7 +200,7 @@ static void draw_cell(int r, int c, int cursor)
 {
     const struct cell *e = &view_row(r)[c];
     int fg = e->fg, bg = e->bg;
-    uint32_t f = palette[fg & 15], b = palette[bg & 15];
+    uint32_t f = pal256(fg), b = pal256(bg);
     if (!back && (cursor || selected(r, c))) {
         uint32_t t = f;
         f = b;
@@ -297,6 +320,17 @@ static void csi(int final)
             else if (p >= 40 && p <= 47) cur_bg = p - 40;
             else if (p == 49) cur_bg = 0;
             else if (p >= 90 && p <= 97) cur_fg = p - 90 + 8;
+            else if (p >= 100 && p <= 107) cur_bg = p - 100 + 8;
+            else if (p == 38 || p == 48) {                /* 38;5;N or 38;2;R;G;B (48 for the background) */
+                int *to = p == 38 ? &cur_fg : &cur_bg;
+                if (i + 2 < nparam && params[i + 1] == 5) {
+                    *to = params[i + 2] & 255;
+                    i += 2;
+                } else if (i + 4 < nparam && params[i + 1] == 2) {
+                    *to = nearest256(params[i + 2] & 255, params[i + 3] & 255, params[i + 4] & 255);
+                    i += 4;
+                }
+            }
         }
         break;
     default:
