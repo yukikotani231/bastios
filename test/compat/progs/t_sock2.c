@@ -92,6 +92,30 @@ static int many_datagrams(void) {
     return ok;
 }
 
+/* A nonblocking connect to a port nobody listens on: poll reports the socket
+ * writable and SO_ERROR says ECONNREFUSED, once (Tornado, libuv and every
+ * event loop read a failed connect this way). */
+static int refused_connect(void) {
+    int l = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t al = sizeof a;
+    setsockopt(l, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (bind(l, (void *)&a, sizeof a) != 0 || getsockname(l, (void *)&a, &al) != 0) return 0;
+    close(l);                                   /* the port is free and nobody listens */
+    int c = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    int r = connect(c, (void *)&a, sizeof a);
+    if (r == 0 || errno != EINPROGRESS) return 0;
+    struct pollfd p = {c, POLLOUT, 0};
+    if (poll(&p, 1, 3000) != 1) return 0;
+    int e = -1, e2 = -1;
+    socklen_t el = sizeof e;
+    getsockopt(c, SOL_SOCKET, SO_ERROR, &e, &el);
+    el = sizeof e2;
+    getsockopt(c, SOL_SOCKET, SO_ERROR, &e2, &el);
+    close(c);
+    return e == ECONNREFUSED && e2 == 0;
+}
+
 int main(void) {
     setup();
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
@@ -241,6 +265,7 @@ int main(void) {
                read(f, &i, sizeof i) == sizeof i && i.ssi_signo == SIGUSR1 && i.ssi_code == SI_QUEUE && i.ssi_int == 7);
         close(f);
     }
+    EXPECT("a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once", refused_connect());
     EXPECT("56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails", many_pairs());
     EXPECT("at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused", many_listeners());
     EXPECT("24 bound AF_UNIX datagram sockets send around a ring and name their senders", many_datagrams());
