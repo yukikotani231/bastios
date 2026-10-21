@@ -1005,9 +1005,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey down")
             good = until(b"bfiles: cursor 1", mark)
         if good:
+            monitor("sendkey home")
+            good = until(b"bfiles: cursor 0", mark)
+            mark2 = len(out)
+            monitor("sendkey end")
+            good = good and until(b"bfiles: cursor 1", mark2)
+        if good:
             monitor("sendkey ret")
             good = until(b"bfiles: image /tmp/ni/p.ppm", mark) and until(b"bview: window", mark)
-        print(("ok  " if good else "FAIL"), f"({name}) the arrow keys and Enter open an entry of the bfiles list")
+        print(("ok  " if good else "FAIL"), f"({name}) the arrow, Home and End keys and Enter work on the bfiles list")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)

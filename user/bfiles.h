@@ -688,14 +688,26 @@ static int bfiles_main(int argc, char **argv)
                     bf_esc = c == '[' ? 2 : 0;
                     continue;
                 }
-                if (bf_esc == 2) {
-                    bf_esc = 0;
-                    if (c == 'A' || c == 'B') {
-                        bf_move_sel(c == 'A' ? -1 : 1);
-                        bf_paint();
-                        if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
-                            break;
+                if (bf_esc == 2 || bf_esc == 3) {
+                    if (c >= '0' && c <= '9') {
+                        bf_escnum = bf_esc == 2 ? c - '0' : bf_escnum * 10 + c - '0';
+                        bf_esc = 3;
+                        continue;
                     }
+                    int num = bf_esc == 3 ? bf_escnum : 0;
+                    bf_esc = 0;
+                    int page = BF_ROWS - 2;
+                    if (c == 'A') bf_move_sel(-1);
+                    else if (c == 'B') bf_move_sel(1);
+                    else if (c == 'H' || (c == '~' && (num == 1 || num == 7))) bf_move_sel(-bf_nent);
+                    else if (c == 'F' || (c == '~' && (num == 4 || num == 8))) bf_move_sel(bf_nent);
+                    else if (c == '~' && num == 5) bf_move_sel(-page);
+                    else if (c == '~' && num == 6) bf_move_sel(page);
+                    else
+                        continue;
+                    bf_paint();
+                    if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                        break;
                     continue;
                 }
                 if (c == '\r' || c == '\n') {
