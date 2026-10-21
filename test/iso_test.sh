@@ -384,12 +384,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
         # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
         # dragging and typing, driven through QEMU's monitor.
-        def monitor(*cmds):
+        def monitor(*cmds, gap=0.15):
             m3 = socket.socket(socket.AF_UNIX)
             m3.connect(mon_path)
             for c in cmds:
                 m3.sendall(c.encode() + b"\n")
-                time.sleep(0.15)
+                time.sleep(gap)
             time.sleep(0.4)
             m3.close()
         mark = len(out)
@@ -695,10 +695,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             # A double click on the title bar of the full-screen window puts it back.
             for step in ((200, -200), (12, -200), (0, -200), (0, -146)):     # from the task bar button (88, 756) onto the title bar at (300, 10)
                 monitor(f"mouse_move {step[0]} {step[1]}")
-            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
-            time.sleep(1.5)
-            w, h, px = screendump()
-            good = not (tuple(px[(3 * w + 1000) * 3:(3 * w + 1000) * 3 + 3]) == (40, 90, 200))
+            # bwm counts a second press within 400 ms of its clock as a double
+            # click, so the presses go 0.1 s apart. On a loaded host the guest
+            # can still see them further apart: two single clicks change
+            # nothing, and the double click is tried again, three times at most.
+            for _ in range(3):
+                monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+                time.sleep(1.5)
+                w, h, px = screendump()
+                good = not (tuple(px[(3 * w + 1000) * 3:(3 * w + 1000) * 3 + 3]) == (40, 90, 200))
+                if good:
+                    break
             print(("ok  " if good else "FAIL"), f"({name}) a double click on the title bar restores a maximized window")
             fails += not good
         monitor("sendkey ctrl-q")

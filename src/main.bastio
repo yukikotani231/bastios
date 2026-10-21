@@ -1470,7 +1470,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // PCI's configuration ports are claimed for the drivers that look for
   // their devices there.
-  let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
+  let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4), top: 0 };
+  pci_survey(&mut pci);
   // The xHCI controller first, the first of them with anything on it,
   // with pages from USB_AT: a USB stick with a BastiOS partition on it
   // becomes the disk, and a USB keyboard and mouse the keyboard and mouse.
