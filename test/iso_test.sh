@@ -760,6 +760,10 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = until(b"bsys: refreshed", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the menu's System entry opens the System window and r refreshes it")
             fails += not good
+            # left alone, the window reads the numbers again by itself.
+            good = good and until(b"bsys: live", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the System window refreshes itself")
+            fails += not good
             monitor("mouse_move 34 72")
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.5)

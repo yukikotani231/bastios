@@ -6,6 +6,7 @@
  * says "bsys: refreshed"; the close box ends it. Says "bsys: window ID" when
  * the window is open. It is part of the bterm program, which runs it when
  * started as "bsys", so it adds no image to the kernel. */
+#include <poll.h>
 #include <stdio.h>
 #include <sys/statvfs.h>
 #include <sys/sysinfo.h>
@@ -80,7 +81,20 @@ static int bsys_main(void)
     printf("bsys: window %d\n", id);
     fflush(stdout);
     static unsigned char buf[BWM_MAX_PAYLOAD];
+    int live = 0;
     for (;;) {
+        struct pollfd pf = { fd, POLLIN, 0 };
+        if (poll(&pf, 1, 2000) == 0) {                       /* quiet for 2 s: read the numbers again */
+            bs_paint(sw, sh);
+            if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
+                break;
+            if (!live) {
+                live = 1;
+                puts("bsys: live");
+                fflush(stdout);
+            }
+            continue;
+        }
         int t = bwm_event(fd, buf);
         if (t < 0 || t == BWM_CLOSE)
             break;
