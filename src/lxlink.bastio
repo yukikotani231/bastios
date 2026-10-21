@@ -112,6 +112,21 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   let mut e = 0;                            // where the component being looked at starts
   let mut hops = 0;
   let mut bad = false;
+  // A name that exists and is not a link has only directories above it (a
+  // file is created through its parent, which this very function resolves;
+  // a directory or a link is not replaced while it has entries). So when no
+  // mount covers the path, and the whole name is a file in the file layer,
+  // the walk down its components would find directories and no link and
+  // end here: the lookups above the last component are skipped.
+  if last && pl > 0 && ns_find(k, ns, p, pl) >= MT_N {
+    let tl = ns_tr(&mut k, ns, p, pl);
+    if tl != NO_RESULT && magic_link(&mut k, pid, tl) == NO_RESULT {
+      let f = vfs_lookup(&mut k.fs, tl);
+      if f != NO_FILE && !vfs_is_link(&mut k.fs, f) {
+        e = pl;
+      }
+    }
+  }
   while e < pl && !bad
     invariant e <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && (blen(q) == SPLICE || blen(q) == 1) && kok(k)
   {
