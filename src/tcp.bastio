@@ -81,7 +81,7 @@ const W_RXHEAD: u64 = 24;             // where the next byte to read is in the r
 const W_WS: u64 = 25;                 // the peer's window scale + 1, once both sides scale; 0: neither does
 const W_SACK: u64 = 26;               // 1 if the peer takes SACK blocks (it sent SACK-permitted)
 const W_NS: u64 = 27;                 // its network namespace (src/netns.bastio)
-const W_FAM: u64 = 28;                // a listener's FAM_* (net.bastio)
+const W_FAM: u64 = 28;                // a listener's FAM_* (net.bastio); a connection's: FAM_V4 if its peer is an IPv4 socket (FAM_BOTH: an IPv6 one)
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
 // Connection t's rings (src/tcpbuf.bastio).
@@ -556,6 +556,24 @@ fn tcb_find(n: &Net, lport: u64, rip: u64, rport: u64) -> u64
   return lis;
 }
 
+/// The family of the socket that is connecting from sport to dport on this
+/// machine (loopback carries no family): FAM_V4 for an IPv4 socket, or none
+/// found.
+fn tcb_syn_sent_fam(n: &Net, sport: u64, dport: u64) -> u64
+  requires net_ok(n)
+{
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS
+  {
+    if tw(n, t, W_STATE) == T_SYN_SENT && tw(n, t, W_LPORT) == sport && tw(n, t, W_RPORT) == dport && tw(n, t, W_NS) == n.ns {
+      return tw(n, t, W_FAM);
+    }
+    t = t + 1;
+  }
+  return FAM_V4;
+}
+
 /// Is a port in use by any connection or listener?
 fn tcp_port_used(n: &Net, port: u64) -> bool
   requires net_ok(n)
@@ -755,6 +773,9 @@ fn tcp_accept_syn(n: &mut Net, lis: u64, seq: u64, hl: u64)
     return;
   }
   tcb_init(&mut n, t, T_SYN_RCVD, be16(n.pkt, 36), be32(n.pkt, 26), be16(n.pkt, 34), lis, 0);
+  if n.lo_in {
+    tset(&mut n, t, W_FAM, tcb_syn_sent_fam(n, be16(n.pkt, 34), be16(n.pkt, 36)));
+  }
   tset(&mut n, t, W_RCV, seq_add(seq, 1));
   tset(&mut n, t, W_WND, be16(n.pkt, 48));
   tset(&mut n, t, W_MSS, tcp_mss_opt(n, hl));
@@ -1156,7 +1177,7 @@ fn tcp_eph_port(n: &mut Net) -> u64
 
 /// Opens a connection to to:port (0.0.0.0: this machine) from an ephemeral port: its number (it is
 /// SYN_SENT; poll tcp_status), or NO_SOCK.
-fn tcp_open(n: &mut Net, to: u64, port: u64) -> u64
+fn tcp_open(n: &mut Net, to: u64, port: u64, fam: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
 {
@@ -1173,6 +1194,7 @@ fn tcp_open(n: &mut Net, to: u64, port: u64) -> u64
     return NO_SOCK;
   }
   tcb_init(&mut n, t, T_SYN_SENT, lport, ip, port, TCBS, 1);
+  tset(&mut n, t, W_FAM, fam);
   let iss = twb(n, t, W_ISS, SEQ_MOD);
   tcp_emit(&mut n, t, TF_SYN, iss, 0, 0);
   tnxt(&mut n, t, seq_add(iss, 1));
@@ -1398,7 +1420,7 @@ fn tcp_accept(c: &mut Nic, lis: u64) -> u64
   }
 }
 
-fn tcp_connect(c: &mut Nic, ns: u64, ip: u64, port: u64) -> u64
+fn tcp_connect(c: &mut Nic, ns: u64, ip: u64, port: u64, fam: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c)
 {
@@ -1410,7 +1432,7 @@ fn tcp_connect(c: &mut Nic, ns: u64, ip: u64, port: u64) -> u64
         return NO_SOCK;
       }
       n.ns = ns;
-      let r = tcp_open(&mut n, ip, port);
+      let r = tcp_open(&mut n, ip, port, fam);
       c = Nic::Up(n);
       return r;
     },
@@ -1590,6 +1612,21 @@ fn tcp_peer_ip(c: &Nic, t: u64) -> u64
         return tw(n, t, W_RIP);
       }
       return 0;
+    },
+  }
+}
+
+/// Whether connection t came from an IPv4 socket (or went to one): FAM_V4.
+fn tcp_peer_fam(c: &Nic, t: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return FAM_V4; },
+    Nic::Up(n) => {
+      if tcb_held(n, t) {
+        return tw(n, t, W_FAM);
+      }
+      return FAM_V4;
     },
   }
 }

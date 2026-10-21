@@ -104,7 +104,6 @@ const MAP_FIXED_NOREPLACE: u64 = 0x100000;
 const MAP_LEGACY_MASK: u64 = 0xFC17F973;
 const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memory (Linux's PATH_MAX)
 const PATH_FIRST: u64 = 256;            // read first; most paths end within it
-const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
@@ -2430,7 +2429,6 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
   // Build the name in `out`, starting from the working directory unless
   // the path starts at "/", which is the process's root (chroot). ".."
   // stops at `floor`: the root, for a name inside it.
-  let mut out = balloc(PATH_OUT);
   let mut o = 0;
   let rl = root_len(k, pid);
   let mut floor = 0;
@@ -2439,16 +2437,15 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
   let mut esc = false;
   if abs {
     while o < rl
-      invariant o <= rl && rl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
+      invariant o <= rl && rl <= FNAME_MAX && blen(k.lexb) == PATH_OUT && kok(k) && pid < NPROC
     {
-      bset(&mut out, o, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
+      bset(&mut k.lexb, o, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
       o = o + 1;
     }
     floor = rl;
   } else {
     if h > OFD_N {
-      bfree(out);
-      k.perr = EBADF;
+        k.perr = EBADF;
       if h > OFD_N + 1 {
         k.perr = ENOTDIR;
       }
@@ -2456,18 +2453,18 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
     }
     let cl = base_len(k, pid, h);
     while o < cl
-      invariant o <= cl && cl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC && h <= OFD_N
+      invariant o <= cl && cl <= FNAME_MAX && blen(k.lexb) == PATH_OUT && kok(k) && pid < NPROC && h <= OFD_N
     {
-      bset(&mut out, o, base_byte(k, pid, h, o));
+      bset(&mut k.lexb, o, base_byte(k, pid, h, o));
       o = o + 1;
     }
     start = o;
-    floor = root_under(k, pid, out, o);
+    floor = root_under(k, pid, k.lexb, o);
   }
   let mut i = 0;
   let mut ok = true;
   while ok && i < e
-    invariant i <= e && e < XFER && o <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
+    invariant i <= e && e < XFER && o <= PATH_OUT && blen(k.lexb) == PATH_OUT && kok(k)
   {
     if bget(k.fs.xfer, i) == 47 {
       i = i + 1;
@@ -2486,8 +2483,8 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
         if o <= start {
           esc = true;                       // from the base itself
         }
-        while o > floor && bget(out, o - 1) != 47
-          invariant o <= PATH_OUT && blen(out) == PATH_OUT
+        while o > floor && bget(k.lexb, o - 1) != 47
+          invariant o <= PATH_OUT && blen(k.lexb) == PATH_OUT
         {
           o = o - 1;
         }
@@ -2498,10 +2495,10 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
         ok = false;
       } else {
         if o > 0 {
-          bset(&mut out, o, 47);
+          bset(&mut k.lexb, o, 47);
           o = o + 1;
         }
-        bytes_copy_span(&mut out, o, k.fs.xfer, i, j);
+        bytes_copy_span(&mut k.lexb, o, k.fs.xfer, i, j);
         o = o + w;
       }
       i = j;
@@ -2513,20 +2510,18 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
     // as Linux reports it.
     let mut c = 0;
     while c < o && c < FNAME_MAX
-      invariant c <= o && blen(out) == PATH_OUT && kok(k)
+      invariant c <= o && blen(k.lexb) == PATH_OUT && kok(k)
     {
-      bset(&mut k.fs.xfer, c, bget(out, c));
+      bset(&mut k.fs.xfer, c, bget(k.lexb, c));
       c = c + 1;
     }
-    bfree(out);
     if c > 0 && lx_follow(&mut k, pid, c, true, smaller(floor, c)) == NO_RESULT {
       return bad;                           // k.perr says why
     }
     k.perr = ENAMETOOLONG;
     return bad;
   }
-  bytes_copy_span(&mut k.fs.xfer, 0, out, 0, o);
-  bfree(out);
+  bytes_copy_span(&mut k.fs.xfer, 0, k.lexb, 0, o);
   return Lex { n: o, floor: floor, trail: trail, abs: abs, esc: esc, dirend: dirend };
 }
 

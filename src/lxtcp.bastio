@@ -186,6 +186,9 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   of_set(&mut k.ofd, h, 3, tm_word(flags / SOCK_NONBLOCK % 2, tk.port, TM_CONN));
   if ofd_v6(k, tk.h) {
     k.inet6 = set(k.inet6, h, 1);           // an AF_INET6 listener's connections are too
+    if tcp_peer_ip(k.nic, c) == 0x7F000001 && tcp_peer_fam(k.nic, c) == FAM_V4 {
+      k.inet6 = set(k.inet6, h, 2);         // an IPv4 peer on loopback reads as ::ffff:127.0.0.1, not ::1
+    }
   }
   let nfd = fd_install(&mut k, pid, h);
   if nfd >= LXNFD {
@@ -194,7 +197,7 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   if flags / SOCK_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, nfd, FD_OFD + h + FD_CLOEXEC);
   }
-  let r = sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c), ofd_v6(k, h));
+  let r = sin_out_m(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c), ofd_v6(k, h), ofd_mapped(k, h));
   if r != 0 {
     return r;
   }
@@ -236,7 +239,11 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
     if sin.err != 0 {
       return sin.err;
     }
-    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, sin.port);
+    let mut cfam = FAM_V4;                   // what the listener sees on loopback, where 127.0.0.1 and ::1 are one address
+    if ofd_v6(k, tk.h) && !sin_mapped(&mut k, pid, addr) {
+      cfam = FAM_BOTH;
+    }
+    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, sin.port, cfam);
     if t >= TCBS {
       return ENETUNREACH;
     }
@@ -522,12 +529,12 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
         me = local_for(k.nic, pip);         // the source address its route picked
       }
     }
-    return sin_out(&mut k, pid, addr, lenp, me, port, ofd_v6(k, tk.h));
+    return sin_out_m(&mut k, pid, addr, lenp, me, port, ofd_v6(k, tk.h), ofd_mapped(k, tk.h));
   }
   if tk.mode != TM_CONN || tk.t >= TCBS {
     return ENOTCONN;
   }
-  return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h));
+  return sin_out_m(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h), ofd_mapped(k, tk.h));
 }
 
 /// What a poll on a stream socket finds now: a listener is readable when a
