@@ -1143,6 +1143,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print(cnt)
             fails += not good
+            # SGR 4 underlines the cells that follow (the two bottom pixel rows, in the foreground colour).
+            typed("printf '\\033[2J\\033[H\\033[38;5;196;4m      \\033[0m'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            red = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = 60 <= red <= 200
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal underlines text")
+            if not good:
+                print(red)
+            fails += not good
             # A key held down repeats (bwm does it, the events have none).
             monitor("sendkey z 2500")
             time.sleep(1.2)
