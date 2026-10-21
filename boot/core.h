@@ -29,7 +29,7 @@
 #define CORE_TRAP_TOP  192                      /* end of the block, for `syscall` */
 #define CORE_INDEX     200                      /* the processor's number: 0 for the bootstrap one */
 #define CORE_MMU       208                      /* 4 words: the prelude's CR3 state */
-#define CORE_UROOT     232                      /* the fourth: the user table the next bst_cpu_enter loads into CR3 */
+#define CORE_UROOT     232                      /* the fourth: the user table the next bst_cpu_enter loads into CR3; bst_cpu_enter sets bit 0, which the prelude's next entry or exit of a table clears: still set means the lease never lapsed */
 #define CORE_TSS       256                      /* 104-byte task state segment */
 #define CORE_ALIAS     368                      /* where the block is mapped in every table (ALIAS_CORES + 128 KiB * index) */
 #define CORE_UMODE     376                      /* nonzero while CR3 holds the shadow table: the next trap switches back */
