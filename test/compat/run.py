@@ -320,12 +320,33 @@ class Guest:
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
         self.hostsurl = f"https://10.0.2.2:{web.sport}" if web and web.sport else ""
+        self.pick_sshport()
+
+    def pick_sshport(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         self.sshport = str(s.getsockname()[1])
         s.close()
 
     def boot(self):
+        # The SSH port is free when it is picked, but the guests of other
+        # lanes start meanwhile and may take it first: QEMU then refuses to
+        # start ("Could not set up host forwarding rule"). Another port is
+        # tried, three times at most.
+        for _ in range(3):
+            self.start()
+            if self.read_until(b"bastios> ", 0, 60) or b"Could not set up host forwarding rule" not in self.out:
+                break
+            self.pick_sshport()
+        if b"bastios> " not in self.out:
+            tail = self.out[-1500:].decode(errors="replace")
+            raise SystemExit("compat: the kernel did not reach its shell prompt; its last output:\n" + tail)
+        mark = len(self.out)
+        self.send(b"ash\r")
+        if not self.read_until(PROMPT, mark, 30):
+            raise SystemExit("compat: ash did not start")
+
+    def start(self):
         self.stop()
         self.out = b""
         if self.arch == "aarch64":
@@ -348,13 +369,6 @@ class Guest:
             cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             preexec_fn=(lambda: os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))) if self.idle else None)
-        if not self.read_until(b"bastios> ", 0, 60):
-            tail = self.out[-1500:].decode(errors="replace")
-            raise SystemExit("compat: the kernel did not reach its shell prompt; its last output:\n" + tail)
-        mark = len(self.out)
-        self.send(b"ash\r")
-        if not self.read_until(PROMPT, mark, 30):
-            raise SystemExit("compat: ash did not start")
 
     def stop(self):
         if self.q:
@@ -699,6 +713,44 @@ def run_tty(env, name, prog, keys, check, expected, timeout, bb):
     return second
 
 
+def run_gitsuite(env, tests, setup, bb):
+    """The gitsuite group: git's own test scripts (t/tNNNN-*.sh), run in
+    Alpine's root from /gt (test/compat/gitsuite.sh packs them with the
+    build they test). A script passes when it exits 0 (every test ran or
+    is a known breakage) and ran at least one test. A script that fails runs
+    once more, like the other groups' checks: some of them race the timer."""
+    res = lambda n, r, d: {"name": n, "result": r, "detail": d, "syscalls": []}
+    for cmd, label in setup:
+        text, st = env.run(f"echo @@begin; {with_bb(cmd, bb)}; echo @@end $?", 600)
+        if st != 0 or "setup ok" not in text:
+            return [res(t, "fail", f"setup failed at {label}: " + clip(text[-300:])) for t in tests]
+    out = []
+    for t in tests:
+        for attempt in (1, 2):
+            t0 = time.time()
+            text, st = env.run(
+                f"echo @@begin; {bb} chroot /disk/a /bin/sh -c 'cd /gt/t && GIT_TEST_DEFAULT_INITIAL_BRANCH_NAME=main "
+                f"timeout 600 sh ./{t}-*.sh >/tmp/{t}.log 2>&1; echo exit=$?; echo ok=$(grep -c \"^ok\" /tmp/{t}.log); "
+                f"grep \"^not ok\" /tmp/{t}.log | grep -v \"# TODO\" | head -n 5'; echo @@end $?", 700)
+            m = re.search(r"exit=(\d+)\nok=(\d+)\n(.*?)(?:@@end|$)", text.replace("\r", ""), re.S)
+            if st is None:
+                r = res(t, "hang", "did not finish")
+            elif not m:
+                r = res(t, "crash", clip(text[-200:]))
+            elif m.group(1) == "0" and int(m.group(2)) > 0:
+                r = res(t, "pass", "")
+            else:
+                r = res(t, "fail", f"exit {m.group(1)}, {m.group(2)} ok; " + clip(m.group(3).strip()))
+            r["secs"] = round(time.time() - t0, 1)
+            if r["result"] == "pass":
+                if attempt == 2:
+                    r["retried"] = True
+                    print(f"compat: gitsuite {t}: passed on the second try", flush=True)
+                break
+        out.append(r)
+    return out
+
+
 # ---------------------------------------------------------------- reporting
 
 def report(results, names, out_dir, elapsed):
@@ -779,6 +831,7 @@ def main():
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--podman-disk", help="the Podman disk (the root of the podman image) for podman.txt")
+    ap.add_argument("--gitsuite-tar", help="git's own tests with the build they test (gitsuite.sh), served at HOSTURL/gitsuite.tar, for the gitsuite lane")
     ap.add_argument("--host", metavar="BINDIR", help="run on this machine, programs from BINDIR")
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--arch", default="x86_64", choices=["x86_64", "aarch64"],
@@ -791,7 +844,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "rust", "python", "podman"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "rust", "python", "podman", "gitsuite"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -988,6 +1041,32 @@ def main():
             disk = os.path.join(args.out, "alpine-run5.img")
             shutil.copyfile(args.alpine_disk, disk)
             lanes.append(("alpine5", disk, [("alpine#5", "Neovim, gcc and the debuggers in Alpine", applets_lane(alpine5, 300))], "384M"))
+    if args.alpine_disk and args.gitsuite_tar and lane_chosen("gitsuite"):
+        # git's t/ in Alpine's root: the tests it lists (gitsuite.txt), on a
+        # copy of the Alpine disk. perl comes from the repository the web
+        # server serves; some tests run perl scripts. 1G: a test makes
+        # repositories of its own, and many processes.
+        os.symlink(os.path.abspath(args.gitsuite_tar), os.path.join(web.dir, "gitsuite.tar"))
+        if not os.path.exists(os.path.join(web.dir, "alpine")):
+            os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
+            if args.alpine_repo:
+                os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
+        disk = os.path.join(args.out, "gitsuite-run.img")
+        shutil.copyfile(args.alpine_disk, disk)
+        gtests = [l.split()[0] for l in open(os.path.join(HERE, "gitsuite.txt")) if l.strip() and not l.startswith("#")]
+        unpack = alpine[0]
+        setup_cmds = [
+            (unpack[1], "the unpacking of the root"),
+            ("bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X GITSUITE_REPO perl >/dev/null 2>&1; "
+             "cd /disk/a && bb wget -q -O /disk/gitsuite.tar GITSUITE_TAR && bb tar -xf /disk/gitsuite.tar && "
+             "bb mkdir -p /disk/a/tmp && bb chmod 1777 /disk/a/tmp && bb rm /disk/gitsuite.tar && echo setup ok", "the unpacking of git's tests"),
+        ]
+        def gitsuite_group(e):
+            cmds = [(c.replace("ALPINEURL", e.hosturl + "/alpine").replace("GITSUITE_REPO", e.hosturl + "/alpine")
+                      .replace("GITSUITE_TAR", e.hosturl + "/gitsuite.tar"), n) for c, n in setup_cmds]
+            cmds[0] = (cmds[0][0] + "; echo setup ok", cmds[0][1])
+            return run_gitsuite(e, gtests, cmds, bb)
+        lanes.append(("gitsuite", disk, [("gitsuite", "git's own tests", gitsuite_group)], "1G"))
     if args.debian_disk and lane_chosen("debian"):
         # Debian's root, glibc's programs: unpacked on a copy, as above.
         disk = os.path.join(args.out, "debian-run.img")
@@ -1076,7 +1155,7 @@ def main():
                 if c["name"] not in merged or alpine_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["alpine"] = sorted(merged.values(), key=lambda c: at.get(c["name"], len(at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "python", "podman"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "python", "podman", "gitsuite"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

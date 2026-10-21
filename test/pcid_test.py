@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Process-context identifiers (boot/boot.S, boot/platform.c): the kernel
-turns them on only when the boot command line says `pcid` and the processor
-has them. Boots BastiOS twice, with and without the word, runs a system call
+turns them on when the processor has them, unless the boot command line says
+`nopcid`. Boots BastiOS with and without the word, runs a system call
 benchmark in each, and reads CR4 from QEMU's monitor afterwards:
 
     test/pcid_test.py [--kernel build/bastios.elf]
 
-Without the word CR4.PCIDE (bit 17) must be clear, and with it, set on every
+With the word CR4.PCIDE (bit 17) must be clear, and without it, set on every
 processor that has run user code. QEMU's TCG does not offer PCID, so the
 check needs KVM: without /dev/kvm the test says so and passes. The two
 system call times go to stdout (and to the job summary in CI).
@@ -67,7 +67,7 @@ def main():
             return 0
     bad = 0
     qemu64 = "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt,+pcid"
-    for append, want, cpu in (("", False, "host"), ("pcid", True, "host"), ("pcid", True, qemu64)):
+    for append, want, cpu in (("nopcid", False, "host"), ("", True, "host"), ("", True, qemu64)):
         try:
             cr4s, timing = boot_and_read(args.kernel, append, args.smp, cpu)
         except BaseException as e:  # a hang or a crash is a failure of this case, not of the script

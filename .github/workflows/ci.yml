@@ -86,21 +86,32 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-${{ matrix.cache }}-none
+          key: prooftar-${{ matrix.cache }}-none
           restore-keys: |
-            proof-${{ matrix.cache }}-
-            proof-
-          path: build/proof-cache
+            prooftar-${{ matrix.cache }}-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make test BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
         env:
           AARCH64_REQUIRED: 1
           LANES: ${{ matrix.lanes }}
+      # Saved as one tar file and keyed by the run: on the cache's tens of
+      # thousands of files hashFiles failed ("Fail to hash files") and the
+      # save itself overflowed its stack ("Maximum call stack size
+      # exceeded"), so nothing was saved and each run started from an old
+      # cache. The restores take the newest key with the prefix.
+      - name: Pack the proof cache
+        if: always() && github.event_name == 'push'
+        run: tar -cf build/proof-cache.tar -C build proof-cache
+        continue-on-error: true
       - name: Save the proof cache
         if: always() && github.event_name == 'push'
         uses: actions/cache/save@v4
         with:
-          key: proof-${{ matrix.cache }}-${{ hashFiles('build/proof-cache/**') }}
-          path: build/proof-cache
+          key: prooftar-${{ matrix.cache }}-${{ github.run_id }}-${{ strategy.job-index }}-${{ github.run_attempt }}
+          path: build/proof-cache.tar
         continue-on-error: true
   # The same suite with the kernel and the Bastio user programs built by the
   # native x86-64 backend, so no C compiler sees any proved code (the C
@@ -109,7 +120,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    # It takes 18 to 29 minutes on main (proving and building the kernel
+    # natively is 8 of them), so 30 cut off runs that were only slow.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
@@ -122,11 +135,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make test NATIVE=1 LANES='a b ce' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       # The AArch64 port's kernel and Bastio user programs (shell, hello, spin,
       # true) built by the native AArch64 backend, booted once on QEMU virt.
@@ -176,11 +191,14 @@ jobs:
         name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        if: steps.want.outputs.run == 'true'
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - if: steps.want.outputs.run == 'true'
         run: make build/bastios.elf BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       - if: steps.want.outputs.run == 'true'
@@ -208,9 +226,9 @@ jobs:
       - if: steps.want.outputs.run == 'true'
         name: Compare PCIDs on and off, the same kernel
         run: |
-          bench/ab.py --a build/bastios.elf --b build/bastios.elf --append-b pcid --rounds 5 --runs 3 \
+          bench/ab.py --a build/bastios.elf --b build/bastios.elf --append nopcid --append-b "" --rounds 5 --runs 3 \
             --tests syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw --out build/bench/ab-pcid.json | tee build/bench/ab-pcid.md
-          { echo '### bench/ab.py under KVM: boot command line `pcid` (B) against none (A)'; echo; cat build/bench/ab-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
+          { echo '### bench/ab.py under KVM: default PCIDs (B) against boot command line `nopcid` (A)'; echo; cat build/bench/ab-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: always() && steps.want.outputs.run == 'true'
         name: Print the full table again, last in the log
         run: cat build/bench/kvm.md || true
@@ -278,11 +296,14 @@ jobs:
         name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        if: steps.want.outputs.run == 'true'
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - if: steps.want.outputs.run == 'true'
         run: make build/bastios.elf
       - if: steps.want.outputs.run == 'true'
@@ -307,15 +328,14 @@ jobs:
             build/bench/workloads.json
             build/bench/workloads.md
           if-no-files-found: ignore
-  # Process-context identifiers (boot/boot.S, boot/platform.c), off unless the
-  # boot command line says `pcid`. QEMU's TCG has no PCID, so only a KVM guest
+  # Process-context identifiers (boot/boot.S, boot/platform.c), on when the
+  # processor has them, unless the boot command line says `nopcid`. QEMU's TCG has no PCID, so only a KVM guest
   # can run them: this job checks that CR4.PCIDE follows the command line, runs
   # the system call benchmark both ways, then the memory, process, thread,
   # signal, ptrace, IPC and file programs of the compat suite with PCIDs on
   # (test/compat/progs/t_mem.c has the checks that a translation cached
   # before munmap or mprotect must not survive it). It does not fail the
-  # workflow yet: the default stays off until this job has been green for a
-  # while.
+  # workflow.
   pcid-kvm:
     needs: changes
     if: needs.changes.outputs.code == 'true'
@@ -337,11 +357,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make build/bastios.elf
       - run: tools/ci-kvm.sh
       - name: CR4.PCIDE follows the command line
@@ -416,11 +438,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make build/bastios.elf
       - run: NIC=ena test/dhcp_test.sh
       - run: NIC=ena test/tcp_test.sh
@@ -431,11 +455,14 @@ jobs:
   # are cached. The third-party programs are used only when every input
   # they were built from is unchanged: the pinned versions (every `?=`
   # setting in the Makefile), the BusyBox configuration, the patches and
-  # pyzip.py. A change to a recipe alone is not seen: bump CACHE_V to
-  # rebuild. Alpine's images are kept by digest and alpinedisk.py checks
-  # each layer against its digest when it reads it from the cache, so an
-  # older entry is restored when there is no exact one, and only the images
-  # it lacks are fetched; they are saved from main only (an entry saved by a
+  # pyzip.py, gitsuite.sh. A change to a recipe alone is not seen: bump
+  # CACHE_V to rebuild. The save step lists the same paths as the restore
+  # step: the paths are part of an entry's version, so a different list
+  # never hits, and the save then finds the key taken. Alpine's images are
+  # kept by digest and alpinedisk.py checks each layer against its digest
+  # when it reads it from the cache, so an older entry is restored when
+  # there is no exact one, and only the images it lacks are fetched; they
+  # are saved from main only (an entry saved by a
   # pull request serves no other branch and fills the repository's cache
   # space). Disk images and everything built from this repository are never
   # cached. The caches are saved only after the build step succeeded, so a
@@ -477,7 +504,7 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -492,6 +519,7 @@ jobs:
             build/compat/micropython
             build/compat/kilo
             build/compat/git
+            build/compat/gitsuite.tar
             build/compat/perl
             build/compat/perllib
             build/compat/py
@@ -519,11 +547,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - name: Wait for room
         run: |
           while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 5; done
@@ -534,7 +564,7 @@ jobs:
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -549,6 +579,7 @@ jobs:
             build/compat/micropython
             build/compat/kilo
             build/compat/git
+            build/compat/gitsuite.tar
             build/compat/perl
             build/compat/perllib
             build/compat/py
@@ -644,11 +675,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-aarch64-
-            proof-
-          path: build/proof-cache
+            prooftar-aarch64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - name: Cache keys
         id: keys
         run: |
@@ -759,11 +792,13 @@ jobs:
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
         with:
-          key: proof-none
+          key: prooftar-none
           restore-keys: |
-            proof-x86-64-
-            proof-
-          path: build/proof-cache
+            prooftar-x86-64-
+            prooftar-
+          path: build/proof-cache.tar
+      - name: Unpack the proof cache
+        run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - run: make -j4 build/bastios.elf build/ltp/.built
       - name: Save LTP
         if: steps.ltp.outputs.cache-hit != 'true'

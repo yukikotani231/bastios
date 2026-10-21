@@ -178,8 +178,8 @@ build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
 build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
 	$(MUSLCC) -static-pie -O2 -s -o $@ $<
 
-build/user/bterm.elf: user/bterm.c user/bfiles.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
-	$(MUSLCC) -static-pie -O2 -s -Ibuild/user -o $@ $<
+build/user/bterm.elf: user/bterm.c user/bfiles.h user/bsys.h user/bview.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
+	$(MUSLCC) -static-pie -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -s -Ibuild/user -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
 # also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.
@@ -555,7 +555,7 @@ build/compat/rg: | build/compat/src
 # the static amd64 binary of the upstream release, checked against a pinned
 # SHA-256. It runs on BastiOS only; nothing here links against it.
 build/compat/runc: | build/compat/src
-	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.amd64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.amd64
 	echo "$(RUNC_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
@@ -564,7 +564,7 @@ build/compat/runc: | build/compat/src
 # release, checked against a pinned SHA-256. Like runc it runs on BastiOS
 # only.
 build/compat/crun: | build/compat/src
-	curl -fsSL -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-amd64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-amd64
 	echo "$(CRUN_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
@@ -574,7 +574,7 @@ build/compat/crun: | build/compat/src
 # parser/c.so; the C queries come with neovim). It runs on BastiOS only.
 # (The version is in test/compat/images.mk, which arch/aarch64/Makefile shares.)
 build/compat/tree-sitter-c.so: | build/compat/src
-	curl -fsSL -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
 	echo "$(TREESITTER_C_SHA256)  build/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
 	rm -rf build/compat/src/tree-sitter-c && mkdir build/compat/src/tree-sitter-c
 	tar xzf build/compat/src/tree-sitter-c.tgz -C build/compat/src/tree-sitter-c --strip-components=1 package/src
@@ -586,7 +586,7 @@ build/compat/tree-sitter-c.so: | build/compat/src
 # root (opt/typescript/lib), for the case that runs it with Neovim's LSP client.
 # x86-64 only.
 build/compat/tstools.tar: | build/compat/src
-	curl -fsSL -o build/compat/src/tsc.tgz https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-$(TSC_VER).tgz
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/tsc.tgz https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-$(TSC_VER).tgz
 	echo "$(TSC_SHA256)  build/compat/src/tsc.tgz" | sha256sum -c - >/dev/null
 	rm -rf build/compat/src/tsc && mkdir build/compat/src/tsc
 	tar xzf build/compat/src/tsc.tgz -C build/compat/src/tsc --strip-components=1 package/lib
@@ -758,6 +758,25 @@ build/compat/git: | build/compat/src
 	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_ICONV=1 NO_REGEX=NeedsStartEnd \
 	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates git >/dev/null
 	cp build/compat/src/git/git $@
+
+# git's own test suite (t/) with the build it tests, for the gitsuite lane of
+# test/compat/run.py (the scripts it runs are listed in test/compat/gitsuite.txt).
+# A tree of its own: the tests want every program git builds (the dashed
+# commands, the test helpers, the scripts), and a build with iconv, which
+# musl provides, for the tests of commit encodings; build/compat/git is the
+# smaller program apps.txt checks. test/compat/gitsuite.sh packs it.
+build/compat/gitsuite.tar: test/compat/gitsuite.sh | build/compat/src
+	rm -rf build/compat/src/zlib-suite build/compat/src/zlib-suite-out build/compat/src/git-suite
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) build/compat/src/zlib-suite
+	cd build/compat/src/zlib-suite && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" ./configure --static --prefix=$(CURDIR)/build/compat/src/zlib-suite-out >/dev/null
+	$(MAKE) -C build/compat/src/zlib-suite -s install >/dev/null
+	git clone -q --depth 1 --branch $(GIT_TAG) $(GIT_GIT) build/compat/src/git-suite
+	$(MAKE) -C build/compat/src/git-suite -s CC=$(MUSLCC) CFLAGS="-O2 -fPIE -I$(CURDIR)/build/compat/src/zlib-suite-out/include" \
+	  LDFLAGS="-static-pie -L$(CURDIR)/build/compat/src/zlib-suite-out/lib" NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_REGEX=NeedsStartEnd \
+	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates \
+	  all t/helper/test-tool t/helper/test-fake-ssh bin-wrappers/git GIT-BUILD-OPTIONS >/dev/null
+	test/compat/gitsuite.sh $@ build/compat/src/git-suite
 
 # perl, statically linked with its XS modules, and the pure-Perl modules
 # test/compat/apps.txt uses (with what they load) in build/compat/perllib,
@@ -985,7 +1004,7 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 # Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
 # Java disk as /opt/jdtls.
 build/compat/jdtls.tgz: | build/compat/src
-	curl -fsSL -o $@ $(JDTLS_URL)
+	curl -fsSL --retry 3 --retry-all-errors -o $@ $(JDTLS_URL)
 	echo "$(JDTLS_SHA256)  $@" | sha256sum -c - >/dev/null
 
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
@@ -997,14 +1016,14 @@ build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/co
 # The standard library's source, pinned by the SHA-256 of its tar.gz in the Rust
 # release's manifest; the Rust disk unpacks it where rust-analyzer looks for it.
 build/compat/rust-src.tgz: | build/compat/src
-	curl -fsSL -o $@.part $(RUST_SRC_URL)
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part $(RUST_SRC_URL)
 	echo "$(RUST_SRC_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	mv $@.part $@
 
 # rust-analyzer, Rust's language server (a static musl program), for the Rust
 # disk: it goes in as /usr/local/cargo/bin/rust-analyzer. x86-64 only.
 build/compat/rust-analyzer: | build/compat/src
-	curl -fsSL -o build/compat/src/rust-analyzer.tgz $(RUST_ANALYZER_URL)
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/rust-analyzer.tgz $(RUST_ANALYZER_URL)
 	echo "$(RUST_ANALYZER_SHA256)  build/compat/src/rust-analyzer.tgz" | sha256sum -c - >/dev/null
 	rm -rf build/compat/src/rust-analyzer && mkdir build/compat/src/rust-analyzer
 	tar xzf build/compat/src/rust-analyzer.tgz -C build/compat/src/rust-analyzer --strip-components=3 --wildcards '*/rust-analyzer-preview/bin/rust-analyzer'
@@ -1021,8 +1040,9 @@ build/compat/podman.img: test/compat/podmandisk.py test/compat/alpinedisk.py tes
 # made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
 # COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
 # and run a part of the suite: the images of its lanes, and those lanes.
-COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/python.img build/compat/podman.img
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/gitsuite.tar
 
+GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
 # Real open-source projects (zlib, Lua, LZ4, toml, semver, nanoid) as git repositories the web
@@ -1033,11 +1053,11 @@ build/compat/oss: test/compat/ossrepos.sh
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
 compat: build/bastios.elf $(COMPAT_DISKS) build/compat/oss
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests

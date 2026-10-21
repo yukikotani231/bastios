@@ -84,8 +84,8 @@ static int cmdline_has(const char *w) {
     return 0;
 }
 
-/* Process-context identifiers, off unless the command line says `pcid` and
- * the processor has them (CPUID.1:ECX bit 17): then a trap from user mode no
+/* Process-context identifiers, on when the processor has them (CPUID.1:ECX
+ * bit 17) unless the command line says `nopcid`: then a trap from user mode no
  * longer empties the TLB of the kernel's translations (boot.S,
  * bst_cpu_enter). Read by bst_cpu_enter on each processor. */
 uint64_t bst_pcid_on;
@@ -94,7 +94,7 @@ void bst_platform_init(void) {
     alias_init();
     uint32_t a = 1, b, c = 0, d;
     __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
-    bst_pcid_on = (c >> 17 & 1) && cmdline_has("pcid");
+    bst_pcid_on = (c >> 17 & 1) && !cmdline_has("nopcid");
 
     /* Each processor's task state segment is set up by bst_core_init (smp.c). */
 

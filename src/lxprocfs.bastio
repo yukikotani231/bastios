@@ -3077,14 +3077,39 @@ fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
   return rl + 1;
 }
 
-/// The target of /proc/P/fd/FD into o: "/dev/tty" for the console, the
-/// path of a file, a "pipe:[N]" or "socket:[N]" or "anon_inode:[...]"
-/// name for the rest. Returns its length, or NO_RESULT if fd is closed.
-fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
-  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+/// The row of k.croot that holds process p's root now. The threads of a
+/// group share one root, kept in the row of the thread running the group
+/// (group_move); the other rows hold older copies. So for a thread of the
+/// caller r's own group it is r's row, for another group its running
+/// thread's, unless that thread is in another mount namespace and has a
+/// root of its own.
+fn root_row(k: &mut Kernel, r: u64, p: u64) -> u64
+  requires kok(k) && r < NPROC && p < NPROC
+  ensures kok(k) && result < NPROC
+{
+  if pget(k.procs, p, F_TGID) == 0 {
+    return p;
+  }
+  let mut h = r;
+  if tgid(k.procs, r) != tgid(k.procs, p) {
+    h = holder(&mut k, tgid(k.procs, p));
+  }
+  if h == 0 || get(k.mns, h) != get(k.mns, p) {
+    return p;
+  }
+  return h;
+}
+
+/// The target of /proc/P/fd/FD into o, as process r reads it: "/dev/tty"
+/// for the console, the path of a file, a "pipe:[N]" or "socket:[N]" or
+/// "anon_inode:[...]" name for the rest. Returns its length, or NO_RESULT
+/// if fd is closed.
+fn fd_link(k: &mut Kernel, r: u64, p: u64, fd: u64, o: &mut Bytes) -> u64
+  requires kok(k) && r < NPROC && p < NPROC && blen(o) == PROC_OUT
   ensures kok(k) && blen(o) == PROC_OUT
   ensures result <= PROC_OUT || result == NO_RESULT
 {
+  let q = root_row(&mut k, r, p);
   let d = fd_look(k, fd_home(k, p), fd);
   if d.kind == K_BAD {
     return NO_RESULT;
@@ -3118,7 +3143,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
         let mut lg = balloc(FNAME_MAX);
         let ln = ns_back(k, ns_of(k, p), smaller(n, FNAME_MAX), &mut lg);
         if ln != NO_RESULT && ln < PROC_OUT {
-          let mut j = root_skip(k, p, lg, ln);
+          let mut j = root_skip(k, q, lg, ln);
           while j < ln
             invariant j <= ln && ln < PROC_OUT && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
           {
@@ -3129,7 +3154,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
           return a;
         }
         bfree(lg);
-        let mut j = root_skip(k, p, k.fs.xfer, n);
+        let mut j = root_skip(k, q, k.fs.xfer, n);
         while j < n
           invariant j <= n && n <= XFER && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
         {
@@ -3158,7 +3183,7 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
       // A directory opened before a chroot or pivot_root reads relative to
       // the process's root now (the root directory itself as "/"), when it
       // is inside it.
-      let rl = root_len(k, p);
+      let rl = root_len(k, q);
       if rl > 0 {
         let mut s0 = 0;
         if n > 0 && base_byte(k, p, h, 0) == 47 {
@@ -3167,9 +3192,9 @@ fn fd_link(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
         let mut inside = n >= s0 + rl && (n == s0 + rl || base_byte(k, p, h, s0 + rl) == 47);
         let mut i = 0;
         while inside && i < rl
-          invariant i <= rl && rl <= FNAME_MAX && s0 <= 1 && (!inside || s0 + rl <= n) && n <= FNAME_MAX && kok(k) && p < NPROC
+          invariant i <= rl && rl <= FNAME_MAX && s0 <= 1 && (!inside || s0 + rl <= n) && n <= FNAME_MAX && kok(k) && p < NPROC && q < NPROC
         {
-          if cast[u8](wget(k.croot, p * CWD_STRIDE + 1 + i) % 256) != base_byte(k, p, h, s0 + i) {
+          if cast[u8](wget(k.croot, q * CWD_STRIDE + 1 + i) % 256) != base_byte(k, p, h, s0 + i) {
             inside = false;
           }
           i = i + 1;
@@ -3289,7 +3314,7 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
     }
   }
   let mut lo = balloc(PROC_OUT);
-  let ln = fd_link(&mut k, t, fd, &mut lo);
+  let ln = fd_link(&mut k, pid, t, fd, &mut lo);
   if ln == NO_RESULT || ln == 0 || ln > FNAME_MAX || bget(lo, 0) != 47 {
     bfree(lo);
     return NO_RESULT;                       // not a path ("anon_inode:[file]")
@@ -3414,7 +3439,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       return EACCES;
     }
     let mut lo = balloc(PROC_OUT);
-    let ln = fd_link(&mut k, pfd / LXNFD, pfd % LXNFD, &mut lo);
+    let ln = fd_link(&mut k, pid, pfd / LXNFD, pfd % LXNFD, &mut lo);
     if ln == NO_RESULT {
       bfree(lo);
       return ENOENT;

@@ -384,12 +384,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
         # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
         # dragging and typing, driven through QEMU's monitor.
-        def monitor(*cmds):
+        def monitor(*cmds, gap=0.15):
             m3 = socket.socket(socket.AF_UNIX)
             m3.connect(mon_path)
             for c in cmds:
                 m3.sendall(c.encode() + b"\n")
-                time.sleep(0.15)
+                time.sleep(gap)
             time.sleep(0.4)
             m3.close()
         mark = len(out)
@@ -424,16 +424,34 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             # Alt-Tab brings up the window at the bottom: the picture changes,
             # and with three windows, three of them bring it back.
-            w, h, before = screendump()
+            # On a loaded host bwm can take longer than monitor's pause to
+            # redraw, so the picture is read again until it is the one
+            # wanted (10 s at most). Only the part above the task bar is
+            # compared: the bar's clock changes when a minute turns over.
+            def above_bar():
+                w, h, px = screendump()
+                return px[:w * 3 * 740]
+            def settle(want):
+                end = time.time() + 10
+                while True:
+                    px = above_bar()
+                    if want(px) or time.time() > end:
+                        return px
+            before = above_bar()
+            for _ in range(20):                 # the picture before, once it stops changing
+                px = above_bar()
+                if px == before:
+                    break
+                before = px
             monitor("sendkey alt-tab")
-            w, h, once = screendump()
+            once = settle(lambda px: px != before)
             monitor("sendkey alt-tab", "sendkey alt-tab")
-            w, h, thrice = screendump()
+            thrice = settle(lambda px: px == before)
             good = once != before and thrice == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Tab cycles the windows")
             fails += not good
             monitor("sendkey alt-tab", "sendkey alt-shift-tab")
-            w, h, back = screendump()
+            back = settle(lambda px: px == before)
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
             fails += not good
@@ -677,10 +695,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             # A double click on the title bar of the full-screen window puts it back.
             for step in ((200, -200), (12, -200), (0, -200), (0, -146)):     # from the task bar button (88, 756) onto the title bar at (300, 10)
                 monitor(f"mouse_move {step[0]} {step[1]}")
-            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
-            time.sleep(1.5)
-            w, h, px = screendump()
-            good = not (tuple(px[(3 * w + 1000) * 3:(3 * w + 1000) * 3 + 3]) == (40, 90, 200))
+            # bwm counts a second press within 400 ms of its clock as a double
+            # click, so the presses go 0.1 s apart. On a loaded host the guest
+            # can still see them further apart: two single clicks change
+            # nothing, and the double click is tried again, three times at most.
+            for _ in range(3):
+                monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+                time.sleep(1.5)
+                w, h, px = screendump()
+                good = not (tuple(px[(3 * w + 1000) * 3:(3 * w + 1000) * 3 + 3]) == (40, 90, 200))
+                if good:
+                    break
             print(("ok  " if good else "FAIL"), f"({name}) a double click on the title bar restores a maximized window")
             fails += not good
         monitor("sendkey ctrl-q")
@@ -709,19 +734,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = tuple(px[at:at + 3]) == (45, 45, 60)
             print(("ok  " if good else "FAIL"), f"({name}) the Menu button opens the launcher menu")
             fails += not good
-            monitor("mouse_move -34 -96")                          # onto Terminal
+            monitor("mouse_move -34 -120")                         # onto Terminal
             monitor("mouse_button 1", "mouse_button 0")
             good = until(b"bterm: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the menu's Terminal entry starts a terminal window")
             fails += not good
             time.sleep(1)
-            monitor("mouse_move 34 96")
+            monitor("mouse_move 34 120")
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.5)
-            monitor("mouse_move -34 -72")                          # onto Files
+            monitor("mouse_move -34 -96")                          # onto Files
             monitor("mouse_button 1", "mouse_button 0")
             good = until(b"bfiles: dir /", mark) and until(b"bfiles: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the menu's Files entry opens the file browser on /")
+            fails += not good
+            monitor("mouse_move 34 96")
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.5)
+            monitor("mouse_move -34 -72")                          # onto System
+            monitor("mouse_button 1", "mouse_button 0")
+            good = until(b"bsys: window", mark)
+            if good:
+                time.sleep(1)
+                monitor("sendkey r")
+                good = until(b"bsys: refreshed", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the menu's System entry opens the System window and r refreshes it")
             fails += not good
             monitor("mouse_move 34 72")
             monitor("mouse_button 1", "mouse_button 0")
@@ -854,6 +891,201 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # n in the list of bfiles makes a new empty file and edits it.
+        mark = len(out)
+        q.stdin.write(b"mkdir /tmp/nf\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/nf", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey n")
+            good = until(b"bfiles: edit /tmp/nf/untitled", mark)
+            monitor("sendkey h", "sendkey i", "sendkey ctrl-s")
+            good = good and until(b"bfiles: saved /tmp/nf/untitled", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) n in bfiles makes a new file and edits it")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/nf/untitled\r"); q.stdin.flush()
+        good = until(b"hi", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the new file holds what was typed")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # h in the list of bfiles shows and hides the names that start with a dot.
+        mark = len(out)
+        q.stdin.write(b"touch /tmp/nf/.dot; bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey h")
+            good = until(b"bfiles: dotfiles shown", mark)
+            monitor("sendkey h")
+            good = good and until(b"bfiles: dotfiles hidden", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
+        fails += not good
+        # s in the list sorts the files by size (largest first) or back by name.
+        if good:
+            monitor("sendkey s")
+            good = until(b"bfiles: sorted by size", mark)
+            monitor("sendkey s")
+            good = good and until(b"bfiles: sorted by name", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) s in bfiles toggles the sort order")
+        fails += not good
+        # R in the list reads the directory again (so a file made elsewhere shows).
+        if good:
+            monitor("sendkey shift-r")
+            good = until(b"bfiles: reloaded", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) R in bfiles reloads the list")
+        fails += not good
+        # G jumps to the end of the list and g back to the top.
+        if good:
+            mark2 = len(out)
+            monitor("sendkey shift-g")
+            good = until(b"bfiles: top", mark2)
+            mark2 = len(out)
+            monitor("sendkey g")
+            good = good and until(b"bfiles: top 0", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) g and G in bfiles jump to the top and the end")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # bview shows a PPM: a 2 x 2 red image becomes a block of pure red.
+        mark = len(out)
+        q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nf/t.ppm; bwm -n -c bview /tmp/nf/t.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            red = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = red > 1000
+        print(("ok  " if good else "FAIL"), f"({name}) bview shows an image")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # t in the list of bfiles opens a terminal in that directory.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey t")
+            good = until(b"bfiles: terminal in /tmp/nf", mark) and until(b"bterm: window", mark)
+        if good:
+            time.sleep(2)
+            for ch in "pwd > /tmp/nf/pwd.out":
+                monitor("sendkey " + {" ": "spc", ">": "shift-dot", "/": "slash", ".": "dot"}.get(ch, ch))
+            monitor("sendkey ret")
+            time.sleep(1.5)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/nf/pwd.out\r"); q.stdin.flush()
+        good = good and until(b"\n/tmp/nf", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) t in bfiles opens a terminal in the directory")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # N in the list of bfiles makes a new directory.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey shift-n")
+            good = until(b"bfiles: mkdir /tmp/nf/newdir", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) N in bfiles makes a new directory")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"[ -d /tmp/nf/newdir ] && echo i$((1+1))s\r"); q.stdin.flush()
+        good = until(b"i2s", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the new directory exists")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # r in the viewer of bfiles renames the file shown.
+        mark = len(out)
+        q.stdin.write(b"echo x > /tmp/nf/ab; bwm -n -c bfiles /tmp/nf/ab\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey r", "sendkey backspace", "sendkey backspace", "sendkey c", "sendkey d", "sendkey ret")
+            good = until(b"bfiles: renamed /tmp/nf/ab to /tmp/nf/cd", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) r in the bfiles viewer renames the file")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"[ -f /tmp/nf/cd ] && [ ! -e /tmp/nf/ab ] && echo i$((1+1))s\r"); q.stdin.flush()
+        good = until(b"i2s", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the renamed file is under its new name")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # c in the viewer of bfiles copies the file shown.
+        mark = len(out)
+        q.stdin.write(b"echo xyz > /tmp/nf/cp; bwm -n -c bfiles /tmp/nf/cp\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey c")
+            good = until(b"bfiles: copied /tmp/nf/cp to /tmp/nf/cp.copy", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/nf/cp.copy\r"); q.stdin.flush()
+        good = good and until(b"xyz", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) c in the bfiles viewer copies the file")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # D twice in the viewer of bfiles deletes the file it shows.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/nf/untitled\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey shift-d")
+            time.sleep(0.5)
+            monitor("sendkey shift-d")
+            good = until(b"bfiles: deleted /tmp/nf/untitled", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) D twice in the bfiles viewer deletes the file")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"ls /tmp/nf; echo d$((1+1))\r"); q.stdin.flush()
+        until(b"d2", mark)
+        good = b"untitled" not in bytes(out[mark:]).replace(b"ls /tmp/nf", b"")
+        print(("ok  " if good else "FAIL"), f"({name}) the deleted file is gone")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bterm (user/bterm.c): a terminal window with ash behind it. A line
         # typed is run and what it prints is read back off the screen, cell
         # by cell, from the window's contents.
@@ -895,6 +1127,54 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             print(("ok  " if good else "FAIL"), f"({name}) leaving the alternate screen brings the shell's screen back")
             if not good:
                 print("\n".join(l for l in lines if l))
+            fails += not good
+            # 256 colours (38;5;N and 48;5;N) and 24-bit colours (48;2;R;G;B, drawn as the nearest of them).
+            keys[";"] = "semicolon"
+            typed("printf '\\033[48;5;196m      \\033[48;5;21m      \\033[48;2;0;255;0m      \\033[0m'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            cnt = {c: 0 for c in ((255, 0, 0), (0, 0, 255), (0, 255, 0))}
+            for i in range(0, len(px) - 2, 3):
+                t = tuple(px[i:i + 3])
+                if t in cnt:
+                    cnt[t] += 1
+            good = all(v > 300 for v in cnt.values())
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal draws 256 and 24-bit colours")
+            if not good:
+                print(cnt)
+            fails += not good
+            # SGR 4 underlines the cells that follow (the two bottom pixel rows, in the foreground colour).
+            typed("printf '\\033[2J\\033[H\\033[38;5;196;4m      \\033[0m'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            red = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = 60 <= red <= 200
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal underlines text")
+            if not good:
+                print(red)
+            fails += not good
+            # SGR 9 strikes text through (two pixel rows); SGR 3 leans it: the red glyphs get wider.
+            typed("printf '\\033[2J\\033[H\\033[38;5;196;9m      \\033[0m'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            red = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = 60 <= red <= 200
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal strikes text through")
+            fails += not good
+            def red_width():
+                w, h, px = screendump()
+                xs = [(i // 3) % w for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0)]
+                return (max(xs) - min(xs) + 1) if xs else 0
+            typed("printf '\\033[2J\\033[H\\033[38;5;196mllllll\\033[0m'")
+            time.sleep(1.5)
+            plain = red_width()
+            typed("printf '\\033[2J\\033[H\\033[38;5;196;3mllllll\\033[0m'")
+            time.sleep(1.5)
+            lean = red_width()
+            good = plain > 0 and lean > plain
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal leans italic text")
+            if not good:
+                print(plain, lean)
             fails += not good
             # A key held down repeats (bwm does it, the events have none).
             monitor("sendkey z 2500")
@@ -962,6 +1242,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # Shift-Page Up and Shift-Page Down page through the history.
+            monitor("sendkey shift-pgup")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = not any(l.strip() == "l30" for l in lines) and any(l.strip().startswith("l") and len(l.strip()) == 3 for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Shift-Page Up scrolls the terminal back a page")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey shift-pgdn")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Shift-Page Down scrolls forward a page")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
@@ -1011,6 +1310,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print(("ok  " if good else "FAIL"), f"({name}) Shift-Insert pastes the copy into the terminal")
                 if not good:
                     print("\n".join(l for l in lines3 if l))
+                fails += not good
+            if good:
+                # A double click selects the word under the pointer and copies it.
+                erow = next((i for i, l in enumerate(lines3) if l.strip() == "# echo copied"), None)
+                good = erow is not None
+            if good:
+                # the pointer is at (326, ty + 200) after the paste
+                movep(100 - 326, (90 + erow * 16 + 8) - (90 + row * 16 + 8 + 200))
+                monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0")
+                time.sleep(0.7)
+                monitor("mouse_button 4", "mouse_button 0", "mouse_move 200 200")   # the middle button types the copy
+                time.sleep(1)
+                w, h, px = screendump()
+                lines4 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copiedcopiedecho" for l in lines4)
+                print(("ok  " if good else "FAIL"), f"({name}) a double click selects a word and copies it")
+                if not good:
+                    print("\n".join(l for l in lines4 if l))
                 fails += not good
             time.sleep(1)
             monitor("sendkey ctrl-q")

@@ -11,7 +11,8 @@
  * Home, End and Page keys and a click move and change the text, Ctrl-S saves
  * ("bfiles: saved PATH") and Ctrl-X goes back to the viewer, which shows the
  * file as it is on disk. "bfiles /path/to/file" opens the file in the viewer.
- * The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
+ * In the list n makes an empty file (untitled, untitled2, ...) and opens it
+ * in the editor. The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
  * window is open and "bfiles: dir PATH" or "bfiles: view PATH" as it
  * moves.
  * It is part of the bterm program, which runs it when started as "bfiles"
@@ -23,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 
@@ -45,6 +47,12 @@ static struct bf_ent bf_ents[BF_MAXENT];
 static int bf_nent, bf_top;                     /* the entries (".." is the first) and the first one shown */
 static char bf_cwd[PATH_MAX] = "/";
 static int bf_viewing;
+static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
+static int bf_renaming;                   /* r was pressed in the viewer: the new name is being typed */
+static char bf_rname[NAME_MAX + 1];
+static int bf_rlen;
+static int bf_hidden = 1;                 /* names starting with a dot are left out of the list (h toggles) */
+static int bf_stale;                      /* a file was made: the list must be read again */
 static char bf_vpath[PATH_MAX];
 static char bf_vtext[BF_VIEWMAX];
 static const char *bf_vline[BF_MAXLINES];       /* each line of the file, cut at COLS characters */
@@ -57,11 +65,15 @@ static int bf_esc, bf_escnum;                   /* where we are in an ESC [ ... 
 static size_t bf_erow[BF_MAXLINES + 1];         /* where each display row starts while editing */
 static int bf_nerow;
 
+static int bf_by_size;                          /* 1: files largest first, 0: by name */
+
 static int bf_cmp(const void *a, const void *b)
 {
     const struct bf_ent *x = a, *y = b;
     if (x->dir != y->dir)
         return y->dir - x->dir;
+    if (bf_by_size && x->size != y->size)
+        return x->size < y->size ? 1 : -1;
     return strcmp(x->name, y->name);
 }
 
@@ -95,6 +107,8 @@ static void bf_load_dir(void)
     struct dirent *e;
     while ((e = readdir(d)) != NULL && bf_nent < BF_MAXENT) {
         if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        if (bf_hidden && e->d_name[0] == '.')
             continue;
         char p[PATH_MAX + NAME_MAX + 2];
         struct stat st;
@@ -172,8 +186,13 @@ static void bf_paint(void)
     uint32_t bg = 0x00101018, fg = 0x00D8D8D8, hd = 0x00305090;
     if (bf_viewing) {
         char h[BF_COLS + 1];
-        snprintf(h, sizeof h, "%s", bf_vpath);
-        bf_put_row(0, h, strlen(h), 0x00FFFFFF, hd);
+        if (bf_renaming)
+            snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
+        else if (bf_confirm)
+            snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_vpath);
+        else
+            snprintf(h, sizeof h, "%s", bf_vpath);
+        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
             char t[BF_COLS + 1];
@@ -312,6 +331,146 @@ static void be_start(void)
     fflush(stdout);
 }
 
+/* n in the directory list: makes an empty file ("untitled", "untitled2",
+ * ...) here and opens it in the editor. */
+static void bf_new_file(void)
+{
+    char path[PATH_MAX];
+    for (int i = 1; i < 100; i++) {
+        char name[32];
+        if (i == 1)
+            snprintf(name, sizeof name, "untitled");
+        else
+            snprintf(name, sizeof name, "untitled%d", i);
+        bf_path_of(name, path, sizeof path);
+        int f = open(path, O_WRONLY | O_CREAT | O_EXCL, 0644);
+        if (f < 0)
+            continue;
+        close(f);
+        printf("bfiles: new %s\n", path);
+        fflush(stdout);
+        bf_load_file(path);
+        be_start();
+        bf_stale = 1;
+        return;
+    }
+}
+
+/* N in the directory list: makes an empty directory ("newdir", "newdir2",
+ * ...) here and shows it in the list. */
+static void bf_new_dir(void)
+{
+    char path[PATH_MAX];
+    for (int i = 1; i < 100; i++) {
+        char name[32];
+        if (i == 1)
+            snprintf(name, sizeof name, "newdir");
+        else
+            snprintf(name, sizeof name, "newdir%d", i);
+        bf_path_of(name, path, sizeof path);
+        if (mkdir(path, 0755) != 0)
+            continue;
+        printf("bfiles: mkdir %s\n", path);
+        fflush(stdout);
+        bf_load_dir();
+        return;
+    }
+}
+
+/* r in the viewer: type a new name (in the same directory), Enter renames,
+ * Escape cancels. */
+static void bf_rename_key(int c)
+{
+    if (c == 27) {
+        bf_renaming = 0;
+    } else if (c == '\r' || c == '\n') {
+        char *sl = strrchr(bf_vpath, '/');
+        char to[PATH_MAX];
+        snprintf(to, sizeof to, "%.*s%s", (int)(sl - bf_vpath + 1), bf_vpath, bf_rname);
+        bf_renaming = 0;
+        if (bf_rlen > 0 && strchr(bf_rname, '/') == NULL && rename(bf_vpath, to) == 0) {
+            printf("bfiles: renamed %s to %s\n", bf_vpath, to);
+            snprintf(bf_vpath, sizeof bf_vpath, "%s", to);
+            bf_stale = 1;
+        } else {
+            printf("bfiles: cannot rename %s\n", bf_vpath);
+        }
+        fflush(stdout);
+    } else if (c == 127 || c == 8) {
+        if (bf_rlen > 0)
+            bf_rname[--bf_rlen] = 0;
+    } else if (c >= 32 && c < 127 && bf_rlen < NAME_MAX) {
+        bf_rname[bf_rlen++] = (char)c;
+        bf_rname[bf_rlen] = 0;
+    }
+}
+
+/* c in the viewer: copies the file shown to "NAME.copy" ("NAME.copy2", ...)
+ * next to it. */
+static void bf_copy_file(void)
+{
+    int in = open(bf_vpath, O_RDONLY);
+    if (in < 0)
+        return;
+    char to[PATH_MAX];
+    int out = -1;
+    for (int i = 1; i < 100 && out < 0; i++) {
+        if (i == 1)
+            snprintf(to, sizeof to, "%s.copy", bf_vpath);
+        else
+            snprintf(to, sizeof to, "%s.copy%d", bf_vpath, i);
+        out = open(to, O_WRONLY | O_CREAT | O_EXCL, 0644);
+    }
+    if (out < 0) {
+        close(in);
+        return;
+    }
+    char buf[4096];
+    ssize_t n;
+    int bad = 0;
+    while ((n = read(in, buf, sizeof buf)) > 0)
+        if (write(out, buf, (size_t)n) != n) {
+            bad = 1;
+            break;
+        }
+    close(in);
+    close(out);
+    if (bad || n < 0) {
+        unlink(to);
+        printf("bfiles: cannot copy %s\n", bf_vpath);
+    } else {
+        printf("bfiles: copied %s to %s\n", bf_vpath, to);
+        bf_stale = 1;
+    }
+    fflush(stdout);
+}
+
+/* t in the directory list: opens a terminal window in the directory shown.
+ * The terminal is a grandchild, so nothing is left to be waited for. */
+/* Starts /bin/bterm in the directory shown under the name NAME with ARG, from a double
+ * fork so that it needs no wait; says "bfiles: MSG". */
+static void bf_spawn(const char *name, const char *arg, const char *msg)
+{
+    pid_t p = fork();
+    if (p == 0) {
+        if (fork() == 0) {
+            char *argv[] = { (char *)name, (char *)arg, NULL };
+            for (int fd = 3; fd < 64; fd++)
+                close(fd);
+            if (chdir(bf_cwd) == 0)
+                execv("/bin/bterm", argv);
+            _exit(127);
+        }
+        _exit(0);
+    }
+    if (p > 0) {
+        int st;
+        waitpid(p, &st, 0);
+        printf("bfiles: %s %s\n", msg, arg ? arg : bf_cwd);
+        fflush(stdout);
+    }
+}
+
 static void be_key(int c)
 {
     int page = BF_ROWS - 2;
@@ -420,6 +579,10 @@ static void bf_click(int row)
 {
     if (bf_viewing) {
         bf_viewing = 0;
+        if (bf_stale) {
+            bf_stale = 0;
+            bf_load_dir();
+        }
         return;
     }
     if (row < 1)
@@ -483,11 +646,66 @@ static int bfiles_main(int argc, char **argv)
             break;
         if (t == BWM_KEY) {
             int c = ((struct bwm_key *)buf)->ch;
-            if (bf_editing)
+            if (bf_renaming) {
+                bf_rename_key(c);
+                bf_paint();
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    break;
+                continue;
+            }
+            int was_confirm = bf_confirm;
+            bf_confirm = 0;
+            if (c == 'D' && bf_viewing && !bf_editing) {
+                if (was_confirm) {
+                    if (unlink(bf_vpath) == 0) {
+                        printf("bfiles: deleted %s\n", bf_vpath);
+                        bf_viewing = 0;
+                        bf_load_dir();
+                    } else {
+                        printf("bfiles: cannot delete %s\n", bf_vpath);
+                    }
+                    fflush(stdout);
+                } else {
+                    bf_confirm = 1;
+                }
+            } else if (bf_editing)
                 be_key(c);
+            else if (c == 'r' && bf_viewing) {
+                const char *b = strrchr(bf_vpath, '/');
+                snprintf(bf_rname, sizeof bf_rname, "%s", b ? b + 1 : bf_vpath);
+                bf_rlen = strlen(bf_rname);
+                bf_renaming = 1;
+            } else if (c == 'c' && bf_viewing)
+                bf_copy_file();
+            else if (c == 'i' && bf_viewing)
+                bf_spawn("bview", bf_vpath, "image");
             else if (c == 'e' && bf_viewing)
                 be_start();
-            else if (c == 'j')
+            else if (c == 'n' && !bf_viewing)
+                bf_new_file();
+            else if (c == 'R' && !bf_viewing) {
+                bf_load_dir();
+                printf("bfiles: reloaded %d entries\n", bf_nent);
+                fflush(stdout);
+            } else if (c == 's' && !bf_viewing) {
+                bf_by_size = !bf_by_size;
+                printf("bfiles: sorted by %s\n", bf_by_size ? "size" : "name");
+                fflush(stdout);
+                bf_load_dir();
+            } else if (c == 'h' && !bf_viewing) {
+                bf_hidden = !bf_hidden;
+                printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
+                fflush(stdout);
+                bf_load_dir();
+            } else if (c == 't' && !bf_viewing) {
+                bf_spawn("bterm", NULL, "terminal in");
+            } else if (c == 'N' && !bf_viewing)
+                bf_new_dir();
+            else if (c == 'g' || c == 'G') {
+                bf_scroll(c == 'g' ? -1000000 : 1000000);
+                printf("bfiles: top %d\n", bf_viewing ? bf_vtop : bf_top);
+                fflush(stdout);
+            } else if (c == 'j')
                 bf_scroll(1);
             else if (c == 'k')
                 bf_scroll(-1);
@@ -496,9 +714,13 @@ static int bfiles_main(int argc, char **argv)
             else if (c == 'b')
                 bf_scroll(-(BF_ROWS - 2));
             else if (c == 127 || c == 8) {
-                if (bf_viewing)
+                if (bf_viewing) {
                     bf_viewing = 0;
-                else {
+                    if (bf_stale) {
+                        bf_stale = 0;
+                        bf_load_dir();
+                    }
+                } else {
                     bf_go_up();
                     bf_load_dir();
                 }

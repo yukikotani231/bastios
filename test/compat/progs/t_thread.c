@@ -3,6 +3,7 @@
 #include "compat.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -14,6 +15,8 @@
 #include <sys/stat.h>
 #include <signal.h>
 #include <stdint.h>
+#include <sys/resource.h>
+#include <time.h>
 
 static int counter;
 static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
@@ -146,6 +149,53 @@ static int task_fd(void) {
     return ok && n == 1;
 }
 
+/* /proc/self/fd/N read from another thread after the process's chroot:
+ * names inside the new root read from it ("/tt_sub", not "/tt_root/tt_sub"),
+ * whichever thread reads them (runc reads its /sys/fs/cgroup descriptor back
+ * this way). The descriptors are read through /proc/self/fd opened before
+ * the chroot, as the root has no /proc. */
+static int rl_pipe[2], rl_dfd, rl_ffd, rl_pfd;
+static void *rl_reader(void *a) {
+    (void)a;
+    char c, b[64];
+    if (read(rl_pipe[0], &c, 1) != 1) return 0;
+    char n1[16], n2[16];
+    snprintf(n1, sizeof n1, "%d", rl_dfd);
+    snprintf(n2, sizeof n2, "%d", rl_ffd);
+    ssize_t n = readlinkat(rl_pfd, n1, b, sizeof b - 1);
+    int ok = n == 7 && memcmp(b, "/tt_sub", 7) == 0;
+    n = readlinkat(rl_pfd, n2, b, sizeof b - 1);
+    ok = ok && n == 5 && memcmp(b, "/tt_f", 5) == 0;
+    return (void *)(long)ok;
+}
+static int fd_link_after_chroot(void) {
+    pid_t c = fork();
+    if (c == 0) {
+        mkdir("tt_root", 0755);
+        mkdir("tt_root/tt_sub", 0755);
+        int f = open("tt_root/tt_f", O_CREAT | O_WRONLY, 0644);
+        if (f < 0 || pipe(rl_pipe) != 0) _exit(2);
+        close(f);
+        rl_pfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+        pthread_t t;
+        void *r = 0;
+        if (rl_pfd < 0 || pthread_create(&t, 0, rl_reader, 0) != 0) _exit(3);
+        usleep(20000);                    /* the reader runs, then waits */
+        if (chroot("tt_root") != 0 || chdir("/") != 0) _exit(4);
+        rl_dfd = open("/tt_sub", O_RDONLY | O_DIRECTORY);
+        rl_ffd = open("/tt_f", O_RDONLY);
+        if (rl_dfd < 0 || rl_ffd < 0 || write(rl_pipe[1], "x", 1) != 1) _exit(5);
+        if (pthread_join(t, &r) != 0) _exit(6);
+        _exit(r ? 0 : 1);
+    }
+    int st;
+    int ok = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    unlink("tt_root/tt_f");
+    rmdir("tt_root/tt_sub");
+    rmdir("tt_root");
+    return ok;
+}
+
 /* A thread that has ended does not hand its id to the next one at once. */
 static void *tid_of(void *a) { (void)a; return (void *)(long)gettid(); }
 static int tids_differ(void) {
@@ -260,6 +310,62 @@ static int spawn_keeps_fds(void) {
     return bad_fd == 0;
 }
 
+/* fork while another thread writes two pages in turn, the lower one first:
+ * the child's copy must be the parent's memory at one moment, as on Linux,
+ * so the higher page never holds a newer count than the lower one. */
+static volatile long *pair_lo, *pair_hi;
+static volatile int pair_go;
+static void *pair_writer(void *x) {
+    (void)x;
+    for (long i = 1; pair_go; i++) { *pair_lo = i; *pair_hi = i; }
+    return 0;
+}
+static int fork_snapshot(void) {
+    char *m = mmap(0, 3 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) return 0;
+    pair_lo = (long *)m;
+    pair_hi = (long *)(m + 2 * 4096);
+    pair_go = 1;
+    pthread_t w;
+    if (pthread_create(&w, 0, pair_writer, 0) != 0) return 0;
+    while (*pair_lo < 1000) {}            /* the writer is running */
+    int bad = 0, rounds = 300;
+    for (int i = 0; i < rounds && !bad; i++) {
+        pid_t c = fork();
+        if (c == 0) _exit(*pair_hi > *pair_lo ? 1 : 0);
+        int st = 0;
+        if (c < 0 || waitpid(c, &st, 0) != c || !WIFEXITED(st)) { bad = -1; break; }
+        if (WEXITSTATUS(st) != 0) bad = i + 1;
+    }
+    pair_go = 0;
+    pthread_join(w, 0);
+    munmap(m, 3 * 4096);
+    if (bad > 0) { fail("fork %d: the child saw the higher page newer than the lower one", bad); return -1; }
+    return bad == 0;
+}
+
+/* The process's CPU clock, times() and getrusage(RUSAGE_SELF) count every
+   thread, those that ended too: a thread spins for 0.3 s of its own CPU
+   time and is joined, and the process has used at least that much more
+   than the main thread. */
+static double cpu_clock(clockid_t c) { struct timespec t; clock_gettime(c, &t); return t.tv_sec + t.tv_nsec / 1e9; }
+static void *spin_cpu(void *a) {
+    (void)a;
+    while (cpu_clock(CLOCK_THREAD_CPUTIME_ID) < 0.3) {}
+    return 0;
+}
+static int process_cpu(void) {
+    pthread_t x;
+    if (pthread_create(&x, 0, spin_cpu, 0) != 0 || pthread_join(x, 0) != 0) return 0;
+    double proc = cpu_clock(CLOCK_PROCESS_CPUTIME_ID), self = cpu_clock(CLOCK_THREAD_CPUTIME_ID);
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    double ru_user = ru.ru_utime.tv_sec + ru.ru_utime.tv_usec / 1e6;
+    if (proc - self < 0.25) { fail("CLOCK_PROCESS_CPUTIME_ID %.3f s, the main thread %.3f s", proc, self); return -1; }
+    if (ru_user < 0.25) { fail("getrusage user time %.3f s", ru_user); return -1; }
+    return 1;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -287,9 +393,18 @@ int main(void) {
     EXPECT("/proc/self/task lists the threads, and /proc/self/task/TID has their files", task_dir());
     EXPECT("/proc/self/task/TID/fd/N and ns/ are the process's", task_fd());
     EXPECT("threads that ended and began one after another have different ids", tids_differ());
+    EXPECT("/proc/self/fd/N read by another thread after a chroot names the file from the new root", fd_link_after_chroot());
     EXPECT("a thread keeps its descriptors while another spawns a child", spawn_keeps_fds());
     EXPECT("clone3: CLONE_CLEAR_SIGHAND, and what it refuses", clone3_clear_sighand());
     EXPECT("clone3: a fork child", clone3_fork());
+    if (begin("the process's CPU time counts its threads, those that ended too")) {
+        int r = process_cpu();
+        if (r == 1) pass(); else if (r == 0) fail("pthread_create or pthread_join failed");
+    }
+    if (begin("fork while another thread writes copies one moment of the parent")) {
+        int r = fork_snapshot();
+        if (r == 1) pass(); else if (r == 0) fail("mmap, pthread_create, fork or waitpid failed");
+    }
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");

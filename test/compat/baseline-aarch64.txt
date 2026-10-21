@@ -740,6 +740,7 @@ t_more: readdir counts the files
 t_more: renameat2 RENAME_NOREPLACE
 t_more: sched_getcpu
 t_more: sem_open in /dev/shm
+t_more: sem_open past 64 mappings: mapping one again by name gives the same page
 t_more: sendfile file to file
 t_more: sendfile needs a readable source
 t_more: sendfile to a pipe
@@ -1255,7 +1256,9 @@ t_thread: 4 threads, mutex
 t_thread: a thread keeps its descriptors while another spawns a child
 t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
 t_thread: clone3: a fork child
+t_thread: the process's CPU time counts its threads, those that ended too
 t_thread: condition variable
+t_thread: fork while another thread writes copies one moment of the parent
 t_thread: exit_group while another thread runs keeps its code
 t_thread: gettid differs in a thread
 t_thread: pthread_create + join
@@ -1619,6 +1622,7 @@ t_userns: the root of a user namespace gives up capabilities
 t_userns: a user namespace made inside one mounts in a mount namespace of its own
 t_userns: an unprivileged user mounts nothing
 t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
+t_more: what a mapping wrote past the end of a file reads as zeros
 t_inotify: two hundred and fifty timerfds at once
 t_timens: an offset that overflows the clock is ERANGE
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows

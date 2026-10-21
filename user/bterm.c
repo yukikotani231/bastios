@@ -14,11 +14,14 @@
 #include <stdlib.h>
 #include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <termios.h>
 
 #include "bwmlib.h"
 #include "font8x8.h"
 #include "bfiles.h"
+#include "bsys.h"
+#include "bview.h"
 
 #define MAXC 160                          /* the most columns and rows the grid can have */
 #define MAXR 60
@@ -36,12 +39,35 @@ static const uint32_t palette[16] = {
     0x666666, 0xF14C4C, 0x23D18B, 0xF5F543, 0x3B8EEA, 0xD670D6, 0x29B8DB, 0xFFFFFF,
 };
 
-struct cell { unsigned char ch, fg, bg; };
+/* The colour of index i of the xterm 256-colour palette: the 16 above, a 6 x 6 x 6 cube, then 24 greys. */
+static uint32_t pal256(int i)
+{
+    if (i < 16)
+        return palette[i];
+    if (i >= 232) {
+        unsigned g = 8 + 10 * (i - 232);
+        return g << 16 | g << 8 | g;
+    }
+    static const unsigned char lv[6] = { 0, 95, 135, 175, 215, 255 };
+    i -= 16;
+    return (uint32_t)lv[i / 36] << 16 | (uint32_t)lv[i / 6 % 6] << 8 | lv[i % 6];
+}
+
+/* The nearest cube index to a 24-bit colour. */
+static int nearest256(int r, int g, int b)
+{
+    int q[3] = { r, g, b };
+    for (int k = 0; k < 3; k++)
+        q[k] = q[k] < 48 ? 0 : q[k] < 115 ? 1 : (q[k] - 35) / 40;
+    return 16 + 36 * q[0] + 6 * q[1] + q[2];
+}
+
+struct cell { unsigned char ch, fg, bg, attr;      /* attr: 1 underline, 2 italic, 4 strike-through */ };
 static struct cell grid[MAXR][MAXC];
 static uint32_t *pix;            /* the window's pixels: bwm's shared memory when it gave some */
 static int shared;
 static unsigned char dirty[MAXR];
-static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse;
+static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse, cur_attr;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
 static int priv;                          /* the CSI had a '?' prefix */
 static int top, bot = 23;           /* the scroll region, inclusive */
@@ -52,6 +78,8 @@ static int main_cx, main_cy, alt;
 static struct cell hist[HIST][MAXC];
 static int hist_n, hist_head;             /* how many are kept; where the next one goes */
 static int back;                          /* how many lines the view is scrolled back (0 is the live screen) */
+static int clicks, click_r, click_c;       /* clicks in a row on one cell (a double click selects a word, a triple one the line) */
+static long click_ms;
 static int sel_on, selecting;             /* a selection is lit; the button is still down */
 static int sel_ar, sel_ac, sel_br, sel_bc;   /* where it began and where the pointer is, as cells */
 #define CLIP_FILE "/tmp/bwm.clip"         /* what is selected, for any terminal to paste */
@@ -61,6 +89,7 @@ static void put_cell(int r, int c, unsigned char ch)
     grid[r][c].ch = ch;
     grid[r][c].fg = cur_fg + (bold && cur_fg < 8 ? 8 : 0);
     grid[r][c].bg = cur_bg;
+    grid[r][c].attr = cur_attr;
     dirty[r] = 1;
 }
 
@@ -70,6 +99,7 @@ static void clear_cells(int r, int c0, int c1)
         grid[r][c].ch = ' ';
         grid[r][c].fg = 7;
         grid[r][c].bg = cur_bg;
+        grid[r][c].attr = 0;
     }
     dirty[r] = 1;
 }
@@ -172,7 +202,7 @@ static void draw_cell(int r, int c, int cursor)
 {
     const struct cell *e = &view_row(r)[c];
     int fg = e->fg, bg = e->bg;
-    uint32_t f = palette[fg & 15], b = palette[bg & 15];
+    uint32_t f = pal256(fg), b = pal256(bg);
     if (!back && (cursor || selected(r, c))) {
         uint32_t t = f;
         f = b;
@@ -183,8 +213,14 @@ static void draw_cell(int r, int c, int cursor)
     int ch = e->ch < 128 ? e->ch : ' ';
     for (int y = 0; y < CH; y++) {
         unsigned bits = font8x8[ch * 8 + y / 2];
-        for (int x = 0; x < CW; x++, bits >>= 1)
-            pix[(r * CH + y) * WIDTH + c * CW + x] = bits & 1 ? f : b;
+        int lean = !(e->attr & 2) ? 0 : y < 5 ? 1 : y >= 11 ? -1 : 0;        /* italic: the top leans right, the bottom left */
+        for (int x = 0; x < CW; x++) {
+            int sx = x - lean;
+            int on = sx >= 0 && sx < CW && (bits >> sx & 1);
+            if (((e->attr & 1) && y >= CH - 2) || ((e->attr & 4) && (y == CH / 2 - 1 || y == CH / 2)))
+                on = 1;
+            pix[(r * CH + y) * WIDTH + c * CW + x] = on ? f : b;
+        }
     }
 }
 
@@ -283,7 +319,13 @@ static void csi(int final)
             params[nparam++] = 0;
         for (int i = 0; i < nparam; i++) {
             int p = params[i];
-            if (p == 0) { cur_fg = 7; cur_bg = 0; bold = 0; reverse = 0; }
+            if (p == 0) { cur_fg = 7; cur_bg = 0; bold = 0; reverse = 0; cur_attr = 0; }
+            else if (p == 3) cur_attr |= 2;
+            else if (p == 4) cur_attr |= 1;
+            else if (p == 9) cur_attr |= 4;
+            else if (p == 23) cur_attr &= ~2;
+            else if (p == 24) cur_attr &= ~1;
+            else if (p == 29) cur_attr &= ~4;
             else if (p == 1) bold = 1;
             else if (p == 22) bold = 0;
             else if (p == 7) { int t = cur_fg; cur_fg = cur_bg; cur_bg = t; reverse = !reverse; }
@@ -292,6 +334,17 @@ static void csi(int final)
             else if (p >= 40 && p <= 47) cur_bg = p - 40;
             else if (p == 49) cur_bg = 0;
             else if (p >= 90 && p <= 97) cur_fg = p - 90 + 8;
+            else if (p >= 100 && p <= 107) cur_bg = p - 100 + 8;
+            else if (p == 38 || p == 48) {                /* 38;5;N or 38;2;R;G;B (48 for the background) */
+                int *to = p == 38 ? &cur_fg : &cur_bg;
+                if (i + 2 < nparam && params[i + 1] == 5) {
+                    *to = params[i + 2] & 255;
+                    i += 2;
+                } else if (i + 4 < nparam && params[i + 1] == 2) {
+                    *to = nearest256(params[i + 2] & 255, params[i + 3] & 255, params[i + 4] & 255);
+                    i += 4;
+                }
+            }
         }
         break;
     default:
@@ -442,6 +495,42 @@ static void copy_selection(void)
     }
 }
 
+/* A click on cell (r, c) that follows another within 400 ms on the same cell
+ * is a double click: it selects the run of non-blank characters under it. A
+ * third makes the whole row the selection. */
+static void click_select(int r, int c)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    long now = ts.tv_sec * 1000L + ts.tv_nsec / 1000000L;
+    if (clicks > 0 && r == click_r && c == click_c && now - click_ms < 400)
+        clicks++;
+    else
+        clicks = 1;
+    click_r = r; click_c = c; click_ms = now;
+    if (clicks < 2 || r >= rows)
+        return;
+    if (clicks >= 3) {
+        sel_ar = sel_br = r;
+        sel_ac = 0;
+        sel_bc = cols - 1;
+        clicks = 0;
+    } else {
+        if (grid[r][c].ch <= ' ')
+            return;
+        int a = c, b = c;
+        while (a > 0 && grid[r][a - 1].ch > ' ')
+            a--;
+        while (b < cols - 1 && grid[r][b + 1].ch > ' ')
+            b++;
+        sel_ar = sel_br = r;
+        sel_ac = a;
+        sel_bc = b;
+    }
+    sel_on = 1;
+    copy_selection();
+}
+
 /* Types the clipboard into the shell. */
 static void paste(int m)
 {
@@ -460,6 +549,10 @@ int main(int argc, char **argv)
     const char *base = strrchr(argv[0], '/');
     if (strcmp(base ? base + 1 : argv[0], "bfiles") == 0)
         return bfiles_main(argc, argv);
+    if (strcmp(base ? base + 1 : argv[0], "bsys") == 0)
+        return bsys_main();
+    if (strcmp(base ? base + 1 : argv[0], "bview") == 0)
+        return bview_main(argc, argv);
     unsigned sw, sh;
     bwm_screen(&sw, &sh);                         /* a small screen gets a smaller grid than 80 x 24 */
     if (sw >= 16 + MINC * CW && sh >= 80 + MINR * CH) {
@@ -542,6 +635,21 @@ int main(int argc, char **argv)
             if (t == BWM_KEY) {
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
+                if (k->ch == BWM_KEY_SCROLL_UP || k->ch == BWM_KEY_SCROLL_DOWN) {
+                    if (!alt) {
+                        int nb = back + (k->ch == BWM_KEY_SCROLL_UP ? rows - 1 : -(rows - 1));
+                        nb = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
+                        if (nb != back) {
+                            back = nb;
+                            memset(dirty, 1, sizeof dirty);
+                            printf("bterm: back %d\n", back);
+                            fflush(stdout);
+                            if (repaint(fd, id, &ocx, &ocy) != 0)
+                                break;
+                        }
+                    }
+                    continue;
+                }
                 if (back) {
                     back = 0;                    /* typing brings the live screen back */
                     memset(dirty, 1, sizeof dirty);
@@ -587,10 +695,13 @@ int main(int argc, char **argv)
                     memset(dirty, 1, sizeof dirty);
                 } else if (!(e->buttons & 1) && selecting) {
                     selecting = 0;               /* the release ends it: a drag is copied, a click only clears */
-                    if (sel_ar != sel_br || sel_ac != sel_bc)
+                    if (sel_ar != sel_br || sel_ac != sel_bc) {
                         copy_selection();
-                    else
+                        clicks = 0;
+                    } else {
                         sel_on = 0;
+                        click_select(er, ec);
+                    }
                     memset(dirty, 1, sizeof dirty);
                 }
                 if ((e->buttons & 4) && !mid) {

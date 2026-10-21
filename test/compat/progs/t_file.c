@@ -49,6 +49,17 @@ int main(void) {
         EXPECT("O_EXCL on existing", (x = open("cf_a", O_RDWR | O_CREAT | O_EXCL, 0644)) == -1 && errno == EEXIST);
         if (x >= 0) close(x);
     }
+    {
+        /* O_CREAT | O_EXCL never follows a link at the end, a dangling one included. */
+        int x = -1;
+        unlink("cf_dl");
+        EXPECT("O_EXCL on a dangling symbolic link is EEXIST and makes nothing",
+               symlink("cf_dl_target", "cf_dl") == 0 &&
+               (x = open("cf_dl", O_WRONLY | O_CREAT | O_EXCL, 0644)) == -1 && errno == EEXIST &&
+               access("cf_dl_target", F_OK) == -1 && errno == ENOENT);
+        if (x >= 0) close(x);
+        unlink("cf_dl");
+    }
     EXPECT("open missing is ENOENT", open("cf_none", O_RDONLY) == -1 && errno == ENOENT);
     EXPECT("O_APPEND", (fd = open("cf_a", O_WRONLY | O_APPEND)) >= 0 && write(fd, "XY", 2) == 2 &&
            close(fd) == 0 && stat("cf_a", &st) == 0 && st.st_size == 5);

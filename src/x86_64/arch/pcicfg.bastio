@@ -9,11 +9,17 @@ const PCI_ADDR: u64 = 0xCF8;
 const PCI_DATA: u64 = 0xCFC;
 const PCI_ENABLE: u64 = 0x80000000;   // bit 31 of the address: a config cycle
 const PCI_NONE: u64 = 65536;
+const PCI_BUS_END: u64 = 256;         // PCI_NONE / 256: one past the last bus
 
-struct Pci { addr: PortIo, data: PortIo }
+/// `top` is the highest bus with a device on it (pci_survey): the search
+/// for a device need not look past it. Each probe of an empty slot costs
+/// two port accesses, which are VM exits in a guest, so walking all 256
+/// buses is the slow part of finding a device (0.2 s a search in a guest
+/// on a cloud host).
+struct Pci { addr: PortIo, data: PortIo, top: u64 }
 
 spec fn pci_ok(p: &Pci) -> bool {
-  port_count(p.addr) == 4 && port_count(p.data) == 4
+  port_count(p.addr) == 4 && port_count(p.data) == 4 && p.top < PCI_BUS_END
 }
 
 fn pci_free(ports: &mut Ports, p: Pci)
@@ -45,3 +51,43 @@ fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
   pio_out32(&mut p.data, 0, cast[u32](v));
 }
 
+
+/// Finds the highest bus with a device in its slot 0..31 function 0, once,
+/// at the start. Nothing is later put on a bus above it.
+fn pci_survey(p: &mut Pci)
+  requires pci_ok(p)
+  ensures pci_ok(p)
+{
+  let mut top = 0;
+  let mut b = 0;
+  while b < PCI_BUS_END
+    invariant b <= PCI_BUS_END && top < PCI_BUS_END && pci_ok(p)
+  {
+    let mut s = 0;
+    let mut found = false;
+    while s < 32 && !found
+      invariant s <= 32 && b < PCI_BUS_END && pci_ok(p)
+    {
+      if pci_read(&mut p, b * 256 + s * 8, 0) != 0xFFFFFFFF {
+        found = true;
+      }
+      s = s + 1;
+    }
+    if found {
+      top = b;
+    }
+    b = b + 1;
+  }
+  p.top = top;
+}
+
+/// The first bus from `b` on that may hold a device, or PCI_BUS_END.
+fn pci_bus_from(p: &mut Pci, b: u64) -> u64
+  requires pci_ok(p) && b <= PCI_BUS_END
+  ensures b <= result && result <= PCI_BUS_END
+{
+  if b <= p.top {
+    return b;
+  }
+  return PCI_BUS_END;
+}
