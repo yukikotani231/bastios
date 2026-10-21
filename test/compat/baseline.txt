@@ -997,6 +997,7 @@ t_ovpivot: stat finds /bin/sh as a regular file
 t_ovpivot: lstat sees the link
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
+t_path: a name below a directory, a file or a link that replaced a directory
 t_path: a name ending in / or /. must be a directory
 t_path: a path in unmapped memory is EFAULT
 t_path: a set-group-ID bit at create is kept only for a member of the group
