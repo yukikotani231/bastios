@@ -85,6 +85,8 @@ rs() {  # NAME URL TAG
 
 rs semver https://github.com/dtolnay/semver 1.0.23
 rs fastrand https://github.com/smol-rs/fastrand v2.3.0
+rs itoa https://github.com/dtolnay/itoa 1.0.11
+rs either https://github.com/rayon-rs/either 1.13.0
 
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
