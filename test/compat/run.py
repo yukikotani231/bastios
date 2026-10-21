@@ -320,12 +320,33 @@ class Guest:
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
         self.hostsurl = f"https://10.0.2.2:{web.sport}" if web and web.sport else ""
+        self.pick_sshport()
+
+    def pick_sshport(self):
         s = socket.socket()
         s.bind(("127.0.0.1", 0))
         self.sshport = str(s.getsockname()[1])
         s.close()
 
     def boot(self):
+        # The SSH port is free when it is picked, but the guests of other
+        # lanes start meanwhile and may take it first: QEMU then refuses to
+        # start ("Could not set up host forwarding rule"). Another port is
+        # tried, three times at most.
+        for _ in range(3):
+            self.start()
+            if self.read_until(b"bastios> ", 0, 60) or b"Could not set up host forwarding rule" not in self.out:
+                break
+            self.pick_sshport()
+        if b"bastios> " not in self.out:
+            tail = self.out[-1500:].decode(errors="replace")
+            raise SystemExit("compat: the kernel did not reach its shell prompt; its last output:\n" + tail)
+        mark = len(self.out)
+        self.send(b"ash\r")
+        if not self.read_until(PROMPT, mark, 30):
+            raise SystemExit("compat: ash did not start")
+
+    def start(self):
         self.stop()
         self.out = b""
         if self.arch == "aarch64":
@@ -348,13 +369,6 @@ class Guest:
             cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             preexec_fn=(lambda: os.sched_setscheduler(0, os.SCHED_IDLE, os.sched_param(0))) if self.idle else None)
-        if not self.read_until(b"bastios> ", 0, 60):
-            tail = self.out[-1500:].decode(errors="replace")
-            raise SystemExit("compat: the kernel did not reach its shell prompt; its last output:\n" + tail)
-        mark = len(self.out)
-        self.send(b"ash\r")
-        if not self.read_until(PROMPT, mark, 30):
-            raise SystemExit("compat: ash did not start")
 
     def stop(self):
         if self.q:

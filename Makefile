@@ -555,7 +555,7 @@ build/compat/rg: | build/compat/src
 # the static amd64 binary of the upstream release, checked against a pinned
 # SHA-256. It runs on BastiOS only; nothing here links against it.
 build/compat/runc: | build/compat/src
-	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.amd64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.amd64
 	echo "$(RUNC_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
@@ -564,7 +564,7 @@ build/compat/runc: | build/compat/src
 # release, checked against a pinned SHA-256. Like runc it runs on BastiOS
 # only.
 build/compat/crun: | build/compat/src
-	curl -fsSL -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-amd64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-amd64
 	echo "$(CRUN_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
@@ -574,7 +574,7 @@ build/compat/crun: | build/compat/src
 # parser/c.so; the C queries come with neovim). It runs on BastiOS only.
 # (The version is in test/compat/images.mk, which arch/aarch64/Makefile shares.)
 build/compat/tree-sitter-c.so: | build/compat/src
-	curl -fsSL -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
 	echo "$(TREESITTER_C_SHA256)  build/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
 	rm -rf build/compat/src/tree-sitter-c && mkdir build/compat/src/tree-sitter-c
 	tar xzf build/compat/src/tree-sitter-c.tgz -C build/compat/src/tree-sitter-c --strip-components=1 package/src
@@ -586,7 +586,7 @@ build/compat/tree-sitter-c.so: | build/compat/src
 # root (opt/typescript/lib), for the case that runs it with Neovim's LSP client.
 # x86-64 only.
 build/compat/tstools.tar: | build/compat/src
-	curl -fsSL -o build/compat/src/tsc.tgz https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-$(TSC_VER).tgz
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/tsc.tgz https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-$(TSC_VER).tgz
 	echo "$(TSC_SHA256)  build/compat/src/tsc.tgz" | sha256sum -c - >/dev/null
 	rm -rf build/compat/src/tsc && mkdir build/compat/src/tsc
 	tar xzf build/compat/src/tsc.tgz -C build/compat/src/tsc --strip-components=1 package/lib
@@ -1004,7 +1004,7 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 # Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
 # Java disk as /opt/jdtls.
 build/compat/jdtls.tgz: | build/compat/src
-	curl -fsSL -o $@ $(JDTLS_URL)
+	curl -fsSL --retry 3 --retry-all-errors -o $@ $(JDTLS_URL)
 	echo "$(JDTLS_SHA256)  $@" | sha256sum -c - >/dev/null
 
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
@@ -1016,14 +1016,14 @@ build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/co
 # The standard library's source, pinned by the SHA-256 of its tar.gz in the Rust
 # release's manifest; the Rust disk unpacks it where rust-analyzer looks for it.
 build/compat/rust-src.tgz: | build/compat/src
-	curl -fsSL -o $@.part $(RUST_SRC_URL)
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part $(RUST_SRC_URL)
 	echo "$(RUST_SRC_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	mv $@.part $@
 
 # rust-analyzer, Rust's language server (a static musl program), for the Rust
 # disk: it goes in as /usr/local/cargo/bin/rust-analyzer. x86-64 only.
 build/compat/rust-analyzer: | build/compat/src
-	curl -fsSL -o build/compat/src/rust-analyzer.tgz $(RUST_ANALYZER_URL)
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/rust-analyzer.tgz $(RUST_ANALYZER_URL)
 	echo "$(RUST_ANALYZER_SHA256)  build/compat/src/rust-analyzer.tgz" | sha256sum -c - >/dev/null
 	rm -rf build/compat/src/rust-analyzer && mkdir build/compat/src/rust-analyzer
 	tar xzf build/compat/src/rust-analyzer.tgz -C build/compat/src/rust-analyzer --strip-components=3 --wildcards '*/rust-analyzer-preview/bin/rust-analyzer'
