@@ -415,6 +415,13 @@ t_file: utime
 t_file: write
 t_file: writev
 t_file: a write of many unaligned blocks is not short
+t_file: read across a hole into unaligned buffers
+t_file: read into untouched anonymous memory
+t_file: read into a copy-on-write buffer leaves the parent's own
+t_file: read into a buffer that ends at an unmapped page returns what fits
+t_file: read into a read-only buffer is EFAULT
+t_file: read into an unmapped buffer is EFAULT
+t_file: read sees a store through a shared mapping
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches

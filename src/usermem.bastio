@@ -147,6 +147,79 @@ fn copy_to_user(spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, pid: u64, va: u6
   return k;
 }
 
+/// Copies src[s .. s + n] to user address va of process pid as copy_to_user
+/// copies a buffer, but straight from the page: no staging buffer between
+/// them. Returns the count, short at a page that is not written, or
+/// NO_RESULT if the range is not inside the user window.
+fn copy_frame_to_user(spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, pid: u64, va: u64, src: &Frame, s: u64, n: u64) -> u64
+  requires spaces_ok(spaces) && mem_ok(m) && pid < NPROC && s + n <= 4096
+  ensures spaces_ok(spaces) && mem_ok(m)
+  ensures result <= n || result == NO_RESULT
+{
+  if !user_range(va, n) {
+    return NO_RESULT;
+  }
+  let off = va - USER_BASE;
+  let mut k = 0;
+  let mut last = WPAGES;
+  let mut go = true;
+  while go
+    invariant k <= n && s + n <= 4096 && off + n <= USER_SIZE && spaces_ok(spaces) && mem_ok(m)
+  {
+    let r = raw_frame_to_user(&mut spaces, pid, off, src, s, k, n);
+    if r == NO_RESULT {
+      return NO_RESULT;
+    }
+    k = r;
+    go = false;
+    if k < n && (off + k) / 4096 != last {
+      last = (off + k) / 4096;
+      go = cow_touch(&mut m, &mut spaces, pid, last) || anon_touch(&mut m, &mut spaces, an, pid, last);
+    }
+  }
+  return k;
+}
+
+/// The bytes from k0 on of copy_frame_to_user, without faulting anything in.
+fn raw_frame_to_user(spaces: &mut Vec[Space], pid: u64, off: u64, src: &Frame, s: u64, k0: u64, n: u64) -> u64
+  requires spaces_ok(spaces) && pid < NPROC && k0 <= n && s + n <= 4096 && off + n <= USER_SIZE
+  ensures spaces_ok(spaces)
+  ensures (k0 <= result && result <= n) || result == NO_RESULT
+{
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return NO_RESULT; },
+    Space::Mapped(mut root) => {
+      let mut k = k0;
+      if pt_has(root, 1) {
+        k = pt_borrow(&mut root, 1, frame_to_l3, off, src, s, k0, n);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return k;
+    },
+  }
+}
+
+/// copy_frame_to_user below the top-level table, in place.
+fn frame_to_l3(l3: &mut PageTable, off: u64, src: &Frame, s: u64, k0: u64, n: u64) -> u64
+  requires pt_level(l3) == 3 && off + n <= USER_SIZE && k0 <= n && s + n <= 4096
+  ensures k0 <= result && result <= n
+{
+  let mut k = k0;
+  let mut ok = true;
+  while ok && k < n
+    invariant k0 <= k && k <= n && pt_level(l3) == 3
+  {
+    let a = off + k;
+    let m = chunk(a, n - k);
+    if w_write_fr(&mut l3, a, src, s + k, m) {
+      k = k + m;
+    } else {
+      ok = false;
+    }
+  }
+  return k;
+}
+
 /// Copies the first n bytes of buf to user address va of process pid as
 /// copy_to_user does, but into a read-only page too if it is the process's
 /// own (not shared with others). Faults nothing in. Returns the count, short
