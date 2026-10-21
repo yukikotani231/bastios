@@ -342,6 +342,7 @@ static int t_fileread(long n) {
   size_t chunk = 64 << 10;
   char *buf = malloc(chunk);
   snprintf(p, sizeof p, "%s/osbench.data", dir);
+  sync();                 // filewrite's data is on its way to the disk, not part of the reads
   begin("fileread");
   long kib = 0;
   for (long i = 0; i < n; i++) {

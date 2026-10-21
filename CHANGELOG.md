@@ -18,6 +18,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
+- `bsys` reads its numbers again every 2 seconds.
 - `bfiles` opens a `.ppm` or `.bmp` in the image viewer on a click in the list.
 - `bfiles` makes a new empty file on `n` in the directory list and opens it in the editor.
 - `bterm` selects and copies the word under the pointer on a double click and the whole row on a triple click.

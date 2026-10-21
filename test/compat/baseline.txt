@@ -1564,6 +1564,8 @@ rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a real crate (semver) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a second real crate (fastrand) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a third real crate (itoa) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a fourth real crate (either) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a compile error is reported
 rust: rust: rust-analyzer reports its version
 rust: rust: rust-analyzer finds a type error in a crate
