@@ -53,6 +53,11 @@ $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q click 2
 $ bb chroot /disk/a /bin/sh -c 'python3 -m venv /root/vf && . /root/vf/bin/activate && pip install -q flask "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/flask-3.1.3.tar.gz | tar xz && cd flask-3.1.3 && python -m pytest -q -p no:cacheprovider --deselect tests/test_helpers.py::TestStreaming::test_async_view --deselect tests/test_reqctx.py::test_bad_environ_raises_bad_request 2>&1 | tail -n 1 | sed "s/ in .*//"'
 475 passed, 6 skipped, 2 deselected
 
+== python: the test suite of a fourth real project (Tornado's, without its autoreload tests and with a retry of racy SSL tests: sockets, threads and asyncio over the loopback)
+# timeout 1500
+$ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O - HOSTURL/wheels/tornado-6.6.tar.gz | tar xz && cd tornado-6.6 && wget -q -O /tmp/tornado_tests.py HOSTURL/pyprogs/tornado_tests.py && python3 /tmp/tornado_tests.py 2>&1 | cut -c1-110'
+Ran 1497 tests
+OK
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0

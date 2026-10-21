@@ -116,6 +116,24 @@ static int refused_connect(void) {
     return e == ECONNREFUSED && e2 == 0;
 }
 
+/* Listeners that all set SO_REUSEPORT share a port; one that did not is
+ * refused (Tornado's multi-process servers rely on it). */
+static int reuse_port_listeners(void) {
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    socklen_t al = sizeof a;
+    int one = 1, ok = 1;
+    int s1 = socket(AF_INET, SOCK_STREAM, 0), s2 = socket(AF_INET, SOCK_STREAM, 0), s3 = socket(AF_INET, SOCK_STREAM, 0);
+    setsockopt(s1, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+    ok = ok && bind(s1, (void *)&a, sizeof a) == 0 && listen(s1, 8) == 0 && getsockname(s1, (void *)&a, &al) == 0;
+    setsockopt(s2, SOL_SOCKET, SO_REUSEPORT, &one, sizeof one);
+    ok = ok && bind(s2, (void *)&a, sizeof a) == 0 && listen(s2, 8) == 0;
+    ok = ok && bind(s3, (void *)&a, sizeof a) == 0 ? listen(s3, 8) != 0 && errno == EADDRINUSE : 0;
+    int c = socket(AF_INET, SOCK_STREAM, 0);
+    ok = ok && connect(c, (void *)&a, sizeof a) == 0;       /* one of the listeners takes it */
+    close(c); close(s1); close(s2); close(s3);
+    return ok;
+}
+
 int main(void) {
     setup();
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
@@ -266,6 +284,7 @@ int main(void) {
         close(f);
     }
     EXPECT("a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once", refused_connect());
+    EXPECT("TCP listeners that set SO_REUSEPORT share a port; one that did not is refused", reuse_port_listeners());
     EXPECT("56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails", many_pairs());
     EXPECT("at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused", many_listeners());
     EXPECT("24 bound AF_UNIX datagram sockets send around a ring and name their senders", many_datagrams());

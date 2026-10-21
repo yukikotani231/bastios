@@ -170,7 +170,7 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if tk.mode != TM_NEW {
     return EINVAL;
   }
-  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port, ofd_fam(k, tk.h));    // port 0: an ephemeral one
+  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port, ofd_fam(k, tk.h), sock_flag(k, tk.h, SOF_REUSEPORT));    // port 0: an ephemeral one
   if t >= TCBS {
     return EADDRINUSE;
   }
