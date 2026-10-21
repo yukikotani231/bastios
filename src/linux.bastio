@@ -345,6 +345,14 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
 }
 
 /// Handles the Linux system call process `pid` just made.
+/// getppid for process `pid`: its group leader's parent, as `pid` sees it.
+/// `reap_gen` below changes whenever an exit gives any process a new parent.
+fn lx_ppid(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  return vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1)));
+}
+
 fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
@@ -882,7 +890,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_GETPPID {
-    ret(&mut k.procs, pid, vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1))));
+    ret(&mut k.procs, pid, lx_ppid(k, pid));
     return KEEP;
   }
   if n == LX_IOCTL {
