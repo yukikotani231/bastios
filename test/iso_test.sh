@@ -996,6 +996,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The arrow keys move a cursor in the bfiles list and Enter opens the entry under it.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ni\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down")
+            good = until(b"bfiles: cursor 1", mark)
+        if good:
+            monitor("sendkey ret")
+            good = until(b"bfiles: image /tmp/ni/p.ppm", mark) and until(b"bview: window", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the arrow keys and Enter open an entry of the bfiles list")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # t in the list of bfiles opens a terminal in that directory.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()
