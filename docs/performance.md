@@ -255,6 +255,16 @@ Linux guest):
 | `microvm` | 0.29 s | after it |
 | `pc` | 0.2 to 0.4 s | includes QEMU's start-up |
 
+Under KVM on a GitHub runner (nested, so every port access is a VM exit of
+about 14 us) the benchmark's `boot` row is 436 ms against 839 ms for Linux
+(0.52x), and `boot1` is 339 ms against 807 ms. Before the survey described
+below it was 1.4 to 2.7 s: six device searches (xHCI, UHCI, USB, rng, block,
+sound) each probed all 256 PCI buses, two port accesses per probe, about
+0.23 s per search. `pci_survey` now walks the buses once and records the
+highest populated one, and `pci_next` skips the buses above it. One survey
+pass (about 0.23 s of the remaining time) is left; bridge secondary bus
+numbers could cut it, but machines with several root buses need care.
+
 The smallest RAM that boots is 36 MiB (1863 free 4 KiB pages at the prompt).
 `-m 16M` prints nothing because the image is linked at 16 MiB. Details and
 the failure modes of the other sizes are in [cloud.md](cloud.md).
