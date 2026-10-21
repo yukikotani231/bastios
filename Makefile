@@ -172,14 +172,18 @@ build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.e
 build/user/font8x8.h: src/font8x8.bin | build/user
 	(echo 'static const unsigned char font8x8[] = {'; od -An -v -tu1 -w16 $< | sed 's/ \+/,/g; s/^,//; s/$$/,/'; echo '};') > $@
 
+# The GUI programs are embedded in the kernel image, which the memory test keeps small: no page padding
+# between their segments, no RELRO, no build id (about 4 KiB each; the code is the same).
+GUILD := -Wl,-z,noseparate-code,-z,norelro,--build-id=none
+
 build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
-	$(MUSLCC) -static-pie -O2 -s -Ibuild/user -o $@ $<
+	$(MUSLCC) -static-pie -O2 $(GUILD) -s -Ibuild/user -o $@ $<
 
 build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
-	$(MUSLCC) -static-pie -O2 -s -o $@ $<
+	$(MUSLCC) -static-pie -O2 $(GUILD) -s -o $@ $<
 
 build/user/bterm.elf: user/bterm.c user/bfiles.h user/bsys.h user/bview.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
-	$(MUSLCC) -static-pie -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections -s -Ibuild/user -o $@ $<
+	$(MUSLCC) -static-pie -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections $(GUILD) -s -Ibuild/user -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
 # also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.

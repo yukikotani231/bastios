@@ -255,6 +255,16 @@ Linux guest):
 | `microvm` | 0.29 s | after it |
 | `pc` | 0.2 to 0.4 s | includes QEMU's start-up |
 
+Under KVM on a GitHub runner (nested, so every port access is a VM exit of
+about 14 us) the benchmark's `boot` row is 436 ms against 839 ms for Linux
+(0.52x), and `boot1` is 339 ms against 807 ms. Before the survey described
+below it was 1.4 to 2.7 s: six device searches (xHCI, UHCI, USB, rng, block,
+sound) each probed all 256 PCI buses, two port accesses per probe, about
+0.23 s per search. `pci_survey` now walks the buses once and records the
+highest populated one, and `pci_next` skips the buses above it. One survey
+pass (about 0.23 s of the remaining time) is left; bridge secondary bus
+numbers could cut it, but machines with several root buses need care.
+
 The smallest RAM that boots is 36 MiB (1863 free 4 KiB pages at the prompt).
 `-m 16M` prints nothing because the image is linked at 16 MiB. Details and
 the failure modes of the other sizes are in [cloud.md](cloud.md).
@@ -372,8 +382,14 @@ run (the identity map, the entry area and the block guards are all set up
 before the first user process); the shadow table is PCID 2 and is loaded
 with a flush every time, since its slot 0 follows the process and the
 process's own table changes with every munmap, mprotect and copy-on-write
-fault. So only the kernel's side gains: no user translation can outlive a
-change to its mapping. They are on by default; QEMU's TCG has no PCID, so
+fault. So the kernel's side gains on every entry, and the user's side only
+in one case: a system call answered without the lock (`fast_call`) returns
+to the same table with the lease never dropped, and nothing is taken out of
+a table while it is leased, so `bst_cpu_enter` loads the shadow table with
+the no-flush bit (bit 0 of `CORE_UROOT` is set when it enters, and cleared
+by the prelude's next `bst_mmu_enter`, so it survives only a loop of such
+calls). Any other trap drops the lease, and the next entry flushes: no user
+translation can outlive a change to its mapping. They are on by default; QEMU's TCG has no PCID, so
 the code can only be tested under KVM: the `pcid-kvm` job in CI checks
 that CR4.PCIDE follows the command line, runs the memory, process, thread,
 signal, ptrace, IPC and file programs of the compat suite with PCIDs on, and

@@ -70,6 +70,9 @@ static unsigned char dirty[MAXR];
 static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse, cur_attr;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
 static int priv;                          /* the CSI had a '?' prefix */
+static int mouse_mode, mouse_sgr;           /* xterm mouse reporting: 1000 (1), 1002 (2), 1003 (3); 1006 (the SGR encoding) */
+static unsigned mouse_btn;                /* the buttons held at the last report */
+static int mouse_r = -1, mouse_c = -1;
 static int top, bot = 23;           /* the scroll region, inclusive */
 static int saved_cx, saved_cy;
 static struct cell main_grid[MAXR][MAXC];
@@ -237,6 +240,10 @@ static void csi(int final)
             for (int i = 0; i < nparam; i++)
                 if (params[i] == 1049 || params[i] == 1047 || params[i] == 47)
                     set_alt(final == 'h');
+                else if (params[i] == 1000 || params[i] == 1002 || params[i] == 1003)
+                    mouse_mode = final == 'h' ? (params[i] == 1000 ? 1 : params[i] == 1002 ? 2 : 3) : 0;
+                else if (params[i] == 1006)
+                    mouse_sgr = final == 'h';
         return;
     }
     switch (final) {
@@ -544,6 +551,43 @@ static void paste(int m)
     close(f);
 }
 
+/* Tells the program on the pty about the pointer, in xterm's encoding (CODE: 0 left, 1 middle, 2 right,
+ * 64 and 65 the wheel, plus 32 for a move, 3 for a release without the SGR encoding). */
+static void mouse_emit(int m, int code, int press, int r, int c)
+{
+    char b[32];
+    int n;
+    if (mouse_sgr)
+        n = snprintf(b, sizeof b, "\033[<%d;%d;%d%c", code, c + 1, r + 1, press ? 'M' : 'm');
+    else if (c + 33 > 255 || r + 33 > 255)
+        return;
+    else
+        n = snprintf(b, sizeof b, "\033[M%c%c%c", 32 + (press ? code : 3), 33 + c, 33 + r);
+    (void)!write(m, b, n);
+}
+
+static void mouse_report(int m, unsigned buttons, int r, int c)
+{
+    static const unsigned bit[3] = { 1, 4, 2 };        /* left, middle, right */
+    int wheel = (signed char)((buttons >> 8) & 0xFF);
+    for (int i = 0; i < (wheel < 0 ? -wheel : wheel) && i < 3; i++)
+        mouse_emit(m, wheel < 0 ? 64 : 65, 1, r, c);
+    int moved = r != mouse_r || c != mouse_c, held = -1;
+    for (int i = 0; i < 3; i++) {
+        if ((buttons & bit[i]) != (mouse_btn & bit[i]))
+            mouse_emit(m, i, (buttons & bit[i]) != 0, r, c);
+        else if (buttons & bit[i])
+            held = i;
+    }
+    if (moved && held >= 0 && mouse_mode >= 2 && buttons == mouse_btn)
+        mouse_emit(m, 32 + held, 1, r, c);
+    else if (moved && !(buttons & 7) && mouse_mode == 3)
+        mouse_emit(m, 35, 1, r, c);
+    mouse_btn = buttons & 7;
+    mouse_r = r;
+    mouse_c = c;
+}
+
 int main(int argc, char **argv)
 {
     const char *base = strrchr(argv[0], '/');
@@ -662,6 +706,11 @@ int main(int argc, char **argv)
                     break;
             } else if (t == BWM_MOUSE) {
                 struct bwm_mouse *e = (struct bwm_mouse *)buf;
+                if (mouse_mode) {                /* the program asked for the pointer: no selection, no scrolling back */
+                    int mr = e->y / CH, mc = e->x / CW;
+                    mouse_report(m, e->buttons, mr >= rows ? rows - 1 : mr, mc >= cols ? cols - 1 : mc);
+                    continue;
+                }
                 int wheel = (signed char)((e->buttons >> 8) & 0xFF);       /* negative is up */
                 if (wheel && !alt) {
                     int nb = back - wheel * 3;
