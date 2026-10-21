@@ -411,7 +411,7 @@ $(B)/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/com
 # resolves the few libc calls it makes when it loads it.
 $(B)/compat/tree-sitter-c.so: | $(B)/compat
 	rm -rf $(B)/compat/src/tree-sitter-c && mkdir -p $(B)/compat/src/tree-sitter-c
-	curl -fsSL -o $(B)/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
+	curl -fsSL --retry 3 --retry-all-errors -o $(B)/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
 	echo "$(TREESITTER_C_SHA256)  $(B)/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
 	tar xzf $(B)/compat/src/tree-sitter-c.tgz -C $(B)/compat/src/tree-sitter-c --strip-components=1 package/src
 	$(CROSS)gcc -shared -fPIC -O2 -nostdlib -fno-stack-protector -Wl,-s -I $(B)/compat/src/tree-sitter-c/src -o $@.part $(B)/compat/src/tree-sitter-c/src/parser.c
@@ -422,7 +422,7 @@ $(B)/compat/tree-sitter-c.so: | $(B)/compat
 # executable at a fixed address, as the kernel loads those.
 $(B)/compat/strace: | $(B)/compat
 	rm -rf $(B)/compat/src/strace && mkdir -p $(B)/compat/src/strace
-	curl -fsSL -o $(B)/compat/src/strace.tar.xz https://github.com/strace/strace/releases/download/v$(STRACE_VER)/strace-$(STRACE_VER).tar.xz
+	curl -fsSL --retry 3 --retry-all-errors -o $(B)/compat/src/strace.tar.xz https://github.com/strace/strace/releases/download/v$(STRACE_VER)/strace-$(STRACE_VER).tar.xz
 	echo "$(STRACE_SHA256)  $(B)/compat/src/strace.tar.xz" | sha256sum -c - >/dev/null
 	tar xJf $(B)/compat/src/strace.tar.xz -C $(B)/compat/src/strace --strip-components=1
 	cd $(B)/compat/src/strace && ./configure --host=aarch64-linux-gnu --enable-mpers=no CC=$(CROSS)gcc \
@@ -437,7 +437,7 @@ $(B)/compat/strace: | $(B)/compat
 RUNC_VER          ?= 1.2.6
 RUNC_ARM64_SHA256 ?= 12c612e2ebe6ca198de676ce75ed557e79fe6109032209bb8e25166c967fe170
 $(B)/compat/runc: | $(B)/compat
-	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.arm64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.arm64
 	echo "$(RUNC_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
@@ -470,7 +470,7 @@ $(B)/compat/gdb.tar: | $(B)/compat
 CMAKE_WHEEL_URL := https://files.pythonhosted.org/packages/4b/13/ff769c6fc4a1e1458d3e18c7989e84cc1d374bda994d01ec900d1d3bdd44/cmake-4.4.4-py3-none-musllinux_1_2_aarch64.whl
 CMAKE_WHEEL_SHA256 := e2d98233f16b5d6b9d4673a0a724ce801fc413811befb8f0b008cbffb7a2ad63
 $(B)/compat/cmake.whl: | $(B)/compat
-	curl -fsSL -o $@.part $(CMAKE_WHEEL_URL)
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part $(CMAKE_WHEEL_URL)
 	echo "$(CMAKE_WHEEL_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	mv $@.part $@
 
@@ -479,7 +479,7 @@ $(B)/compat/cmake.whl: | $(B)/compat
 CRUN_VER          ?= 1.19.1
 CRUN_ARM64_SHA256 ?= 4f28e8912fa52d1325cb42bfdc41d8f387d44e415955a82c203251e9dc1def5c
 $(B)/compat/crun: | $(B)/compat
-	curl -fsSL -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-arm64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-arm64
 	echo "$(CRUN_ARM64_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
