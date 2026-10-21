@@ -1,12 +1,12 @@
-"""Runs Tornado's own test suite from its source tree (the current directory),
-without the autoreload tests: each starts Python twice within a 4 s limit,
-which emulated CPUs miss. A few of the SSL tests are racy when the CPU is
-slow (the handshake finishes after the test has moved on, or logs one line
-more than the test expects), so each test that fails is run once more on its
-own; the suite passes if those pass. The two SSL variants of
-test_inline_read_error depend on whether the server's handshake has finished
-by the time the test closes its socket, which it does about half the time
-here, so their results are not counted.
+"""Runs the socket-heavy part of Tornado's own test suite from its source tree
+(the current directory): the event loop, address and port allocation, the TCP
+client and server, child processes, the HTTP server, the simple HTTP client
+(connection refused, timeouts, SSL) and WebSockets. The rest is Python code
+that does not reach the kernel, and the whole suite takes a quarter of an
+hour in CI. A few of the SSL tests are racy when the CPU is slow (a handshake
+ends after the test has moved on, or logs one line more than the test
+expects), so each test that fails is run once more on its own; the suite
+passes if those pass.
 
 Prints "Ran N tests" and then "OK", or the tests that still fail."""
 import os
@@ -21,12 +21,13 @@ os.environ.setdefault("EMULATION", "1")
 
 sys.path.insert(0, os.getcwd())
 
-from tornado.test.runtests import TEST_MODULES
-
-RACY = {
-    "tornado.test.iostream_test.TestIOStreamSSL.test_inline_read_error",
-    "tornado.test.iostream_test.TestIOStreamSSLContext.test_inline_read_error",
-}
+MODULES = [
+    "tornado.test." + m
+    for m in (
+        "ioloop_test", "netutil_test", "tcpclient_test", "tcpserver_test", "process_test",
+        "httpserver_test", "websocket_test", "simple_httpclient_test",
+    )
+]
 RUN = [sys.executable, "-m", "tornado.test.runtests"]
 
 
@@ -41,9 +42,9 @@ def run(names):
     return int(ran.group(1)) if ran else 0, sorted(set(failed))
 
 
-ran, failed = run([m for m in TEST_MODULES if "autoreload" not in m])
+ran, failed = run(MODULES)
 for name in failed[:]:
-    if name in RACY or run([name])[1] == []:
+    if run([name])[1] == []:
         failed.remove(name)
 print("Ran %d tests" % ran)
 if failed:
