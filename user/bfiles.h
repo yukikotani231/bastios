@@ -66,6 +66,7 @@ static int bf_esc, bf_escnum;                   /* where we are in an ESC [ ... 
 static size_t bf_erow[BF_MAXLINES + 1];         /* where each display row starts while editing */
 static int bf_nerow;
 
+static int bf_sel;                              /* the entry the keyboard cursor is on (arrows move it, Enter opens it) */
 static int bf_by_size;                          /* 1: files largest first, 0: by name */
 
 static int bf_cmp(const void *a, const void *b)
@@ -99,6 +100,7 @@ static void bf_load_dir(void)
 {
     bf_nent = 0;
     bf_top = 0;
+    bf_sel = 0;
     snprintf(bf_ents[bf_nent].name, sizeof bf_ents[bf_nent].name, "..");
     bf_ents[bf_nent].dir = 1;
     bf_ents[bf_nent++].size = 0;
@@ -223,7 +225,7 @@ static void bf_paint(void)
             snprintf(t, sizeof t, "%s/", bf_ents[i].name);
         else
             snprintf(t, sizeof t, "%-44.44s %10lld", bf_ents[i].name, (long long)bf_ents[i].size);
-        bf_put_row(r, t, strlen(t), bf_ents[i].dir ? 0x0080C0FF : fg, bg);
+        bf_put_row(r, t, strlen(t), bf_ents[i].dir ? 0x0080C0FF : fg, bf_sel == i ? 0x00203050 : bg);
     }
 }
 
@@ -576,20 +578,10 @@ static void bf_scroll(int by)
     }
 }
 
-static void bf_click(int row)
+/* Goes into the directory, or shows the file, that entry I of the list is. */
+static void bf_open(int i)
 {
-    if (bf_viewing) {
-        bf_viewing = 0;
-        if (bf_stale) {
-            bf_stale = 0;
-            bf_load_dir();
-        }
-        return;
-    }
-    if (row < 1)
-        return;
-    int i = bf_top + row - 1;
-    if (i >= bf_nent)
+    if (i < 0 || i >= bf_nent)
         return;
     if (i == 0) {
         bf_go_up();
@@ -609,6 +601,34 @@ static void bf_click(int row)
         else
             bf_load_file(p);
     }
+}
+
+static void bf_click(int row)
+{
+    if (bf_viewing) {
+        bf_viewing = 0;
+        if (bf_stale) {
+            bf_stale = 0;
+            bf_load_dir();
+        }
+        return;
+    }
+    if (row < 1)
+        return;
+    bf_sel = bf_top + row - 1;
+    bf_open(bf_sel);
+}
+
+/* Moves the keyboard cursor by BY entries and scrolls it into view. */
+static void bf_move_sel(int by)
+{
+    bf_sel += by;
+    if (bf_sel > bf_nent - 1) bf_sel = bf_nent - 1;
+    if (bf_sel < 0) bf_sel = 0;
+    if (bf_sel < bf_top) bf_top = bf_sel;
+    if (bf_sel > bf_top + BF_ROWS - 2) bf_top = bf_sel - (BF_ROWS - 2);
+    printf("bfiles: cursor %d\n", bf_sel);
+    fflush(stdout);
 }
 
 static int bfiles_main(int argc, char **argv)
@@ -658,6 +678,33 @@ static int bfiles_main(int argc, char **argv)
                 if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
                     break;
                 continue;
+            }
+            if (!bf_editing && !bf_viewing) {          /* arrow keys and Enter in the list */
+                if (bf_esc == 0 && c == 27) {
+                    bf_esc = 1;
+                    continue;
+                }
+                if (bf_esc == 1) {
+                    bf_esc = c == '[' ? 2 : 0;
+                    continue;
+                }
+                if (bf_esc == 2) {
+                    bf_esc = 0;
+                    if (c == 'A' || c == 'B') {
+                        bf_move_sel(c == 'A' ? -1 : 1);
+                        bf_paint();
+                        if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                            break;
+                    }
+                    continue;
+                }
+                if (c == '\r' || c == '\n') {
+                    bf_open(bf_sel);
+                    bf_paint();
+                    if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                        break;
+                    continue;
+                }
             }
             int was_confirm = bf_confirm;
             bf_confirm = 0;
