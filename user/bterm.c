@@ -62,12 +62,12 @@ static int nearest256(int r, int g, int b)
     return 16 + 36 * q[0] + 6 * q[1] + q[2];
 }
 
-struct cell { unsigned char ch, fg, bg; };
+struct cell { unsigned char ch, fg, bg, ul; };
 static struct cell grid[MAXR][MAXC];
 static uint32_t *pix;            /* the window's pixels: bwm's shared memory when it gave some */
 static int shared;
 static unsigned char dirty[MAXR];
-static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse;
+static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse, cur_ul;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
 static int priv;                          /* the CSI had a '?' prefix */
 static int top, bot = 23;           /* the scroll region, inclusive */
@@ -89,6 +89,7 @@ static void put_cell(int r, int c, unsigned char ch)
     grid[r][c].ch = ch;
     grid[r][c].fg = cur_fg + (bold && cur_fg < 8 ? 8 : 0);
     grid[r][c].bg = cur_bg;
+    grid[r][c].ul = cur_ul;
     dirty[r] = 1;
 }
 
@@ -98,6 +99,7 @@ static void clear_cells(int r, int c0, int c1)
         grid[r][c].ch = ' ';
         grid[r][c].fg = 7;
         grid[r][c].bg = cur_bg;
+        grid[r][c].ul = 0;
     }
     dirty[r] = 1;
 }
@@ -212,7 +214,7 @@ static void draw_cell(int r, int c, int cursor)
     for (int y = 0; y < CH; y++) {
         unsigned bits = font8x8[ch * 8 + y / 2];
         for (int x = 0; x < CW; x++, bits >>= 1)
-            pix[(r * CH + y) * WIDTH + c * CW + x] = bits & 1 ? f : b;
+            pix[(r * CH + y) * WIDTH + c * CW + x] = bits & 1 || (e->ul && y >= CH - 2) ? f : b;
     }
 }
 
@@ -311,7 +313,9 @@ static void csi(int final)
             params[nparam++] = 0;
         for (int i = 0; i < nparam; i++) {
             int p = params[i];
-            if (p == 0) { cur_fg = 7; cur_bg = 0; bold = 0; reverse = 0; }
+            if (p == 0) { cur_fg = 7; cur_bg = 0; bold = 0; reverse = 0; cur_ul = 0; }
+            else if (p == 4) cur_ul = 1;
+            else if (p == 24) cur_ul = 0;
             else if (p == 1) bold = 1;
             else if (p == 22) bold = 0;
             else if (p == 7) { int t = cur_fg; cur_fg = cur_bg; cur_bg = t; reverse = !reverse; }
