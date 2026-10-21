@@ -68,5 +68,10 @@ $ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/mri.tar.gz | bb tar -xz 
 
 == node: a real package (debug) with its installed dependencies, tested with mocha and sinon
 # timeout 600
-$ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/debug.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node /work/debug/node_modules/mocha/bin/mocha.js --exit /work/debug/test.js /work/debug/test.node.js 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)' | bb sed 's/ ([0-9]*ms)//; s/^ *//'
+$ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/debug.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node /work/debug/node_modules/mocha/bin/mocha.js --exit /work/debug/test.js /work/debug/test.node.js 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
 16 passing
+
+== node: a web framework (express) with its installed dependencies, tested with mocha and supertest over the loopback
+# timeout 900
+$ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/express.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/express"); process.argv = [process.argv[0], "mocha", "--require", "test/support/env", "--check-leaks", "test/", "test/acceptance/"]; require("/work/express/node_modules/mocha/bin/mocha.js")' 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
+1288 passing

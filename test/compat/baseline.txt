@@ -1509,6 +1509,7 @@ node: node: a hot loop is compiled and gives the right sum
 node: node: a real package (nanoid) fetched from the host, tested with node --test
 node: node: a real package with its installed dependencies (mri, tape), tested with tape
 node: node: a real package (debug) with its installed dependencies, tested with mocha and sinon
+node: node: a web framework (express) with its installed dependencies, tested with mocha and supertest over the loopback
 node: node: a script with arrays and JSON
 node: node: an expression
 node: node: exit status and uncaught exceptions
@@ -1673,6 +1674,9 @@ t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+t_gai: a dual-stack listener names an AF_INET client ::ffff:127.0.0.1
+t_gai: getpeername and getsockname of that connection read ::ffff:127.0.0.1 too
+t_gai: a dual-stack listener names an AF_INET6 client ::1
 t_pty: IUTF8 can be set
 t_pty: erasing a wide character echoes whole erasures
 t_pty: erasing a two-byte character takes back one cell
