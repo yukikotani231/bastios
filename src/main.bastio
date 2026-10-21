@@ -222,18 +222,21 @@ fn power_button(s: &mut Sys)
 
 // A process taken out to run: its id, its process id (tgid, for a thread),
 // its lease on its address space, and its FPU page.
-struct Task { pid: u64, tgid: u64, vpid: u64, vtgid: u64, lease: Lease, fpu: Frame, slow: bool }
+//
+// `vppid` is what getppid answers while `reap_gen` of the kernel is still `rg`.
+struct Task { pid: u64, tgid: u64, vpid: u64, vtgid: u64, vppid: u64, rg: u64, lease: Lease, fpu: Frame, slow: bool }
 
 enum Job { Stop, Idle, Disk, Run(Task) }   // Disk: idle, but a polled disk command is running
 
 /// The system calls a processor answers without the lock, from what it
-/// knows of the task it runs: the thread and process ids, and a yield while no other process waits
+/// knows of the task it runs: the thread and process ids, its parent's (while no exit has given
+/// a process a new parent since the task was picked), and a yield while no other process waits
 /// for a processor (`others`, published under the lock by turn and
-/// next_job_p). True if `v` was one of them (the caller skips this for a task whose calls must all be seen: a seccomp filter, PTRACE_SYSCALL); the result is in rax and the
+/// next_job_p: bit 0 is whether one waits, the rest the number of exits that gave a process a new parent). True if `v` was one of them (the caller skips this for a task whose calls must all be seen: a seccomp filter, PTRACE_SYSCALL); the result is in rax and the
 /// task runs on. Anything they skip (a signal, a kill, the tick's
 /// accounting) waits for the task's next trap that is not one of them, at
 /// the latest its timer interrupt.
-fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, vpid: u64, vtg: u64, others: &Atomic[bool]) -> bool {
+fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, vpid: u64, vtg: u64, vppid: u64, rg: u64, others: &Atomic[u64]) -> bool {
   let n = cpu_get(cpu, R_RAX);
   if v == V_LINUX {
     if n == LX_GETTID {
@@ -244,7 +247,11 @@ fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, vpid: u64, vtg: u64, others: &Atom
       cpu_set(&mut cpu, R_RAX, vtg);
       return true;
     }
-    if n == LX_SCHED_YIELD && !atomic_load(others) {
+    if n == LX_GETPPID && atomic_load(others) / 2 == rg {
+      cpu_set(&mut cpu, R_RAX, vppid);
+      return true;
+    }
+    if n == LX_SCHED_YIELD && atomic_load(others) % 2 == 0 {
       cpu_set(&mut cpu, R_RAX, 0);
       return true;
     }
@@ -253,11 +260,31 @@ fn fast_call(cpu: &mut Cpu, v: u64, pid: u64, vpid: u64, vtg: u64, others: &Atom
       cpu_set(&mut cpu, R_RAX, pid);
       return true;
     }
-    if n == SYS_YIELD && !atomic_load(others) {
+    if n == SYS_YIELD && atomic_load(others) % 2 == 0 {
       return true;
     }
   }
   return false;
+}
+
+/// The number of exits that gave a process a new parent, kept below 2^62.
+fn reap_gen(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result < 4611686018427387904
+{
+  return get(k.sys, SYS_REAP) % 4611686018427387904;
+}
+
+/// What `others` holds: bit 0 is whether a process waits for a processor,
+/// the rest is `reap_gen`.
+fn others_word(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let mut w = reap_gen(k) * 2;
+  if any_ready(k.procs, k.pid_hi) {
+    w = w + 1;
+  }
+  return w;
 }
 
 /// Is any process READY (waiting for a processor)?
@@ -395,7 +422,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           regs_load(&mut cpu, s.k.procs, p, 18);
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
-          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
+          return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), vppid: lx_ppid(s.k, p), rg: reap_gen(s.k), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
         },
       }
     },
@@ -904,7 +931,7 @@ fn after_trap(s: &mut Sys, p: u64, v: u64)
 /// `finish` for task `t`, then `next_job` from where it leaves the round
 /// robin, in one critical section, so a system call costs one round trip
 /// of the lock. Publishes how much console output waits in `pend`.
-fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, poll: bool, pend: &Atomic[u64], others: &Atomic[bool]) -> Next
+fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, poll: bool, pend: &Atomic[u64], others: &Atomic[u64]) -> Next
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   requires 1 <= p && p < NPROC
   ensures sys_ok(s) && result.from < NPROC
@@ -915,7 +942,7 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, p
   after_trap(&mut s, p, v);
   let j = next_job(&mut s, &mut cpu, &mut mmu, c, poll);
   atomic_store(pend, s.con.r.n + gfx_pending(s.k));
-  atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
+  atomic_store(others, others_word(s.k));
   return Next { job: j, from: c };
 }
 
@@ -955,14 +982,14 @@ fn fault_fast(s: &mut Sys, cpu: &Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u
       let mut sp = root;
       let l = mmu_enter(&mut mmu, &mut sp);
       put_space(&mut s.k.spaces, p, Space::Mapped(sp));
-      return Fast::Go(Task { pid: p, tgid: tgid_, vpid: vpid, vtgid: vtgid, lease: l, fpu: fpu, slow: slow });
+      return Fast::Go(Task { pid: p, tgid: tgid_, vpid: vpid, vtgid: vtgid, vppid: lx_ppid(s.k, p), rg: reap_gen(s.k), lease: l, fpu: fpu, slow: slow });
     },
   }
 }
 
 /// `next_job`, then publishes how much console output waits in `pend`.
 /// `back`: this processor was idle (its last job was Job::Idle).
-fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, back: bool, pend: &Atomic[u64], others: &Atomic[bool]) -> Job
+fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, back: bool, pend: &Atomic[u64], others: &Atomic[u64]) -> Job
   requires sys_ok(s) && mmu_root(mmu) == KERNEL_ROOT
   ensures sys_ok(s)
   ensures result is Job::Run ==> (1 <= result.Run.pid && result.Run.pid < NPROC)
@@ -973,7 +1000,7 @@ fn next_job_p(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool, 
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, from, poll);
   atomic_store(pend, s.con.r.n + gfx_pending(s.k));
-  atomic_store(others, any_ready(s.k.procs, s.k.pid_hi));
+  atomic_store(others, others_word(s.k));
   return j;
 }
 
@@ -1188,7 +1215,7 @@ fn try_pump(u: &Lock[Term], s: &Lock[Sys], pumping: &Atomic[bool], pend: &Atomic
 
 /// The scheduler loop each processor runs, with its own `cpu` and `mmu`,
 /// until the kernel stops (no process left, or a power off).
-fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &Atomic[bool], pend: &Atomic[u64], others: &Atomic[bool])
+fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &Atomic[bool], pend: &Atomic[u64], others: &Atomic[u64])
   requires mmu_root(mmu) == KERNEL_ROOT
   ensures mmu_root(mmu) == KERNEL_ROOT
 {
@@ -1244,7 +1271,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         let mut v = cpu_run(&mut cpu, mmu);
         // A task with a seccomp filter or under PTRACE_SYSCALL has every
         // call seen by the kernel, the ones answered here included.
-        while !t.slow && fast_call(&mut cpu, v, t.pid, t.vpid, t.vtgid, others) {
+        while !t.slow && fast_call(&mut cpu, v, t.pid, t.vpid, t.vtgid, t.vppid, t.rg, others) {
           v = cpu_run(&mut cpu, mmu);         // answered without the lock
         }
         mmu_exit(&mut mmu, t.lease);
@@ -1724,7 +1751,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let tl = lock_new(term);
   let pumping = atomic_new(false);
   let pend = atomic_new(0);
-  let others = atomic_new(false);
+  let others = atomic_new(0);
   smp_run(sched, &mut cpu, &mut mmu, sl, tl, pumping, pend, others);
   let mut sys = lock_end(sl);
   let mut devices = lock_end(tl);
