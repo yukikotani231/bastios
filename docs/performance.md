@@ -382,8 +382,14 @@ run (the identity map, the entry area and the block guards are all set up
 before the first user process); the shadow table is PCID 2 and is loaded
 with a flush every time, since its slot 0 follows the process and the
 process's own table changes with every munmap, mprotect and copy-on-write
-fault. So only the kernel's side gains: no user translation can outlive a
-change to its mapping. They are on by default; QEMU's TCG has no PCID, so
+fault. So the kernel's side gains on every entry, and the user's side only
+in one case: a system call answered without the lock (`fast_call`) returns
+to the same table with the lease never dropped, and nothing is taken out of
+a table while it is leased, so `bst_cpu_enter` loads the shadow table with
+the no-flush bit (bit 0 of `CORE_UROOT` is set when it enters, and cleared
+by the prelude's next `bst_mmu_enter`, so it survives only a loop of such
+calls). Any other trap drops the lease, and the next entry flushes: no user
+translation can outlive a change to its mapping. They are on by default; QEMU's TCG has no PCID, so
 the code can only be tested under KVM: the `pcid-kvm` job in CI checks
 that CR4.PCIDE follows the command line, runs the memory, process, thread,
 signal, ptrace, IPC and file programs of the compat suite with PCIDs on, and
