@@ -21,6 +21,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bfiles` makes a new empty file on `n` in the directory list and opens it in the editor.
 - `bterm` selects and copies the word under the pointer on a double click and the whole row on a triple click.
 - `bterm` scrolls back and forward a page on Shift-Page Up and Shift-Page Down (`bwm` sends the keys `BWM_KEY_SCROLL_UP` and `BWM_KEY_SCROLL_DOWN`, 0x101 and 0x102, to the focused client).
+- `bterm` draws the 256-colour palette (`38;5;N`, `48;5;N`), the bright backgrounds (`100`-`107`) and 24-bit colours (`38;2;R;G;B`, as the nearest of the 256).
 - `bview` shows a PPM or BMP image in a window (`bwm -c bview FILE`, or `i` in the `bfiles` viewer). It is part of `bterm`. `bterm` is now linked with `--gc-sections`, which saves about 4 KiB of the kernel image.
 - `bsys` is a System window (kernel, uptime, memory, processors, screen, root disk, time) that the launcher menu opens; `r` refreshes it. It is part of `bterm`, so it adds no image.
 - `g` and `G` in `bfiles` jump to the top and the end of the list or the file.
