@@ -3090,10 +3090,10 @@ fn root_row(k: &mut Kernel, r: u64, p: u64) -> u64
   if pget(k.procs, p, F_TGID) == 0 {
     return p;
   }
-  let mut h = r;
-  if tgid(k.procs, r) != tgid(k.procs, p) {
-    h = holder(&mut k, tgid(k.procs, p));
+  if tgid(k.procs, r) == tgid(k.procs, p) {
+    return r;
   }
+  let h = holder(&mut k, tgid(k.procs, p));
   if h == 0 || get(k.mns, h) != get(k.mns, p) {
     return p;
   }
@@ -3141,7 +3141,7 @@ fn fd_link(k: &mut Kernel, r: u64, p: u64, fd: u64, o: &mut Bytes) -> u64
         // reads under the mount's name, not the file layer's; and below the
         // process's root (chroot, pivot_root) from there.
         let mut lg = balloc(FNAME_MAX);
-        let ln = ns_back(k, ns_of(k, p), smaller(n, FNAME_MAX), &mut lg);
+        let ln = ns_back(k, ns_of(k, q), smaller(n, FNAME_MAX), &mut lg);
         if ln != NO_RESULT && ln < PROC_OUT {
           let mut j = root_skip(k, q, lg, ln);
           while j < ln

@@ -1423,6 +1423,7 @@ t_thread: pthread_detach
 t_thread: thread-local storage
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
+t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
 t_thread: timed condition wait, signalled early (monotonic)
 t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
