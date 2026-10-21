@@ -23,6 +23,7 @@
 #include <poll.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -601,7 +602,12 @@ static void bf_click(int row)
     } else {
         char p[PATH_MAX];
         bf_path_of(bf_ents[i].name, p, sizeof p);
-        bf_load_file(p);
+        size_t n = strlen(bf_ents[i].name);
+        if (n > 4 && (strcasecmp(bf_ents[i].name + n - 4, ".ppm") == 0 ||
+                      strcasecmp(bf_ents[i].name + n - 4, ".bmp") == 0))
+            bf_spawn("bview", p, "image");
+        else
+            bf_load_file(p);
     }
 }
 
