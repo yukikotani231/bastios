@@ -368,9 +368,6 @@ bst_cpu_enter:
         wrmsr
 6:
 
-        mov     $UDATA, %ax
-        mov     %ax, %ds
-        mov     %ax, %es
         mov     1*8(%rsi), %rbx
         mov     2*8(%rsi), %rcx
         mov     3*8(%rsi), %rdx
@@ -556,9 +553,6 @@ trap_common:
          * below their target. iretq gives the user its own DF back from the
          * saved RFLAGS. (syscall clears DF through FMASK already.) */
         cld
-        mov     $KDATA, %ax
-        mov     %ax, %ds
-        mov     %ax, %es
         mov     120(%rsp), %rdi
         call    bst_lapic_ack           /* smp.c: end-of-interrupt for local APIC vectors */
         testb   $3, 144(%rsp)
@@ -587,12 +581,15 @@ trap_common:
         mov     152(%rsp), %rax; mov %rax, 17*8(%rdi)
         mov     128(%rsp), %rax; mov %rax, 18*8(%rdi)
         mov     %cr2, %rax;      mov %rax, 19*8(%rdi)
+        cmpq    $0x81, 120(%rsp)
+        je      1f                      /* `syscall`: the base is what the kernel last set (a program can change it only through a system call, CR4.FSGSBASE being off) */
         mov     $0xC0000100, %ecx       /* FS_BASE */
         rdmsr
         shl     $32, %rdx
         or      %rdx, %rax;      mov %rax, 20*8(%rdi)
         bts     $63, %rax
         mov     %rax, CORE_FSB(%rdi)    /* what the register holds, for bst_cpu_enter */
+1:
         mov     120(%rsp), %rax
         mov     CORE_KRSP(%rdi), %rsp
         pop     %r15
