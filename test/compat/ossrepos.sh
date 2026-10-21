@@ -66,7 +66,7 @@ rs() {  # NAME URL TAG
   git -C "$work/rs-$1" fetch -q --depth 1 "$2" "$3"
   git -C "$work/rs-$1" checkout -q FETCH_HEAD
   rm -rf "$work/rs-$1/.git"
-  mkdir "$work/rs-$1/.cargo"
+  mkdir -p "$work/rs-$1/.cargo"
   (cd "$work/rs-$1" && cargo vendor --versioned-dirs vendor > .cargo/config.toml 2>/dev/null)
   sed -i "s#directory = \".*\"#directory = \"vendor\"#" "$work/rs-$1/.cargo/config.toml"
   mkdir "$work/rs-top-$1"
@@ -75,6 +75,7 @@ rs() {  # NAME URL TAG
 }
 
 rs semver https://github.com/dtolnay/semver 1.0.23
+rs fd https://github.com/sharkdp/fd v10.4.2
 
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
@@ -91,6 +92,7 @@ gv() {  # NAME URL TAG
 }
 
 gv testify https://github.com/stretchr/testify v1.9.0
+gv fzf https://github.com/junegunn/fzf v0.58.0
 
 # An npm package built on the host and shipped with its dependencies and one
 # test runner installed beside it (node_modules), nothing else of its tooling.
