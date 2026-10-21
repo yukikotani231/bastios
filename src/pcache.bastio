@@ -57,10 +57,11 @@ import "pages.bastio";
 
 const PC_T: u64 = 16;                 // level-1 tables
 const PC_N: u64 = 8192;               // PC_T * 512 pages the cache can hold
-const PCK_LEN: u64 = 24579;           // 3 words a slot, the clock hand, 1 once the table is made, slots in use
+const PCK_LEN: u64 = 24580;           // 3 words a slot, the clock hand, 1 once the table is made, slots in use, free-slot hint
 const PC_HAND: u64 = 24576;           // 3 * PC_N
 const PC_ONW: u64 = 24577;
 const PC_USED: u64 = 24578;
+const PC_FREE: u64 = 24579;           // no slot below this one is free (a hint: pc_victim starts its search here)
 const PC_NONE: u64 = 18446744073709551615;
 const PC_B: u64 = 8192;               // index buckets
 const PC_LK: u64 = 16384;             // PC_B bucket heads, then PC_N chain links
@@ -172,6 +173,9 @@ fn pc_unkey(keys: &mut Buf, link: &mut Buf, i: u64)
     keys = set(keys, 3 * i + 2, 0);
     if get(keys, PC_USED) > 0 {
       keys = set(keys, PC_USED, get(keys, PC_USED) - 1);
+    }
+    if i < get(keys, PC_FREE) {
+      keys = set(keys, PC_FREE, i);
     }
   }
 }
@@ -327,12 +331,28 @@ fn pc_victim(c: &mut PCache, cap: u64) -> u64
 {
   let mut i = 0;
   if get(c.keys, PC_USED) < cap {
+    // From the hint, so that filling an empty cache is not quadratic; the
+    // slots below it are full unless the hint is stale, which the second
+    // pass from 0 covers.
+    i = get(c.keys, PC_FREE);
+    if i >= cap {
+      i = 0;
+    }
     while i < cap && get(c.keys, 3 * i) != 0
       invariant i <= cap && pc_ok(c)
     {
       i = i + 1;
     }
+    if i >= cap {
+      i = 0;
+      while i < cap && get(c.keys, 3 * i) != 0
+        invariant i <= cap && pc_ok(c)
+      {
+        i = i + 1;
+      }
+    }
     if i < cap {
+      c.keys = set(c.keys, PC_FREE, i + 1);
       return i;
     }
   }
