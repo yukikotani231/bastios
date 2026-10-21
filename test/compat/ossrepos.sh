@@ -69,13 +69,22 @@ rs() {  # NAME URL TAG
   mkdir -p "$work/rs-$1/.cargo"
   (cd "$work/rs-$1" && cargo vendor --versioned-dirs vendor > .cargo/config.toml 2>/dev/null)
   sed -i "s#directory = \".*\"#directory = \"vendor\"#" "$work/rs-$1/.cargo/config.toml"
+  # The Windows-only crates are the bulk of a vendor directory and never built
+  # here: keep their manifests (cargo resolves every target) and empty them.
+  for d in "$work/rs-$1"/vendor/windows* "$work/rs-$1"/vendor/winapi*; do
+    [ -d "$d" ] || continue
+    pkg=$(sed -n 's/.*"package":"\([0-9a-f]*\)".*/\1/p' "$d/.cargo-checksum.json")
+    find "$d" -mindepth 1 ! -name Cargo.toml -delete 2>/dev/null || true
+    mkdir -p "$d/src" && : > "$d/src/lib.rs"
+    printf '{"files":{},"package":"%s"}' "$pkg" > "$d/.cargo-checksum.json"
+  done
   mkdir "$work/rs-top-$1"
   mv "$work/rs-$1" "$work/rs-top-$1/$1"
   tar -C "$work/rs-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
 }
 
 rs semver https://github.com/dtolnay/semver 1.0.23
-rs fd https://github.com/sharkdp/fd v10.4.2
+rs fastrand https://github.com/smol-rs/fastrand v2.3.0
 
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
@@ -95,7 +104,7 @@ gv testify https://github.com/stretchr/testify v1.9.0
 gv fzf https://github.com/junegunn/fzf v0.58.0
 
 # An npm package built on the host and shipped with its dependencies and one
-# test runner installed beside it (node_modules), nothing else of its tooling.
+# test runner (or several, separated by spaces) installed beside it (node_modules), nothing else of its tooling.
 nm() {  # NAME URL TAG RUNNER
   [ -f "$out/$1.tar.gz" ] && return 0
   mkdir "$work/nm-$1"
@@ -103,15 +112,16 @@ nm() {  # NAME URL TAG RUNNER
   git -C "$work/nm-$1" fetch -q --depth 1 "$2" "$3"
   git -C "$work/nm-$1" checkout -q FETCH_HEAD
   rm -rf "$work/nm-$1/.git"
-  (cd "$work/nm-$1" && npm install --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 && npm run build >/dev/null 2>&1 \
+  (cd "$work/nm-$1" && npm install --ignore-scripts --no-audit --no-fund >/dev/null 2>&1 && npm run build --if-present >/dev/null 2>&1 \
     && npm pkg delete devDependencies scripts >/dev/null && rm -rf node_modules package-lock.json \
     && npm install --ignore-scripts --omit=dev --no-audit --no-fund >/dev/null 2>&1 \
-    && npm install --no-save --ignore-scripts --no-audit --no-fund "$4" >/dev/null 2>&1)
+    && npm install --no-save --ignore-scripts --no-audit --no-fund $4 >/dev/null 2>&1)
   mkdir "$work/nm-top-$1"
   mv "$work/nm-$1" "$work/nm-top-$1/$1"
   tar -C "$work/nm-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
 }
 
 nm mri https://github.com/lukeed/mri v1.2.0 tape@4.13.3
+nm debug https://github.com/debug-js/debug 4.3.7 "mocha@10.8.2 sinon@14.0.2"
 
 tb nanoid https://github.com/ai/nanoid 5.0.7

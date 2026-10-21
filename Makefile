@@ -1045,7 +1045,7 @@ COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.i
 GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
-# Real open-source projects (zlib, Lua, LZ4, toml, semver, fd, testify, fzf, nanoid) as git repositories the web
+# Real open-source projects (zlib, Lua, LZ4, toml, semver, fastrand, testify, fzf, nanoid, debug) as git repositories the web
 # server serves, for alpine.txt to clone, build and test.
 build/compat/oss: test/compat/ossrepos.sh
 	test/compat/ossrepos.sh $@

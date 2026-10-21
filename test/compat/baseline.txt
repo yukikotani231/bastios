@@ -1507,6 +1507,7 @@ alpine-tty: nvim: :terminal runs a shell in a window, takes typed keys, and the 
 node: node: a hot loop is compiled and gives the right sum
 node: node: a real package (nanoid) fetched from the host, tested with node --test
 node: node: a real package with its installed dependencies (mri, tape), tested with tape
+node: node: a real package (debug) with its installed dependencies, tested with mocha and sinon
 node: node: a script with arrays and JSON
 node: node: an expression
 node: node: exit status and uncaught exceptions
@@ -1561,6 +1562,7 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a real crate (semver) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a second real crate (fastrand) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a compile error is reported
 rust: rust: rust-analyzer reports its version
 rust: rust: rust-analyzer finds a type error in a crate
