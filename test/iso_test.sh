@@ -1153,6 +1153,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print(red)
             fails += not good
+            # SGR 9 strikes text through (two pixel rows); SGR 3 leans it: the red glyphs get wider.
+            typed("printf '\\033[2J\\033[H\\033[38;5;196;9m      \\033[0m'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            red = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = 60 <= red <= 200
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal strikes text through")
+            fails += not good
+            def red_width():
+                w, h, px = screendump()
+                xs = [(i // 3) % w for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0)]
+                return (max(xs) - min(xs) + 1) if xs else 0
+            typed("printf '\\033[2J\\033[H\\033[38;5;196mllllll\\033[0m'")
+            time.sleep(1.5)
+            plain = red_width()
+            typed("printf '\\033[2J\\033[H\\033[38;5;196;3mllllll\\033[0m'")
+            time.sleep(1.5)
+            lean = red_width()
+            good = plain > 0 and lean > plain
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal leans italic text")
+            if not good:
+                print(plain, lean)
+            fails += not good
             # A key held down repeats (bwm does it, the events have none).
             monitor("sendkey z 2500")
             time.sleep(1.2)
