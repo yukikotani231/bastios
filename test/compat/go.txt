@@ -92,3 +92,11 @@ $ bb wget -q -O - HOSTURL/oss/testify.tar.gz | bb tar -xz -C /disk/g/work; expor
 ok  	github.com/stretchr/testify/assert
 ok  	github.com/stretchr/testify/assert/internal/unsafetests
 ok  	github.com/stretchr/testify/require
+
+== go: a real command-line program (junegunn/fzf) with vendored dependencies, tested with go test -mod=vendor
+# timeout 1800
+$ bb mkdir -p /disk/g/bin; bb cp /disk/busybox /disk/g/bin/busybox; for a in sh echo cat sleep; do bb ln -s busybox /disk/g/bin/$a; done; bb wget -q -O - HOSTURL/oss/fzf.tar.gz | bb tar -xz -C /disk/g/work; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on PATH=/usr/local/go/bin:/bin; bb chroot /disk/g /usr/local/go/bin/go -C /work/fzf test -mod=vendor -vet=off ./src/... 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//' | bb grep -v 'no test files'
+ok  	github.com/junegunn/fzf/src
+ok  	github.com/junegunn/fzf/src/algo
+ok  	github.com/junegunn/fzf/src/tui
+ok  	github.com/junegunn/fzf/src/util

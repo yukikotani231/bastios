@@ -14,6 +14,18 @@
 #include <sys/wait.h>
 
 static char *cow_buf;
+static volatile int fast_phase;
+static char *fast_page;
+/* Runs only system calls the kernel answers without its lock (getpid), so the
+ * processor keeps its translations between them, until the other thread has
+ * unmapped the page. */
+static void *fast_thread(void *a) {
+    fast_page[0] = 1;
+    fast_phase = 1;
+    while (fast_phase < 2) syscall(SYS_getpid);
+    fast_page[0] = 2;
+    return a;
+}
 static void *cow_thread(void *a) { cow_buf[4096 * 3] = 7; return a; }
 
 int main(void) {
@@ -48,6 +60,15 @@ int main(void) {
            c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
     EXPECT("a page written before mprotect(PROT_READ) faults on the next write", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            ({ pid_t c = fork(); c == 0 ? (q[0] = 1, mprotect(q, 4096, PROT_READ), q[0] = 2, _exit(0), 0) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    EXPECT("a page another thread unmaps while this one makes quick system calls faults on its next touch", (fast_page = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ pid_t c = fork(); c == 0 ? ({ pthread_t t; fast_phase = 0;
+              if (pthread_create(&t, 0, fast_thread, 0)) _exit(1);
+              while (fast_phase < 1) sched_yield();
+              for (int i = 0; i < 1000; i++) syscall(SYS_getpid);
+              munmap(fast_page, 4096);
+              fast_phase = 2;
+              pthread_join(t, 0); _exit(0); 0; }) :
            c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
     EXPECT("a page read before munmap and mapped again at its address is a fresh zero page", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            ({ q[0] = 'P'; pid_t c = fork(); c == 0 ? ({ char r = q[0]; munmap(q, 4096);

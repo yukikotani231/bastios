@@ -1423,6 +1423,7 @@ t_thread: pthread_detach
 t_thread: thread-local storage
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
+t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
 t_thread: timed condition wait, signalled early (monotonic)
 t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
@@ -1507,6 +1508,7 @@ alpine-tty: nvim: :terminal runs a shell in a window, takes typed keys, and the 
 node: node: a hot loop is compiled and gives the right sum
 node: node: a real package (nanoid) fetched from the host, tested with node --test
 node: node: a real package with its installed dependencies (mri, tape), tested with tape
+node: node: a real package (debug) with its installed dependencies, tested with mocha and sinon
 node: node: a script with arrays and JSON
 node: node: an expression
 node: node: exit status and uncaught exceptions
@@ -1522,6 +1524,7 @@ go: go: fetch a real project from the host
 go: go: a real project (BurntSushi/toml), built with go build
 go: go: a real project (BurntSushi/toml), tested with go test
 go: go: a Go module with vendored dependencies (stretchr/testify), tested with go test -mod=vendor
+go: go: a real command-line program (junegunn/fzf) with vendored dependencies, tested with go test -mod=vendor
 go: go: gofmt rewrites a program
 go: go: gopls finds the definition of a function
 go: go: gopls formats a file
@@ -1538,6 +1541,7 @@ python: pip: install pytest and its dependencies from the host's web server
 python: pip: build a C extension from source (setuptools, gcc) and import it
 python: pytest: the whole test suite of a real project (Jinja2's)
 python: pytest: the whole test suite of a second real project (Click's, without its pager tests)
+python: pytest: the whole test suite of a third real project (Flask's, without two tests that fail on Linux too)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
@@ -1559,6 +1563,7 @@ rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
 rust: rust: a real crate (semver) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a second real crate (fastrand) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a compile error is reported
 rust: rust: rust-analyzer reports its version
 rust: rust: rust-analyzer finds a type error in a crate

@@ -3,6 +3,7 @@
 #include "compat.h"
 #include <fcntl.h>
 #include <pthread.h>
+#include <sched.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
@@ -191,6 +192,39 @@ static int fd_link_after_chroot(void) {
     int st;
     int ok = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
     unlink("tt_root/tt_f");
+    rmdir("tt_root/tt_sub");
+    rmdir("tt_root");
+    return ok;
+}
+
+/* A thread with a mount namespace of its own (runc's init thread after
+ * unshare) chroots there: /proc/self/fd/N, read by that thread, names the
+ * directory from its root, though the process's other threads keep theirs. */
+static void *ns_reader(void *a) {
+    (void)a;
+    char b[64];
+    if (unshare(CLONE_NEWNS) != 0 || chroot("tt_root") != 0 || chdir("/") != 0) return 0;
+    int d = open("/tt_sub", O_RDONLY | O_DIRECTORY);
+    if (d < 0) return 0;
+    char n1[16];
+    snprintf(n1, sizeof n1, "%d", d);
+    ssize_t n = readlinkat(rl_pfd, n1, b, sizeof b - 1);
+    return (void *)(long)(n == 7 && memcmp(b, "/tt_sub", 7) == 0);
+}
+static int fd_link_in_thread_ns(void) {
+    pid_t c = fork();
+    if (c == 0) {
+        mkdir("tt_root", 0755);
+        mkdir("tt_root/tt_sub", 0755);
+        rl_pfd = open("/proc/self/fd", O_RDONLY | O_DIRECTORY);
+        pthread_t t;
+        void *r = 0;
+        if (rl_pfd < 0 || pthread_create(&t, 0, ns_reader, 0) != 0) _exit(3);
+        if (pthread_join(t, &r) != 0) _exit(6);
+        _exit(r ? 0 : 1);
+    }
+    int st;
+    int ok = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
     rmdir("tt_root/tt_sub");
     rmdir("tt_root");
     return ok;
@@ -394,6 +428,7 @@ int main(void) {
     EXPECT("/proc/self/task/TID/fd/N and ns/ are the process's", task_fd());
     EXPECT("threads that ended and began one after another have different ids", tids_differ());
     EXPECT("/proc/self/fd/N read by another thread after a chroot names the file from the new root", fd_link_after_chroot());
+    EXPECT("/proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root", fd_link_in_thread_ns());
     EXPECT("a thread keeps its descriptors while another spawns a child", spawn_keeps_fds());
     EXPECT("clone3: CLONE_CLEAR_SIGHAND, and what it refuses", clone3_clear_sighand());
     EXPECT("clone3: a fork child", clone3_fork());

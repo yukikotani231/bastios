@@ -976,6 +976,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # A click on a .ppm in the bfiles list opens it in the image viewer.
+        mark = len(out)
+        q.stdin.write(b"mkdir /tmp/ni; cp /tmp/nf/t.ppm /tmp/ni/p.ppm; bwm -n -c bfiles /tmp/ni\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("mouse_move -420 -254", "mouse_move -1 -1", "mouse_button 1", "mouse_button 0")
+            good = until(b"bfiles: image /tmp/ni/p.ppm", mark) and until(b"bview: window", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a click on a .ppm in bfiles opens the image viewer")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # t in the list of bfiles opens a terminal in that directory.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bfiles /tmp/nf\r"); q.stdin.flush()

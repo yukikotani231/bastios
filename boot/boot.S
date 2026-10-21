@@ -310,13 +310,22 @@ bst_cpu_enter:
 4:
         /* The shadow table: slot 0 is the window's level-3 table. */
         mov     CORE_UROOT(%rsi), %rax
+        mov     %eax, %edi
+        and     $1, %edi                        /* set below by the entry before this one, unless the prelude entered a table since */
+        orq     $1, CORE_UROOT(%rsi)
+        and     $-2, %rax
         mov     CORE_INDEX(%rsi), %rdx
         shl     $12, %rdx
         movabs  $bst_shadow_pml4, %rcx
         add     %rcx, %rdx
         mov     %rdx, %rcx
         or      CORE_UPCID(%rsi), %rcx
-        mov     %rcx, CORE_CR3(%rsi)
+        test    %edi, %edi
+        jz      6f
+        cmpq    $0, CORE_UPCID(%rsi)
+        je      6f
+        bts     $63, %rcx                       /* still the same lease: nothing was taken out of the table, keep its translations */
+6:      mov     %rcx, CORE_CR3(%rsi)
         mov     8(%rax), %rax                   /* slot 1 of the process's table */
         mov     %rax, (%rdx)
         movq    $1, CORE_UMODE(%rsi)
