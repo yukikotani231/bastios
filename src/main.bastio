@@ -1476,11 +1476,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, " framebuffer\r\n");
   }
   let mut m = mem_new(pool);
+  let e0 = cpu_tsc(cpu);
   // The pool spans every run of RAM (bastiolang's bst_pool_init, and
   // boot/multiboot.c's bst_map_ram): its last page is checked once.
   if !probe_top(&mut m) {
     puts(&mut con, "memory: the last page of RAM does not read back\r\n");
   }
+  let e1 = cpu_tsc(cpu);
   // PCI's configuration ports are claimed for the drivers that look for
   // their devices there.
   let mut pci = Pci { addr: port_claim(&mut ports, PCI_ADDR, 4), data: port_claim(&mut ports, PCI_DATA, 4) };
@@ -1488,10 +1490,13 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // with pages from USB_AT: a USB stick with a BastiOS partition on it
   // becomes the disk, and a USB keyboard and mouse the keyboard and mouse.
   let xn = usb_count(&mut pci);
+  let e2 = cpu_tsc(cpu);
   // UHCI controllers are only looked at, to say in the boot log whether a
   // keyboard may be out of reach behind one (no driver yet).
   let uh = uhci_survey(&mut ports, &mut pci, acpi_lo, acpi_hi);
+  let e3 = cpu_tsc(cpu);
   let mut usb = usb_find(&mut pci, &mut m, &mut win, USB_AT, fb_lo, fb_hi, msi, V_DISK);
+  let e4 = cpu_tsc(cpu);
   let usb_lo = usb_base(usb);
   let usb_hi = usb_top(usb);
   let usb_disk = usb_msd(usb);
@@ -1501,6 +1506,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // joins the generator's pool once the kernel exists.
   let mut hw = alloc(VRNG_WORDS);
   let hw_n = rng_hw(&mut ports, &mut pci, &mut m, &mut win, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, vm_where, &mut hw);
+  let e5 = cpu_tsc(cpu);
   if hw_n > 0 {
     puts(&mut con, "rng: virtio-rng, ");
     put_num(&mut con, hw_n * 8);
@@ -1508,6 +1514,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
   let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"), vm_where);
+  let e6 = cpu_tsc(cpu);
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
@@ -1525,6 +1532,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     dmode = DM_RAW;
   }
   let disk = disk_mount(dev, dmode, dq_slots_for(pool_pages));
+  let e7 = cpu_tsc(cpu);
   if blk_is_virtio(disk.dev) {
     puts(&mut con, "disk: virtio\r\n");
   } else if blk_is_nvme(disk.dev) {
@@ -1590,6 +1598,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   // The sound card, if any, with six pages from SND_AT.
   let snd = snd_find(&mut pci, &mut m, &mut win, SND_AT, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
+  let e8 = cpu_tsc(cpu);
   let snd_l = snd_lo(snd);
   let snd_h = snd_hi(snd);
   if snd_live(snd) {
@@ -1604,6 +1613,26 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   // The network card, if any: nine pages after the disk's four (an e1000
   // takes six of them).
   let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, snd_l, snd_h, msi, vm_where);
+  let e9 = cpu_tsc(cpu);
+  puts(&mut con, "exp-stages: mem ");
+  put_num(&mut con, (e1 - e0) / 1000);
+  puts(&mut con, " usbcount ");
+  put_num(&mut con, (e2 - e1) / 1000);
+  puts(&mut con, " uhci ");
+  put_num(&mut con, (e3 - e2) / 1000);
+  puts(&mut con, " usbfind ");
+  put_num(&mut con, (e4 - e3) / 1000);
+  puts(&mut con, " rng ");
+  put_num(&mut con, (e5 - e4) / 1000);
+  puts(&mut con, " blk ");
+  put_num(&mut con, (e6 - e5) / 1000);
+  puts(&mut con, " mount ");
+  put_num(&mut con, (e7 - e6) / 1000);
+  puts(&mut con, " snd ");
+  put_num(&mut con, (e8 - e7) / 1000);
+  puts(&mut con, " nic ");
+  put_num(&mut con, (e9 - e8) / 1000);
+  puts(&mut con, " kcycles\r\n");
   // An e1000 has no MSI: its line goes through the 8259 (vectors 32-47,
   // acknowledged like the timer's), unless it shares the timer's, the
   // keyboard's, the cascade or COM1's.
