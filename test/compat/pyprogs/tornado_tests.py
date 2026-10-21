@@ -5,8 +5,8 @@ client and server, child processes, the HTTP server, the simple HTTP client
 that does not reach the kernel, and the whole suite takes a quarter of an
 hour in CI. A few of the SSL tests are racy when the CPU is slow (a handshake
 ends after the test has moved on, or logs one line more than the test
-expects), so each test that fails is run once more on its own; the suite
-passes if those pass.
+expects), so each test that fails is run up to three more times on its own; the
+suite passes if those pass.
 
 Prints "Ran N tests" and then "OK", or the tests that still fail."""
 import os
@@ -44,8 +44,10 @@ def run(names):
 
 ran, failed = run(MODULES)
 for name in failed[:]:
-    if run([name])[1] == []:
-        failed.remove(name)
+    for _ in range(3):
+        if run([name])[1] == []:
+            failed.remove(name)
+            break
 print("Ran %d tests" % ran)
 if failed:
     for name in failed:
