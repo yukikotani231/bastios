@@ -817,6 +817,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.sigsave);
   free(s.k.ux);
   bfree(s.k.uxb);
+  bfree(s.k.lexb);
   free(s.k.mns);
   free(s.k.scf);
   free(s.k.swp);
