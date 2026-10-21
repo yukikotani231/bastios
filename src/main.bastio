@@ -1360,6 +1360,13 @@ fn diag_pause(t: &mut Term, con: &mut Con, clock: &mut Hpet, acpi: &mut Acpi)
   con_flush(&mut t, &mut con);
 }
 
+fn dsub(a: u64, b: u64) -> u64 {
+  if a >= b {
+    return a - b;
+  }
+  return 0;
+}
+
 fn tick(t: u64) -> u64 {
   if t < 18446744073709551615 {
     return t + 1;
@@ -1615,23 +1622,23 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, snd_l, snd_h, msi, vm_where);
   let e9 = cpu_tsc(cpu);
   puts(&mut con, "exp-stages: mem ");
-  put_num(&mut con, (e1 - e0) / 1000);
+  put_num(&mut con, dsub(e1, e0) / 1000);
   puts(&mut con, " usbcount ");
-  put_num(&mut con, (e2 - e1) / 1000);
+  put_num(&mut con, dsub(e2, e1) / 1000);
   puts(&mut con, " uhci ");
-  put_num(&mut con, (e3 - e2) / 1000);
+  put_num(&mut con, dsub(e3, e2) / 1000);
   puts(&mut con, " usbfind ");
-  put_num(&mut con, (e4 - e3) / 1000);
+  put_num(&mut con, dsub(e4, e3) / 1000);
   puts(&mut con, " rng ");
-  put_num(&mut con, (e5 - e4) / 1000);
+  put_num(&mut con, dsub(e5, e4) / 1000);
   puts(&mut con, " blk ");
-  put_num(&mut con, (e6 - e5) / 1000);
+  put_num(&mut con, dsub(e6, e5) / 1000);
   puts(&mut con, " mount ");
-  put_num(&mut con, (e7 - e6) / 1000);
+  put_num(&mut con, dsub(e7, e6) / 1000);
   puts(&mut con, " snd ");
-  put_num(&mut con, (e8 - e7) / 1000);
+  put_num(&mut con, dsub(e8, e7) / 1000);
   puts(&mut con, " nic ");
-  put_num(&mut con, (e9 - e8) / 1000);
+  put_num(&mut con, dsub(e9, e8) / 1000);
   puts(&mut con, " kcycles\r\n");
   // An e1000 has no MSI: its line goes through the 8259 (vectors 32-47,
   // acknowledged like the timer's), unless it shares the timer's, the
