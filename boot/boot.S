@@ -423,13 +423,25 @@ bst_tramp_start:
 
 /* The end of bst_cpu_enter: CR3 takes the shadow table, and `iretq` takes
  * the frame bst_cpu_enter built. All registers but rax are the user's; the
- * user's rax is on the stack above the frame. */
+ * user's rax is on the stack above the frame. When the user's rcx and r11
+ * already hold the frame's rip and rflags, as after a `syscall`, `sysretq`
+ * does the same as `iretq` (it loads rip from rcx and rflags from r11, and
+ * forces the user's code and stack segments STAR names) and is much faster.
+ * The stack is the user's for the instruction before it; the interrupts
+ * that can arrive then (NMI, #MC) use IST1. */
 bst_enter_tail:
         mov     %rsp, %rax
         and     $-CORE_BLOCK, %rax
         mov     CORE_CR3(%rax), %rax
         mov     %rax, %cr3
+        cmp     %rcx, (%rsp)
+        jne     1f
+        cmp     %r11, 2*8(%rsp)
+        jne     1f
         mov     5*8(%rsp), %rax
+        mov     3*8(%rsp), %rsp
+        sysretq
+1:      mov     5*8(%rsp), %rax
         iretq
 
 /*
