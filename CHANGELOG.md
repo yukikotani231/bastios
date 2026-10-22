@@ -18,6 +18,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
+- `bterm` sets the window title when a program prints `ESC ] 0 ; TEXT` or `ESC ] 2 ; TEXT` ended by BEL or `ESC \`.
+- `bwm` draws a desktop icon for each launcher entry but Hello window and Quit bwm, and starts the program on a click.
 - `bwm`'s launcher menu gains an entry for each `Label=command` line of `/etc/bwm.menu`, which runs the command in a terminal window; `bterm -e COMMAND` runs a command in place of the shell prompt.
 - `bfiles` moves a cursor along the list with the arrow, Home, End and Page keys and opens the entry under it on Enter.
 - `bsys` reads its numbers again every 2 seconds.

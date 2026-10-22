@@ -496,15 +496,36 @@ jobs:
   # space). Disk images and everything built from this repository are never
   # cached. The caches are saved only after the build step succeeded, so a
   # build that failed halfway is never kept.
+  # The suite runs in three parts on runners of their own (run.py --lanes):
+  # the programs and the Bastio compiler, Alpine with Go, and the other
+  # languages' toolchains. Each builds only the disks of its lanes and holds
+  # to the baseline every check of the groups its lanes hold. The
+  # third-party cache is kept per part; until a part has an entry of its own
+  # it restores the whole one the single job saved.
   compat:
+    name: compat (${{ matrix.part }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - part: programs
+            lanes: main1,main2,dev,bastio
+            disks: disk.img dev.img bastio.img
+          - part: alpine
+            lanes: alpine,alpine2,alpine3,alpine4,alpine5,go
+            disks: alpine.img go.img
+          - part: toolchains
+            lanes: debian,node,python,java,rust,podman,gitsuite
+            disks: alpine.img debian.img node.img python.img jdk.img rust.img podman.img gitsuite.tar
     env:
       # Raise it to drop every cache entry below (a bad entry is never
       # replaced: a key that hits is not saved again).
       CACHE_V: 2
+      COMPAT_LANES: ${{ matrix.lanes }}
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
     steps:
@@ -533,7 +554,8 @@ jobs:
         id: tp
         uses: actions/cache/restore@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}-${{ matrix.part }}
+          restore-keys: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -562,13 +584,13 @@ jobs:
       # pyzip.py; tcc, from its patch). The key covers those inputs, so a
       # hit is up to date.
       - name: Mark the restored programs up to date
-        if: steps.tp.outputs.cache-hit == 'true'
+        if: steps.tp.outputs.cache-matched-key != ''
         run: find build/busybox build/compat -exec touch -h {} +
       - name: Restore Alpine's images
         id: al
         uses: actions/cache/restore@v4
         with:
-          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}-${{ matrix.part }}
           restore-keys: compat-alpine-${{ env.CACHE_V }}-
           path: |
             build/compat/alpine/*.tar.gz
@@ -588,12 +610,12 @@ jobs:
           while pgrep -f 'rm -rf /usr/share/dotnet' >/dev/null; do sleep 5; done
           df -h /
       - name: Build the disks
-        run: make -j4 compat-disks
+        run: make -j4 compat-disks COMPAT_DISKS="$(printf 'build/compat/%s ' ${{ matrix.disks }})"
       - name: Save the third-party programs
         if: steps.tp.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}
+          key: compat-3p-${{ env.CACHE_V }}-${{ steps.keys.outputs.pins }}-rg-${{ hashFiles('test/compat/busybox.config', 'test/compat/patches/**', 'test/compat/pyzip.py', 'test/compat/gitsuite.sh') }}-${{ matrix.part }}
           path: |
             build/busybox
             build/compat/src/tcc
@@ -622,14 +644,14 @@ jobs:
         if: github.event_name == 'push' && steps.al.outputs.cache-hit != 'true'
         uses: actions/cache/save@v4
         with:
-          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}
+          key: compat-alpine-${{ env.CACHE_V }}-${{ steps.keys.outputs.images }}-${{ hashFiles('test/compat/alpinedisk.py') }}-${{ matrix.part }}
           path: |
             build/compat/alpine/*.tar.gz
             build/compat/alpine/*.json
         continue-on-error: true
       - name: Run the x86-64 guests under KVM
         run: tools/ci-kvm.sh
-      - run: make compat
+      - run: make compat COMPAT_DISKS="$(printf 'build/compat/%s ' ${{ matrix.disks }})"
       - name: What failed
         if: failure()
         run: |
@@ -641,7 +663,7 @@ jobs:
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: compat-report
+          name: compat-report-${{ matrix.part }}
           path: |
             build/compat/report.md
             build/compat/results.json
