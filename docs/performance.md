@@ -175,6 +175,13 @@ instructions on both. Where BastiOS is behind:
   commit still flushes the data before any directory block that names it.
   The 500-file root now makes 643 host writes (from 1329) and `untar` runs
   about 15% faster (median of three alternating runs, 0.93 to 0.78 s).
+  A directory nested three deep, a rename into a directory made since the
+  last commit and a full list of noted directory blocks used to wait for the
+  disk to catch up before going on; they now only queue the batch's commit
+  (`settle_batch`), which the queue runs, flush and all, ahead of the next
+  one, so the order on the disk is the same. Unpacking Alpine's mini root
+  (97 directories, 88 files, 335 symlinks) waits for the disk 7 times
+  instead of 21.
   The same goes for removing a file the disk never held (or held empty):
   its entry rides the next commit as the creation did, and `O_TRUNC` on a
   file that is already empty no longer drains the queue. The `create` test
