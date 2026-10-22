@@ -70,6 +70,22 @@ fn dir_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   return Ent { len: 0, dir: false, end: true };
 }
 
+/// How many entries after the one at index i of directory dir (which
+/// dir_entry found to hold nothing) hold nothing as well: the disk's
+/// directories are listed by asking about every slot, and almost all of them
+/// belong to other directories.
+fn dir_gap(k: &mut Kernel, dir: u64, i: u64) -> u64
+  requires kok(k) && i < 0xFFFFFFFF
+  ensures kok(k) && result <= DSLOTS
+{
+  if dir >= DIR_VFS && dir < DIR_PROC {
+    let from = i + 1;
+    let j = vfs_skip(&mut k.fs, dir - DIR_VFS, from);
+    return j - from;
+  }
+  return 0;
+}
+
 /// Entry i of the file layer's directory d.
 fn vfs_entry(k: &mut Kernel, d: u64, i: u64) -> Ent
   requires kok(k)
@@ -206,6 +222,9 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
       nx = ovl_after(k, i);
     } else {
       e = dir_entry(&mut k, pid, dir, i - 2);
+      if e.len == 0 && !e.end {
+        nx = i + 1 + dir_gap(&mut k, dir, i - 2);
+      }
     }
     if e.end {
       more = false;

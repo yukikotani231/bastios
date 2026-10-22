@@ -8,7 +8,7 @@
 // Between them sits a line discipline like the console's (tty_cook): in
 // canonical mode input is gathered into lines, echoed, and erased with
 // VERASE and VKILL, and VEOF ends a line (an empty one reads as end of
-// file); with ISIG, VINTR and VQUIT send SIGINT and SIGQUIT to the
+// file); with ISIG, VINTR, VQUIT and VSUSP send SIGINT, SIGQUIT and SIGTSTP to the
 // terminal's foreground process group; ICRNL turns CR into LF; output gets
 // OPOST/ONLCR. In noncanonical mode each byte can be read at once. The
 // settings are a struct termios per terminal, which the slave and the
@@ -25,7 +25,7 @@
 // PTY_CAP bytes per terminal: input (master to slave), then output.
 //
 // Not done: job control signals for background reads and writes
-// (SIGTTIN, SIGTTOU), VSUSP, VMIN above 1 (read as 1), VTIME, flow control
+// (SIGTTIN, SIGTTOU), VMIN above 1 (read as 1), VTIME, flow control
 // (IXON), and packet mode. A canonical read can return more than one line.
 // /dev/tty names the console unless the process's session has a terminal.
 
@@ -52,7 +52,6 @@ const PT_W_TT: u64 = 16;               // the termios, a byte a word (TERMIOS_SI
 
 const SIGHUP: u64 = 1;
 const SIGQUIT: u64 = 3;
-const TIOCSWINSZ: u64 = 0x5414;
 const TIOCSCTTY: u64 = 0x540E;
 const TIOCNOTTY: u64 = 0x5422;
 const TIOCGPTN: u64 = 0x80045430;
@@ -471,11 +470,14 @@ fn pty_input(k: &mut Kernel, p: u64, ch: u64) -> bool
   if c == 13 && pt_flags(k.ptys, p, 0) & ICRNL != 0 {
     c = 10;
   }
-  if lf & ISIG != 0 && c != 0 && (c == pt_byte(k.ptys, p, 17) || c == pt_byte(k.ptys, p, 18)) {
-    // VINTR or VQUIT: the signal, and what was typed is thrown away.
+  if lf & ISIG != 0 && c != 0 && (c == pt_byte(k.ptys, p, 17) || c == pt_byte(k.ptys, p, 18) || c == pt_byte(k.ptys, p, VSUSP_AT)) {
+    // VINTR, VQUIT or VSUSP: the signal, and what was typed is thrown away.
     let mut s = SIGINT;
     if c == pt_byte(k.ptys, p, 18) {
       s = SIGQUIT;
+    }
+    if c == pt_byte(k.ptys, p, VSUSP_AT) && c != pt_byte(k.ptys, p, 17) && c != pt_byte(k.ptys, p, 18) {
+      s = SIGTSTP;
     }
     let mut r = pty_ring(k.ptys, p, false);
     ring_clear(&mut r);

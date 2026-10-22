@@ -605,7 +605,8 @@ fn vfs_close(v: &mut Vfs, mem: &mut Mem, row: u64) -> bool
 /// Node `node` of file system `fs` (handle h) lost a row or a hold. The
 /// last close of a file removed while open frees it, and its cached pages.
 /// A closed file that still exists keeps its pages in the page cache, so
-/// the next run of a program finds its code there. A handle can be freed
+/// the next run of a program finds its code there, and the next mmap of a
+/// MAP_SHARED page the page that other processes may still map. A handle can be freed
 /// with pages cached (a file removed while closed); whatever makes a new
 /// file under it drops them first (pc_forget at each create), so a handle
 /// never names another file's pages.
@@ -624,8 +625,6 @@ fn node_settle(v: &mut Vfs, mem: &mut Mem, fs: u64, node: u64, h: u64)
       pc_forget(&mut v.pc, &mut mem, h);
       disk_remove(&mut v.lo, node);
       lo_settle(&mut v);
-    } else {
-      pc_close(&mut v.pc, &mut mem, h);
     }
   }
 }
@@ -840,10 +839,17 @@ fn vfs_write(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result <= n || result == NO_FD || result == VFS_MISS
 {
+  let f = vfs_row_file(v, row);
+  let mut was = NO_FILE;
+  if pc_any(v.pc, f) {
+    was = vfs_size(&mut v, f);
+  }
   let w = write_row(&mut v, &mut mem, row, n);
   let end = fget(v.ftab, row, FD_OFF);
   if w <= n && w <= end {
-    let f = vfs_row_file(v, row);
+    if was != NO_FILE && end > was {
+      pc_zero_tail(&mut v.pc, f, was);
+    }
     pc_wrote(&mut v.pc, f, end - w, v.xfer, w);
     if fget(v.ftab, row, FD_FS) == FS_DISK {
       // The pages this write filled whole are what a reader of the file, or
@@ -923,9 +929,17 @@ fn vfs_truncate(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
   requires vfs_ok(v) && mem_ok(mem) && row < FD_ROWS
   ensures vfs_ok(v) && mem_ok(mem)
 {
+  let f = vfs_row_file(v, row);
+  let mut was = NO_FILE;
+  if pc_any(v.pc, f) {
+    was = vfs_size(&mut v, f);
+  }
   let ok = truncate_row(&mut v, &mut mem, row, size_to);
   if ok {
-    pc_resize(&mut v.pc, &mut mem, vfs_row_file(v, row), size_to);
+    if was != NO_FILE && size_to > was {
+      pc_zero_tail(&mut v.pc, f, was);
+    }
+    pc_resize(&mut v.pc, &mut mem, f, size_to);
   }
   return ok;
 }
@@ -1726,6 +1740,66 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
   return NO_FILE;
 }
 
+/// The first index at or after i that can be an entry of disk directory p
+/// (DTOP: the top) of file system d: vfs_readdir finds nothing, and no
+/// entry of p lives, below it. The end of the directory's slots (or i, if
+/// it is past them) if there is none.
+fn dk_skip(d: &DiskFs, p: u64, i: u64) -> u64
+  requires disk_ok(d)
+  ensures result >= i && (result <= DSLOTS || i > DSLOTS)
+{
+  let mut j = i;
+  while j < DSLOTS && j < d.slots && !(dent_used(d, j) && dent_parent(d, j) == p)
+    invariant j >= i && disk_ok(d) && (j <= DSLOTS || j == i)
+  {
+    j = j + 1;
+  }
+  return j;
+}
+
+/// Where a walk over directory d's entries, which has just found nothing at
+/// index i, can go on: vfs_readdir finds nothing at any index between i
+/// and the result (at least i, at most i + DSLOTS). The disk's directories
+/// hold only the entries whose parent they are, among all of its slots, so
+/// listing one would otherwise ask about every slot in turn.
+fn vfs_skip(v: &mut Vfs, d: u64, i: u64) -> u64
+  requires vfs_ok(v) && i < 0x100000000
+  ensures vfs_ok(v) && result >= i && result <= i + DSLOTS
+{
+  let mut dk = d;
+  let mut lo = false;
+  if d == VDIR_DISK || (d >= NFILES && d < NFILES + DSLOTS) {
+    dk = DTOP;
+    if d != VDIR_DISK {
+      if !dent_dir(v.disk, d - NFILES) {
+        return i;
+      }
+      dk = d - NFILES;
+    }
+  } else if d == VDIR_LO || (d >= LO0 && d < HFILES) {
+    lo = true;
+    dk = DTOP;
+    if d != VDIR_LO {
+      if !dent_dir(v.lo, d - LO0) {
+        return i;
+      }
+      dk = d - LO0;
+    }
+  } else {
+    return i;
+  }
+  let mut j = 0;
+  if lo {
+    j = dk_skip(v.lo, dk, i);
+  } else {
+    j = dk_skip(v.disk, dk, i);
+  }
+  if j > i + DSLOTS {
+    return i;
+  }
+  return j;
+}
+
 /// vfs_readdir of entry i of directory entry p (DTOP: the top) of disk
 /// file system d.
 fn dk_readdir(d: &DiskFs, x: &mut Bytes, p: u64, i: u64) -> u64
@@ -2209,7 +2283,7 @@ fn dk_symlink(d: &mut DiskFs, pc: &mut PCache, mem: &mut Mem, h0: u64, x: &mut B
   }
   pc_forget(&mut pc, &mut mem, h0 + e);
   xfer_shift(&mut x, n, m);
-  if !disk_set_meta(&mut d, e, mode, NO_DISK_FILE) || disk_write_wait(&mut d, e, x, m, now) != m {
+  if !disk_set_meta(&mut d, e, mode, NO_DISK_FILE) || disk_write_soon(&mut d, e, x, m, now) != m {
     disk_remove(&mut d, e);
     return false;
   }
@@ -2425,7 +2499,7 @@ fn vfs_mount_node(v: &Vfs, s: u64) -> u64
 fn vfs_mount_ro(v: &Vfs, s: u64) -> bool
   requires vfs_ok(v) && s < MNT_N
 {
-  return get(v.mnt, 2 * s + 1) != 0;
+  return get(v.mnt, 2 * s + 1) % 4 != 0;
 }
 
 /// Is mount slot s an ext4 image (src/ext4.bastio)? Such a mount stays
@@ -2433,7 +2507,7 @@ fn vfs_mount_ro(v: &Vfs, s: u64) -> bool
 fn vfs_mount_ext(v: &Vfs, s: u64) -> bool
   requires vfs_ok(v) && s < MNT_N
 {
-  return get(v.mnt, 2 * s + 1) == 2;
+  return get(v.mnt, 2 * s + 1) % 4 == 2;
 }
 
 /// Marks mount slot s as a read-only ext4 image.
@@ -2441,7 +2515,25 @@ fn vfs_set_ext(v: &mut Vfs, s: u64)
   requires vfs_ok(v) && s < MNT_N
   ensures vfs_ok(v)
 {
-  v.mnt = set(v.mnt, 2 * s + 1, 2);
+  let w = get(v.mnt, 2 * s + 1);
+  v.mnt = set(v.mnt, 2 * s + 1, w - w % 4 + 2);
+}
+
+/// The mount flags kept for slot s (MS_NOSUID, MS_NODEV, MS_NOEXEC,
+/// MS_NOATIME, MS_NODIRATIME): the upper bits of its second word.
+fn vfs_mount_flags(v: &Vfs, s: u64) -> u64
+  requires vfs_ok(v) && s < MNT_N
+{
+  return get(v.mnt, 2 * s + 1) / 4;
+}
+
+/// Sets the mount flags of slot s, keeping its read-only state.
+fn vfs_set_mflags(v: &mut Vfs, s: u64, fl: u64)
+  requires vfs_ok(v) && s < MNT_N && fl < 65536
+  ensures vfs_ok(v)
+{
+  let w = get(v.mnt, 2 * s + 1);
+  v.mnt = set(v.mnt, 2 * s + 1, w % 4 + fl * 4);
 }
 
 /// Mounts on in-memory directory node i. False if every slot is taken.
@@ -2471,11 +2563,12 @@ fn vfs_set_ro(v: &mut Vfs, s: u64, ro: bool)
   requires vfs_ok(v) && s < MNT_N
   ensures vfs_ok(v)
 {
+  let w = get(v.mnt, 2 * s + 1);
   let mut r = 0;
   if ro {
     r = 1;
   }
-  v.mnt = set(v.mnt, 2 * s + 1, r);
+  v.mnt = set(v.mnt, 2 * s + 1, w - w % 4 + r);
 }
 
 /// Is a[..l] the same as b[..l]?
@@ -2549,6 +2642,56 @@ fn vfs_dev_of(v: &mut Vfs, n: u64) -> u64
     s = s + 1;
   }
   return best;
+}
+
+/// The mount flags (the statfs f_flags: ST_RDONLY 1, ST_NOSUID 2, ST_NODEV 4,
+/// ST_NOEXEC 8, ST_NOATIME 1024, ST_NODIRATIME 2048) of the innermost tmpfs
+/// mount that holds the name in the first n bytes of the transfer buffer,
+/// or 0.
+fn vfs_path_mflags(v: &mut Vfs, n: u64) -> u64
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  if on_disk(v, n) {
+    return 0;
+  }
+  let mut best = 0;
+  let mut best_l = 0;
+  let mut found = false;
+  let mut s = 0;
+  while s < v.mnt_hi
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XFER
+  {
+    let i = vfs_mount_node(v, s);
+    if i < NFILES {
+      let l = ram_name(&mut v.ram, i, &mut v.name);
+      if l != NO_FILE && l <= n && (l == n || bget(v.xfer, l) == 47) && same_start(v.xfer, v.name, l) && (!found || l > best_l) {
+        found = true;
+        best_l = l;
+        best = smaller(vfs_mount_flags(v, s), 65535);
+        if vfs_mount_ro(v, s) {
+          best = best + 1;
+        }
+      }
+    }
+    s = s + 1;
+  }
+  return best;
+}
+
+/// vfs_path_mflags of file f (a vfs_lookup handle). Uses the transfer buffer.
+fn vfs_file_mflags(v: &mut Vfs, f: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f >= NFILES {
+    return 0;
+  }
+  let l = ram_name(&mut v.ram, f, &mut v.xfer);
+  if l == NO_FILE {
+    return 0;
+  }
+  return vfs_path_mflags(&mut v, l);
 }
 
 /// Does file f (a vfs_lookup handle) lie in a mount? Uses the transfer
@@ -2722,7 +2865,7 @@ fn vfs_lo_mount(v: &mut Vfs, mem: &mut Mem, f: u64, at: u64, dev: u64, ro: bool)
     return LO_NOFS;
   }
   let magic = get_u64(v.xfer, 0);
-  if magic != DISK_MAGIC && magic != DISK_MAGIC2 && magic != DISK_MAGIC4 {
+  if magic != DISK_MAGIC && magic != DISK_MAGIC2 && magic != DISK_MAGIC4 && magic != DISK_MAGIC5 && magic != DISK_MAGIC6 {
     return LO_NOFS;
   }
   pc_forget(&mut v.pc, &mut mem, f);                 // the loop driver owns its pages now

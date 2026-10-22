@@ -18,7 +18,7 @@
 // pids.current, pids.events (forks refused by pids.max), memory.max, memory.current and memory.events, memory.stat,
 // memory.high, memory.low, memory.min and memory.swap.max (kept as written,
 // not enforced), the cpuset controller's cpuset.cpus and cpuset.mems (a list
-// of processors, kept as written, not enforced, and their .effective files), memory.swap.current (0), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
+// of processors, kept as written, not enforced, and their .effective files), memory.swap.current (the pages swapped out), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
 // (threads too) fail with EAGAIN once the group or one above it holds that
 // many tasks, and so does moving a process in.
 //
@@ -1005,9 +1005,9 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if f >= 18 && f <= 21 {
-    // memory.high, low, min and swap.max: kept as written. Only memory.max
-    // is enforced; with no reclaim and no swap there is nothing for these
-    // to hold back or to protect.
+    // memory.high, low and min: kept as written. Only memory.max and
+    // memory.swap.max are enforced; with no reclaim there is nothing for the
+    // others to hold back or to protect.
     let v = cg_get(k, s, CGW_MHIGH + f - 18);
     if v == 0 && f != 19 && f != 20 {
       return put_s(&mut o, 0, "max\n");
@@ -1022,7 +1022,8 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if f == 22 {
-    return put_s(&mut o, 0, "0\n");            // no swap
+    let a = put_n(&mut o, 0, cg_swap_current(k, s));
+    return put_c(&mut o, a, 10);
   }
   if f == 28 {
     let a = put_s(&mut o, 0, "max ");
@@ -1066,7 +1067,11 @@ fn cg_resident(k: &mut Kernel, q: u64) -> u64
   if c > WPAGES {
     return 0;
   }
-  return c;
+  let out = swap_count(k, q);              // swapped pages map the marker page: they hold no memory
+  if out >= c {
+    return 0;
+  }
+  return c - out;
 }
 
 /// memory.current of cgroup s: the bytes of memory the processes in it and
@@ -1088,6 +1093,56 @@ fn cg_mem_current(k: &mut Kernel, s: u64) -> u64
     q = q + 1;
   }
   return pages * 4096;
+}
+
+/// memory.swap.current of cgroup s: the bytes of the processes in it and
+/// below it that are in the swap file (each address space counted once).
+fn cg_swap_current(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+  ensures result <= 0x100000000000000
+{
+  let mut pages = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && pages <= (q - 1) * WPAGES && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q && cg_in(k, cg_of(k, q), s) {
+      pages = pages + smaller(swap_count(k, q), WPAGES);
+    }
+    q = q + 1;
+  }
+  return pages * 4096;
+}
+
+/// How many more pages the swap file may take from process q: the room left
+/// under the tightest memory.swap.max of its group and the ones above it
+/// (a limit of "max" leaves all of the window).
+fn cg_swap_room(k: &Kernel, q: u64) -> u64
+  requires kok(k) && q < NPROC
+  ensures result <= WPAGES
+{
+  let mut room = WPAGES;
+  let mut c = cg_of(k, q);
+  let mut i = 0;
+  while i < CG_N
+    invariant i <= CG_N && c < CG_N && room <= WPAGES && kok(k)
+  {
+    let lim = cg_get(k, c, CGW_MHIGH + 3);
+    if lim != 0 && lim <= CG_BIG {
+      let cur = cg_swap_current(k, c);
+      if cur >= lim - 1 {
+        room = 0;
+      } else {
+        room = smaller(room, (lim - 1 - cur) / 4096);
+      }
+    }
+    if c == 0 {
+      return room;
+    }
+    c = cg_parent(k, c);
+    i = i + 1;
+  }
+  return room;
 }
 
 /// Has a task of cgroup s or below a SIGKILL it has not yet died of?

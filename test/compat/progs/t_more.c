@@ -28,6 +28,74 @@
 
 extern char **environ;
 
+/* Half a page of file, mapped MAP_SHARED, the rest of the page written
+ * through the mapping (past the end of the file), unmapped and closed;
+ * then the file grows by ftruncate (how 0), a write at the end of the
+ * page (1) or a write past it (2), or stays as it is (3). The bytes past
+ * the old end must read as zeros, by read and by a new mapping: they were
+ * never the file's (POSIX: the partial page is zero-filled, and what is
+ * written past the end is never written out). */
+static int grow_zero(int how) {
+    const long ps = 4096;
+    char buf[4096];
+    int ok = 1, fd = open("cm_grow", O_RDWR | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0) return 0;
+    memset(buf, 'a', ps / 2);
+    char *m = write(fd, buf, ps / 2) == ps / 2 ? mmap(0, ps, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    if (m == MAP_FAILED) { close(fd); unlink("cm_grow"); return 0; }
+    memset(m + ps / 2, 'b', ps / 2);
+    munmap(m, ps);
+    close(fd);
+    fd = open("cm_grow", O_RDWR);
+    if (how == 0) ok = ftruncate(fd, ps) == 0;
+    else if (how == 1) ok = pwrite(fd, "", 1, ps - 1) == 1;
+    else if (how == 2) ok = pwrite(fd, "z", 1, 2 * ps) == 1;
+    if (how != 3) {
+        ok = ok && pread(fd, buf, ps - 1, 0) == ps - 1;
+        for (long i = ps / 2; ok && i < ps - 1; i++) ok = buf[i] == 0;
+    }
+    m = mmap(0, ps, PROT_READ, MAP_SHARED, fd, 0);
+    ok = ok && m != MAP_FAILED;
+    for (long i = ps / 2; ok && i < ps - 1; i++) ok = m[i] == 0;
+    if (m != MAP_FAILED) munmap(m, ps);
+    close(fd);
+    unlink("cm_grow");
+    return ok;
+}
+
+/* Eighty named semaphores, each mapped with its descriptor closed at once
+ * (as sem_open does), then the last one mapped again by name: the new
+ * mapping must be the same page. Past a process's 64 recorded shared
+ * mappings the page cache used to drop the page at that close, and
+ * another process opening the semaphore by name (multiprocessing's spawn)
+ * got a page of its own. */
+static int sem_many(void) {
+    enum { N = 80 };
+    sem_t *s[N];
+    char n[32];
+    int made = 0, ok = 1;
+    for (; made < N && ok; made++) {
+        snprintf(n, sizeof n, "/cm_many%d", made);
+        sem_unlink(n);
+        s[made] = sem_open(n, O_CREAT | O_EXCL, 0600, 0);
+        if (s[made] == SEM_FAILED) { ok = 0; break; }
+    }
+    if (ok) {
+        int f = open("/dev/shm/cm_many79", O_RDWR), v = -1;
+        sem_t *m = f >= 0 ? mmap(0, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED, f, 0) : MAP_FAILED;
+        if (f >= 0) close(f);
+        ok = m != MAP_FAILED && sem_post(s[N - 1]) == 0 && sem_getvalue(m, &v) == 0 && v == 1 &&
+             sem_trywait(m) == 0 && sem_trywait(s[N - 1]) == -1 && errno == EAGAIN;
+        if (m != MAP_FAILED) munmap(m, sizeof(sem_t));
+    }
+    for (int i = 0; i < made; i++) {
+        snprintf(n, sizeof n, "/cm_many%d", i);
+        sem_close(s[i]);
+        sem_unlink(n);
+    }
+    return ok;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1)
         return 7;                                   /* run by the posix_spawn check */
@@ -105,6 +173,19 @@ int main(int argc, char **argv) {
            waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 7; }));
     EXPECT("vfork + _exit", (c = vfork()) >= 0 && (c == 0 ? (_exit(7), 0) : waitpid(c, &st, 0) == c && WEXITSTATUS(st) == 7));
     EXPECT("getrusage children", ({ struct rusage r; getrusage(RUSAGE_CHILDREN, &r) == 0; }));
+    /* numpy and psutil: ru_maxrss, the memory policy calls, the memory and context-switch lines of /proc/PID/status, and SIOCETHTOOL. */
+    EXPECT("getrusage self reports a maximum resident size", ({ struct rusage r; getrusage(RUSAGE_SELF, &r) == 0 && r.ru_maxrss > 0; }));
+    EXPECT("mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT", ({ char *pg = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0); int mode = -1;
+           pg != MAP_FAILED && syscall(SYS_mbind, (long)pg, 4096L, 0L, 0L, 0L, 0L) == 0 && syscall(SYS_set_mempolicy, 0L, 0L, 0L) == 0
+           && syscall(SYS_get_mempolicy, (long)&mode, 0L, 0L, 0L, 0L) == 0 && mode == 0; }));
+    EXPECT("/proc/PID/status has VmRSS and the context switch counts", ({ char b[4096]; int f = open("/proc/self/status", O_RDONLY);
+           int n = f < 0 ? -1 : read(f, b, sizeof b - 1); if (n > 0) b[n] = 0; if (f >= 0) close(f);
+           n > 0 && strstr(b, "\nVmRSS:\t") && strstr(b, "\nvoluntary_ctxt_switches:\t") && strstr(b, "\nnonvoluntary_ctxt_switches:\t"); }));
+    EXPECT("/proc/meminfo has Active, Inactive and Shmem", ({ char b[4096]; int f = open("/proc/meminfo", O_RDONLY);
+           int n = f < 0 ? -1 : read(f, b, sizeof b - 1); if (n > 0) b[n] = 0; if (f >= 0) close(f);
+           n > 0 && strstr(b, "\nActive:") && strstr(b, "\nInactive:") && strstr(b, "\nShmem:"); }));
+    EXPECT("SIOCETHTOOL on a socket is EOPNOTSUPP", ({ int s = socket(AF_INET, SOCK_DGRAM, 0); unsigned ec[16] = { 1 }; /* ETHTOOL_GSET */ char ifr[40] = "lo"; void *d = ec;
+           memcpy(ifr + 16, &d, sizeof d); s >= 0 && ioctl(s, 0x8946, ifr) == -1 && errno == EOPNOTSUPP && close(s) == 0; }));
     /* What CPython's socket, os and shutil modules lean on. */
     EXPECT("ioctl FIONBIO makes a read EAGAIN", ({ int one = 1; char ch; pipe(p) == 0 && ioctl(p[0], FIONBIO, &one) == 0 &&
            (fcntl(p[0], F_GETFL) & O_NONBLOCK) && read(p[0], &ch, 1) == -1 && errno == EAGAIN; }));
@@ -123,5 +204,7 @@ int main(int argc, char **argv) {
            stat("cm_fsd", &b) == 0 && a.st_ino == b.st_ino && a.st_dev == b.st_dev && rmdir("cm_fsd") == 0; }));
     EXPECT("sem_open in /dev/shm", ({ sem_t *m = sem_open("/cm_sem", O_CREAT | O_EXCL, 0600, 1);
            m != SEM_FAILED && sem_wait(m) == 0 && sem_post(m) == 0 && sem_close(m) == 0 && sem_unlink("/cm_sem") == 0; }));
+    EXPECT("sem_open past 64 mappings: mapping one again by name gives the same page", sem_many());
+    EXPECT("what a mapping wrote past the end of a file reads as zeros", grow_zero(0) && grow_zero(1) && grow_zero(2) && grow_zero(3));
     return done();
 }

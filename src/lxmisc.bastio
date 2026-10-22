@@ -194,14 +194,14 @@ fn lx_sysinfo(k: &mut Kernel, pid: u64, va: u64) -> u64
 }
 
 /// getrusage(who, usage): the user and system times (see tm_ticks) of the
-/// caller, or with RUSAGE_CHILDREN of its waited-for children; the rest
-/// is zero.
+/// caller's process, all its threads, or with RUSAGE_CHILDREN of its waited-for children; the rest
+/// is zero (ru_maxrss too, for the children).
 fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let mut t = smaller(pget(k.procs, pid, F_TICKS), 0xFFFFFFFFFFFF);
-  let mut st = smaller(tm_ticks(k, pid, 0), 0xFFFFFFFFFFFF);
+  let mut t = smaller(group_time(k.procs, k.sys, pid, 0), 0xFFFFFFFFFFFF);
+  let mut st = smaller(group_sys_ticks(k.procs, k.sys, pid), 0xFFFFFFFFFFFF);
   if children {
     t = smaller(tm_ticks(k, pid, 1), 0xFFFFFFFFFFFF);
     st = smaller(tm_ticks(k, pid, 2), 0xFFFFFFFFFFFF);
@@ -211,6 +211,11 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 8, t % 100 * 10000);      // ru_utime.tv_usec
   xfer_u64(&mut k.fs.xfer, 16, st / 100);            // ru_stime
   xfer_u64(&mut k.fs.xfer, 24, st % 100 * 10000);
+  if !children {
+    // ru_maxrss in kilobytes: every page the process has counts as resident
+    // (the peak is not kept; this is the current size).
+    xfer_u64(&mut k.fs.xfer, 32, smaller(anon_count(&mut k, pid, 0, WPAGES), WPAGES) * 4);
+  }
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;
   }
@@ -221,7 +226,7 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
 /// memory (files live in memory), with names up to FNAME_MAX bytes. Its
 /// type is tmpfs for a path in a tmpfs mount (src/lxmount.bastio), ramfs
 /// otherwise (`magic`).
-fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64) -> u64
+fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64, mflags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -236,6 +241,7 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 48, NFILES);           // f_ffree (a guess: the table is not counted)
   xfer_u64(&mut k.fs.xfer, 64, FNAME_MAX);        // f_namelen
   xfer_u64(&mut k.fs.xfer, 72, 4096);             // f_frsize
+  xfer_u64(&mut k.fs.xfer, 80, smaller(mflags, 65535) + 32);   // f_flags: ST_RDONLY, ST_NOSUID, ST_NODEV, ST_NOEXEC, .., and ST_VALID
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, STATFS_SIZE) != STATFS_SIZE {
     return EFAULT;
   }
@@ -273,21 +279,22 @@ fn lx_fstatfs(k: &mut Kernel, pid: u64, d: Fd, va: u64) -> u64
   ensures kok(k)
 {
   if (d.kind == K_DEV && is_cg_file(d.x)) || (d.kind == K_DIR && d.x >= DIR_CG) {
-    return lx_statfs(&mut k, pid, va, CGROUP2_MAGIC);
+    return lx_statfs(&mut k, pid, va, CGROUP2_MAGIC, 0);
   }
   if d.kind == K_DIR && d.x >= DIR_PROC && d.x < DIR_CG {
-    return lx_statfs(&mut k, pid, va, PROC_MAGIC);
+    return lx_statfs(&mut k, pid, va, PROC_MAGIC, 0);
   }
   if d.kind == K_FILE && d.x < FD_ROWS {
     if vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
-      return lx_statfs(&mut k, pid, va, TMPFS_MAGIC);
+      let mf = vfs_file_mflags(&mut k.fs, vfs_row_file(k.fs, d.x));
+      return lx_statfs(&mut k, pid, va, TMPFS_MAGIC, mf);
     }
     let h = vfs_row_file(k.fs, d.x);
     if h >= NFILES && h < NFILES + DSLOTS {
       return lx_statfs_disk(&mut k, pid, va);
     }
   }
-  return lx_statfs(&mut k, pid, va, RAMFS_MAGIC);
+  return lx_statfs(&mut k, pid, va, RAMFS_MAGIC, 0);
 }
 
 /// getrandom(buf, n, flags): the bytes /dev/urandom gives, from the kernel's
@@ -580,6 +587,47 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
   return r;
 }
 
+/// pwrite64 as write(2) is (lx_write_call): a file takes a count whole. If
+/// the disk lags after some pieces, what was written is kept in F_WDONE and
+/// the call restarts, from the argument registers, for the rest.
+fn lx_pwrite64(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, off: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let wd = smaller(pget(k.procs, pid, F_WDONE) / 2, READ_MAX * 64);
+  pset(&mut k.procs, pid, F_WDONE, wd * 2);
+  let mut r = lx_pio(&mut con, &mut k, pid, true, fd, va, n, off);
+  let missed = pget(k.procs, pid, F_WDONE) % 2 == 1;
+  pset(&mut k.procs, pid, F_WDONE, wd * 2);
+  if missed && r > 0 && r < n && n <= READ_MAX * 64 && va <= 0xFFFFFFFFFFFFFFFF - r && off < 0x4000000000000000 {
+    pset(&mut k.procs, pid, F_WDONE, (wd + r) * 2);
+    pset(&mut k.procs, pid, F_REGS + R_RSI, va + r);
+    pset(&mut k.procs, pid, F_REGS + R_RDX, n - r);
+    pset(&mut k.procs, pid, F_REGS + R_R10, off + r);
+    return DISK_RETRY;
+  }
+  if wd > 0 && r != DISK_RETRY {
+    if r <= n && n <= 1099511627776 {
+      r = r + wd;
+    } else {
+      r = wd;                           // an error after progress reports the progress
+    }
+    pset(&mut k.procs, pid, F_WDONE, 0);
+  }
+  return r;
+}
+
+/// pread64 or pwrite64 as a system call.
+fn lx_pio_call(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64, n: u64, off: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if write {
+    return lx_pwrite64(&mut con, &mut k, pid, fd, va, n, off);
+  }
+  return lx_pio(&mut con, &mut k, pid, false, fd, va, n, off);
+}
+
 /// ftruncate(fd, size): sets the length of a file open for writing,
 /// cutting it or adding zeros; its offset stays.
 fn lx_ftruncate(k: &mut Kernel, pid: u64, fd: u64, size: u64) -> u64
@@ -858,6 +906,35 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// The last of lx_misc_call's calls (split off so the solver proves each half).
+fn lx_misc_tail(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r0: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = r0;
+  if n == LX_CAPGET {
+    r = lx_capget(&mut k, pid, a, b);
+  } else if n == LX_CAPSET {
+    r = lx_capset(&mut k, pid, a, b);
+  } else if n == LX_PRCTL || n == LX_SECCOMP {
+    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
+  } else if n == LX_MLOCK || n == LX_MUNLOCK {
+    r = lx_mlock_call(&mut k, pid, n, a, b);
+  } else if n == LX_MLOCKALL {
+    r = lx_mlockall(&mut k, pid, a);
+  } else if n == LX_MUNLOCKALL {
+    r = lx_munlockall(&mut k, pid);
+  } else if n == LX_GETRANDOM {
+    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
+    if c % 0x100000000 > 7 || c % 8 == 6 {
+      r = EINVAL;
+    } else {
+      r = lx_getrandom(&mut k, pid, a, b);
+    }
+  }
+  return r;
+}
+
 /// Writes a call's result and keeps the process running, or retries it when
 /// the disk blocks it needs are not cached yet. (Its own function so the proof
 /// of lx_misc_call's long chain of cases does not have to carry the whole kernel
@@ -871,6 +948,69 @@ fn lx_misc_done(k: &mut Kernel, pid: u64, n: u64, r: u64) -> u64
   }
   ret(&mut k.procs, pid, r);
   return KEEP;
+}
+
+/// mremap, and the locked pages follow the range (src/lxrlimit.bastio).
+fn lx_mremap_locked(k: &mut Kernel, pid: u64, a: u64, b: u64, c: u64, flags: u64, naddr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_mremap(&mut k, pid, a, b, c, flags, naddr);
+  if r < 0x8000000000000000 {
+    lock_remapped(&mut k, pid, a, b, c, r);
+  }
+  return r;
+}
+
+/// munmap, and what it unmaps is no longer locked.
+fn lx_munmap_locked(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r = lx_munmap(&mut k, pid, a, b);
+  if r == 0 {
+    lock_unmapped(&mut k, pid, a, b);
+  }
+  return r;
+}
+
+/// statfs(path, buf): the file system the path names.
+fn lx_statfs_path(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
+  let mut pfd = NO_RESULT;
+  if pn != NO_RESULT && pn <= XFER {
+    pfd = proc_fd(k.procs, k.fs.xfer, pn);   // /proc/PID/fd/N: the file system of what the descriptor holds
+  }
+  if pn == NO_RESULT {
+    r = k.perr;
+  } else if pfd != NO_RESULT {
+    let d = fd_look(k, pfd / LXNFD, pfd % LXNFD);
+    if tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) {
+      r = EACCES;
+    } else if d.kind == K_BAD {
+      r = ENOENT;
+    } else {
+      r = lx_fstatfs(&mut k, pid, d, b);
+    }
+  } else if !path_there(&mut k, pn) {
+    r = ENOENT;
+  } else if cg_under(k, pn) {
+    r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC, 0);
+  } else if pn >= 4 && xfer_is(k.fs.xfer, 0, 4, "proc") && (pn == 4 || bget(k.fs.xfer, 4) == 47) {
+    r = lx_statfs(&mut k, pid, b, PROC_MAGIC, 0);
+  } else if vfs_in_mount(&mut k.fs, pn, false) {
+    let mf = vfs_path_mflags(&mut k.fs, pn);
+    r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC, mf);
+  } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
+    r = lx_statfs_disk(&mut k, pid, b);   // disk/ itself, or a name under it
+  } else {
+    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC, 0);
+  }
+  return r;
 }
 
 /// System call n of process pid, with its first three arguments.
@@ -896,13 +1036,13 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   let mut r = 0;
   if n == LX_PREAD64 || n == LX_PWRITE64 {
-    r = lx_pio(&mut con, &mut k, pid, n == LX_PWRITE64, a, b, c, r10);
+    r = lx_pio_call(&mut con, &mut k, pid, n == LX_PWRITE64, a, b, c, r10);
   } else if n == LX_UNAME {
     r = lx_uname(&mut k, pid, a);
   } else if n == LX_MREMAP {
-    r = lx_mremap(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
+    r = lx_mremap_locked(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
   } else if n == LX_MUNMAP {
-    r = lx_munmap(&mut k, pid, a, b);
+    r = lx_munmap_locked(&mut k, pid, a, b);
   } else if n == LX_MPROTECT {
     r = lx_mprotect(&mut k, pid, a, b, c);
   } else if n == LX_MADVISE {
@@ -972,35 +1112,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_SYSINFO {
     r = lx_sysinfo(&mut k, pid, a);
   } else if n == LX_STATFS {
-    let pn = lx_path_at(&mut k, pid, AT_FDCWD, a);
-    let mut pfd = NO_RESULT;
-    if pn != NO_RESULT && pn <= XFER {
-      pfd = proc_fd(k.procs, k.fs.xfer, pn);   // /proc/PID/fd/N: the file system of what the descriptor holds
-    }
-    if pn == NO_RESULT {
-      r = k.perr;
-    } else if pfd != NO_RESULT {
-      let d = fd_look(k, pfd / LXNFD, pfd % LXNFD);
-      if tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) {
-        r = EACCES;
-      } else if d.kind == K_BAD {
-        r = ENOENT;
-      } else {
-        r = lx_fstatfs(&mut k, pid, d, b);
-      }
-    } else if !path_there(&mut k, pn) {
-      r = ENOENT;
-    } else if cg_under(k, pn) {
-      r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC);
-    } else if pn >= 4 && xfer_is(k.fs.xfer, 0, 4, "proc") && (pn == 4 || bget(k.fs.xfer, 4) == 47) {
-      r = lx_statfs(&mut k, pid, b, PROC_MAGIC);
-    } else if vfs_in_mount(&mut k.fs, pn, false) {
-      r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC);
-    } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
-      r = lx_statfs_disk(&mut k, pid, b);   // disk/ itself, or a name under it
-    } else {
-      r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC);
-    }
+    r = lx_statfs_path(&mut k, pid, a, b);
   } else if n == LX_FSTATFS {
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD {
@@ -1030,27 +1142,12 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
         r = vpid_of(k, pid, sid_of(k.procs, p));
       }
     }
-  } else if n == LX_CAPGET {
-    r = lx_capget(&mut k, pid, a, b);
-  } else if n == LX_CAPSET {
-    r = lx_capset(&mut k, pid, a, b);
-  } else if n == LX_PRCTL || n == LX_SECCOMP {
-    r = lx_prctl_seccomp(&mut k, pid, n, a, b, c);
-  } else if n == LX_MLOCK || n == LX_MUNLOCK {
-    r = lx_mlock_call(&mut k, pid, n, a, b);
-  } else if n == LX_MLOCKALL {
-    r = lx_mlockall(&mut k, pid, a);
-  } else if n == LX_MUNLOCKALL {
-    r = lx_munlockall(&mut k, pid);
-  } else if n == LX_GETRANDOM {
-    // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
-    if c % 0x100000000 > 7 || c % 8 == 6 {
-      r = EINVAL;
-    } else {
-      r = lx_getrandom(&mut k, pid, a, b);
-    }
+  } else {
+    r = lx_misc_tail(&mut k, pid, n, a, b, c, r);
   }
   // Everything else (madvise, sync) succeeds doing nothing.
-  assert kok(k) && con_ok(con);
+  assert pid < NPROC;
+  assert kok(k);
+  assert con_ok(con);
   return lx_misc_done(&mut k, pid, n, r);
 }

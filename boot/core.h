@@ -29,11 +29,14 @@
 #define CORE_TRAP_TOP  192                      /* end of the block, for `syscall` */
 #define CORE_INDEX     200                      /* the processor's number: 0 for the bootstrap one */
 #define CORE_MMU       208                      /* 4 words: the prelude's CR3 state */
-#define CORE_UROOT     232                      /* the fourth: the user table the next bst_cpu_enter loads into CR3 */
+#define CORE_UROOT     232                      /* the fourth: the user table the next bst_cpu_enter loads into CR3; bst_cpu_enter sets bit 0, which the prelude's next entry or exit of a table clears: still set means the lease never lapsed */
 #define CORE_TSS       256                      /* 104-byte task state segment */
 #define CORE_ALIAS     368                      /* where the block is mapped in every table (ALIAS_CORES + 128 KiB * index) */
 #define CORE_UMODE     376                      /* nonzero while CR3 holds the shadow table: the next trap switches back */
-#define CORE_CR3       384                      /* the shadow table bst_cpu_enter built, for its last instructions */
+#define CORE_CR3       384                      /* the shadow table bst_cpu_enter built (with its PCID), for its last instructions */
+#define CORE_KCR3      392                      /* what a trap from user mode loads into CR3: the kernel's table, with its PCID and no-flush bit when PCIDs are on; 0 until this processor's first bst_cpu_enter */
+#define CORE_UPCID     400                      /* the PCID of the shadow table (0 without PCIDs), or'ed into CORE_CR3 */
+#define CORE_FSB       408                      /* the FS base the processor holds, with bit 63 set (0: unknown): bst_cpu_enter writes the register only when it differs */
 #define CORE_IST_TOP   0x2000                   /* top of the 4 KiB IST1 stack, the block's second page */
 #define CORE_GUARD     0x2000                   /* the unmapped page below the kernel stack */
 

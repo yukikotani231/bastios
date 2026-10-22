@@ -49,6 +49,10 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       put_fpu(&mut k.fpus, pid, Fpu::State(g));
     },
   }
+  if !swap_reach(&mut k, tgid(k.procs, pid), pid, 0, WPAGES) {
+    give_page(&mut k.mem, fpu);
+    return ENOMEM;                          // the parent's swapped pages must be back: the copy shares no slot (src/swap.bastio)
+  }
   let solo = group_alone(&mut k, pid);
   match fork_space(&mut k.mem, &mut k.spaces, pid, solo) {
     Space::Empty => {
@@ -128,7 +132,12 @@ fn vfork_give_back(k: &mut Kernel, mmu: &Mmu, c: u64)
   ensures kok(k)
 {
   let par = pget(k.procs, c, F_PARENT);
-  if par == 0 || par >= NPROC || state(k.procs, par) != LXVFORK || pget(k.procs, par, F_WAIT) != c {
+  if par == 0 || par >= NPROC || pget(k.procs, par, F_WAIT) != c {
+    return;
+  }
+  // The parent waits, or its tracer holds it in the vfork event stop.
+  let waiting = state(k.procs, par) == LXVFORK;
+  if !waiting && state(k.procs, par) != STOPPED {
     return;
   }
   match take_space(&mut k.spaces, c) {
@@ -144,7 +153,12 @@ fn vfork_give_back(k: &mut Kernel, mmu: &Mmu, c: u64)
     },
   }
   pset(&mut k.procs, par, F_WAIT, 0);
-  pset(&mut k.procs, par, F_STATE, READY);
+  if waiting {
+    pset(&mut k.procs, par, F_STATE, READY);
+    pt_vfork_done(&mut k, par, c);
+  } else {
+    pt_vfork_copied(&mut k, par);           // stopped: the vfork-done stop follows its resume
+  }
 }
 
 /// lx_fork, once the child's address space `t` and FPU page are made:
@@ -174,6 +188,8 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
+  pset(&mut k.procs, c, F_TDUSER, 0);      // nor any of ended threads (src/lxrlimit.bastio)
+  pset(&mut k.procs, c, F_TDSYS, 0);
   pset(&mut k.procs, c, F_START, k.ns / 10000000 + 1);
   pset(&mut k.procs, c, F_PARENT, pid);
   pset(&mut k.procs, c, F_XSIG, 0);         // SIGCHLD, unless clone says otherwise
@@ -207,6 +223,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   }
   pidns_enter(&mut k, pid, c);              // with an id in the PID namespace children start in
   pset(&mut k.procs, c, F_SIGPEND, 0);
+  rtq_clear(&mut k, c);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_ASLEEP, 0);       // it has not run yet, whatever its parent was doing
   pset(&mut k.procs, c, F_STATE, READY);
@@ -325,6 +342,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   }
   hole_clear(&mut k, pid);                // a new window has no holes
   anon_clear(&mut k, pid);
+  swap_drop_all(&mut k, tgid(k.procs, pid));   // its swapped pages went with the old space
   lazy_set(&mut k, pid, src, hold, rn);   // map_drop_all dropped the old record
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
@@ -434,6 +452,10 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
     k.perr = EACCES;                        // no execute permission (src/lxperm.bastio)
     return none;
   }
+  if vfs_path_mflags(&mut k.fs, n) / 8 % 2 == 1 {
+    k.perr = EACCES;                        // a noexec mount
+    return none;
+  }
   let size = vfs_size(&mut k.fs, f);
   if size == NO_FILE {
     return none;
@@ -461,6 +483,9 @@ fn fd_src(k: &mut Kernel, pid: u64, fd: u64) -> Src
   let m = file_meta(&mut k.fs, f);
   if !m.ok || !may_meta(k.procs, pid, m.mode, m.own, MAY_X) {
     return none;
+  }
+  if vfs_file_mflags(&mut k.fs, f) / 8 % 2 == 1 {
+    return none;                            // a noexec mount (k.perr is EACCES)
   }
   let size = vfs_size(&mut k.fs, f);
   if size == NO_FILE {
@@ -851,6 +876,20 @@ fn child_of_group(procs: &Buf, c: u64, pid: u64) -> bool
   return par < NPROC && par != 0 && tgid(procs, par) == tgid(procs, pid);
 }
 
+/// The tracer of zombie c, which is not its parent, has reaped the report of
+/// its end: the parent is told now, as Linux does, and wakes from wait.
+fn tracer_reaped(k: &mut Kernel, c: u64)
+  requires kok(k) && 1 <= c && c < NPROC
+  ensures kok(k)
+{
+  let par = pget(k.procs, c, F_PARENT);
+  if 1 <= par && par < NPROC && state(k.procs, c) == ZOMBIE {
+    let pg = tgid(k.procs, par);
+    wake_waiters(&mut k, pg);
+    child_ended(&mut k, par, c);
+  }
+}
+
 /// wait4(want, status, options, rusage): collects a child that has ended
 /// (one wait_match names), storing its exit code as the Linux
 /// status at user address `status` if not NULL. With none ended yet, the
@@ -935,6 +974,7 @@ fn lx_wait4(k: &mut Kernel, pid: u64, pidarg: u64, status: u64, options: u64) ->
           pset(&mut k.procs, c, F_STATE, FREE);
         } else {
           tr_put(&mut k, c, 0);             // its tracer has heard; the parent reaps it
+          tracer_reaped(&mut k, c);
         }
         ret(&mut k.procs, pid, vpid_of(k, pid, c));
         return KEEP;
@@ -1049,6 +1089,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
             pset(&mut k.procs, c, F_STATE, FREE);
           } else {
             tr_put(&mut k, c, 0);           // its tracer has heard; the parent reaps it
+            tracer_reaped(&mut k, c);
           }
         }
         ret(&mut k.procs, pid, 0);
@@ -1083,7 +1124,7 @@ fn lx_waitid(k: &mut Kernel, pid: u64, idtype: u64, id: u64, info: u64, options:
   return r;
 }
 
-/// times(buf): the caller's user and system time, and its waited-for
+/// times(buf): the caller's user and system time (all its threads'), and its waited-for
 /// children's, in clock ticks; returns the ticks since boot.
 fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -1091,8 +1132,8 @@ fn lx_times(k: &mut Kernel, pid: u64, buf: u64) -> u64
 {
   if buf != 0 {
     lx_fill(&mut k, 0, 32);
-    xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_TICKS));
-    xfer_u64(&mut k.fs.xfer, 8, tm_ticks(k, pid, 0));
+    xfer_u64(&mut k.fs.xfer, 0, group_time(k.procs, k.sys, pid, 0));
+    xfer_u64(&mut k.fs.xfer, 8, group_sys_ticks(k.procs, k.sys, pid));
     xfer_u64(&mut k.fs.xfer, 16, tm_ticks(k, pid, 1));
     xfer_u64(&mut k.fs.xfer, 24, tm_ticks(k, pid, 2));
     if lx_put_out(&mut k, pid, buf, 32) != 0 {
@@ -1127,6 +1168,9 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
   let mut m = path_meta(&mut k, n);
   if !follow && pf != 0 && is_ns_file(pf) {
     m = nsf_link_meta(pf);                  // lstat: the /proc/PID/ns link itself
+  }
+  if !follow && n <= XFER {
+    m = fd_link_meta(&mut k, n, m);
   }
   if !m.ok {
     return ENOENT;
@@ -1282,7 +1326,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
     // open, lstat, fstat check of os.fwalk and shutil compares the two.
     let ff = pi_get(k.pipes, d.x, 4);
     if ff >= 1 && ff - 1 < FIFO_N {
-      let h = get(k.evt, FIFO_AT + (ff - 1) * FIFO_STRIDE);
+      let h = evg(k, FIFO_AT + (ff - 1) * FIFO_STRIDE);
       if h >= 1 {
         let fm = file_meta(&mut k.fs, h - 1);
         if fm.ok {
@@ -1347,6 +1391,8 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   let mut atime = m.mtime;
   if m.ino >= INO_FILES && m.ino < INO_FILES + HFILES {
     atime = atime_of(&mut k, m.ino - INO_FILES, m.mtime);   // set by utime, else the modification time
+  } else if m.ino > DIR_VFS && m.ino - 1 - DIR_VFS < HFILES {
+    atime = atime_of(&mut k, m.ino - 1 - DIR_VFS, m.mtime);   // a directory of the file layer is a handle too
   }
   xfer_u64(&mut k.fs.xfer, 72, atime);        // st_atime
   xfer_u64(&mut k.fs.xfer, 88, m.mtime);      // st_mtime

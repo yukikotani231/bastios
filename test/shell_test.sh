@@ -308,9 +308,9 @@ steps = [
     # src/tcpbuf.bastio), so the later page counts may be lower than the
     # first by that much.
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
-    # 100 connections to ourselves at once is 200 in the kernel's table (it
-    # held 32), and 30 UDP sockets at once (8 before).
-    ("mtcp many 100", b"mtcp: 100 connections and 30 udp sockets, 16 queued", b"\n# "),
+    # 450 connections to ourselves at once is 900 in the kernel's table (it
+    # held 32, then 240), and 250 UDP sockets at once (32 before).
+    ("mtcp many 450", b"mtcp: 450 connections and 250 udp sockets, 64 queued", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -327,6 +327,8 @@ steps = [
     # rmdir refusing a directory that is not empty.
     ("mkdir dd; cd dd; /bin/pwd; echo deep > f; cat ../dd/f", b"\r\n/dd\r\ndeep\r\n", b"\n# "),
     ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
+    # A directory lists only its own entries, though the disk's slots hold its neighbours' between them (getdents skips ahead over the others).
+    ("mkdir gl1 gl2; echo 1 > gl1/a; echo 2 > gl2/b; echo 3 > gl1/c; echo 4 > gl2/d; mkdir gl1/s; echo 5 > gl1/s/e; echo 6 > gl2/f; echo gl1/*; echo gl2/*; echo gl1/s/*; rm gl2/d; echo gl2/*", b"\r\ngl1/a gl1/c gl1/s\r\ngl2/b gl2/d gl2/f\r\ngl1/s/e\r\ngl2/b gl2/f\r\n", b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
     # rename through BusyBox's mv: over a file, into a directory, and a
@@ -353,6 +355,10 @@ steps = [
     # and the file still there after an unmount and a second mount.
     ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # Directories made on that file system ride the next commit: a tree of
+    # new directories and the files directly in them survives a remount.
+    ("truncate -s 1M im2; mkfs.bstdisk3 im2 && mkdir mm2 && mount -t bstdisk3 im2 mm2 && mkdir mm2/a mm2/a/b mm2/c && echo 1 > mm2/a/f && echo 2 > mm2/a/b/g && echo 3 > mm2/c/h && umount mm2 && mount -t bstdisk3 im2 mm2 && cat mm2/a/f mm2/a/b/g mm2/c/h; umount mm2; rm im2; rmdir mm2; echo dd$((1+1))",
+     [b"\r\n1\r\n2\r\n3\r\n", b"\r\ndd2\r\n"], b"\n# "),
     # A file in memory past the 64 MiB it was once limited to: grown to
     # 300 MiB (holes cost no pages), then written at its end.
     ("truncate -s 300M bigram; stat -c %s bigram; echo z >> bigram; stat -c %s bigram; rm bigram; echo bg$((1+1))",
@@ -447,8 +453,8 @@ steps = [
     # cpu.max with every processor busy running waiting calls again (readers of
     # a fifo nobody writes to): the throttled group's next period must still
     # begin, or its process is never scheduled again.
-    ("mkdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/rq/cpu.max; mkfifo /tmp/rb; ash -c 'echo $$ > /sys/fs/cgroup/rk/cgroup.procs; for i in 1 2 3 4; do cat /tmp/rb > /dev/null & done; sleep 60 > /tmp/rb & wait' & sleep 1; ash -c 'echo $$ > /sys/fs/cgroup/rq/cgroup.procs; i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; echo burst > /tmp/rbd' & n=0; while [ ! -f /tmp/rbd ] && [ $n -lt 20 ]; do sleep 1; n=$((n+1)); done; read r < /tmp/rbd; echo r=$r; echo 1 > /sys/fs/cgroup/rk/cgroup.kill; echo 1 > /sys/fs/cgroup/rq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo c=$?; rm -f /tmp/rb /tmp/rbd",
-     [b"r=burst", b"c=0"], b"\n# "),
+    ("mkdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/rq/cpu.max; mkfifo /tmp/rb; ash -c 'echo $$ > /sys/fs/cgroup/rk/cgroup.procs; for i in 1 2 3 4; do cat /tmp/rb > /dev/null & done; sleep 60 > /tmp/rb & wait' & sleep 1; ash -c 'echo $$ > /sys/fs/cgroup/rq/cgroup.procs; while :; do :; done' & sleep 2; while read k v; do case $k in usage_usec) a=$v;; esac; done < /sys/fs/cgroup/rq/cpu.stat; sleep 5; while read k v; do case $k in usage_usec) b=$v;; esac; done < /sys/fs/cgroup/rq/cpu.stat; [ \"$b\" -gt \"$a\" ] && echo ran on; echo 1 > /sys/fs/cgroup/rk/cgroup.kill; echo 1 > /sys/fs/cgroup/rq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo c=$?; rm -f /tmp/rb",
+     [b"ran on", b"c=0"], b"\n# "),
     # cpu.weight: two groups that both have more busy processes than there are
     # processors share them in proportion to their weights, here 1 to 3.
     ("mkdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo 100 > /sys/fs/cgroup/wa/cpu.weight; echo 300 > /sys/fs/cgroup/wb/cpu.weight; cat /sys/fs/cgroup/wb/cpu.weight; printf 'echo $$ > /sys/fs/cgroup/$1/cgroup.procs\\nwhile :; do :; done\\n' > /tmp/wb.sh; for g in wa wb; do for i in 1 2 3 4 5 6; do ash /tmp/wb.sh $g & done; done; sleep 12; while read k v; do case $k in usage_usec) a=$v;; esac; done < /sys/fs/cgroup/wa/cpu.stat; while read k v; do case $k in usage_usec) b=$v;; esac; done < /sys/fs/cgroup/wb/cpu.stat; echo a=$a b=$b; [ $((b * 10)) -gt $((a * 20)) ] && [ $((b * 10)) -lt $((a * 45)) ] && echo weighted; echo 1 > /sys/fs/cgroup/wa/cgroup.kill; echo 1 > /sys/fs/cgroup/wb/cgroup.kill; sleep 2; rmdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo r=$?",
@@ -516,11 +522,12 @@ steps = [
     # any file, and kept on the disk across boots (disk/pf, for the virtio
     # boot below).
     ("mkfifo pp; ls -l pp; echo hi > pp & cat pp; wait; mv pp pq; rm pq; ls pq; mkfifo disk/pf; stat -c %F disk/pf", [b"prw", b"\r\nhi\r\n", b"pq: No such file", b"fifo"], b"\n# "),
-    ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n2\r\n"], b"\n# "),
+    ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 disk/hk3; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n3\r\n"], b"\n# "),
     # A file removed while its last writes are still in a batch that was
     # never queued (the disk never sees them), and one removed after a
     # second batch over blocks the disk has: both give every block back.
     ("sync; stat -f -c %f /disk > fr0; i=0; while [ $i -lt 20 ]; do echo data$i > disk/tmpdrop; rm disk/tmpdrop; i=$((i+1)); done; echo old > disk/keepdrop; sync; echo more >> disk/keepdrop; cat disk/keepdrop; rm disk/keepdrop; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo dropfree=same; ls disk/tmpdrop disk/keepdrop", [b"\r\nold\r\nmore\r\n", b"dropfree=same", b"tmpdrop: No such file"], b"\n# "),
+    ("sync; stat -f -c %f /disk > fr0; mkdir disk/mf; i=0; while [ $i -lt 30 ]; do echo a$i > disk/mf/a$i; echo b$i > disk/mf/b$i; ln -s a$i disk/mf/s$i; echo a$i >> disk/mf/a$i; i=$((i+1)); done; cat disk/mf/a7 disk/mf/b29; readlink disk/mf/s5; sync; cat disk/mf/a29; rm -r disk/mf; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo mfree=same", [b"\r\na7\r\na7\r\nb29\r\na5\r\n", b"a29\r\na29\r\n", b"mfree=same"], b"\n# "),
     # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
@@ -536,6 +543,19 @@ steps = [
     ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
+    # Names of 250 bytes, the longest that fits a path of FNAME_MAX (255) bytes written as disk/NAME (past 200 the disk keeps the rest of a name in the entry after it): create, read back, list, stat, rename between short and long names, and refuse 256.
+    ("n=a; i=0; while [ $i -lt 8 ]; do n=$n$n; i=$((i+1)); done; l=${n#??????}; m=${l%?}; echo hi > disk/$l; cat disk/$l; for f in disk/*; do [ \"${f#disk/}\" = \"$l\" ] && echo listed; done; stat -c %s disk/$l; (echo no > disk/${l}aa) 2>/dev/null; echo r=$?; mv disk/$l disk/s; cat disk/s; mv disk/s disk/$m; cat disk/$m; [ -e disk/$l ] || echo gone; rm disk/$m; mkdir disk/$l; [ -d disk/$l ] && echo isdir; rmdir disk/$l; [ -e disk/$l ] || echo gone2",
+     b"hi\r\nlisted\r\n3\r\nr=1\r\nhi\r\nhi\r\ngone\r\nisdir\r\ngone2\r\n", b"\n# "),
+    # The disk finds names through a hash index once it holds more than IX_MIN entries (src/diskfs.bastio), built when the
+    # directory first grows past it and kept up by each create, rename and removal: every name stays findable across the crossing.
+    ("mkdir disk/dix; i=0; while [ $i -lt 300 ]; do echo $i > disk/dix/f$i || break; i=$((i+1)); done; i=0; while [ $i -lt 300 ]; do [ $((i%3)) -eq 0 ] && rm disk/dix/f$i; [ $((i%3)) -eq 1 ] && mv disk/dix/f$i disk/dix/g$i; i=$((i+1)); done; ls disk/dix | wc -l; cat disk/dix/g100 disk/dix/f101",
+     b"\r\n200\r\n100\r\n101\r\n", b"\n# "),
+    ("i=0; while [ $i -lt 300 ]; do [ $((i%3)) -eq 0 ] && echo r$i > disk/dix/f$i; i=$((i+1)); done; ls disk/dix | wc -l; cat disk/dix/f102 disk/dix/g100; rm -r disk/dix; ls disk/dix",
+     [b"\r\n300\r\nr102\r\n100\r\n", b"No such file"], b"\n# "),
+    # A file created and removed before its first commit is dropped without reading its entry back (disk_remove): the files
+    # beside it, committed earlier, are left alone, and the slot serves the next ones.
+    ("echo keep1 > disk/byst; echo keep2 > disk/byst2; sync; i=0; while [ $i -lt 30 ]; do echo tmp$i > disk/chn; echo more > disk/chn2; rm disk/chn disk/chn2; i=$((i+1)); done; echo new > disk/after; cat disk/byst disk/byst2 disk/after; ls disk/chn; rm disk/byst disk/byst2 disk/after",
+     [b"keep1\r\nkeep2\r\nnew\r\n", b"No such file"], b"\n# "),
     # The in-memory file system finds names through a hash index (src/ramfs.bastio): creating, removing and renaming hundreds of files
     # must leave every name findable, and enough removals fill it with tombstones, which a rebuild clears.
     ("mkdir ixr; i=0; while [ $i -lt 600 ]; do echo $i > ixr/f$i || break; i=$((i+1)); done; i=0; while [ $i -lt 600 ]; do [ $((i%3)) -eq 0 ] && rm ixr/f$i; [ $((i%3)) -eq 1 ] && mv ixr/f$i ixr/g$i; i=$((i+1)); done; ls ixr | wc -l; cat ixr/g400 ixr/f401", b"\r\n400\r\n400\r\n401\r\n", b"\n# "),
@@ -1211,6 +1231,8 @@ session("virtio", True, [
     ("rm disk/pf", b""),
     # The user made at the first boot, kept on the disk.
     ("ash", b"built-in shell (ash)", b"\n# "),
+    # The two names left of the file that had three are counted after the remount.
+    ("stat -c %h disk/hk2 disk/hk3; rm disk/hk3", b"\r\n2\r\n2\r\n", b"\n# "),
     ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
     # seccomp (src/lxseccomp.bastio): programs that read outside seccomp_data
     # or jump out of themselves are refused at load; filters answer with an
@@ -1230,10 +1252,20 @@ session("virtio", True, [
     ("mproc", b"mproc: ok, 700 processes at once", b"\n# "),
     # /dev/fb0 without a screen (this machine has none): ENODEV (user/mfb.c; the drawing is tested in test/iso_test.sh).
     ("mfb", b"mfb: no screen (ENODEV)", b"\n# "),
+    # /dev/input/event0 tells what it is (user/mkeyev.c; the events themselves are tested in test/iso_test.sh).
+    ("mkeyev", b"mkeyev: ok", b"\n# "),
     ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
     ("bhello", b"bhello: no window server", b"\n# "),
     ("bterm", b"bterm: no window server", b"\n# "),
+    # A reader of the key events that is killed while it waits leaves its
+    # registers behind in the process table; the line typed after ash ends
+    # must still reach the native shell, not be taken for the dead reader's.
+    ("cat /dev/input/event0 > /tmp/evk & kill $!; echo ended", b"ended", b"\n# "),
+    # The same for a reader that is still waiting when ash ends: its timed
+    # wait is not one of the console's, so the next line is not taken for it.
+    ("cat /dev/input/event0 > /tmp/evk2 & echo waiting", b"waiting", b"\n# "),
     ("exit", b""),
+    ("hello", b"hello from user mode, pid "),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is

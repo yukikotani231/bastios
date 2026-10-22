@@ -580,7 +580,7 @@ fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
   }
   // A file in a loop-mounted image (handles LO0 on) is as if mounted
   // nosuid: whoever made the image chose its owners and modes.
-  if file && f < LO0 && !nnp {
+  if file && f < LO0 && !nnp && vfs_file_mflags(&mut k.fs, f) / 2 % 2 == 0 {   // not on a nosuid mount
     let m = vfs_meta(&mut k.fs, f);
     if m.ok && m.mode & S_ISUID != 0 {
       euid = m.own % ID_SPAN;

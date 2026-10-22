@@ -1,0 +1,5 @@
+// How close to its deadline a timed wait stops sleeping and polls (AArch64).
+// The tick is not stretched here, so a sleeper is woken by the 10 ms tick
+// only; with 50 ms the Alpine lane's Python (asyncio) and apk cases hung
+// or timed out, so it keeps the 200 ms the TIMEWAIT states were tuned with.
+const NEAR: u64 = 200000000;

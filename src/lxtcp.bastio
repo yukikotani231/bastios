@@ -52,6 +52,27 @@ fn tk_look(k: &Kernel, pid: u64, fd: u64) -> Tk
   return Tk { err: 0, h: h, t: t, nb: w % 2, port: w / 2 % 65536, mode: w / 131072 % 4, rd: w / TM_RDSHUT };
 }
 
+/// SO_ERROR of a TCP socket: ECONNREFUSED (111, as a positive number) once,
+/// if a connect that has not reported success failed (the peer refused it or
+/// it timed out), which leaves the socket unconnected as the connect call
+/// itself does; else 0.
+fn lx_tcp_soerror(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 || tk.mode != TM_CONN || tk.port != 0 || tk.t >= TCBS {
+    return 0;
+  }
+  if tcp_status(k.nic, tk.t) != 2 {
+    return 0;
+  }
+  tcp_close(&mut k.nic, tk.t);
+  of_set(&mut k.ofd, tk.h, 2, TCBS);
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, 0, TM_NEW));
+  return 111;
+}
+
 fn is_tcp(k: &Kernel, pid: u64, fd: u64) -> bool
   requires kok(k) && pid < NPROC
 {
@@ -112,6 +133,7 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     }
   }
   of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, port, TM_NEW));
+  sock_bound(&mut k, tk.h, sin.ip);
   return 0;
 }
 
@@ -148,7 +170,7 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if tk.mode != TM_NEW {
     return EINVAL;
   }
-  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port, ofd_fam(k, tk.h));    // port 0: an ephemeral one
+  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port, ofd_fam(k, tk.h), sock_flag(k, tk.h, SOF_REUSEPORT));    // port 0: an ephemeral one
   if t >= TCBS {
     return EADDRINUSE;
   }
@@ -185,6 +207,9 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   of_set(&mut k.ofd, h, 3, tm_word(flags / SOCK_NONBLOCK % 2, tk.port, TM_CONN));
   if ofd_v6(k, tk.h) {
     k.inet6 = set(k.inet6, h, 1);           // an AF_INET6 listener's connections are too
+    if tcp_peer_ip(k.nic, c) == 0x7F000001 && tcp_peer_fam(k.nic, c) == FAM_V4 {
+      k.inet6 = set(k.inet6, h, 2);         // an IPv4 peer on loopback reads as ::ffff:127.0.0.1, not ::1
+    }
   }
   let nfd = fd_install(&mut k, pid, h);
   if nfd >= LXNFD {
@@ -193,7 +218,7 @@ fn lx_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   if flags / SOCK_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, nfd, FD_OFD + h + FD_CLOEXEC);
   }
-  let r = sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c), ofd_v6(k, h));
+  let r = sin_out_m(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, c), tcp_peer_port(k.nic, c), ofd_v6(k, h), ofd_mapped(k, h));
   if r != 0 {
     return r;
   }
@@ -235,7 +260,11 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
     if sin.err != 0 {
       return sin.err;
     }
-    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, sin.port);
+    let mut cfam = FAM_V4;                   // what the listener sees on loopback, where 127.0.0.1 and ::1 are one address
+    if ofd_v6(k, tk.h) && !sin_mapped(&mut k, pid, addr) {
+      cfam = FAM_BOTH;
+    }
+    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, sin.port, cfam);
     if t >= TCBS {
       return ENETUNREACH;
     }
@@ -284,28 +313,67 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
   if got == NO_RESULT || got == 0 {
     return EFAULT;
   }
-  let w = tcp_send_xfer(&mut k, pid, fd, got, more);
+  // A piece with more of the same call behind it is sent corked, so the
+  // pieces go out as full segments and not one short segment each; the
+  // last piece is sent as the caller said.
+  let w = tcp_send_xfer(&mut k, pid, fd, got, more || got < n);
   if w != got {
     return w;
   }
   // More than one transfer buffer's worth, while the send ring takes it.
-  let mut total = got;
-  let mut go = true;
-  while go && buf < 0x800000000000 && total < n && total <= TCP_RING - XFER
-    invariant kok(k) && pid < NPROC && total <= TCP_RING
-  {
-    let c = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, &mut k.fs.xfer, smaller(n - total, XFER));
-    if c == NO_RESULT || c == 0 {
-      go = false;                           // as a short write
-    } else {
-      let r = tcp_send_xfer(&mut k, pid, fd, c, more);
-      if r > c {
-        go = false;                         // full, or an error: say it next time
-      } else {
-        total = total + r;
-        go = r == c;
-      }
+  let total = tcp_send_run(&mut k.nic, &mut k.spaces, &mut k.mem, k.anon, &mut k.fs.xfer, pid, tk.t, buf, n, got, more);
+  if !more && total < n {
+    // Stopped before the last piece: the pieces sent so far were corked, but
+    // nothing follows to uncork the short segment that may be left.
+    let tk2 = tk_look(k, pid, fd);
+    if tk2.err == 0 && tk2.mode == TM_CONN {
+      tcp_cork(&mut k.nic, tk2.t, false);
     }
+  }
+  return total;
+}
+
+/// The pieces of a write after its first, `done` bytes of `n` from `va`
+/// having gone: each is copied into `xfer` and put into the send buffer, all
+/// under one move of the card out of its enum, which costs about as much as a
+/// piece's copy. Stops at the first piece the send buffer does not take whole
+/// (full, or the connection cannot send) or that cannot be read; the last
+/// piece is sent as the caller said (`more`). Returns the bytes gone in all.
+fn tcp_send_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfer: &mut Bytes, pid: u64, t: u64, va: u64, n: u64, done: u64, more: bool) -> u64
+  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && done <= n && done <= XFER
+  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XFER
+  ensures result <= TCP_RING
+{
+  let mut total = done;
+  match c {
+    Nic::None => {
+      c = Nic::None;
+    },
+    Nic::Up(mut nn) => {
+      let mut go = true;
+      while go && va < 0x800000000000 && total < n && total <= TCP_RING - XFER
+        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && total <= TCP_RING && net_ok(nn)
+      {
+        let want = smaller(n - total, XFER);
+        let g = copy_from_user(&mut spaces, &mut m, an, pid, va + total, &mut xfer, want);
+        if g == NO_RESULT || g == 0 {
+          go = false;                       // as a short write
+        } else {
+          let last = total + g >= n || total + g > TCP_RING - XFER;
+          if last {
+            net_cork(&mut nn, t, more);
+          }
+          let r = tcp_write(&mut nn, t, xfer, g);
+          if r > g || r == 0 {
+            go = false;                     // full, or an error: say it next time
+          } else {
+            total = total + r;
+            go = r == g;
+          }
+        }
+      }
+      c = Nic::Up(nn);
+    },
   }
   return total;
 }
@@ -315,6 +383,17 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
 /// full (-EAGAIN when the socket is nonblocking); -EPIPE once the
 /// connection cannot send.
 fn tcp_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  return tcp_send_piece(&mut k, pid, fd, n, more, false);
+}
+
+/// tcp_send_xfer; with `mid`, as a piece in the middle of one call (the
+/// pieces of lx_tcp_send), the buffers of the card were fed and the cork was
+/// set by the piece before, so neither is done again: each costs about as
+/// much as the copy of the piece does.
+fn tcp_send_piece(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool, mid: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -328,8 +407,10 @@ fn tcp_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool) -> u64
   if n == 0 {
     return 0;
   }
-  nic_feed(&mut k.nic, &mut k.mem);
-  tcp_cork(&mut k.nic, tk.t, more);
+  if !mid {
+    nic_feed(&mut k.nic, &mut k.mem);
+    tcp_cork(&mut k.nic, tk.t, more);
+  }
   let w = tcp_send(&mut k.nic, tk.t, k.fs.xfer, n);
   if w == NO_SOCK {
     return EPIPE;
@@ -341,6 +422,42 @@ fn tcp_send_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool) -> u64
     return SK_WAIT;
   }
   return w;
+}
+
+/// The pieces of a read after its first, `done` bytes of `n` having gone to
+/// `va`: each is taken from the receive buffer into `xfer` and copied out, all
+/// under one move of the card out of its enum (as tcp_send_run). Stops when
+/// nothing more has arrived, at the end, on a reset, or when a piece cannot be
+/// written. Returns the bytes gone in all.
+fn tcp_recv_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfer: &mut Bytes, pid: u64, t: u64, va: u64, n: u64, done: u64, first: bool) -> u64
+  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && done <= TCP_RING
+  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XFER
+  ensures result <= TCP_RING
+{
+  let mut total = done;
+  match c {
+    Nic::None => {
+      c = Nic::None;
+    },
+    Nic::Up(mut nn) => {
+      let mut more = first;
+      while more && va < 0x800000000000 && total < n && total <= TCP_RING - XFER
+        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && total <= TCP_RING && net_ok(nn)
+      {
+        let r = tcp_read(&mut nn, t, &mut xfer, smaller(n - total, XFER), false);
+        if r == 0 || r > XFER {
+          more = false;                     // nothing more yet, the end, or reset: say it next time
+        } else if copy_to_user(&mut spaces, &mut m, an, pid, va + total, xfer, r) != r {
+          more = false;                     // as a short read
+        } else {
+          total = total + r;
+          more = r == XFER;
+        }
+      }
+      c = Nic::Up(nn);
+    },
+  }
+  return total;
 }
 
 /// read / recv on a connection: the bytes that arrived (left there with
@@ -375,21 +492,7 @@ fn lx_tcp_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, dontwait: bo
     return EFAULT;
   }
   // More than one transfer buffer's worth, while more has arrived.
-  let mut total = got;
-  let mut more = got == XFER && !peek;
-  while more && buf < 0x800000000000 && total < n && total <= TCP_RING - XFER
-    invariant kok(k) && pid < NPROC && total <= TCP_RING
-  {
-    let r = tcp_recv(&mut k.nic, tk.t, &mut k.fs.xfer, smaller(n - total, XFER), false);
-    if r == 0 || r > XFER {
-      more = false;                         // nothing more yet, the end, or reset: say it next time
-    } else if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + total, k.fs.xfer, r) != r {
-      more = false;                         // as a short read
-    } else {
-      total = total + r;
-      more = r == XFER;
-    }
-  }
+  let total = tcp_recv_run(&mut k.nic, &mut k.spaces, &mut k.mem, k.anon, &mut k.fs.xfer, pid, tk.t, buf, n, got, got == XFER && !peek);
   return total;
 }
 
@@ -435,15 +538,24 @@ fn lx_tcp_name(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, peer: bo
       port = tcp_local_port(k.nic, tk.t);   // word 3 only says whether connect reported it
     }
     let mut me = 0;
-    if tk.mode == TM_CONN && tk.t < TCBS && is_v6tok(tcp_peer_ip(k.nic, tk.t)) {
-      me = V6_SELF;                         // connected over IPv6: our address there
+    let bound = sock_bound_ip(k, tk.h);
+    if bound != 0 && bound <= 4294967295 && tk.mode != TM_CONN {
+      me = bound;
     }
-    return sin_out(&mut k, pid, addr, lenp, me, port, ofd_v6(k, tk.h));
+    if tk.mode == TM_CONN && tk.t < TCBS {
+      let pip = tcp_peer_ip(k.nic, tk.t);
+      if is_v6tok(pip) {
+        me = V6_SELF;                       // connected over IPv6: our address there
+      } else if pip != 0 && pip <= 4294967295 {
+        me = local_for(k.nic, pip);         // the source address its route picked
+      }
+    }
+    return sin_out_m(&mut k, pid, addr, lenp, me, port, ofd_v6(k, tk.h), ofd_mapped(k, tk.h));
   }
   if tk.mode != TM_CONN || tk.t >= TCBS {
     return ENOTCONN;
   }
-  return sin_out(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h));
+  return sin_out_m(&mut k, pid, addr, lenp, tcp_peer_ip(k.nic, tk.t), tcp_peer_port(k.nic, tk.t), ofd_v6(k, tk.h), ofd_mapped(k, tk.h));
 }
 
 /// What a poll on a stream socket finds now: a listener is readable when a

@@ -37,6 +37,33 @@ int main(void) {
            IN6_IS_ADDR_V4MAPPED(&((struct sockaddr_in6 *)&ss)->sin6_addr) &&
            ((struct sockaddr_in6 *)&ss)->sin6_addr.s6_addr[15] == 1);
 
+    /* A dual-stack listener names a loopback peer by the family it connected
+     * with: ::ffff:127.0.0.1 for an AF_INET client, ::1 for an AF_INET6 one
+     * (express's req.ip, over supertest, depends on it). */
+    int l6 = socket(AF_INET6, SOCK_STREAM, 0);
+    struct sockaddr_in6 la = {.sin6_family = AF_INET6};
+    socklen_t ll = sizeof la;
+    int listening = l6 >= 0 && bind(l6, (void *)&la, sizeof la) == 0 && listen(l6, 4) == 0 && getsockname(l6, (void *)&la, &ll) == 0;
+    struct sockaddr_in to4 = {.sin_family = AF_INET, .sin_port = la.sin6_port, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
+    int c4 = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_in6 pa = {0};
+    socklen_t pl = sizeof pa;
+    int a4s = listening && connect(c4, (void *)&to4, sizeof to4) == 0 ? accept(l6, (void *)&pa, &pl) : -1;
+    struct sockaddr_in6 gp = {0};
+    socklen_t gl = sizeof gp;
+    EXPECT("a dual-stack listener names an AF_INET client ::ffff:127.0.0.1",
+           a4s >= 0 && IN6_IS_ADDR_V4MAPPED(&pa.sin6_addr) && pa.sin6_addr.s6_addr[15] == 1);
+    EXPECT("getpeername and getsockname of that connection read ::ffff:127.0.0.1 too",
+           a4s >= 0 && getpeername(a4s, (void *)&gp, &gl) == 0 && IN6_IS_ADDR_V4MAPPED(&gp.sin6_addr) &&
+           (gl = sizeof gp, getsockname(a4s, (void *)&gp, &gl)) == 0 && IN6_IS_ADDR_V4MAPPED(&gp.sin6_addr));
+    struct sockaddr_in6 to6 = {.sin6_family = AF_INET6, .sin6_port = la.sin6_port, .sin6_addr = IN6ADDR_LOOPBACK_INIT};
+    int c6 = socket(AF_INET6, SOCK_STREAM, 0);
+    memset(&pa, 0, sizeof pa);
+    pl = sizeof pa;
+    int a6s = listening && connect(c6, (void *)&to6, sizeof to6) == 0 ? accept(l6, (void *)&pa, &pl) : -1;
+    EXPECT("a dual-stack listener names an AF_INET6 client ::1",
+           a6s >= 0 && memcmp(&pa.sin6_addr, &in6addr_loopback, 16) == 0);
+
     struct addrinfo h, *r;
     memset(&h, 0, sizeof h);
     h.ai_family = AF_UNSPEC;

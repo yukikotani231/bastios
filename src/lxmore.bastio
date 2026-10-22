@@ -396,7 +396,12 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
     bset(&mut k.fs.xfer, z, 0);
     z = z + 1;
   }
-  xfer_u64(&mut k.fs.xfer, 0, STATX_BASIC + 4096 * 0x100000000);   // stx_mask, stx_blksize
+  let mut smask = STATX_BASIC;
+  if mode / 4096 == 6 && mask / 0x2000 % 2 == 1 {
+    smask = smask + 0x2000;                 // STATX_DIOALIGN, answered for a block device
+    xfer_u64(&mut k.fs.xfer, 152, 512 + 512 * 0x100000000);   // stx_dio_mem_align, stx_dio_offset_align
+  }
+  xfer_u64(&mut k.fs.xfer, 0, smask + 4096 * 0x100000000);   // stx_mask, stx_blksize
   xfer_u64(&mut k.fs.xfer, 16, nlink % 0x100000000 + uid * 0x100000000);   // stx_nlink, stx_uid
   xfer_u64(&mut k.fs.xfer, 24, gid + mode % 65536 * 0x100000000);   // stx_gid, stx_mode
   xfer_u64(&mut k.fs.xfer, 32, ino);
@@ -811,6 +816,8 @@ fn lx_more_result(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u6
       r = EBADF;
     } else if d.kind != K_FILE {
       r = ESPIPE;
+    } else if r10 % 4294967296 > 5 {
+      r = EINVAL;                           // POSIX_FADV_NORMAL .. NOREUSE are 0 to 5
     }
     // Otherwise accepted: advice is not taken.
   } else if n == LX_GETCPU {

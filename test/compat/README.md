@@ -109,6 +109,20 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts threads and writes machine code at run time, so this lane boots the
   guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
   them on a copy.
+- `python.txt`: Python development, from a seventh disk (`pythondisk.py`): the
+  root of the official `python:3.14-alpine` image (`PYTHON_IMAGE`: CPython,
+  pip and the headers in `/usr/local`), entered with `chroot`, with gcc
+  installed by apk from the Alpine repository over HTTP. The cases make a
+  venv, `pip install` packages from the host's web server (pinned by SHA-256
+  in `pythondeps.txt`, served at `HOSTURL/wheels/`; pip finds them through
+  `/etc/pip.conf`), build a C extension from source (MarkupSafe), run the
+  whole test suite of a real project (Jinja2's 784 tests, spread over two xdist workers), load binary musl
+  wheels (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson,
+  cffi) and run `pyprogs/stdlib.py`, which exercises the standard library on
+  top of the system calls: fork, threads, signals, sockets, mmap, pty,
+  sqlite3, ctypes, multiprocessing (fork, spawn and forkserver), asyncio and
+  TLS. `pyprogs/` is served at `HOSTURL/pyprogs/`, and the same script runs on
+  Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB.
 - `go.txt`: the Go toolchain of the official `golang` image (`GO_IMAGE`), from
   a seventh disk (`godisk.py`), entered with `chroot`: Go programs are
   static, so the root holds only `/usr/local/go`. x86-64 only.
@@ -194,6 +208,19 @@ pass, fail (`TFAIL`), broken (`TBROK`: it could not set itself up),
 unsupported (`TCONF`: it needs something this system does not claim to
 have, such as a kernel config or a block device), hang (interrupted after
 `--timeout` seconds) or crash. `--only REGEX` runs a subset by tag.
+
+`make compat-ltp` also runs LTP's file system stress tests (`runtest/fs`: growfiles,
+ftest, stream), the memory tests (`runtest/mm`: mmap stress, shared memory), direct I/O (`runtest/dio`), file permissions (`runtest/fs_perms_simple`), the pthread stress tests (`runtest/sched`), its pseudo-terminal, namespace (container) and
+CVE regression tests, and the Open POSIX Test Suite's conformance tests
+(`--suite posix`; about 1,600 programs named after an interface and an
+assertion, such as `posix-sigaction_1-1`). Those exit 0 for a pass, 1 for a
+failure, 2 when they could not set themselves up, 4 or 5 for something not
+supported here.
+
+`--suite libctest` runs musl's libc-test (`src/functional` and `src/regression`,
+built static against musl at the revision `LIBCTEST_REV` in the Makefile; tags
+are `libctest-functional-NAME` and `libctest-regression-NAME`). An executable
+that exits 0 passes.
 
 The report ranks missing system calls by how many tests they block, as
 `run.py` does, and lists every test that did not pass with its first
