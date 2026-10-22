@@ -119,6 +119,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Disk
 
+- File names on the disk file system can be 255 bytes long, as on Linux (`NAME_MAX`; the limit was 200, so a name of 201 to 255 bytes failed). A whole path is still limited to 255 bytes, so the longest name directly under `/disk` is 249 bytes; raising that limit is a separate change. A name past 200 bytes goes on into the entry after the one that holds it, which is of a new kind (5) and the other half of the same 512-byte sector, so a power cut leaves the whole name or none. The first such name rewrites the magic to `BSTDISK6` in one sector, so an older kernel leaves that disk alone instead of reading a cut name; a disk with no long name keeps its magic. `test/fsck.py` checks the new kind, and `mkdisk.py` can make such names.
 - NVMe and AHCI take a run of consecutive blocks in one command, as virtio already did: up to 32 blocks (128 KiB), through a PRP list (NVMe, bounded by the drive's MDTS) or one PRD entry per block (AHCI). `diskbench` writes 2 MiB in 3-4 ticks on both, 8-10 and 6-7 before.
 - The disk file system holds 5119 files and directories (was 4095): the
   directory has up to 320 blocks, all named by the superblock's block, so
