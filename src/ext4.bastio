@@ -651,9 +651,9 @@ struct Step { err: u64, sp: u64 }
 /// 8, inode number num) of the directory whose path is pb[0..plen], the
 /// sp-th open one: makes its node, and for a directory opens it.
 fn ex_child(v: &mut Vfs, mem: &mut Mem, e: Ext, pb: &mut Bytes, plen: u64, nl: u64, num: u64, sp: u64, st: &mut Buf, ibs: &mut Bytes, nb: &mut Bytes, fib: &mut Bytes, hl: &mut Buf) -> Step
-  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && blen(pb) == 512 && plen <= FNAME_MAX && nl < 256 && nl + 8 <= XFER
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && blen(pb) == 4096 && plen <= FNAME_MAX && nl < 256 && nl + 8 <= XBUF
     && sp >= 1 && sp <= EX_DEPTH && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
-  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
     && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL && result.sp >= 1 && result.sp <= EX_DEPTH
 {
   if nl == 0 {
@@ -666,7 +666,7 @@ fn ex_child(v: &mut Vfs, mem: &mut Mem, e: Ext, pb: &mut Bytes, plen: u64, nl: u
   bset(&mut pb, plen, 47);
   let mut j = 0;
   while j < nl
-    invariant j <= nl && nl < 256 && plen + 1 + nl <= FNAME_MAX && blen(pb) == 512 && nl + 8 <= XFER && blen(v.xfer) == XFER
+    invariant j <= nl && nl < 256 && plen + 1 + nl <= FNAME_MAX && blen(pb) == 4096 && nl + 8 <= XBUF && blen(v.xfer) == XBUF
   {
     let c = bget(v.xfer, 8 + j);
     if c == 0 || c == 47 {
@@ -705,9 +705,9 @@ fn ex_child(v: &mut Vfs, mem: &mut Mem, e: Ext, pb: &mut Bytes, plen: u64, nl: u
 /// One step of the walk: reads the next entry of the innermost open
 /// directory (the sp-th) and handles it, or closes the directory at its end.
 fn ex_step(v: &mut Vfs, mem: &mut Mem, e: Ext, sp: u64, st: &mut Buf, pb: &mut Bytes, ibs: &mut Bytes, nb: &mut Bytes, fib: &mut Bytes, hl: &mut Buf) -> Step
-  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && blen(pb) == 512
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && blen(pb) == 4096
     && sp >= 1 && sp <= EX_DEPTH && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
-  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
     && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL && result.sp <= EX_DEPTH
 {
   let fr = (sp - 1) * EX_FR;
@@ -767,9 +767,9 @@ fn ex_step(v: &mut Vfs, mem: &mut Mem, e: Ext, sp: u64, st: &mut Buf, pb: &mut B
 /// Walks the tree below the mount directory (path pb[0..rl]) and makes a
 /// node for everything in it. st, ibs, nb, fib, hl are scratch.
 fn ex_walk(v: &mut Vfs, mem: &mut Mem, e: Ext, pb: &mut Bytes, rl: u64, st: &mut Buf, ibs: &mut Bytes, nb: &mut Bytes, fib: &mut Bytes, hl: &mut Buf) -> u64
-  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && rl >= 1 && rl <= FNAME_MAX && blen(pb) == 512
+  requires vfs_ok(v) && mem_ok(mem) && ext_ok(e) && e.err == 0 && rl >= 1 && rl <= FNAME_MAX && blen(pb) == 4096
     && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
-  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == EX_FR * EX_DEPTH && blen(ibs) == 64 * EX_DEPTH
     && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
 {
   let root = ex_inode(&mut v, e, 2, &mut ibs, 0);
@@ -786,7 +786,7 @@ fn ex_walk(v: &mut Vfs, mem: &mut Mem, e: Ext, pb: &mut Bytes, rl: u64, st: &mut
   let mut iter = 0;
   let mut err = EX_OK;
   while err == EX_OK && sp > 0 && iter <= EX_ITER
-    invariant sp <= EX_DEPTH && iter <= EX_ITER + 1 && vfs_ok(v) && mem_ok(mem) && blen(pb) == 512 && len(st) == EX_FR * EX_DEPTH
+    invariant sp <= EX_DEPTH && iter <= EX_ITER + 1 && vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == EX_FR * EX_DEPTH
       && blen(ibs) == 64 * EX_DEPTH && blen(nb) == 4096 && blen(fib) == 64 && len(hl) == 2 * EX_HL
   {
     iter = iter + 1;
@@ -808,7 +808,7 @@ fn ex_import(v: &mut Vfs, mem: &mut Mem, f: u64, n: u64) -> u64
   requires vfs_ok(v) && mem_ok(mem) && n >= 1 && n <= FNAME_MAX
   ensures vfs_ok(v) && mem_ok(mem)
 {
-  let mut pb = balloc(512);
+  let mut pb = balloc(4096);
   bcopy(&mut pb, 0, v.xfer, 0, n);                   // the open below uses the transfer buffer
   let e = ex_open(&mut v, f);
   if e.err != EX_OK {

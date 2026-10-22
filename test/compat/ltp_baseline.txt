@@ -1919,7 +1919,6 @@ posix-sem_unlink_1-1
 posix-sem_unlink_2-1
 posix-sem_unlink_2-2
 posix-sem_unlink_4-2
-posix-sem_unlink_5-1
 posix-sem_unlink_6-1
 posix-sem_unlink_7-1
 posix-sem_unlink_9-1
