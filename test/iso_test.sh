@@ -1202,6 +1202,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             keys = {"-": "minus", " ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
             def typed(text):
                 monitor(*[f"sendkey {keys.get(c, 'shift-' + c.lower() if c.isupper() else c)}" for c in text], "sendkey ret")
+            # A program can set the window title (ESC ] 2 ; TEXT BEL), which bwm shows.
+            keys[";"] = "semicolon"
+            mark2 = len(out)
+            typed("printf '\\033\\1352;Mine\\007'")
+            good = until(b" Mine", mark2)
+            print(("ok  " if good else "FAIL"), f"({name}) a program sets the title of its terminal window")
+            fails += not good
             typed("printf '\\033[?1049halt\\n'")
             time.sleep(1.5)
             w, h, px = screendump()
