@@ -88,7 +88,7 @@ static int deep_paths(void) {
     int fd = ok ? open(full, O_CREAT | O_WRONLY, 0644) : -1;
     ok = ok && fd >= 0 && write(fd, "deep", 4) == 4 && close(fd) == 0 && stat(full, &st) == 0 && st.st_size == 4;
     full[len] = 0;
-    ok = ok && chdir(full) == 0 && getcwd(cwd, sizeof cwd) && strlen(cwd) == strlen(base) + 1 + len
+    ok = ok && chdir(full) == 0 && getcwd(cwd, sizeof cwd) && strlen(cwd) == (strcmp(base, "/") ? strlen(base) : 0) + 1 + len
         && stat("f", &st) == 0 && chdir(base) == 0;
     memset(nm, 'n', 256); nm[256] = 0;
     ok = ok && mkdir(nm, 0755) == -1 && errno == ENAMETOOLONG;
