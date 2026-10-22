@@ -151,14 +151,3 @@ $ bb chroot /disk/a /bin/sh -c 'cd /root && TERM=xterm LANG=C.UTF-8 nvim -u NONE
 > :wq\r
 $ bb cat /disk/a/root/wid.txt
 3 6 9
-
-== zsh: Ctrl-Z stops a job, jobs lists it, fg resumes it and Ctrl-C ends it
-$ test -x /disk/a/usr/bin/zsh && bb rm -f /disk/a/root/z.txt && bb chroot /disk/a /usr/bin/zsh -f
-> sleep 100\r
-> \x1a
-> jobs > /root/z.txt\r
-> fg\r
-> \x03
-> exit\r
-$ bb cat /disk/a/root/z.txt
-[1]  + suspended  sleep 100

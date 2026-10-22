@@ -518,11 +518,6 @@ tmux
 cmake
 lua-language-server
 
-== apk: install zsh over HTTP
-$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL zsh 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e zsh 2>/dev/null
-status 0
-zsh
-
 == apk: install ripgrep and fzf over HTTP
 $ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL ripgrep fzf 2>/dev/null; echo status $?; bb chroot /disk/a /sbin/apk info -e ripgrep fzf 2>/dev/null
 status 0

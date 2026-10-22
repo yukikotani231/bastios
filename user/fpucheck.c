@@ -5,8 +5,10 @@
  * (`fpucheck &` then `fpucheck`): without per-process FPU state, each would
  * see the other's value. It then touches 512 fresh pages of anonymous memory,
  * every one a page fault the kernel answers without putting the task back in
- * the round robin, and checks xmm0 and xmm9 after each. Freestanding, Linux
- * system calls only.
+ * the round robin, and checks xmm0 and xmm9 after each. Last it calls stat,
+ * open, read and close in a loop (the calls the kernel answers without saving
+ * the task's FPU registers when nothing else needs the processor) and checks
+ * them again. Freestanding, Linux system calls only.
  */
 typedef unsigned long u64;
 
@@ -51,6 +53,23 @@ u64 elf_main(u64 *sp) {
         __asm__ volatile("movq %%xmm9, %0" : "=r"(got9));
         if (got != want || got9 != want9) {
             sys(1, 1, (u64)"fpucheck: xmm changed by a page fault\r\n", 38);
+            return 1;
+        }
+    }
+    char buf[256] __attribute__((aligned(16)));
+    for (u64 i = 0; i < 20000; i++) {
+        u64 fd;
+        sys(4, (u64)"/", (u64)buf, 0);                                   /* stat */
+        fd = sys6(257, (u64)-100, (u64)"/proc/self/exe", 0, 0, 0, 0);    /* openat */
+        if (fd < 4096) {
+            sys(0, fd, (u64)buf, 4);                                     /* read */
+            sys(3, fd, 0, 0);                                            /* close */
+        }
+        u64 got, got9;
+        __asm__ volatile("movq %%xmm0, %0" : "=r"(got));
+        __asm__ volatile("movq %%xmm9, %0" : "=r"(got9));
+        if (got != want || got9 != want9) {
+            sys(1, 1, (u64)"fpucheck: xmm changed by a file call\r\n", 38);
             return 1;
         }
     }

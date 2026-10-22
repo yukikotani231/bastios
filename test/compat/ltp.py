@@ -286,7 +286,7 @@ def waiting(tests, last, gated):
     return busy, idle, {k: p.get("secs", 0) for k, p in prev.items()}
 
 
-def run_guest(args, tests, progs, log, gated):
+def run_guest(args, tests, progs, log, gated, whole=None):
     """Runs the batches, args.jobs machines at a time. The tests that only
     wait (see waiting()) run besides those, on as many more machines as it
     takes to finish them within about the time the others take. A machine
@@ -294,14 +294,17 @@ def run_guest(args, tests, progs, log, gated):
     sleeping call until its time is up), so those machines run under
     SCHED_IDLE: the others, where the timing tests are, keep the CPUs they
     had. (At nice 19 they still took enough to fail epoll_pwait03's
-    timing in 4 runs of 4.)"""
+    timing in 4 runs of 4.)
+
+    whole: the batches to run, when the caller has already cut them (a
+    shard); by default they are cut from tests."""
     busy, idle, secs = waiting(tests, os.path.join(args.out, "results.json"), gated)
     # The batches are made from every test, as before, and then lose the
     # waiting ones, so that each test runs after the same tests as before
     # (a test can leave the kernel short of something, like pipes, that a
     # later one in its batch needs).
     moved = {t[0] for t in idle}
-    groups = [g for g in ([t for t in b if t[0] not in moved] for b in batches(tests, BATCH)) if g]
+    groups = [g for g in ([t for t in b if t[0] not in moved] for b in (whole or batches(tests, BATCH))) if g]
     lanes = []
     if idle:
         per_lane = max(WAITED, sum(secs.get(t[0], 0) for t in busy) / args.jobs)
@@ -405,6 +408,9 @@ def main():
     ap.add_argument("--timeout", type=float, default=60)
     ap.add_argument("--jobs", type=int, default=max(1, (os.cpu_count() or 2) // 2),
                     help="machines run at once (each has two processors)")
+    ap.add_argument("--shard", metavar="K/N",
+                    help="run only the batches K, K+N, K+2N, ... (counted from 0) of the full run, so that "
+                         "N machines of CI can each take a share; the baseline is checked for those tests only")
     ap.add_argument("--update-baseline", action="store_true")
     ap.add_argument("--suite", action="append", default=[],
                     help="also run runtest/NAME with the programs in testcases/kernel/NAME (pty, sched, ...); "
@@ -417,10 +423,20 @@ def main():
         gated = {l.strip() for l in open(base) if l.strip() and not l.startswith("#")}
     skip = load_skip()
     tests, progs, missing = load_tests(args.ltp, args.only, skip, args.suite, args.libc_test)
+    whole = None
+    if args.shard:
+        k, n = (int(x) for x in args.shard.split("/"))
+        if not 0 <= k < n:
+            ap.error("--shard K/N needs 0 <= K < N")
+        # The batches are cut from every test, as in a full run, so that each
+        # test runs after the same tests as there; a shard keeps every Nth.
+        whole = [b for i, b in enumerate(batches(tests, BATCH)) if i % n == k]
+        mine = {t[0] for b in whole for t in b}
+        tests = [t for t in tests if t[0] in mine]
     os.makedirs(args.out, exist_ok=True)
     t0 = time.time()
     with open(os.path.join(args.out, "serial.log"), "wb") as log:
-        results = run_guest(args, tests, progs, log, gated)
+        results = run_guest(args, tests, progs, log, gated, whole)
     report(results, missing, skip, syscall_names(), args.out, time.time() - t0)
 
     ids = sorted(r["name"] for r in results if r["result"] == "pass")
@@ -435,6 +451,8 @@ def main():
         return 0
     if os.path.exists(base):
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
+        if args.shard:
+            want = [w for w in want if w in {t[0] for t in tests}]
         lost = sorted(set(want) - set(ids))
         # A few tests depend on timing and fail now and then (clock_gettime04,
         # shmctl01). A test that stopped passing runs again, twice at most,
