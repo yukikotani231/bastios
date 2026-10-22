@@ -512,8 +512,8 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
   if nm != 0 {
     return nm;
   }
-  if flags / 2 != 0 && flags != MFD_CLOEXEC + 2 {
-    return EINVAL;                          // MFD_ALLOW_SEALING (2) is accepted; nothing else
+  if flags / 4 != 0 {
+    return EINVAL;                          // MFD_CLOEXEC (1) and MFD_ALLOW_SEALING (2), alone or together; nothing else
   }
   let mut oflags = LO_RDWR + LO_CREAT + LO_EXCL;
   if flags % 2 == MFD_CLOEXEC {

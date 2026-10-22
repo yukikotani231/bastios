@@ -286,6 +286,7 @@ t_fanotify: remove the mark
 t_fanotify: the event says who did it
 t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC
 t_fdlock: 200 separate byte-range locks on one file
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
@@ -1240,6 +1241,7 @@ t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: settimeofday
+t_sysv: shmat over its own address with SHM_REMAP replaces the attachment
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM
