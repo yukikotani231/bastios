@@ -726,6 +726,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             clock = any(tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255) for y in range(746, 766) for x in range(915, 965))
             print(("ok  " if clock else "FAIL"), f"({name}) the task bar shows a clock")
             fails += not clock
+            # A right click on the empty desktop opens the same menu at the pointer; a click elsewhere closes it.
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            at = (444 * w + 642) * 3
+            good = tuple(px[at:at + 3]) == (45, 45, 60)
+            print(("ok  " if good else "FAIL"), f"({name}) a right click on the desktop opens the launcher menu at the pointer")
+            fails += not good
+            monitor("mouse_move 300 0")
+            monitor("mouse_button 1", "mouse_button 0")
+            monitor("mouse_move -300 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = tuple(px[at:at + 3]) != (45, 45, 60)
+            print(("ok  " if good else "FAIL"), f"({name}) a click elsewhere closes it")
+            fails += not good
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.7)
