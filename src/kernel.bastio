@@ -225,6 +225,11 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   if !make_dir(&mut k.fs, "sys") || !make_dir(&mut k.fs, "sys/fs") {
     puts(&mut con, "cannot make /sys/fs\r\n");
   }
+  // /sys/class/power_supply is empty: a machine without a battery has the
+  // directory, and psutil's sensors_battery lists it (a missing one is an error).
+  if !make_dir(&mut k.fs, "sys/class") || !make_dir(&mut k.fs, "sys/class/power_supply") {
+    puts(&mut con, "cannot make /sys/class/power_supply\r\n");
+  }
   // The installer image's own files (initextra.bastio) live in /install.
   if NEXTRA > 0 && !make_dir(&mut k.fs, "install") {
     puts(&mut con, "cannot make /install\r\n");

@@ -108,6 +108,7 @@ const SY_NETV6RT: u64 = 81;            // /proc/net/ipv6_route
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
 const SY_VMSTAT: u64 = 99;             // /proc/vmstat (src/oom.bastio's counters)
 const SY_SWAPS: u64 = 100;             // /proc/swaps
+const SY_PARTS: u64 = 101;             // /proc/partitions
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 10;
@@ -513,6 +514,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     if xfer_is(x, 5, n, "swaps") {
       return PROC_DEV + PSYS + SY_SWAPS;
+    }
+    if xfer_is(x, 5, n, "partitions") {
+      return PROC_DEV + PSYS + SY_PARTS;
     }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
@@ -1139,7 +1143,10 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 15 {
     return Ent { len: name_out(&mut k.fs.xfer, "swaps"), dir: false, end: false };
   }
-  let p = i - 15;
+  if i == 16 {
+    return Ent { len: name_out(&mut k.fs.xfer, "partitions"), dir: false, end: false };
+  }
+  let p = i - 16;
   if p >= NPROC {
     return end;
   }
@@ -1936,6 +1943,84 @@ fn mountinfo_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
   return a;
 }
 
+/// The AT_RANDOM entry of the auxiliary vector exec built for process p, whose
+/// strings start at window offset `top`: the address of the 16 random bytes
+/// just above them; 0 if the vector is not found (found as /proc/PID/auxv
+/// finds it).
+fn auxv_random(k: &mut Kernel, p: u64, top: u64) -> u64
+  requires kok(k) && p < NPROC && top >= 320
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 320, &mut k.fs.xfer, 320) != 320 {
+    return 0;
+  }
+  let mut j = 0;
+  let mut found = false;
+  while j < 8 && !found
+    invariant j <= 8 && blen(k.fs.xfer) == XBUF
+  {
+    if rd64(k.fs.xfer, 8 * j) == 3 && rd64(k.fs.xfer, 8 * (j + 2)) == 4 && rd64(k.fs.xfer, 8 * (j + 3)) == PH_SIZE && rd64(k.fs.xfer, 8 * (j + 4)) == 5 {
+      found = true;
+    } else {
+      j = j + 1;
+    }
+  }
+  if !found {
+    return 0;
+  }
+  let mut e = j;
+  while e < 38 && rd64(k.fs.xfer, 8 * e) != 0
+    invariant j <= e && e <= 39 && blen(k.fs.xfer) == XBUF
+  {
+    if rd64(k.fs.xfer, 8 * e) == 25 {
+      return rd64(k.fs.xfer, 8 * (e + 1));
+    }
+    e = e + 2;
+  }
+  return 0;
+}
+
+/// /proc/PID/environ: the environment strings exec put after the arguments,
+/// each ending in a NUL, as far as the file holds (PROC_OUT - 1 bytes). They
+/// end where the random bytes start, less the padding that aligns the strings;
+/// a process whose arguments were not kept has none.
+fn environ_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let w = pget(k.procs, p, F_ARGS);
+  let top = w % 1099511627776;
+  let alen = w / 1099511627776;
+  if alen == 0 || top < 320 {
+    return 0;
+  }
+  let r = auxv_random(&mut k, p, top);
+  let start = USER_BASE + top + alen;
+  if r <= start {
+    return 0;
+  }
+  let n = smaller(r - start, PROC_OUT - 1);
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, start, &mut k.fs.xfer, n) != n {
+    return 0;
+  }
+  let mut len = 0;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n < PROC_OUT && len <= i && blen(o) == PROC_OUT && blen(k.fs.xfer) == XBUF
+  {
+    let c = bget(k.fs.xfer, i);
+    bset(&mut o, i, c);
+    if c != 0 {
+      len = i + 1;
+    }
+    i = i + 1;
+  }
+  if len < n {
+    return len + 1;                         // the NUL that ends the last string
+  }
+  return len;
+}
+
 /// Writes /proc file f into o. Returns its length.
 fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   requires kok(k) && pid < NPROC && blen(o) == PROC_OUT
@@ -1971,6 +2056,17 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_s(&mut o, a, "\npswpout ");
       a = put_n(&mut o, a, swap_pout(k));
       return put_s(&mut o, a, "\n");
+    }
+    if what == SY_PARTS {
+      // The one disk (major 8, minor 0, "bastio0") with its size in 1 KiB
+      // blocks, as /proc/diskstats names it; none when no disk was found.
+      let mut a = put_s(&mut o, 0, "major minor  #blocks  name\n\n");
+      if k.fs.disk.blocks > 0 {
+        a = put_s(&mut o, a, "   8        0 ");
+        a = put_n(&mut o, a, k.fs.disk.blocks % 0x20000000000000 * 4);
+        a = put_s(&mut o, a, " bastio0\n");
+      }
+      return a;
     }
     if what == SY_SWAPS {
       let mut a = put_s(&mut o, 0, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");
@@ -2225,6 +2321,29 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       }
       if w == 10 {
         return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
+      }
+      if w == 12 {
+        return environ_text(&mut k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);
+      }
+      if w == 11 {
+        // The sums /proc/PID/smaps_rollup gives, with the pages statm counts
+        // as resident: all of them private and dirty, none shared.
+        let sp = smaller((what - SY_PX) / PXF_N, NPROC - 1);
+        let kb = 4 * smaller(anon_count(&mut k, sp, 0, WPAGES), WPAGES);
+        let mut a = put_s(&mut o, 0, "00400000-7ffffffff000 ---p 00000000 00:00 0                          [rollup]\n");
+        a = put_s(&mut o, a, "Rss:               ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nPss:               ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nPss_Dirty:         ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nShared_Clean:        0 kB\nShared_Dirty:        0 kB\nPrivate_Clean:       0 kB\nPrivate_Dirty:     ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nReferenced:        ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nAnonymous:         ");
+        a = put_n(&mut o, a, kb);
+        return put_s(&mut o, a, " kB\nLazyFree:            0 kB\nAnonHugePages:       0 kB\nShmemPmdMapped:      0 kB\nFilePmdMapped:       0 kB\nShared_Hugetlb:      0 kB\nPrivate_Hugetlb:     0 kB\nSwap:                0 kB\nSwapPss:             0 kB\nLocked:              0 kB\n");
       }
       return put_s(&mut o, 0, px_text(w));
     }
@@ -3049,6 +3168,29 @@ fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
   return p * LXNFD + fd;
 }
 
+/// If x[..n] is /proc/PID/cwd or /proc/PID/root: PID * 2, plus 1 for root;
+/// else NO_RESULT. Only readlink knows these links.
+fn proc_cwd(procs: &Buf, x: &Bytes, n: u64) -> u64
+  requires ptab_ok(procs) && n <= blen(x)
+  ensures result == NO_RESULT || result < 2 * NPROC
+{
+  if n < 6 || !xfer_is(x, 0, 5, "proc/") {
+    return NO_RESULT;
+  }
+  let e = comp_end(x, 5, n);
+  let p = proc_pid(procs, x, 5, e);
+  if p >= NPROC || n < e + 4 {
+    return NO_RESULT;
+  }
+  if n == e + 4 && xfer_is(x, e, n, "/cwd") {
+    return 2 * p;
+  }
+  if n == e + 5 && xfer_is(x, e, n, "/root") {
+    return 2 * p + 1;
+  }
+  return NO_RESULT;
+}
+
 /// Where the name x[..n] (no leading "/") goes on once process p's root is
 /// taken off its front: 0 if the name is not inside the root.
 fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
@@ -3075,6 +3217,37 @@ fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
     return 0;
   }
   return rl + 1;
+}
+
+/// The target of /proc/PID/cwd for process t as reader r sees it: t's working
+/// directory from r's root (the whole name when it is outside it), or "/" for
+/// /proc/PID/root. Returns its length.
+fn cwd_link(k: &mut Kernel, r: u64, t: u64, root: bool, o: &mut Bytes) -> u64
+  requires kok(k) && r < NPROC && t < NPROC && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_c(&mut o, 0, 47);
+  if root {
+    return a;
+  }
+  let n = smaller(wget(k.cwd, t * CWD_STRIDE), FNAME_MAX);
+  let mut lg = balloc(FNAME_MAX);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && FNAME_MAX <= blen(lg) && kok(k) && t < NPROC
+  {
+    bset(&mut lg, i, cast[u8](rbyte(k.cwd, k.cwdx, t, i)));
+    i = i + 1;
+  }
+  let mut j = root_skip(k, r, lg, n);
+  while j < n
+    invariant j <= n && n <= FNAME_MAX && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
+  {
+    a = put_c(&mut o, a, bget(lg, j));
+    j = j + 1;
+  }
+  bfree(lg);
+  return a;
 }
 
 /// The row of k.croot that holds process p's root now. The threads of a
@@ -3444,6 +3617,30 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       bfree(lo);
       return ENOENT;
     }
+    let m = smaller(ln, smaller(size, XFER));
+    let mut i = 0;
+    while i < m
+      invariant i <= m && m <= PROC_OUT && m <= XFER && blen(lo) == PROC_OUT && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, bget(lo, i));
+      i = i + 1;
+    }
+    bfree(lo);
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
+      return EFAULT;
+    }
+    return m;
+  }
+  let mut pc = NO_RESULT;
+  if n <= XFER {
+    pc = proc_cwd(k.procs, k.fs.xfer, n);
+  }
+  if pc != NO_RESULT {
+    if !proc_peek(k.procs, pid, pc / 2) {
+      return EACCES;
+    }
+    let mut lo = balloc(PROC_OUT);
+    let ln = cwd_link(&mut k, pid, pc / 2, pc % 2 == 1, &mut lo);
     let m = smaller(ln, smaller(size, XFER));
     let mut i = 0;
     while i < m
