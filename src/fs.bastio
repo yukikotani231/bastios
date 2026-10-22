@@ -1632,6 +1632,17 @@ fn vfs_dir_look(v: &mut Vfs, n: u64) -> DirLook
   ensures result.d <= VDIR_LO || result.d == NO_FILE
   ensures result.f < HFILES || result.f == NO_FILE
 {
+  return vfs_dir_look_with(&mut v, n, false, NO_FILE);
+}
+
+/// vfs_dir_look, for a caller that has looked the name up already: when
+/// `known`, f0 is what vfs_lookup gave (and no file changed since).
+fn vfs_dir_look_with(v: &mut Vfs, n: u64, known: bool, f0: u64) -> DirLook
+  requires vfs_ok(v) && n <= XBUF && (f0 < HFILES || f0 == NO_FILE)
+  ensures vfs_ok(v)
+  ensures result.d <= VDIR_LO || result.d == NO_FILE
+  ensures result.f < HFILES || result.f == NO_FILE
+{
   if n == 0 {
     return DirLook { d: VDIR_ROOT, f: NO_FILE, looked: false };
   }
@@ -1642,7 +1653,10 @@ fn vfs_dir_look(v: &mut Vfs, n: u64) -> DirLook
     && bget(v.xfer, 3) == 107 {
     return DirLook { d: VDIR_DISK, f: NO_FILE, looked: false };
   }
-  let f = vfs_lookup(&mut v, n);
+  let mut f = f0;
+  if !known {
+    f = vfs_lookup(&mut v, n);
+  }
   if f != NO_FILE && vfs_is_dir(&mut v, f) {
     return DirLook { d: f, f: f, looked: true };
   }
