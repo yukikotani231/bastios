@@ -4,6 +4,7 @@
  *   mhog touch MIB    map MIB MiB of anonymous memory and write every page,
  *                     read them back, then grow the stack by 128 KiB
  *   mhog hold MIB     map and write MIB MiB, then sleep until killed
+ *   mhog holdlock MIB map and write MIB MiB, mlock them, then sleep until killed
  *   mhog cache MIB [F]  write a MIB MiB file F (default /tmp/mhog.cache)
  *   mhog mapfile MIB F  map MIB MiB of file F shared and read every page: the
  *                     kernel's page cache holds them afterwards
@@ -76,6 +77,24 @@ int main(int argc, char **argv) {
         if (grab(arg_mib(argc, argv), 0))
             return 1;
         printf("mhog: holding %lu MiB\n", arg_mib(argc, argv));
+        fflush(stdout);
+        for (;;)
+            pause();
+    }
+    if (strcmp(argv[1], "holdlock") == 0) {
+        unsigned long len = arg_mib(argc, argv) << 20;
+        unsigned char *p = mmap(0, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (p == MAP_FAILED) {
+            printf("mhog: mmap of %lu MiB failed\n", arg_mib(argc, argv));
+            return 1;
+        }
+        for (unsigned long i = 0; i < len; i += 4096)
+            p[i] = (unsigned char)(i >> 12);
+        if (mlock(p, len) != 0) {
+            printf("mhog: mlock failed: %d\n", errno);
+            return 1;
+        }
+        printf("mhog: holding %lu MiB locked\n", arg_mib(argc, argv));
         fflush(stdout);
         for (;;)
             pause();

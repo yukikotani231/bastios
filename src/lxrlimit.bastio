@@ -11,9 +11,9 @@
 // file stops at it; at it, SIGXFSZ and EFBIG), RLIMIT_CPU (SIGXCPU each
 // second from the soft limit, SIGKILL at the hard one), RLIMIT_MEMLOCK
 // (mlock and mlockall for non-root) and RLIMIT_NPROC (fork for a real
-// user other than root). The others are only kept. Every page stays in
-// memory anyway, so locking changes nothing but the count, and mlock of
-// a range already locked counts it again. The limits of the threads of a
+// user other than root). The others are only kept. Locked pages are never
+// swapped out (src/swap.bastio); mlock of a range already locked counts
+// it once. The limits of the threads of a
 // process are copies: setrlimit in one does not reach the others.
 
 import "lxmisc.bastio";
@@ -308,7 +308,8 @@ fn lock_count(k: &mut Kernel, pid: u64, bytes: u64, lock: bool) -> u64
   return 0;
 }
 
-// The pages mlock locked are kept as up to LR_N ranges per process (two
+// The pages mlock locked are kept as up to LR_N ranges per address space,
+// in the row of its thread group's leader (two
 // words each in k.sys from SYS_LR: the first page + 1, 0 for a free slot,
 // and the end page), so locking a page again counts it once and munlock
 // gives back only what was locked. A range that cannot be kept (all slots
@@ -327,13 +328,23 @@ fn lr_covered(k: &Kernel, p: u64, from: u64, to: u64) -> u64
   requires kok(k) && p < NPROC && from <= to && to <= WPAGES
   ensures result <= to - from
 {
+  return lr_covered_in(k.sys, k.procs, p, from, to);
+}
+
+/// lr_covered from the two tables it reads (for code that has moved other
+/// fields out of the kernel).
+fn lr_covered_in(sys: &Buf, procs: &Buf, p0: u64, from: u64, to: u64) -> u64
+  requires len(sys) == SYS_LEN && ptab_ok(procs) && p0 < NPROC && from <= to && to <= WPAGES
+  ensures result <= to - from
+{
+  let p = tgid(procs, p0);
   let mut n = 0;
   let mut i = 0;
   while i < LR_N
-    invariant i <= LR_N && n <= (to - from) && kok(k)
+    invariant i <= LR_N && n <= (to - from)
   {
-    let s1 = get(k.sys, lr_at(p, i, 0));
-    let e = get(k.sys, lr_at(p, i, 1));
+    let s1 = get(sys, lr_at(p, i, 0));
+    let e = get(sys, lr_at(p, i, 1));
     if s1 != 0 && s1 <= WPAGES + 1 && e <= WPAGES {
       let s = s1 - 1;
       let lo = larger(s, from);
@@ -348,10 +359,11 @@ fn lr_covered(k: &Kernel, p: u64, from: u64, to: u64) -> u64
 }
 
 /// Keeps from .. to as locked: ranges that touch it join it.
-fn lr_add(k: &mut Kernel, p: u64, from0: u64, to0: u64)
-  requires kok(k) && p < NPROC && from0 < to0 && to0 <= WPAGES
+fn lr_add(k: &mut Kernel, p0: u64, from0: u64, to0: u64)
+  requires kok(k) && p0 < NPROC && from0 < to0 && to0 <= WPAGES
   ensures kok(k)
 {
+  let p = tgid(k.procs, p0);
   let mut from = from0;
   let mut to = to0;
   let mut pass = 0;
@@ -386,10 +398,11 @@ fn lr_add(k: &mut Kernel, p: u64, from0: u64, to0: u64)
 }
 
 /// Forgets from .. to as locked; the pages that were.
-fn lr_sub(k: &mut Kernel, p: u64, from: u64, to: u64) -> u64
-  requires kok(k) && p < NPROC && from <= to && to <= WPAGES
+fn lr_sub(k: &mut Kernel, p0: u64, from: u64, to: u64) -> u64
+  requires kok(k) && p0 < NPROC && from <= to && to <= WPAGES
   ensures kok(k) && result <= to - from
 {
+  let p = tgid(k.procs, p0);
   let mut n = 0;
   let mut i = 0;
   while i < LR_N

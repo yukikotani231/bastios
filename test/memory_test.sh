@@ -58,13 +58,13 @@ def run(line):
     read_until(b"\n# ", mark)
     return out[mark:].decode(errors="replace").replace("\r", "")
 
-def hold(group, prefix=""):
+def hold(group, prefix="", mib=None):
     """Starts `mhog hold HOLD` in cgroup group as $big and waits until it has
     written all its pages: on a loaded host a fixed sleep was not always
     enough, and a holder still growing when the next program starts is the
     one the killer picks."""
     mark = len(out)
-    run(f"{prefix}ash -c 'echo $$ > /sys/fs/cgroup/{group}/cgroup.procs; exec /disk/mhog hold {HOLD}' & big=$!")
+    run(f"{prefix}ash -c 'echo $$ > /sys/fs/cgroup/{group}/cgroup.procs; exec /disk/mhog hold {mib or HOLD}' & big=$!")
     read_until(b"mhog: holding", mark)
 
 def check(name, ok, text=""):
@@ -181,13 +181,29 @@ check("swapoff brings the pages back", "swap off" in t and "rc=0" in t and memin
 check("the group's swapped bytes are back in memory", run("cat /sys/fs/cgroup/sw/memory.swap.current").split()[-2] == "0")
 check("the holder is alive and whole", "bigalive" in run("kill -0 $big && echo bigalive"))
 run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sw")
-# More than memory and swap together: the killer still ends the program.
+def group_swap(g):
+    return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
 run("/disk/mhog swapon /disk/swap")
+# A holder that mlocked its pages is never swapped out: with a second, ordinary
+# holder beside it (smaller than the locked one, big enough to give what is
+# needed), the pages that go to the swap file are the ordinary one's.
+LOCKED, MORE = max(F * 2 // 5, 4), F * 11 // 20
+run("mkdir /sys/fs/cgroup/sk /sys/fs/cgroup/sa")
+mark = len(out)
+run(f"ash -c 'echo $$ > /sys/fs/cgroup/sk/cgroup.procs; exec /disk/mhog holdlock {LOCKED}' & lk=$!")
+read_until(b"locked", mark)
+check("the holder's mlock is counted", re.search(rf"VmLck:\s+{LOCKED * 1024} kB", run("cat /proc/$lk/status")) is not None)
+hold("sa", mib=max(F // 4, 2))
+t = run(f"/disk/mhog touch {MORE}; echo rc=$?")
+check("a program runs beside a locked holder", f"touched {MORE} MiB" in t and "rc=0" in t and vm("oom_kill") == kills, t)
+check("the ordinary holder's pages went to the swap file", group_swap("sa") > 100 * 4096, str(group_swap("sa")))
+check("the locked holder keeps every page in memory", group_swap("sk") == 0, str(group_swap("sk")))
+check("the locked holder is alive", "up2" in run("kill -0 $lk && echo up$((1+1))"))
+run("kill -9 $big $lk; sleep 1; rmdir /sys/fs/cgroup/sk /sys/fs/cgroup/sa")
+# More than memory and swap together: the killer still ends the program.
 # memory.swap.max: nothing of a group at 0 goes to the swap file (the program that
 # wants more memory is killed instead, as there is nothing else to swap);
 # a group with a small limit gets no more into the swap file than that.
-def group_swap(g):
-    return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
 run("mkdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm; echo 0 > /sys/fs/cgroup/sl/memory.swap.max; echo 2097152 > /sys/fs/cgroup/sm/memory.swap.max")
 hold("sl")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")

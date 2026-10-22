@@ -1816,8 +1816,8 @@ fn lx_madvise(k: &mut Kernel, pid: u64, addr: u64, n: u64, advice: u64) -> u64
   return 0;
 }
 
-/// mlock and munlock (which change nothing, as every page stays in
-/// memory): ENOMEM when part of the range, rounded out to pages, is not
+/// mlock and munlock (the pages locked are kept by src/lxrlimit.bastio, and
+/// swap_out leaves them alone): ENOMEM when part of the range, rounded out to pages, is not
 /// mapped.
 fn lock_range(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
