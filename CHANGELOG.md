@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` opens its launcher menu at the pointer on a right click on the empty desktop.
 - The `bfiles` editor cuts and pastes a line (Ctrl-K, Ctrl-U), finds text (Ctrl-F) and goes to a line (Ctrl-G), and shows the cursor's line number.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
