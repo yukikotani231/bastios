@@ -79,6 +79,10 @@ static int put(const char *path, const char *s) {
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "child") == 0)
         return 7;                                   /* run by the execve check */
+    if (argc > 1 && strcmp(argv[1], "env") == 0) {  /* run by the environ check */
+        char b[64]; int n = slurp("/proc/self/environ", b, sizeof b);
+        return n == 11 && memcmp(b, "A=1\0BB=two\0", 11) == 0 ? 0 : 1;
+    }
     if (argc > 1 && strcmp(argv[1], "bang") == 0)   /* run by the "#!" checks */
         return argc == 4 && strcmp(argv[2], "./cp_bang") == 0 && strcmp(argv[3], "a") == 0 ? 8 : 9;
     setup();
@@ -96,6 +100,9 @@ int main(int argc, char **argv) {
            waitpid(p, &st, 0) == p && WEXITSTATUS(st) == 2 && v == 1); }));
     EXPECT("execve", (p = fork()) >= 0 && (p == 0 ? (execl(argv[0], argv[0], "child", (char *)0), _exit(99), 0) :
            waitpid(p, &st, 0) == p && WEXITSTATUS(st) == 7));
+    EXPECT("/proc/self/environ holds the environment execve passed", ({ char *envp[] = {"A=1", "BB=two", 0};
+           (p = fork()) >= 0 && (p == 0 ? (execle(argv[0], argv[0], "env", (char *)0, envp), _exit(99), 0) :
+           waitpid(p, &st, 0) == p && WEXITSTATUS(st) == 0); }));
     EXPECT("execve missing is ENOENT", execl("/no/such", "x", (char *)0) == -1 && errno == ENOENT);
     EXPECT("waitpid WNOHANG", (p = fork()) >= 0 && (p == 0 ? (sleep(1), _exit(0), 0) :
            waitpid(p, &st, WNOHANG) == 0 && waitpid(p, &st, 0) == p));

@@ -1936,6 +1936,84 @@ fn mountinfo_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
   return a;
 }
 
+/// The AT_RANDOM entry of the auxiliary vector exec built for process p, whose
+/// strings start at window offset `top`: the address of the 16 random bytes
+/// just above them; 0 if the vector is not found (found as /proc/PID/auxv
+/// finds it).
+fn auxv_random(k: &mut Kernel, p: u64, top: u64) -> u64
+  requires kok(k) && p < NPROC && top >= 320
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 320, &mut k.fs.xfer, 320) != 320 {
+    return 0;
+  }
+  let mut j = 0;
+  let mut found = false;
+  while j < 8 && !found
+    invariant j <= 8 && blen(k.fs.xfer) == XFER
+  {
+    if rd64(k.fs.xfer, 8 * j) == 3 && rd64(k.fs.xfer, 8 * (j + 2)) == 4 && rd64(k.fs.xfer, 8 * (j + 3)) == PH_SIZE && rd64(k.fs.xfer, 8 * (j + 4)) == 5 {
+      found = true;
+    } else {
+      j = j + 1;
+    }
+  }
+  if !found {
+    return 0;
+  }
+  let mut e = j;
+  while e < 38 && rd64(k.fs.xfer, 8 * e) != 0
+    invariant j <= e && e <= 39 && blen(k.fs.xfer) == XFER
+  {
+    if rd64(k.fs.xfer, 8 * e) == 25 {
+      return rd64(k.fs.xfer, 8 * (e + 1));
+    }
+    e = e + 2;
+  }
+  return 0;
+}
+
+/// /proc/PID/environ: the environment strings exec put after the arguments,
+/// each ending in a NUL, as far as the file holds (PROC_OUT - 1 bytes). They
+/// end where the random bytes start, less the padding that aligns the strings;
+/// a process whose arguments were not kept has none.
+fn environ_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
+  requires kok(k) && p < NPROC && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let w = pget(k.procs, p, F_ARGS);
+  let top = w % 1099511627776;
+  let alen = w / 1099511627776;
+  if alen == 0 || top < 320 {
+    return 0;
+  }
+  let r = auxv_random(&mut k, p, top);
+  let start = USER_BASE + top + alen;
+  if r <= start {
+    return 0;
+  }
+  let n = smaller(r - start, PROC_OUT - 1);
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, start, &mut k.fs.xfer, n) != n {
+    return 0;
+  }
+  let mut len = 0;
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n < PROC_OUT && len <= i && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+  {
+    let c = bget(k.fs.xfer, i);
+    bset(&mut o, i, c);
+    if c != 0 {
+      len = i + 1;
+    }
+    i = i + 1;
+  }
+  if len < n {
+    return len + 1;                         // the NUL that ends the last string
+  }
+  return len;
+}
+
 /// Writes /proc file f into o. Returns its length.
 fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   requires kok(k) && pid < NPROC && blen(o) == PROC_OUT
@@ -2225,6 +2303,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       }
       if w == 10 {
         return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
+      }
+      if w == 12 {
+        return environ_text(&mut k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);
       }
       if w == 11 {
         // The sums /proc/PID/smaps_rollup gives, with the pages statm counts

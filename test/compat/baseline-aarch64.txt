@@ -912,6 +912,7 @@ t_perm: without the group, the group's bits do not apply
 t_proc: #! naming a missing interpreter is ENOENT
 t_proc: #! naming no interpreter is ENOEXEC
 t_proc: /proc/PID/stat of an ended process is ESRCH
+t_proc: /proc/self/environ holds the environment execve passed
 t_proc: child's getppid is the parent
 t_proc: environment
 t_proc: execve
