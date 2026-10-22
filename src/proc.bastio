@@ -1147,6 +1147,7 @@ struct Kernel {
   procs: Buf,           // the process table
   q: Queue,             // console input waiting for a READ
   line: Buf,            // the line a Linux program is typing (see tty_cook)
+  lfb: Bytes,           // lx_follow's work buffer while no call has it: PATH_OUT bytes, or empty while one has it (zeroing 8 KiB on every lookup cost more than the lookup)
   lexb: Bytes,          // the name lx_lex_xfer builds, PATH_OUT bytes: kept here so a path costs no allocation
   lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
   ofd: Buf,             // open file descriptions they share
@@ -1284,7 +1285,7 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.cwdx) <= CWDX_LEN && len(k.crootx) <= CWDX_LEN && len(k.dpathx) <= DPATHX_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && blen(k.lexb) == PATH_OUT && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN && (blen(k.xab) == 0 || blen(k.xab) == XAB_LEN)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.cwdx) <= CWDX_LEN && len(k.crootx) <= CWDX_LEN && len(k.dpathx) <= DPATHX_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && blen(k.lexb) == PATH_OUT && (blen(k.lfb) == PATH_OUT || blen(k.lfb) == 0) && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN && (blen(k.xab) == 0 || blen(k.xab) == XAB_LEN)
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }

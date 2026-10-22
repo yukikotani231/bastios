@@ -1976,6 +1976,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.ux);
   bfree(sys.k.uxb);
   bfree(sys.k.lexb);
+  bfree(sys.k.lfb);
   free(sys.k.mns);
   free(sys.k.scf);
   free(sys.k.swp);

@@ -104,7 +104,12 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
     k.perr = ENAMETOOLONG;
     return NO_RESULT;
   }
-  let mut p = balloc(PATH_OUT);
+  let mut p = k.lfb;                        // not allocated: see Kernel.lfb
+  k.lfb = balloc(0);
+  if blen(p) != PATH_OUT {
+    bfree(p);
+    p = balloc(PATH_OUT);
+  }
   let mut q = balloc(1);                    // grown to SPLICE at the first link: most names have none
   bytes_copy_span(&mut p, 0, k.fs.xfer, 0, n);
   let ns = ns_of(k, pid);
@@ -229,7 +234,8 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   }
   bfree(q);
   if bad {
-    bfree(p);
+    bfree(k.lfb);
+    k.lfb = p;
     return NO_RESULT;
   }
   // The logical path is kept (for a working directory, an open
@@ -237,7 +243,8 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   // buffer.
   ns_keep(&mut k, p, pl);
   let tl = ns_tr_final(&mut k, ns, p, pl);
-  bfree(p);
+  bfree(k.lfb);
+  k.lfb = p;
   if tl == NO_RESULT {
     return NO_RESULT;
   }
