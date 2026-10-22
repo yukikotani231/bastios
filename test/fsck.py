@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK5 format, which is BSTDISK4 plus files past 1 GiB (a super map of root maps); BSTDISK4, which is BSTDISK3 plus
+"""Checks a BastiOS disk image (src/diskfs.bastio's BSTDISK6 format, which is BSTDISK5 plus names of up to 255 bytes (past 200 the name goes on into the entry after, kind 5); BSTDISK5, which is BSTDISK4 plus files past 1 GiB (a super map of root maps); BSTDISK4, which is BSTDISK3 plus
 extension blocks for a directory past 512 blocks; BSTDISK3 itself; or the
 older BSTDISK2, which is the same with only the fixed directory blocks).
 
@@ -9,12 +9,14 @@ It reads the image the way a mount would and checks every rule the kernel
 keeps, without changing anything:
 
   - the magic, and every entry's kind (0 free, 1 file, 2 directory,
-    3 orphan, 4 hard link);
+    3 orphan, 4 hard link, 5 the rest of the name before it);
   - the directory's blocks past the fixed four: named in the superblock
     in order with no gap, each a block of the disk used by nothing else,
     and entry 64 (DTOP) never used;
-  - names: 1 to 200 bytes, no "/" or NUL, nothing after the name, and no
-    two names alike in one directory;
+  - names: 1 to 255 bytes, no "/" or NUL, nothing after the name, and no
+    two names alike in one directory; one past 200 bytes is in an even
+    entry whose next one is kind 5 holding the other bytes (from byte 1),
+    on a BSTDISK6 disk;
   - parents: the top (64) or a directory, reached without a cycle;
   - directories: size 0, no root map;
   - files and orphans: a size up to 1 GiB, every block number in a map 0
@@ -45,11 +47,14 @@ DATA_B0 = 5
 PTRS = 512
 MAX_BLOCKS = 1 << 28
 DTOP = 64
-DNAME_MAX = 200
+DNAME_MAX = 255
+DNAME_HEAD = 200
+XNAME = 5
+E_XNAME = 1
 SEG_FLAG = 1 << 40                    # E_ROOT with this bit names a super map of root maps, one per 1 GiB
 SEG_BLOCKS = PTRS * PTRS
 FILE_MAX = PTRS * SEG_BLOCKS * BLOCK
-MAGICS = (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5")
+MAGICS = (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5", b"BSTDISK6")
 E_NAME = 56
 FILE, DIR, ORPHAN, LINK = 1, 2, 3, 4
 
@@ -74,9 +79,9 @@ def entries(img):
     # Where each directory block is: the fixed ones, then the superblock's.
     dblocks = [1 + db for db in range(DIR_FIXED)]
     seen = []
-    if img[0:8] in (b"BSTDISK3", b"BSTDISK4", b"BSTDISK5"):
+    if img[0:8] in (b"BSTDISK3", b"BSTDISK4", b"BSTDISK5", b"BSTDISK6"):
         ptrs = [u64(img, 8 * db) for db in range(DIR_FIXED, DIR_SB)]
-        if img[0:8] in (b"BSTDISK4", b"BSTDISK5"):
+        if img[0:8] in (b"BSTDISK4", b"BSTDISK5", b"BSTDISK6"):
             # The extension chain: word 0 names the next block, the others
             # directory blocks DIR_SB + EXT_PTRS * e + (w - 1).
             eb, seen = u64(img, 8), []
@@ -115,7 +120,9 @@ def _entry(e):
     return {
         "kind": e[0], "nlen": e[1], "parent": u64(e, 8), "size": u64(e, 16),
         "root": u64(e, 24), "mode": u64(e, 32), "link": u64(e, 48),
-        "name": bytes(e[E_NAME:E_NAME + e[1]]), "tail": bytes(e[E_NAME + e[1]:]),
+        "name": bytes(e[E_NAME:E_NAME + min(e[1], DNAME_HEAD)]),
+        "tail": bytes(e[E_NAME + e[1]:]) if e[1] <= DNAME_HEAD else b"",
+        "raw": bytes(e),
     }
 
 
@@ -125,7 +132,7 @@ _EMPTY = _entry(bytes(DENT))
 def check(img):
     notes = []
     if img[0:8] not in MAGICS:
-        return ["no BSTDISK5, BSTDISK4, BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
+        return ["no BSTDISK6, BSTDISK5, BSTDISK4, BSTDISK3 or BSTDISK2 magic (a blank disk is formatted at mount)"], notes, {}
     blocks = min(len(img) // BLOCK, MAX_BLOCKS)
     dblocks, ents, errors, exts = entries(img)
 
@@ -133,11 +140,28 @@ def check(img):
         return f"entry {i} ({ents[i]['name'].decode(errors='replace')!r})"
 
     named = (FILE, DIR, LINK)
+    # A name past DNAME_HEAD bytes goes on into the next (odd) entry.
+    conts = set()
+    for i, e in enumerate(ents):
+        if e["kind"] in named and e["nlen"] > DNAME_HEAD and e["nlen"] <= DNAME_MAX:
+            nx = ents[i + 1] if i % 2 == 0 and i + 1 < DSLOTS else None
+            if nx is None or nx["kind"] != XNAME:
+                errors.append(f"{where(i)}: a name of {e['nlen']} bytes with no continuation entry")
+                continue
+            conts.add(i + 1)
+            n = e["nlen"] - DNAME_HEAD
+            raw = nx["raw"]
+            ents[i] = dict(e, name=e["name"] + raw[E_XNAME:E_XNAME + n], tail=raw[E_XNAME + n:])
+            if img[0:8] != b"BSTDISK6":
+                errors.append(f"{where(i)}: a name past {DNAME_HEAD} bytes on a disk that does not say BSTDISK6")
+    for i, e in enumerate(ents):
+        if e["kind"] == XNAME and i not in conts:
+            notes.append(f"entry {i}: a name continuation with no name before it (the mount takes it for free)")
     if ents[DTOP]["kind"]:
         errors.append(f"entry {DTOP}: in use, but its number means the top directory")
         ents[DTOP]["kind"] = 0
     for i, e in enumerate(ents):
-        if e["kind"] > LINK:
+        if e["kind"] > LINK and e["kind"] != XNAME:
             errors.append(f"entry {i}: unknown kind {e['kind']}")
     # Names and parents.
     for i, e in enumerate(ents):
@@ -225,7 +249,7 @@ def check(img):
         w = e["root"]
         roots = []                      # (first block of the file it maps, root map)
         if w >= SEG_FLAG:
-            if img[0:8] != b"BSTDISK5":
+            if img[0:8] not in (b"BSTDISK5", b"BSTDISK6"):
                 errors.append(f"{where(i)}: a super map on a disk that does not say BSTDISK5")
             sp = w - SEG_FLAG
             if not block_ok(sp, i, "super map"):

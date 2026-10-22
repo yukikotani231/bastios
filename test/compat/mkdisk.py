@@ -13,7 +13,8 @@ blocks 1..4 directory blocks 0..3. The directory holds up to 8192 entries
 of 256 bytes, 16 to a block, entry 64 unused (byte 0 the kind, 1 a file; byte 1 the name length;
 then little-endian u64s: at 8 the parent, 64 for the top directory, at 16
 the size, at 24 the root map block, at 32 the mode, at 40 the modification
-time; the name from byte 56); from block 5, data and maps. A root map is a
+time; the name from byte 56, up to 200 bytes: a name of up to 255 bytes is made BSTDISK6, its
+first 200 bytes in an even entry and the rest from byte 1 of the entry after it, of kind 5); from block 5, data and maps. A root map is a
 block of 512 block numbers of first-level maps, each a block of 512 block
 numbers of data blocks; 0 is a hole.
 """
@@ -27,7 +28,8 @@ DIR_FIXED = 4
 DATA_B0 = 5
 PTRS = 512
 DTOP = 64
-DNAME_MAX = 200
+DNAME_MAX = 255
+DNAME_HEAD = 200                  # a longer name goes on into the next entry (kind 5, from byte 1), and the disk is BSTDISK6
 MODE = 0o755
 DISK_BYTES = 33 << 20             # at least; more when the files need it
 # room left for the guest to write (MKDISK_FREE_MB overrides)
@@ -75,10 +77,13 @@ def main():
             sys.exit(f"mkdisk: more than {DSLOTS} files and directories, the disk holds {DSLOTS}")
         if not name or len(name) > DNAME_MAX:
             sys.exit(f"mkdisk: bad name: {name!r}")
-        if slots == DTOP:
-            slots += 1                 # its number means the top directory
+        long = len(name) > DNAME_HEAD
+        if slots == DTOP or (long and slots % 2):
+            slots += 1                 # DTOP's number means the top directory; a long name takes an even entry and the next
         i = slots
-        slots += 1
+        slots += 2 if long else 1
+        if slots > DSLOTS:
+            sys.exit(f"mkdisk: more than {DSLOTS} files and directories, the disk holds {DSLOTS}")
         db = i // DPB
         if db < DIR_FIXED:
             dblock = 1 + db
@@ -91,7 +96,11 @@ def main():
         img[e] = kind
         img[e + 1] = len(name)
         img[e + 8:e + 48] = struct.pack("<QQQQQ", parent, size, root, MODE, 0)
-        img[e + 56:e + 56 + len(name)] = name
+        img[e + 56:e + 56 + min(len(name), DNAME_HEAD)] = name[:DNAME_HEAD]
+        if long:
+            img[0:8] = b"BSTDISK6"
+            img[e + DENT] = 5
+            img[e + DENT + 1:e + DENT + 1 + len(name) - DNAME_HEAD] = name[DNAME_HEAD:]
         return i
 
     def parent_of(dest):
