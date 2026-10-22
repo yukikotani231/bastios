@@ -43,6 +43,7 @@ const MK_SYS: u64 = 5;
 const MK_MQUEUE: u64 = 6;
 const MK_OLDROOT: u64 = 7;
 const MK_CGROUP: u64 = 8;                 // cgroup2 (src/lxcgroup.bastio)
+const MK_NSF: u64 = 10;                   // a bind of a /proc/PID/ns file onto a file (src/lxns.bastio); 9 is MK_OVERLAY
 
 fn me_get(k: &Kernel, e: u64, f: u64) -> u64
   requires kok(k) && e < MT_N && f < ME_W

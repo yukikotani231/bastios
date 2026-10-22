@@ -83,7 +83,7 @@ fn ns_find(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   while e < hi
     invariant e <= hi && hi <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
   {
-    if me_in(k, e, ns) && me_covers(k, e, p, c) {
+    if me_in(k, e, ns) && me_covers(k, e, p, c) && me_get(k, e, ME_FLAGS) % MT_RO != MK_NSF {
       if best == MT_N {
         best = e;
       } else if me_klen(k, e) > me_klen(k, best) || (me_klen(k, e) == me_klen(k, best) && me_get(k, e, ME_SEQ) > me_get(k, best, ME_SEQ)) {
@@ -1287,6 +1287,96 @@ fn ns_at(k: &Kernel, ns: u64) -> u64
   return best;
 }
 
+/// The link kind of the namespace that mount e (MK_NSF) holds: the first
+/// byte of its source, a digit.
+fn nm_kind(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result < NF_N
+{
+  if me_slen(k, e) == 0 {
+    return 0;
+  }
+  let c = cast[u64](bget(k.mstr, me_key(e) + MS_ROW));
+  if c < 48 || c >= 48 + NF_N {
+    return 0;
+  }
+  return c - 48;
+}
+
+/// The id of the namespace that mount e (MK_NSF) holds: the decimal after
+/// the kind digit.
+fn nm_id(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result < 10000000
+{
+  let sl = smaller(me_slen(k, e), FNAME_MAX);
+  let at = me_key(e) + MS_ROW;
+  if sl < 2 {
+    return 0;
+  }
+  let mut v = 0;
+  let mut i = 1;
+  while i < sl && v < 1000000
+    invariant 1 <= i && i <= sl && sl <= FNAME_MAX && v < 10000000 && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    let c = cast[u64](bget(k.mstr, at + i));
+    if c < 48 || c > 57 {
+      return v;
+    }
+    v = v * 10 + (c - 48);
+    i = i + 1;
+  }
+  return v;
+}
+
+/// Is namespace id of link kind f held by a file that /proc/PID/ns/F was
+/// bound onto (what `ip netns add` and Docker do to keep a network
+/// namespace after its last process)?
+fn ns_pinned(k: &Kernel, f: u64, id: u64) -> bool
+  requires kok(k)
+{
+  let hi = smaller(k.mt_hi, MT_N);
+  let mut e = 0;
+  while e < hi
+    invariant e <= hi && hi <= MT_N && kok(k)
+  {
+    if me_get(k, e, ME_NS) != 0 && me_get(k, e, ME_FLAGS) % MT_RO == MK_NSF && nm_kind(k, e) == f && nm_id(k, e) == id {
+      return true;
+    }
+    e = e + 1;
+  }
+  return false;
+}
+
+/// The mount that the logical path of the last lookup names, if it is a
+/// file bound to a namespace; MT_N if not.
+fn ns_file_at(k: &Kernel, ns: u64) -> u64
+  requires kok(k)
+  ensures result <= MT_N
+{
+  let e = ns_at(k, ns);
+  if e < MT_N && me_get(k, e, ME_FLAGS) % MT_RO == MK_NSF {
+    return e;
+  }
+  return MT_N;
+}
+
+/// open of a file bound to a namespace (mount e, ns_file_at): a descriptor
+/// of that namespace, which setns joins and ioctl_ns asks about.
+fn lx_open_nsfile(k: &mut Kernel, pid: u64, e: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && e < MT_N
+  ensures kok(k)
+{
+  let fd = ns_fd_new(&mut k, pid, nm_kind(k, e), nm_id(k, e));
+  if fd < LXNFD && flags & LO_CLOEXEC == 0 {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N {
+      fd_set_k(&mut k, pid, fd, FD_OFD + h);
+    }
+  }
+  return fd;
+}
+
 /// The user namespace that made mount namespace ns, or 0 (the first, which
 /// only root owns) if it is the first or has no record.
 fn mo_owner(k: &Kernel, ns: u64) -> u64
@@ -1841,40 +1931,58 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
   let mut sl = 0;
   let mut sdir = true;
   let mut ovf = 0;
+  let mut nsfm = false;
   if kind == MK_BIND {
     let n = lx_path_at(&mut k, pid, AT_FDCWD, source);
     if n == NO_RESULT {
       bfree(src);
       return k.perr;
     }
-    if dir_at(&mut k, n) == NO_FILE {
-      if vfs_lookup(&mut k.fs, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+    let pn = proc_node(k, n);
+    if n <= XFER && is_ns_file(pn) {
+      // /proc/PID/ns/F: the file holds that namespace (ns_file_at).
+      let pf = pn;
+      let nf = nsf_kind(pf);
+      let nid = nf_id(k, nsf_proc(pf), nf);
+      if nid >= 10000000 {
         bfree(src);
-        return ENOENT;
+        return EINVAL;
       }
+      bset(&mut src, 0, cast[u8](48 + nf));
+      sl = 1 + dec_big(&mut src, 1, nid);
       sdir = false;
+      nsfm = true;
     }
-    let mut i = 0;
-    while i < n
-      invariant i <= n && n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
-    {
-      bset(&mut src, i, bget(k.fs.xfer, i));
-      i = i + 1;
-    }
-    sl = n;
-    // A bind of an overlay mount's root is another overlay mount over the
-    // same layers (what runc does to a rootfs before pivot_root).
-    let oe = ns_at(k, ns);
-    if oe < MT_N && me_get(k, oe, ME_FLAGS) % MT_RO == MK_OVERLAY {
-      ovf = me_get(k, oe, ME_FLAGS);
-      sl = me_slen(k, oe);
-      let at = me_key(oe) + MS_ROW;
-      let mut oi = 0;
-      while oi < sl
-        invariant oi <= sl && sl <= FNAME_MAX && blen(src) == MS_ROW && at + FNAME_MAX <= MSTR_LEN && kok(k)
+    if !nsfm {
+      if dir_at(&mut k, n) == NO_FILE {
+        if vfs_lookup(&mut k.fs, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+          bfree(src);
+          return ENOENT;
+        }
+        sdir = false;
+      }
+      let mut i = 0;
+      while i < n
+        invariant i <= n && n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
       {
-        bset(&mut src, oi, bget(k.mstr, at + oi));
-        oi = oi + 1;
+        bset(&mut src, i, bget(k.fs.xfer, i));
+        i = i + 1;
+      }
+      sl = n;
+      // A bind of an overlay mount's root is another overlay mount over the
+      // same layers (what runc does to a rootfs before pivot_root).
+      let oe = ns_at(k, ns);
+      if oe < MT_N && me_get(k, oe, ME_FLAGS) % MT_RO == MK_OVERLAY {
+        ovf = me_get(k, oe, ME_FLAGS);
+        sl = me_slen(k, oe);
+        let at = me_key(oe) + MS_ROW;
+        let mut oi = 0;
+        while oi < sl
+          invariant oi <= sl && sl <= FNAME_MAX && blen(src) == MS_ROW && at + FNAME_MAX <= MSTR_LEN && kok(k)
+        {
+          bset(&mut src, oi, bget(k.mstr, at + oi));
+          oi = oi + 1;
+        }
       }
     }
   } else if kind == MK_OVERLAY {
@@ -1946,6 +2054,9 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     sl = n;
   }
   let mut mf = kind;
+  if nsfm {
+    mf = MK_NSF;
+  }
   if kind == MK_SYS {
     mf = mf + MT_RO;                        // nothing in it may be changed
   }
@@ -2332,6 +2443,9 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
         } else if kind == MK_OVERLAY {
           src = "overlay";
           ty = "overlay";
+        } else if kind == MK_NSF {
+          src = "nsfs";
+          ty = "nsfs";
         }
         w = put_s(&mut o, w, src);
         w = put_s(&mut o, w, " /");

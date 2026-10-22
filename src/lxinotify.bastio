@@ -346,14 +346,23 @@ fn ino_add_watch(k: &mut Kernel, pid: u64, fd: u64, va: u64, mask: u64) -> u64
   if n == NO_RESULT {
     return k.perr;
   }
-  let f = node_at(&mut k, n);
+  let mut f = node_at(&mut k, n);
+  // A /proc or control file has no file layer handle and nothing here
+  // reports its changes, but a watch on it is accepted (as on Linux, where
+  // runtimes watch memory.events for OOM kills): it is a watch that no
+  // event reaches, and every add makes a new one.
+  let mut inert = false;
+  if f == NO_FILE && n <= FNAME_MAX && proc_node(k, n) != 0 {
+    f = NO_FILE - 1;
+    inert = true;
+  }
   if f == NO_FILE {
     return ENOENT;
   }
-  if m & IN_ONLYDIR != 0 && !vfs_is_dir(&mut k.fs, f) {
+  if !inert && m & IN_ONLYDIR != 0 && !vfs_is_dir(&mut k.fs, f) {
     return ENOTDIR;
   }
-  if may_path(&mut k, pid, n, MAY_R) != 0 {
+  if !inert && may_path(&mut k, pid, n, MAY_R) != 0 {
     return EACCES;
   }
   let mut free = INO_W;
@@ -363,7 +372,7 @@ fn ino_add_watch(k: &mut Kernel, pid: u64, fd: u64, va: u64, mask: u64) -> u64
   {
     let at = wat_at(i, w);
     let h = iget(k, at);
-    if h == f + 1 && f < NO_FILE {
+    if h == f + 1 && f < NO_FILE && !inert {
       if m & IN_MASK_CREATE != 0 {
         return EEXIST;
       }

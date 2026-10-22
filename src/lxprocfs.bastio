@@ -3404,6 +3404,30 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
         return link_out(&mut k, pid, f, va, size);
       }
     }
+    if d.kind != K_BAD && ofd_lacks(k, fd_ofd(k, fd_home(k, pid), dirfd), ACC_LINK) {
+      // A handle opened O_PATH | O_NOFOLLOW on a /proc/PID/fd link (runc
+      // 1.5 holds one and reads it with readlinkat(h, "")): the link's text
+      // is the path of the file it stands for.
+      let mut lo = balloc(PROC_OUT);
+      let ln = fd_link(&mut k, pid, pid, dirfd, &mut lo);
+      if ln == NO_RESULT {
+        bfree(lo);
+        return ENOENT;
+      }
+      let m = smaller(ln, smaller(size, XFER));
+      let mut i = 0;
+      while i < m
+        invariant i <= m && m <= PROC_OUT && m <= XFER && blen(lo) == PROC_OUT && kok(k)
+      {
+        bset(&mut k.fs.xfer, i, bget(lo, i));
+        i = i + 1;
+      }
+      bfree(lo);
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
+        return EFAULT;
+      }
+      return m;
+    }
   }
   let selfname = path_ends_self(&mut k, pid, path);
   let n = lx_path_at_nf(&mut k, pid, dirfd, path);
@@ -3430,6 +3454,18 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   let mut pfd = NO_RESULT;
   if n <= XFER {
     pfd = proc_fd(k.procs, k.fs.xfer, n);
+  }
+  if pfd == NO_RESULT && n > 1 && n <= XFER && bget(k.fs.xfer, n - 1) == 47 {
+    // fd/N/ with a slash (runc 1.3 asks for the path of a mount point it has
+    // open): the same link, but only for a directory.
+    pfd = proc_fd(k.procs, k.fs.xfer, n - 1);
+    if pfd != NO_RESULT {
+      let t = fd_home(k, pfd / LXNFD);
+      let dd = fd_look(k, t, pfd % LXNFD);
+      if dd.kind != K_DIR && !(dd.kind == K_DEV && dd.x == DEV_PTSDIR) {
+        return ENOTDIR;
+      }
+    }
   }
   if pfd != NO_RESULT {
     if size == 0 || size > 0x7FFFFFFF {
@@ -3697,10 +3733,10 @@ fn proc_write_xfer(k: &mut Kernel, f: u64, n: u64) -> u64
       got = true;
       i = i + 1;
     }
-    while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9)
+    while i < n && (bget(k.fs.xfer, i) == 10 || bget(k.fs.xfer, i) == 32 || bget(k.fs.xfer, i) == 9 || bget(k.fs.xfer, i) == 0)
       invariant i <= n && n <= 32 && kok(k)
     {
-      i = i + 1;
+      i = i + 1;                            // a NUL ends the text, as in Linux's C string (containerd's runc writes one)
     }
     if !got || i < n || a > 1000 {
       return EINVAL;

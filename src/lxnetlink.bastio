@@ -74,7 +74,8 @@ fn netns_exit(k: &mut Kernel, pid: u64)
   ensures kok(k)
 {
   let s = net_ns(k, pid);
-  if s != 0 && !ns_has_procs(k, s, pid) {
+  // 3 is NF_NET (lxnsk.bastio comes later in the import order).
+  if s != 0 && !ns_has_procs(k, s, pid) && !ns_pinned(k, 3, s) {
     nic_ns_end(&mut k.nic, s);
   }
 }
@@ -89,7 +90,7 @@ fn netns_gc(k: &mut Kernel)
   while s < NNET
     invariant 1 <= s && s <= NNET && kok(k)
   {
-    if nic_ns_live(k.nic, s) && !ns_has_procs(k, s, 0) {
+    if nic_ns_live(k.nic, s) && !ns_has_procs(k, s, 0) && !ns_pinned(k, 3, s) {
       nic_ns_end(&mut k.nic, s);
     }
     s = s + 1;
