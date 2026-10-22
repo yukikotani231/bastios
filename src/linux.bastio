@@ -2445,9 +2445,9 @@ fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
   requires kok(k) && pid < NPROC && h <= OFD_N && i < FNAME_MAX
 {
   if h == OFD_N {
-    return cast[u8](wget(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
+    return cast[u8](rbyte(k.cwd, k.cwdx, pid, i));
   }
-  return cast[u8](wget(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
+  return cast[u8](rbyte(k.dpath, k.dpathx, h, i));
 }
 
 /// The length of process pid's root if the name out[0..o] is inside it,
@@ -2465,7 +2465,7 @@ fn root_under(k: &Kernel, pid: u64, out: &Bytes, o: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= o && o <= blen(out) && rl <= FNAME_MAX && kok(k) && pid < NPROC
   {
-    if cast[u64](bget(out, i)) != wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
+    if cast[u64](bget(out, i)) != rbyte(k.croot, k.crootx, pid, i) {
       return 0;
     }
     i = i + 1;
@@ -2612,7 +2612,7 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
     while o < rl
       invariant o <= rl && rl <= FNAME_MAX && blen(k.lexb) == PATH_OUT && kok(k) && pid < NPROC
     {
-      bset(&mut k.lexb, o, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
+      bset(&mut k.lexb, o, cast[u8](rbyte(k.croot, k.crootx, pid, o)));
       o = o + 1;
     }
     floor = rl;

@@ -223,6 +223,8 @@ fn fs_swap(k: &mut Kernel, a: u64, b: u64)
     wset(&mut k.croot, b * CWD_STRIDE + i, y);
     i = i + 1;
   }
+  swap_spill(&mut k.cwdx, a, b);
+  swap_spill(&mut k.crootx, a, b);
   let u = pget(k.procs, a, F_UMASK);
   pset(&mut k.procs, a, F_UMASK, pget(k.procs, b, F_UMASK));
   pset(&mut k.procs, b, F_UMASK, u);
@@ -754,8 +756,8 @@ fn fs_unshare(k: &mut Kernel, p: u64)
   }
   fs_take(&mut k, p);
   fs_leave(&mut k, p);
-  cwd_fork(&mut k.cwd, n, p);
-  cwd_fork(&mut k.croot, n, p);
+  let c1 = cwd_fork(&mut k.cwd, &mut k.cwdx, n, p);
+  let c2 = cwd_fork(&mut k.croot, &mut k.crootx, n, p);
   pset(&mut k.procs, p, F_UMASK, pget(k.procs, n, F_UMASK));
 }
 
@@ -1219,7 +1221,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       bset(&mut k.fs.xfer, i, base_byte(k, t, h, i));
       i = i + 1;
     }
-    dpath_keep(&mut k.dpath, hd, k.fs.xfer, l);
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.fs.xfer, l);
     return fd_install(&mut k, pid, hd);
   }
   if d.kind == K_FILE {
@@ -1433,7 +1435,7 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
     return ENFILE;
   }
   if dev == DEV_PTSDIR {
-    dpath_keep(&mut k.dpath, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
   }
   ofd_access(&mut k, hv, flags);
   return fd_install(&mut k, pid, hv);
@@ -1541,7 +1543,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if hd >= OFD_N {
       return ENFILE;
     }
-    dpath_keep(&mut k.dpath, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;

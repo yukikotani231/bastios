@@ -1612,7 +1612,7 @@ fn ovl_rest(k: &mut Kernel, pid: u64, h: u64, p: &mut Bytes) -> u64
   while i < n
     invariant i <= n && n <= FNAME_MAX && blen(lp) == PATH_OUT && h < OFD_N && kok(k)
   {
-    bset(&mut lp, i, cast[u8](wget(k.dpath, h * CWD_STRIDE + 1 + i) % 256));
+    bset(&mut lp, i, cast[u8](rbyte(k.dpath, k.dpathx, h, i)));
     i = i + 1;
   }
   let e = ns_find(k, ns_of(k, pid), lp, n);
@@ -2093,7 +2093,7 @@ fn ns_umount(k: &mut Kernel, pid: u64) -> bool
   // mount that is the new root, which Linux refuses to take, as "." is
   // still in the old root's detached mount.
   let n = lpath_len(k);
-  if me_get(k, e, ME_FLAGS) % MT_RO != MK_OLDROOT && (pid + 1) * CWD_STRIDE <= len(k.croot) && row_is(k.croot, pid, k.mstr, 0, n) {
+  if me_get(k, e, ME_FLAGS) % MT_RO != MK_OLDROOT && (pid + 1) * CWD_STRIDE <= len(k.croot) && row_is(k.croot, k.crootx, pid, k.mstr, 0, n) {
     return false;
   }
   me_release(&mut k, e);
@@ -2102,7 +2102,7 @@ fn ns_umount(k: &mut Kernel, pid: u64) -> bool
 
 /// Is the logical path the first n bytes of k.mstr row `row` of table t
 /// (cwd or croot) equal to k.mstr[at..at + n]?
-fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
+fn row_is(t: &Buf, tx: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
   requires len(t) <= CWD_LEN && row < NPROC && n <= FNAME_MAX && at + n <= blen(s)
 {
   if wget(t, row * CWD_STRIDE) != n {
@@ -2112,7 +2112,7 @@ fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
   while i < n
     invariant i <= n && n <= FNAME_MAX && at + n <= blen(s) && len(t) <= CWD_LEN && row < NPROC
   {
-    if wget(t, row * CWD_STRIDE + 1 + i) != cast[u64](bget(s, at + i)) {
+    if rbyte(t, tx, row, i) != cast[u64](bget(s, at + i)) {
       return false;
     }
     i = i + 1;
@@ -2132,7 +2132,7 @@ fn dname_is(k: &Kernel, h: u64, s: &Bytes, n: u64) -> bool
   while i < n
     invariant i <= n && n <= FNAME_MAX && n <= blen(s) && h < OFD_N
   {
-    if wget(k.dpath, h * CWD_STRIDE + 1 + i) != cast[u64](bget(s, i)) {
+    if rbyte(k.dpath, k.dpathx, h, i) != cast[u64](bget(s, i)) {
       return false;
     }
     i = i + 1;
@@ -2161,7 +2161,7 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= FNAME_MAX && blen(orl) == PBUF && kok(k) && pid < NPROC
   {
-    bset(&mut orl, i, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256));
+    bset(&mut orl, i, cast[u8](rbyte(k.croot, k.crootx, pid, i)));
     i = i + 1;
   }
   let ol = ns_tr(&mut k, ns, orl, rl);
@@ -2198,7 +2198,7 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
     bset(&mut nr, i, bget(k.mstr, i));
     i = i + 1;
   }
-  let mut bad = ns == 0 || ns_at(k, ns) >= MT_N || (nl == rl && row_is(k.croot, pid, nr, 0, nl));
+  let mut bad = ns == 0 || ns_at(k, ns) >= MT_N || (nl == rl && row_is(k.croot, k.crootx, pid, nr, 0, nl));
   // put_old: new_root or under it, a directory.
   let m = lx_path_at(&mut k, pid, AT_FDCWD, put_old);
   if m == NO_RESULT {
@@ -2247,12 +2247,12 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   {
     if pget(k.procs, q, F_STATE) != FREE && ns_of(k, q) == ns {
       let rtl = len(k.croot);
-      if (q + 1) * CWD_STRIDE <= rtl && row_is(k.croot, q, orl, 0, rl) {   // a live process has its row
-        name_keep(&mut k.croot, rtl, q, nr, nl);
+      if (q + 1) * CWD_STRIDE <= rtl && row_is(k.croot, k.crootx, q, orl, 0, rl) {   // a live process has its row
+        let kept = name_keep(&mut k.croot, &mut k.crootx, rtl, q, NPROC, nr, nl);
       }
       let ctl = len(k.cwd);
-      if (q + 1) * CWD_STRIDE <= ctl && row_is(k.cwd, q, orl, 0, rl) {
-        name_keep(&mut k.cwd, ctl, q, nr, nl);
+      if (q + 1) * CWD_STRIDE <= ctl && row_is(k.cwd, k.cwdx, q, orl, 0, rl) {
+        let kept = name_keep(&mut k.cwd, &mut k.cwdx, ctl, q, NPROC, nr, nl);
       }
     }
     q = q + 1;
@@ -2265,7 +2265,7 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   {
     let h = dir_ofd(k, pid, fd);
     if h < OFD_N && dname_is(k, h, orl, rl) {
-      dpath_keep(&mut k.dpath, h, nr, nl);
+      dpath_keep(&mut k.dpath, &mut k.dpathx, h, nr, nl);
     }
     fd = fd + 1;
   }
@@ -2305,7 +2305,7 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
         while i < rl
           invariant i <= rl && rl <= kl && kl <= MNT_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k) && p < NPROC
         {
-          if cast[u64](bget(k.mstr, at + i)) != wget(k.croot, p * CWD_STRIDE + 1 + i) % 256 {
+          if cast[u64](bget(k.mstr, at + i)) != rbyte(k.croot, k.crootx, p, i) {
             inr = false;
           }
           i = i + 1;

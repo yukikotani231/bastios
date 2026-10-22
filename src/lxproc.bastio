@@ -167,6 +167,11 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   requires kok(k) && pid < NPROC && 1 <= c && c < NPROC && pt_level(t) == 4 && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  if !cwd_reserve(&mut k, pid, c) {
+    free_space(&mut k.mem, mmu, t);
+    give_page(&mut k.mem, fpu);
+    return ENOMEM;
+  }
   // A FREE process has no address space; check it rather than assume it.
   match take_space(&mut k.spaces, c) {
     Space::Empty => {},
@@ -214,8 +219,8 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   lazy_fork(&mut k, pid, c);
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
-  cwd_fork(&mut k.cwd, pid, c);
-  cwd_fork(&mut k.croot, pid, c);
+  let c1 = cwd_fork(&mut k.cwd, &mut k.cwdx, pid, c);      // cwd_reserve made room
+  let c2 = cwd_fork(&mut k.croot, &mut k.crootx, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
   nsk_fork(&mut k.mns, pid, c);             // and the same others (src/lxnsk.bastio)
   if (nsk_of(k, NSK_TIME, c) != 0) != (nsk_of(k, NSK_TIME, pid) != 0) {
