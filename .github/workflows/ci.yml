@@ -176,7 +176,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -239,6 +239,18 @@ jobs:
           bench/ab.py --a ../base/build/bastios.elf --b build/bastios.elf --rounds 5 --runs 3 --out build/bench/ab.json | tee build/bench/ab.md
           { echo '### bench/ab.py under KVM: this pull request (B) against its base (A)'; echo; cat build/bench/ab.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: steps.want.outputs.run == 'true'
+        name: Build the same source with the native backend
+        run: |
+          git worktree add ../native "$GITHUB_SHA"
+          mkdir -p ../native/build
+          cp -r build/proof-cache ../native/build/ 2>/dev/null || true
+          make -C ../native build/bastios.elf NATIVE=1 BASTIOC0="$PWD/bastiolang/stage0/target/release/bastioc0" BASTIOLIB="$PWD/bastiolang"
+      - if: steps.want.outputs.run == 'true'
+        name: Compare the kernel built through C with the native-built one
+        run: |
+          bench/ab.py --a build/bastios.elf --b ../native/build/bastios.elf --rounds 5 --runs 3 --out build/bench/ab-native.json | tee build/bench/ab-native.md
+          { echo '### bench/ab.py under KVM: built with NATIVE=1 (B) against built through C (A)'; echo; cat build/bench/ab-native.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.want.outputs.run == 'true'
         name: Compare PCIDs on and off, the same kernel
         run: |
           bench/ab.py --a build/bastios.elf --b build/bastios.elf --append nopcid --append-b "" --rounds 5 --runs 3 \
@@ -258,6 +270,8 @@ jobs:
             build/bench/ab-pcid.md
             build/bench/ab.json
             build/bench/ab.md
+            build/bench/ab-native.json
+            build/bench/ab-native.md
           if-no-files-found: ignore
   # Whole programs (bench/workloads.py: apk, gcc, make, tar, find, grep) on
   # BastiOS and on Linux, both under KVM. bench-kvm times single operations;
