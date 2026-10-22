@@ -1810,7 +1810,10 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
     }
     if i != DTOP && dent_free(d, i) && (!long || (i % 2 == 0 && i + 1 < d.slots && dent_free(d, i + 1))) {
       if lazy && (!dep_ok(d, p, i) || (dir && d.pddn >= PDD_MAX)) {
-        disk_drain(&mut d);             // everything is on the disk before the entry is made
+        // The batch is committed before the entry is made: the queue runs
+        // it, flush and all, ahead of the commit this entry will be in, so
+        // the directories it holds are on the disk first. Nothing waits.
+        settle_batch(&mut d);
       }
       dent_zero(&mut d, i, 0, DENT);
       if long {
@@ -1928,7 +1931,7 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
     steps = steps + 1;
   }
   if lazy && p < DSLOTS && p != dent_parent(d, i) && dir_pending(d, p) {
-    disk_drain(&mut d);               // the directory is on the disk before the entry names it
+    settle_batch(&mut d);             // the directory is queued ahead of the commit that will name it
   }
   let both = had || long;
   let mut save = balloc(2 * DENT);
@@ -2476,7 +2479,7 @@ fn ent_lazy(d: &mut DiskFs, i: u64) -> bool
   if note_dir(&mut d, db) {
     return true;
   }
-  disk_drain(&mut d);
+  settle_batch(&mut d);
   return note_dir(&mut d, db);
 }
 

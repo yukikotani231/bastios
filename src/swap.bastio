@@ -28,11 +28,14 @@
 // pages not run yet do (src/lazy.bastio). A process that forks first gets
 // every page of its parent back (swap_reach), so fork shares no slot.
 //
+// Pages mlock or mlockall locked (src/lxrlimit.bastio) are not taken.
+//
 // What is trusted: nothing new. The frames come and go through the page
 // tables with the same capabilities every munmap uses; the disk is read and
 // written through the file system's own functions.
 
 import "oom.bastio";
+import "lxrlimit.bastio";
 
 const SW_MAX: u64 = 65536;               // slots a swap area may have (256 MiB)
 const SW_NONE: u64 = 18446744073709551615;
@@ -638,7 +641,7 @@ fn swap_out_space(k: &mut Kernel, g: u64, r: u64, from: u64, want: u64, stop: &m
               } else {
                 seen = seen + 1;
                 p = q + 1;
-                if evictable(&mut l3, q) {
+                if evictable(&mut l3, q) && lr_covered_in(k.sys, k.procs, g, q, q + 1) == 0 {
                   let slot = sw_put(&mut k.swp, g, q);
                   if slot != SW_NONE {
                     let mut ok = w_read(&mut l3, q * 4096, &mut k.fs.xfer, 0, 4096);
@@ -672,7 +675,7 @@ fn swap_out_space(k: &mut Kernel, g: u64, r: u64, from: u64, want: u64, stop: &m
 }
 
 /// Memory is short: swaps out up to `want` pages of the process that holds
-/// the most memory in RAM. Returns how many it freed.
+/// the most memory in RAM it may take (not counting what mlock locked). Returns how many it freed.
 fn swap_out(k: &mut Kernel, want: u64) -> u64
   requires kok(k)
   ensures kok(k)
@@ -692,10 +695,14 @@ fn swap_out(k: &mut Kernel, want: u64) -> u64
       if r != 0 {
         let c = cg_resident(&mut k, r);
         let sw = swap_count(k, q);
-        if c > sw && c - sw > best && cg_swap_room(k, q) > 0 {   // memory.swap.max
-          best = c - sw;
-          v = q;
-          vr = r;
+        let lk = lr_covered(k, q, 0, WPAGES);                    // mlock'd pages stay
+        if c > sw {
+          let rest = c - sw;
+          if rest > lk && rest - lk > best && cg_swap_room(k, q) > 0 {   // memory.swap.max
+            best = rest - lk;
+            v = q;
+            vr = r;
+          }
         }
       }
     }
