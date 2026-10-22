@@ -1627,7 +1627,7 @@ fn vfs_dir_lookup(v: &mut Vfs, n: u64) -> u64
 struct DirLook { d: u64, f: u64, looked: bool }
 
 fn vfs_dir_look(v: &mut Vfs, n: u64) -> DirLook
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
   ensures result.d <= VDIR_LO || result.d == NO_FILE
   ensures result.f < HFILES || result.f == NO_FILE
