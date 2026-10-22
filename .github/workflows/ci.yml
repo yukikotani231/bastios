@@ -521,6 +521,9 @@ jobs:
           - part: toolchains
             lanes: debian,node,python,java,rust,podman,gitsuite
             disks: alpine.img debian.img node.img python.img jdk.img rust.img podman.img gitsuite.tar
+          - part: containers
+            lanes: docker
+            disks: alpine.img docker.img
     env:
       # Raise it to drop every cache entry below (a bad entry is never
       # replaced: a key that hits is not saved again).

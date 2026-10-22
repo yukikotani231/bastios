@@ -22,6 +22,7 @@ RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
 PYTHON_IMAGE := library/python@sha256:f6a589d43c42b9e7f7dc67a12d37132491f362859a5d750607710cc56da3bc72
 PODMAN_IMAGE ?= mgoltzsche/podman@sha256:86e6ecde27e86140a20fa16dcc03cc1e67150536bd8335f6effbba067e352b48
+DOCKER_IMAGE ?= library/docker@sha256:9e79b879b177fbd72c34376a3dd3d91747da5db49e1f560f76aea59561471977
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
 # gopls, the Go language server, built from this release (Makefile: build/compat/gopls).
 GOPLS_VER := v0.20.0
