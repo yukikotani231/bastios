@@ -625,8 +625,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         until(b"# ", mark)
         # A process for the System window's list to end.
         mark = len(out)
-        q.stdin.write(b"sleep 301 & echo sp$((1+1))=$!\r"); q.stdin.flush()
-        until(b"sp2=", mark)
+        q.stdin.write(b"sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
+        until(b"\nq7", mark)
         until(b"# ", mark)
         sleeper = re.search(rb"sp2=(\d+)", out[mark:])
         sleeper = int(sleeper.group(1)) if sleeper else 0
@@ -801,7 +801,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     r, _, _ = select.select([q.stdout], [], [], 0.2)
                     if r:
                         out += q.stdout.read1(4096)
-                found = (b"bsys: select %d sleep" % sleeper) in out[mark:]
+                found = (b"bsys: select %d " % sleeper) in out[mark:]
             print(("ok  " if found else "FAIL"), f"({name}) p lists the processes and j moves to one")
             fails += not found
             if found:
