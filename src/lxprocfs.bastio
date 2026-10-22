@@ -108,6 +108,7 @@ const SY_NETV6RT: u64 = 81;            // /proc/net/ipv6_route
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
 const SY_VMSTAT: u64 = 99;             // /proc/vmstat (src/oom.bastio's counters)
 const SY_SWAPS: u64 = 100;             // /proc/swaps
+const SY_PARTS: u64 = 101;             // /proc/partitions
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 10;
@@ -513,6 +514,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     }
     if xfer_is(x, 5, n, "swaps") {
       return PROC_DEV + PSYS + SY_SWAPS;
+    }
+    if xfer_is(x, 5, n, "partitions") {
+      return PROC_DEV + PSYS + SY_PARTS;
     }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
@@ -1139,7 +1143,10 @@ fn proc_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   if i == 15 {
     return Ent { len: name_out(&mut k.fs.xfer, "swaps"), dir: false, end: false };
   }
-  let p = i - 15;
+  if i == 16 {
+    return Ent { len: name_out(&mut k.fs.xfer, "partitions"), dir: false, end: false };
+  }
+  let p = i - 16;
   if p >= NPROC {
     return end;
   }
@@ -2049,6 +2056,17 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_s(&mut o, a, "\npswpout ");
       a = put_n(&mut o, a, swap_pout(k));
       return put_s(&mut o, a, "\n");
+    }
+    if what == SY_PARTS {
+      // The one disk (major 8, minor 0, "bastio0") with its size in 1 KiB
+      // blocks, as /proc/diskstats names it; none when no disk was found.
+      let mut a = put_s(&mut o, 0, "major minor  #blocks  name\n\n");
+      if k.fs.disk.blocks > 0 {
+        a = put_s(&mut o, a, "   8        0 ");
+        a = put_n(&mut o, a, k.fs.disk.blocks % 0x20000000000000 * 4);
+        a = put_s(&mut o, a, " bastio0\n");
+      }
+      return a;
     }
     if what == SY_SWAPS {
       let mut a = put_s(&mut o, 0, "Filename\t\t\t\tType\t\tSize\t\tUsed\t\tPriority\n");

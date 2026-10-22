@@ -686,6 +686,7 @@ t_misc: /proc/net/route lists the default route
 t_misc: /proc/net/tcp lists a listening socket
 t_misc: /proc/net/udp lists a bound socket
 t_misc: /proc/net/unix lists a bound socket
+t_misc: /proc/partitions lists the disk that /proc/diskstats counts, with its size in 1 KiB blocks
 t_misc: /proc/self/exe
 t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/self/mountinfo lists the root and /proc

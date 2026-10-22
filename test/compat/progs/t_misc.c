@@ -162,6 +162,10 @@ int main(void) {
     EXPECT("/proc/diskstats has the disk's line with its counts", ({ char t[256]; int f = open("/proc/diskstats", O_RDONLY);
         int n = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); t[n > 0 ? n : 0] = 0;
         n > 0 && strstr(t, " bastio0 ") && t[n - 1] == '\n'; }));
+    EXPECT("/proc/partitions lists the disk that /proc/diskstats counts, with its size in 1 KiB blocks", ({ char t[256]; int f = open("/proc/partitions", O_RDONLY);
+        int n = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); t[n > 0 ? n : 0] = 0;
+        unsigned long blk = 0; char *q = strstr(t, "\n   8        0 "); if (q) sscanf(q + 16, "%lu", &blk);
+        n > 0 && strncmp(t, "major minor  #blocks  name\n", 27) == 0 && blk > 0 && strstr(t, " bastio0\n"); }));
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
     EXPECT("sched_getaffinity", ({ cpu_set_t c; sched_getaffinity(0, sizeof c, &c) == 0; }));
