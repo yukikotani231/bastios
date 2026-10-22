@@ -623,6 +623,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         until(b"# ", mark)
         q.stdin.write(b"kill $!\r"); q.stdin.flush()
         until(b"# ", mark)
+        # A process for the System window's list to end.
+        mark = len(out)
+        q.stdin.write(b"sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
+        until(b"\nq7", mark)
+        until(b"# ", mark)
+        sleeper = re.search(rb"sp2=(\d+)", out[mark:])
+        sleeper = int(sleeper.group(1)) if sleeper else 0
         # Ctrl-T starts a terminal window without a client on the command line.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
@@ -780,6 +787,34 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bsys: live", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the System window refreshes itself")
             fails += not good
+            # p swaps the figures for the list of processes; j walks down it to the sleeping
+            # one and x ends it.
+            monitor("sendkey p")
+            good = until(b"bsys: processes", mark)
+            found = False
+            for _ in range(24):
+                if not good or found:
+                    break
+                monitor("sendkey j")
+                end = time.time() + 0.6
+                while time.time() < end:
+                    r, _, _ = select.select([q.stdout], [], [], 0.2)
+                    if r:
+                        out += q.stdout.read1(4096)
+                found = (b"bsys: select %d " % sleeper) in out[mark:]
+            print(("ok  " if found else "FAIL"), f"({name}) p lists the processes and j moves to one")
+            fails += not found
+            if found:
+                monitor("sendkey x")
+                good = until(b"bsys: terminated %d" % sleeper, mark)
+            else:
+                good = False
+            print(("ok  " if good else "FAIL"), f"({name}) x ends the selected process")
+            fails += not good
+            monitor("sendkey p")
+            good = until(b"bsys: system", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) p goes back to the figures")
+            fails += not good
             monitor("mouse_move 34 72")
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.5)
@@ -792,6 +827,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
         time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"kill -0 %d 2>/dev/null || echo gone$((1+1))\r" % sleeper); q.stdin.flush()
+        good = until(b"gone2", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the process the System window ended is gone")
+        fails += not good
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
