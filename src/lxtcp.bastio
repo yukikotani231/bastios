@@ -340,8 +340,8 @@ fn lx_tcp_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, more: bool) 
 /// (full, or the connection cannot send) or that cannot be read; the last
 /// piece is sent as the caller said (`more`). Returns the bytes gone in all.
 fn tcp_send_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfer: &mut Bytes, pid: u64, t: u64, va: u64, n: u64, done: u64, more: bool) -> u64
-  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && done <= n && done <= XFER
-  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XFER
+  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XBUF && done <= n && done <= XFER
+  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XBUF
   ensures result <= TCP_RING
 {
   let mut total = done;
@@ -352,7 +352,7 @@ fn tcp_send_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfe
     Nic::Up(mut nn) => {
       let mut go = true;
       while go && va < 0x800000000000 && total < n && total <= TCP_RING - XFER
-        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && total <= TCP_RING && net_ok(nn)
+        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XBUF && total <= TCP_RING && net_ok(nn)
       {
         let want = smaller(n - total, XFER);
         let g = copy_from_user(&mut spaces, &mut m, an, pid, va + total, &mut xfer, want);
@@ -430,8 +430,8 @@ fn tcp_send_piece(k: &mut Kernel, pid: u64, fd: u64, n: u64, more: bool, mid: bo
 /// nothing more has arrived, at the end, on a reset, or when a piece cannot be
 /// written. Returns the bytes gone in all.
 fn tcp_recv_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfer: &mut Bytes, pid: u64, t: u64, va: u64, n: u64, done: u64, first: bool) -> u64
-  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && done <= TCP_RING
-  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XFER
+  requires nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XBUF && done <= TCP_RING
+  ensures nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && blen(xfer) == XBUF
   ensures result <= TCP_RING
 {
   let mut total = done;
@@ -442,7 +442,7 @@ fn tcp_recv_run(c: &mut Nic, spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, xfe
     Nic::Up(mut nn) => {
       let mut more = first;
       while more && va < 0x800000000000 && total < n && total <= TCP_RING - XFER
-        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XFER && total <= TCP_RING && net_ok(nn)
+        invariant nic_ok(c) && spaces_ok(spaces) && mem_ok(m) && pid < NPROC && blen(xfer) == XBUF && total <= TCP_RING && net_ok(nn)
       {
         let r = tcp_read(&mut nn, t, &mut xfer, smaller(n - total, XFER), false);
         if r == 0 || r > XFER {

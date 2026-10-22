@@ -167,6 +167,11 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   requires kok(k) && pid < NPROC && 1 <= c && c < NPROC && pt_level(t) == 4 && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  if !cwd_reserve(&mut k, pid, c) {
+    free_space(&mut k.mem, mmu, t);
+    give_page(&mut k.mem, fpu);
+    return ENOMEM;
+  }
   // A FREE process has no address space; check it rather than assume it.
   match take_space(&mut k.spaces, c) {
     Space::Empty => {},
@@ -214,8 +219,8 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   lazy_fork(&mut k, pid, c);
   shm_fork(&mut k, pid, c);
   sig_fork(&mut k.sigact, pid, c);
-  cwd_fork(&mut k.cwd, pid, c);
-  cwd_fork(&mut k.croot, pid, c);
+  let c1 = cwd_fork(&mut k.cwd, &mut k.cwdx, pid, c);      // cwd_reserve made room
+  let c2 = cwd_fork(&mut k.croot, &mut k.crootx, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the same mount namespace (src/lxns.bastio)
   nsk_fork(&mut k.mns, pid, c);             // and the same others (src/lxnsk.bastio)
   if (nsk_of(k, NSK_TIME, c) != 0) != (nsk_of(k, NSK_TIME, pid) != 0) {
@@ -574,7 +579,7 @@ fn exe_src(k: &mut Kernel, p: u64) -> Src
 
 /// Whether the transfer buffer starts with "bin/".
 fn xfer_bin(x: &Bytes) -> bool
-  requires blen(x) == XFER
+  requires blen(x) == XBUF
 {
   return bget(x, 0) == 98 && bget(x, 1) == 105 && bget(x, 2) == 110 && bget(x, 3) == 47;
 }
@@ -1405,7 +1410,7 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
 
 /// Whether the first n bytes of x are "bin".
 fn is_bin(x: &Bytes, n: u64) -> bool
-  requires blen(x) == XFER
+  requires blen(x) == XBUF
 {
   return n == 3 && bget(x, 0) == 98 && bget(x, 1) == 105 && bget(x, 2) == 110;
 }
@@ -1415,7 +1420,7 @@ fn is_bin(x: &Bytes, n: u64) -> bool
 /// argv[0]), and so is /bin/sh: a Linux program running sh (system,
 /// popen) wants a POSIX shell, not the BastiOS one.
 fn bin_prog(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && 4 <= n && n <= FNAME_MAX
+  requires blen(x) == XBUF && 4 <= n && n <= FNAME_MAX
 {
   if xfer_is(x, 4, n, "sh") {
     return ASH_PROG;
@@ -1577,7 +1582,7 @@ fn suid_name(j: u64) -> Str {
 /// the applet its argv[0] names needs it, so a /bin/su run under another
 /// argv[0] gets nothing.
 fn bin_suid(x: &Bytes, n: u64) -> bool
-  requires blen(x) == XFER && 4 <= n && n <= FNAME_MAX
+  requires blen(x) == XBUF && 4 <= n && n <= FNAME_MAX
 {
   let mut j = 0;
   while j < NSUID_APPLETS
