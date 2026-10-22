@@ -48,7 +48,7 @@ rc=0
 localhost/rctr
 
 == podman: rootless, run a container in a user namespace
-$ bb chroot /disk/p /bin/su podman -s /bin/sh -c '/usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r run --rm --network=none rctr sh -c "echo hello; cat /proc/self/uid_map" 2>/dev/null' | bb grep -v '^\[pid'
+$ bb chroot /disk/p /bin/su podman -s /bin/sh -c '/usr/local/bin/podman --storage-driver=vfs --root /home/podman/s --runroot /run/user/1000/r run --rm --network=none rctr sh -c "echo hello; cat /proc/self/uid_map" 2>&1' | bb grep -E '^hello|^ +[0-9]+ +[0-9]+ +[0-9]+$|rror|denied|annot'
 hello
          0       1000          1
          1          1        999
