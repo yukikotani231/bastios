@@ -479,6 +479,9 @@ steps = [
     # Small calls: uname, readv, pread/pwrite, limits, sysinfo, statfs,
     # getrandom, priorities, sessions, process groups, ttyname, pipe capacity (user/mmisc.c).
     ("mmisc", b"mmisc: ok on Linux x86_64, signals, pipe 65536", b"\n# "),
+    # A processor keeps a process's translations across system calls, and
+    # still drops the ones an unmap, mprotect or fork made wrong (user/mtlb.c).
+    ("mtlb", b"mtlb: ok, 400 rounds each", b"\n# "),
     # posix_spawn: clone(CLONE_VM | CLONE_VFORK) lends the parent's
     # address space to the child until it execs or exits (user/mspawn.c).
     ("mspawn", [b"spawned 5", b"mspawn: ok, kept 1234, sh is POSIX"], b"\n# "),
