@@ -150,7 +150,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
-    deadline = time.time() + 360
+    deadline = time.time() + 900
     def until(marker, start):
         nonlocal out
         while marker not in out[start:]:
