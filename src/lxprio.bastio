@@ -345,6 +345,26 @@ fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u
   return 0;
 }
 
+/// The processor getcpu names for thread p: the first one its mask allows
+/// (programs that pin themselves to a processor check that they run there),
+/// 0 when no mask was set.
+fn aff_cpu(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < 64
+{
+  let m = get(k.sys, SYS_AFF + p) & cpu_mask(k);
+  let mut i = 0;
+  while i < 63 && (m >> i) % 2 == 0
+    invariant i <= 63
+  {
+    i = i + 1;
+  }
+  if m == 0 {
+    return 0;
+  }
+  return i;
+}
+
 /// sched_getaffinity: the processors the process was last confined to (sched_setaffinity), else every one that runs; the size must be a whole
 /// number of 8-byte words, and the words past the first are zero.
 fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64

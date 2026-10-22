@@ -175,6 +175,7 @@ int main(void) {
         n == m && m >= 1 && sysconf(_SC_NPROCESSORS_ONLN) == m; }));
     EXPECT("sched_setaffinity to a processor that is not there is EINVAL", ({ cpu_set_t c; CPU_ZERO(&c); CPU_SET(100, &c); sched_setaffinity(0, sizeof c, &c) == -1 && errno == EINVAL; }));
     EXPECT("sched_getaffinity returns the mask sched_setaffinity set", ({ cpu_set_t all, one, got; sched_getaffinity(0, sizeof all, &all); CPU_ZERO(&one); CPU_SET(0, &one); int ok = sched_setaffinity(0, sizeof one, &one) == 0 && sched_getaffinity(0, sizeof got, &got) == 0 && CPU_COUNT(&got) == 1 && CPU_ISSET(0, &got); ok = ok && sched_setaffinity(0, sizeof all, &all) == 0 && sched_getaffinity(0, sizeof got, &got) == 0 && CPU_COUNT(&got) == CPU_COUNT(&all); ok; }));
+    EXPECT("getcpu names a processor the affinity mask allows", ({ cpu_set_t all, one; sched_getaffinity(0, sizeof all, &all); int c = -1; for (int i = 0; i < CPU_SETSIZE; i++) if (CPU_ISSET(i, &all)) c = i; CPU_ZERO(&one); CPU_SET(c, &one); int ok = c >= 0 && sched_setaffinity(0, sizeof one, &one) == 0 && sched_getcpu() == c; sched_setaffinity(0, sizeof all, &all); ok; }));
     EXPECT("SSE floating point", ({ volatile double x = 2.0; x * x / 3.0 > 1.33; }));
     EXPECT("printf %f", (snprintf(b, sizeof b, "%.3f", 3.14159), strcmp(b, "3.142") == 0));
     EXPECT("strtod", strtod("2.5e3", 0) == 2500.0);
