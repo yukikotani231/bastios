@@ -100,3 +100,8 @@ ok  	github.com/junegunn/fzf/src
 ok  	github.com/junegunn/fzf/src/algo
 ok  	github.com/junegunn/fzf/src/tui
 ok  	github.com/junegunn/fzf/src/util
+
+== go: a WebSocket library (gorilla/websocket), tested with go test over the loopback
+# timeout 1800
+$ bb wget -q -O - HOSTURL/oss/websocket.tar.gz | bb tar -xz -C /disk/g/work; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on; bb chroot /disk/g /usr/local/go/bin/go -C /work/websocket test -mod=vendor -vet=off . 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//' | bb grep -v 'no test files'
+ok  	github.com/gorilla/websocket

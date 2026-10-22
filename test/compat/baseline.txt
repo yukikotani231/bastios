@@ -1538,6 +1538,7 @@ go: go: a real project (BurntSushi/toml), built with go build
 go: go: a real project (BurntSushi/toml), tested with go test
 go: go: a Go module with vendored dependencies (stretchr/testify), tested with go test -mod=vendor
 go: go: a real command-line program (junegunn/fzf) with vendored dependencies, tested with go test -mod=vendor
+go: go: a WebSocket library (gorilla/websocket), tested with go test over the loopback
 go: go: gofmt rewrites a program
 go: go: gopls finds the definition of a function
 go: go: gopls formats a file
