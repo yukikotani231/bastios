@@ -24,10 +24,10 @@ int main(void) {
     EXPECT("mkdir", mkdir("cd_x", 0755) == 0);
     EXPECT("stat new directory", stat("cd_x", &st) == 0 && S_ISDIR(st.st_mode));
     {
-        /* A name over 200 bytes (up to NAME_MAX, 255, as far as the path limit allows) is kept whole where the disk holds it (it keeps 200 in one entry and the rest in the next), and one byte more is refused. */
+        /* A name over 200 bytes (up to NAME_MAX, 255) is kept whole where the disk holds it (it keeps 200 in one entry and the rest in the next), and one byte more is refused. */
         char nm[300], path[400], nm2[300], p2[400];
         const char *dir = access("/disk", W_OK) == 0 ? "/disk" : ".";
-        size_t nl = strcmp(dir, "/disk") == 0 ? 249 : 255;   /* BastiOS keeps a whole path to 255 bytes: "/disk/" and 249 */
+        size_t nl = 255;
         memset(nm, 'n', nl); nm[nl] = 0;
         memset(nm2, 'm', 201); nm2[201] = 0;
         snprintf(path, sizeof path, "%s/%s", dir, nm);
