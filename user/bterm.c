@@ -643,6 +643,8 @@ int main(int argc, char **argv)
         close(fd);
         setenv("TERM", "vt100", 1);
         setenv("HOME", "/", 1);
+        if (argc > 2 && strcmp(argv[1], "-e") == 0)           /* bterm -e COMMAND: run it in ash instead of a prompt */
+            execl("/bin/ash", "ash", "-c", argv[2], (char *)NULL);
         execl("/bin/ash", "ash", (char *)NULL);
         _exit(127);
     }
