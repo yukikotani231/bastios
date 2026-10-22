@@ -292,7 +292,11 @@ It counts instructions, not cycles: a TLB flush or a cache miss costs nothing
 in it, so compare two kernels with it, and do not read it against Linux's
 times. `bench/insnprof.py -- COMMAND` says where the instructions go: it
 single-steps the guest from gdb and charges each to a kernel function, per
-call. On 2026-10-13 a `getppid` call took 2640 instructions (after the
+call. A test that ends before gdb attaches (`fault`, `create`, a few
+milliseconds of guest time) is run with `osbench -r`, which repeats its tests
+until killed: `bench/insnprof.py -- /disk/osbench -d /tmp -r create=100`
+(`fault=4` for page faults; a page fault is about 1400 steps, over a third of
+them the page's zeroing). On 2026-10-13 a `getppid` call took 2640 instructions (after the
 `sock_wake` fix; the FPU page's copy in and out by loops in the compiler's
 runtime is about 600 of them, the 21 registers' save and 18 restores about
 500, `sched`, `finish` and `next_job` the rest), and a `stat` of a tmpfs file
