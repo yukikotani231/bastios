@@ -2865,7 +2865,7 @@ fn vfs_lo_mount(v: &mut Vfs, mem: &mut Mem, f: u64, at: u64, dev: u64, ro: bool)
     return LO_NOFS;
   }
   let magic = get_u64(v.xfer, 0);
-  if magic != DISK_MAGIC && magic != DISK_MAGIC2 && magic != DISK_MAGIC4 {
+  if magic != DISK_MAGIC && magic != DISK_MAGIC2 && magic != DISK_MAGIC4 && magic != DISK_MAGIC5 && magic != DISK_MAGIC6 {
     return LO_NOFS;
   }
   pc_forget(&mut v.pc, &mut mem, f);                 // the loop driver owns its pages now

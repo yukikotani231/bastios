@@ -41,12 +41,11 @@ jobs:
           code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
           guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
           if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
-  # test/all.sh in three parts that run on runners of their own (LANES, see
-  # test/all.sh): the x86-64 boots in two halves, the shell and network
-  # tests (a b) and the rest (c e), each about as long as the shell test,
-  # and the AArch64 kernel's. The two x86-64 halves build the same kernel,
-  # so they share one proof cache; the AArch64 part keeps its own, since
-  # the caches are saved and restored whole.
+  # test/all.sh in five parts that run on runners of their own (LANES, see
+  # test/all.sh): the x86-64 boots in four, the shell and network tests
+  # (a b), the lanes c, e and f, and the AArch64 kernel's. The x86-64
+  # parts build the same kernel, so they share one proof cache; the AArch64
+  # part keeps its own, since the caches are saved and restored whole.
   test:
     name: test (${{ matrix.part }})
     needs: changes
@@ -60,8 +59,14 @@ jobs:
           - part: x86-64
             lanes: a b
             cache: x86-64
-          - part: x86-64 rest
-            lanes: c e
+          - part: x86-64 c
+            lanes: c
+            cache: x86-64
+          - part: x86-64 e
+            lanes: e
+            cache: x86-64
+          - part: x86-64 f
+            lanes: f
             cache: x86-64
           - part: aarch64
             lanes: d
@@ -116,10 +121,18 @@ jobs:
   # The same suite with the kernel and the Bastio user programs built by the
   # native x86-64 backend, so no C compiler sees any proved code (the C
   # compiler still builds boot/, the C library and the musl test programs).
+  # Two runners: the x86-64 tests with the native backend, and the AArch64
+  # port built by the native AArch64 backend (they share nothing but the
+  # proof cache, which each restores).
   native:
+    name: native (${{ matrix.part }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [x86-64, aarch64]
     # It takes 18 to 29 minutes on main (proving and building the kernel
     # natively is 8 of them), so 30 cut off runs that were only slow.
     timeout-minutes: 45
@@ -142,10 +155,12 @@ jobs:
           path: build/proof-cache.tar
       - name: Unpack the proof cache
         run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
-      - run: make test NATIVE=1 LANES='a b ce' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - if: matrix.part == 'x86-64'
+        run: make test NATIVE=1 LANES='a b cef' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       # The AArch64 port's kernel and Bastio user programs (shell, hello, spin,
       # true) built by the native AArch64 backend, booted once on QEMU virt.
-      - run: test/aarch64_test.sh --build
+      - if: matrix.part == 'aarch64'
+        run: test/aarch64_test.sh --build
         env:
           NATIVE: 1
           AARCH64_REQUIRED: 1
@@ -161,7 +176,7 @@ jobs:
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
@@ -224,6 +239,18 @@ jobs:
           bench/ab.py --a ../base/build/bastios.elf --b build/bastios.elf --rounds 5 --runs 3 --out build/bench/ab.json | tee build/bench/ab.md
           { echo '### bench/ab.py under KVM: this pull request (B) against its base (A)'; echo; cat build/bench/ab.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: steps.want.outputs.run == 'true'
+        name: Build the same source with the native backend
+        run: |
+          git worktree add ../native "$GITHUB_SHA"
+          mkdir -p ../native/build
+          cp -r build/proof-cache ../native/build/ 2>/dev/null || true
+          make -C ../native build/bastios.elf NATIVE=1 BASTIOC0="$PWD/bastiolang/stage0/target/release/bastioc0" BASTIOLIB="$PWD/bastiolang"
+      - if: steps.want.outputs.run == 'true'
+        name: Compare the kernel built through C with the native-built one
+        run: |
+          bench/ab.py --a build/bastios.elf --b ../native/build/bastios.elf --rounds 5 --runs 3 --out build/bench/ab-native.json | tee build/bench/ab-native.md
+          { echo '### bench/ab.py under KVM: built with NATIVE=1 (B) against built through C (A)'; echo; cat build/bench/ab-native.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.want.outputs.run == 'true'
         name: Compare PCIDs on and off, the same kernel
         run: |
           bench/ab.py --a build/bastios.elf --b build/bastios.elf --append nopcid --append-b "" --rounds 5 --runs 3 \
@@ -243,6 +270,8 @@ jobs:
             build/bench/ab-pcid.md
             build/bench/ab.json
             build/bench/ab.md
+            build/bench/ab-native.json
+            build/bench/ab-native.md
           if-no-files-found: ignore
   # Whole programs (bench/workloads.py: apk, gcc, make, tar, find, grep) on
   # BastiOS and on Linux, both under KVM. bench-kvm times single operations;
@@ -755,11 +784,17 @@ jobs:
   # LTP built once per LTP_TAG and kept in the cache. The previous run's
   # results.json is kept too: ltp.py uses its timings to put the tests that
   # only wait out a timeout on machines of their own.
+  # The run is cut into three shares (ltp.py --shard), one machine each.
   compat-ltp:
+    name: compat-ltp (${{ matrix.shard }})
     needs: changes
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['0/3', '1/3', '2/3']
     env:
       BASTIOC0: bastiolang/stage0/target/release/bastioc0
       BASTIOLIB: bastiolang
@@ -786,8 +821,8 @@ jobs:
       - name: Restore the last run's timings
         uses: actions/cache/restore@v4
         with:
-          key: ltp-times-${{ github.run_id }}
-          restore-keys: ltp-times-
+          key: ltp-times-${{ strategy.job-index }}-${{ github.run_id }}
+          restore-keys: ltp-times-${{ strategy.job-index }}-
           path: build/compat/ltp/results.json
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
@@ -807,18 +842,18 @@ jobs:
           key: ltp-${{ steps.keys.outputs.ltp }}
           path: build/ltp
         continue-on-error: true
-      - run: make compat-ltp
+      - run: make compat-ltp LTP_SHARD=${{ matrix.shard }}
       - name: Save this run's timings
         if: always()
         uses: actions/cache/save@v4
         with:
-          key: ltp-times-${{ github.run_id }}
+          key: ltp-times-${{ strategy.job-index }}-${{ github.run_id }}
           path: build/compat/ltp/results.json
         continue-on-error: true
       - if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: ltp-report
+          name: ltp-report-${{ strategy.job-index }}
           path: |
             build/compat/ltp/report.md
             build/compat/ltp/results.json

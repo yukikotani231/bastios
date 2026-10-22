@@ -37,7 +37,13 @@
 // directory, "disk"), at 16 its size, at 24 its root map block (0 for no
 // data), at 32 its mode (the low 16 bits; then its owner's user and group
 // ids, 24 bits each, 0 for root), at 40 its modification time; bytes 56..256 its
-// name: one path component of up to DNAME_MAX bytes. So a path is a walk
+// name: one path component of up to DNAME_MAX (255) bytes: the first
+// DNAME_HEAD (200) here, and a longer name goes on from byte 1 of the entry
+// after, which is then of kind K_XNAME (5). That is the odd half of the
+// same 512-byte sector as the even entry with the name, so the two are
+// written together or not at all. The first such name rewrites the magic
+// to BSTDISK6 (set_long), so a kernel that does not know them leaves the
+// disk alone. So a path is a walk
 // from the top, component by component, and full paths can be longer than
 // any entry. A blank disk is formatted when it is mounted; a disk with
 // neither magic that is not blank (a partition table, another system's
@@ -120,9 +126,11 @@ const SEG_BLOCKS: u64 = 262144;       // PTRS * PTRS: the blocks one root map re
 const SEG_BYTES: u64 = 1073741824;    // SEG_BLOCKS * BLOCK: a file's first 1 GiB hangs from one root map
 const SEG_FLAG: u64 = 1099511627776;  // 2^40: set in E_ROOT, the word names a super map of up to PTRS root maps, one per 1 GiB
 const DFILE_MAX: u64 = 549755813888;  // PTRS * SEG_BYTES (512 GiB)
-const DNAME_MAX: u64 = 200;
+const DNAME_MAX: u64 = 255;
+const DNAME_HEAD: u64 = 200;          // the bytes of a name an entry holds itself (E_NAME on); a longer name goes on into the next entry
 const DTOP: u64 = 64;                 // the parent of an entry in "disk"; entry 64 stays unused
 const DISK_MAGIC: u64 = 0x334B534944545342;   // "BSTDISK3", little-endian
+const DISK_MAGIC6: u64 = 0x364B534944545342;  // "BSTDISK6": BSTDISK5 plus names over DNAME_HEAD bytes (K_XNAME entries)
 const DISK_MAGIC5: u64 = 0x354B534944545342;  // "BSTDISK5": BSTDISK4 plus files with super maps (E_ROOT with SEG_FLAG)
 const DISK_MAGIC4: u64 = 0x344B534944545342;  // "BSTDISK4": BSTDISK3 plus extension blocks (the head is at byte 8 of the superblock)
 const DISK_MAGIC2: u64 = 0x324B534944545342;  // "BSTDISK2": no directory blocks past the fixed ones
@@ -133,6 +141,7 @@ const DISK_MISS: u64 = 18446744073709551614;    // not in the cache yet: try aga
 const E_KIND: u64 = 0;
 const K_ORPHAN: u64 = 3;               // kind: a file removed while open
 const K_LINK: u64 = 4;                 // kind: a hard link to the file entry in E_LINK
+const K_XNAME: u64 = 5;                // kind: the rest of the name of the entry before it (an even entry whose name is longer than DNAME_HEAD)
 const E_NLEN: u64 = 1;
 const E_PARENT: u64 = 8;
 const E_SIZE: u64 = 16;
@@ -141,6 +150,7 @@ const E_MODE: u64 = 32;                // the mode (16 bits), user id (24) and g
 const E_MTIME: u64 = 40;
 const E_LINK: u64 = 48;
 const E_NAME: u64 = 56;
+const E_XNAME: u64 = 1;                // in a K_XNAME entry: byte DNAME_HEAD of the name, then the bytes after it
 
 const OWN_ID_MAX: u64 = 0x1000000;     // ids a disk entry can keep: 24 bits each
 const MODE_FILE: u64 = 420;           // 0644
@@ -448,7 +458,7 @@ fn disk_free_entries(d: &DiskFs) -> u64
   while i < DSLOTS
     invariant i <= DSLOTS && n <= i
   {
-    if i != DTOP && !dent_used(d, i) {
+    if i != DTOP && dent_free(d, i) {
       n = n + 1;
     }
     i = i + 1;
@@ -783,7 +793,7 @@ fn ext_name(d: &mut DiskFs, db: u64, b: u64) -> bool
   let mut ok = false;
   if e == 0 {
     let was = get_u64(d.sb, 0);
-    if was != DISK_MAGIC5 {
+    if was != DISK_MAGIC5 && was != DISK_MAGIC6 {
       put_u64(&mut d.sb, 0, DISK_MAGIC4);
     }
     put_u64(&mut d.sb, 8, eb);
@@ -961,7 +971,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   }
   d.blocks = n;
   let magic = get_u64(d.sec, 0);
-  if magic == DISK_MAGIC || magic == DISK_MAGIC2 || magic == DISK_MAGIC4 || magic == DISK_MAGIC5 {
+  if magic == DISK_MAGIC || magic == DISK_MAGIC2 || magic == DISK_MAGIC4 || magic == DISK_MAGIC5 || magic == DISK_MAGIC6 {
     // The fixed blocks, then each block the superblock names, in order,
     // up to the first it does not (a block number off the data area ends
     // the directory there too; test/fsck.py reports it).
@@ -987,7 +997,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
         return d;
       }
     }
-    if magic == DISK_MAGIC4 || magic == DISK_MAGIC5 {
+    if magic == DISK_MAGIC4 || magic == DISK_MAGIC5 || magic == DISK_MAGIC6 {
       // The extension blocks, in chain order (at most EXT_MAX: a longer
       // chain, or a loop, is cut there).
       let mut eb = ptr_in(d, d.sb, 8);
@@ -1074,7 +1084,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
     } else if cast[u64](dent_byte(d, i, E_KIND)) == K_ORPHAN {
       // Removed while open, then the power went: nothing has it open now.
       // Its blocks stay unmarked, so they are free.
-      dent_setb(&mut d, i, E_KIND, 0);
+      dent_clear(&mut d, i);
       dir_flush(&mut d, i / 2);
     }
     i = i + 1;
@@ -1089,7 +1099,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
     if cast[u64](dent_byte(d, i, E_KIND)) == K_LINK {
       let t = get_u64(d.dir, i * DENT + E_LINK);
       if t >= slots || dent_byte(d, t, E_KIND) != 1 || same_name(d, i, t) {
-        dent_setb(&mut d, i, E_KIND, 0);
+        dent_clear(&mut d, i);
         dir_flush(&mut d, i / 2);
       }
     }
@@ -1165,6 +1175,79 @@ fn dent_orphan(d: &DiskFs, i: u64) -> bool
   requires disk_ok(d) && i < DSLOTS
 {
   return i < d.slots && cast[u64](dent_byte(d, i, 0)) == K_ORPHAN;
+}
+
+/// Does the name of entry i go on into entry i + 1? That is so for an even
+/// entry whose next one is a K_XNAME (disk_entry and disk_move make the two
+/// together, in one sector, so a power cut leaves both or neither).
+fn dent_cont(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+  ensures result ==> i + 1 < DSLOTS && i + 1 < d.slots
+{
+  return i % 2 == 0 && i + 1 < DSLOTS && i + 1 < d.slots && cast[u64](dent_byte(d, i + 1, E_KIND)) == K_XNAME;
+}
+
+/// Is entry i the continuation of the name of the entry before it?
+fn dent_iscont(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
+  return i % 2 == 1 && i < d.slots && cast[u64](dent_byte(d, i, E_KIND)) == K_XNAME
+    && cast[u64](dent_byte(d, i - 1, E_NLEN)) > DNAME_HEAD && dent_used(d, i - 1);
+}
+
+/// May a new entry be made in slot i? (Not one in use, and not the
+/// continuation of a name.)
+fn dent_free(d: &DiskFs, i: u64) -> bool
+  requires disk_ok(d) && i < DSLOTS
+{
+  return !dent_used(d, i) && !dent_iscont(d, i);
+}
+
+/// Byte k of the name of entry i (0 for a byte a damaged entry does not have).
+fn dname_byte(d: &DiskFs, i: u64, k: u64) -> u8
+  requires disk_ok(d) && i < DSLOTS && k < DNAME_MAX
+{
+  if k < DNAME_HEAD {
+    return dent_byte(d, i, E_NAME + k);
+  }
+  if i + 1 >= DSLOTS || !dent_cont(d, i) {
+    return 0;
+  }
+  return dent_byte(d, i + 1, E_XNAME + k - DNAME_HEAD);
+}
+
+/// Sets byte k of the name of entry i in memory (the entry after it holds
+/// the bytes from DNAME_HEAD on).
+fn dname_set(d: &mut DiskFs, i: u64, k: u64, x: u8)
+  requires disk_ok(d) && i < DSLOTS && (k < DNAME_HEAD || i + 1 < DSLOTS) && k < DNAME_MAX
+  ensures disk_ok(d) && d.dcap == old(d.dcap) && d.slots == old(d.slots)
+{
+  if k < DNAME_HEAD {
+    dent_setb(&mut d, i, E_NAME + k, x);
+  } else {
+    dent_setb(&mut d, i + 1, E_XNAME + k - DNAME_HEAD, x);
+  }
+}
+
+/// Frees entry i in memory (kind 0), and the continuation of its name.
+fn dent_clear(d: &mut DiskFs, i: u64)
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d) && d.dcap == old(d.dcap) && d.slots == old(d.slots)
+{
+  if cast[u64](dent_byte(d, i, E_NLEN)) > DNAME_HEAD && dent_cont(d, i) {
+    dent_setb(&mut d, i + 1, E_KIND, 0);
+  }
+  dent_setb(&mut d, i, E_KIND, 0);
+}
+
+/// Frees just the continuation of entry i's name (kind 0 on entry i + 1).
+fn dent_clear_cont(d: &mut DiskFs, i: u64)
+  requires disk_ok(d) && i < DSLOTS
+  ensures disk_ok(d) && d.dcap == old(d.dcap) && d.slots == old(d.slots)
+{
+  if dent_cont(d, i) {
+    dent_setb(&mut d, i + 1, E_KIND, 0);
+  }
 }
 
 /// Takes entry i's name away but keeps its data, while it is open: one
@@ -1252,7 +1335,15 @@ fn dent_named(d: &DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   if i >= d.slots || cast[u64](dent_byte(d, i, E_NLEN)) != n || n > DNAME_MAX || !dent_live(d, i) {
     return false;
   }
-  return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, n);
+  if n <= DNAME_HEAD {
+    return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, n);
+  }
+  if !dent_cont(d, i) {
+    return false;
+  }
+  assert (i + 1) * DENT + DENT <= blen(d.dir);
+  return bytes_span_eq(d.dir, i * DENT + E_NAME, name, from, DNAME_HEAD)
+    && bytes_span_eq(d.dir, (i + 1) * DENT + E_XNAME, name, from + DNAME_HEAD, n - DNAME_HEAD);
 }
 
 // The index of names. A directory with more than IX_MIN entries has a hash
@@ -1298,6 +1389,27 @@ fn ix_hash(p: u64, m: &Bytes, from: u64, n: u64) -> u64
   return (h ^ (h >> 32)) % IX_CELLS;
 }
 
+/// The first cell to look at for the name of entry i (n bytes, a directory p)
+/// as ix_hash finds it for the same name in a buffer.
+fn ix_hash_ent(d: &DiskFs, p: u64, i: u64, n: u64) -> u64
+  requires disk_ok(d) && i < DSLOTS && n <= DNAME_MAX
+  ensures result < IX_CELLS
+{
+  if n <= DNAME_HEAD && i < d.slots {
+    assert (i + 1) * DENT <= blen(d.dir);
+    return ix_hash(p, d.dir, i * DENT + E_NAME, n);
+  }
+  let mut h = wrap_mul(wrap_add(p, 1), 0x9E3779B97F4A7C15);
+  let mut j = 0;
+  while j < n
+    invariant j <= n && n <= DNAME_MAX
+  {
+    h = wrap_mul(h ^ cast[u64](dname_byte(d, i, j)), 0x100000001B3);
+    j = j + 1;
+  }
+  return (h ^ (h >> 32)) % IX_CELLS;
+}
+
 /// Gives live entry i (i < d.slots) a cell.
 fn ix_add(d: &mut DiskFs, i: u64)
   requires disk_ok(d) && i < DSLOTS
@@ -1314,7 +1426,7 @@ fn ix_add(d: &mut DiskFs, i: u64)
   if n > DNAME_MAX {
     return;
   }
-  let mut c = ix_hash(dent_parent(d, i), d.dir, i * DENT + E_NAME, n);
+  let mut c = ix_hash_ent(d, dent_parent(d, i), i, n);
   let mut t = 0;
   while t < IX_CELLS && ix_cell(d, c) != 0
     invariant t <= IX_CELLS && c < IX_CELLS && blen(d.ix) == IX_BYTES && disk_ok(d)
@@ -1356,7 +1468,7 @@ fn ix_rebuild(d: &mut DiskFs)
     if dent_live(d, i) && d.ixn < IX_MAX - 1 {
       let n = cast[u64](dent_byte(d, i, E_NLEN));
       if n <= DNAME_MAX {
-        let mut c = ix_hash(dent_parent(d, i), d.dir, i * DENT + E_NAME, n);
+        let mut c = ix_hash_ent(d, dent_parent(d, i), i, n);
         let mut t = 0;
         while t < IX_CELLS && ix_cell(d, c) != 0
           invariant t <= IX_CELLS && c < IX_CELLS && blen(d.ix) == IX_BYTES && disk_ok(d)
@@ -1565,7 +1677,14 @@ fn same_name(d: &DiskFs, i: u64, t: u64) -> bool
   if i >= d.dcap * DPB || t >= d.dcap * DPB {
     return false;
   }
-  return bytes_span_eq(d.dir, i * DENT + E_NAME, d.dir, t * DENT + E_NAME, DENT - E_NAME);
+  if !bytes_span_eq(d.dir, i * DENT + E_NAME, d.dir, t * DENT + E_NAME, DENT - E_NAME) {
+    return false;
+  }
+  if cast[u64](dent_byte(d, i, E_NLEN)) > DNAME_HEAD {
+    return dent_cont(d, i) && dent_cont(d, t) && i + 1 < d.dcap * DPB && t + 1 < d.dcap * DPB
+      && bytes_span_eq(d.dir, (i + 1) * DENT + E_XNAME, d.dir, (t + 1) * DENT + E_XNAME, DNAME_MAX - DNAME_HEAD);
+  }
+  return true;
 }
 
 /// File entry i takes the name (parent and last component) of hard link l,
@@ -1580,6 +1699,12 @@ fn disk_take_name(d: &mut DiskFs, i: u64, l: u64) -> bool
 {
   disk_drain(&mut d);                 // queued writes reach the disk first
   if i == l || i >= d.slots || dent_byte(d, i, 0) != 1 || disk_link_of(d, l) != i {
+    return false;
+  }
+  // (A name over DNAME_HEAD bytes lives in two entries, and the pair of i
+  // is not l's: the unlink of a file whose name or whose link's name is
+  // that long, while it has links, is refused.)
+  if cast[u64](dent_byte(d, i, E_NLEN)) > DNAME_HEAD || cast[u64](dent_byte(d, l, E_NLEN)) > DNAME_HEAD {
     return false;
   }
   let mut save = balloc(DENT);
@@ -1660,6 +1785,10 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
   if l == 0 || l > DNAME_MAX || disk_child(d, p, name, k, l) < DSLOTS {
     return DSLOTS;
   }
+  let long = l > DNAME_HEAD;
+  if long && !set_long(&mut d) {
+    return DSLOTS;
+  }
   let mut i = d.free0;
   while i < DSLOTS
     invariant i <= DSLOTS && disk_ok(d)
@@ -1679,11 +1808,15 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         more = more + 1;
       }
     }
-    if i != DTOP && !dent_used(d, i) {
+    if i != DTOP && dent_free(d, i) && (!long || (i % 2 == 0 && i + 1 < d.slots && dent_free(d, i + 1))) {
       if lazy && (!dep_ok(d, p, i) || (dir && d.pddn >= PDD_MAX)) {
         disk_drain(&mut d);             // everything is on the disk before the entry is made
       }
       dent_zero(&mut d, i, 0, DENT);
+      if long {
+        dent_zero(&mut d, i + 1, 0, DENT);
+        dent_setb(&mut d, i + 1, E_KIND, cast[u8](K_XNAME));
+      }
       if dir {
         dent_setb(&mut d, i, E_KIND, 2);
         dent_set(&mut d, i, E_MODE, MODE_DIR);
@@ -1701,9 +1834,9 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
       dent_set(&mut d, i, E_MTIME, now);
       let mut j = 0;
       while j < l
-        invariant j <= l && disk_ok(d)
+        invariant j <= l && l <= DNAME_MAX && (l <= DNAME_HEAD || i + 1 < DSLOTS) && i < DSLOTS && disk_ok(d)
       {
-        dent_setb(&mut d, i, E_NAME + j, bget(name, k + j));
+        dname_set(&mut d, i, j, bget(name, k + j));
         j = j + 1;
       }
       let mut written = false;
@@ -1713,10 +1846,12 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
         written = ent_flush(&mut d, i);
       }
       if !written {
-        dent_setb(&mut d, i, E_KIND, 0);
+        dent_clear(&mut d, i);
         return DSLOTS;
       }
-      d.free0 = i;
+      if !long {
+        d.free0 = i;
+      }
       if lazy && !dir {
         d.pnew = i + 1;
       }
@@ -1770,6 +1905,16 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   if l == 0 || l > DNAME_MAX || disk_child(d, p, name, k, l) < DSLOTS {
     return false;
   }
+  // A name past DNAME_HEAD bytes goes on into the entry after i, which must
+  // then be even and either hold the old name's tail already or be free.
+  let long = l > DNAME_HEAD;
+  let had = dent_cont(d, i) && cast[u64](dent_byte(d, i, E_NLEN)) > DNAME_HEAD;
+  if long && (i % 2 != 0 || i + 1 >= d.slots || !(had || dent_free(d, i + 1))) {
+    return false;
+  }
+  if long && !had && !set_long(&mut d) {
+    return false;
+  }
   // The new directory, and each one above it, must not be i.
   let mut c = p;
   let mut steps = 0;
@@ -1785,22 +1930,33 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   if lazy && p < DSLOTS && p != dent_parent(d, i) && dir_pending(d, p) {
     disk_drain(&mut d);               // the directory is on the disk before the entry names it
   }
-  let mut save = balloc(DENT);
+  let both = had || long;
+  let mut save = balloc(2 * DENT);
   let mut j = 0;
   while j < DENT
-    invariant j <= DENT && blen(save) == DENT && disk_ok(d)
+    invariant j <= DENT && blen(save) == 2 * DENT && disk_ok(d)
   {
     bset(&mut save, j, dent_byte(d, i, j));
+    if both && i + 1 < DSLOTS {
+      bset(&mut save, DENT + j, dent_byte(d, i + 1, j));
+    }
     j = j + 1;
   }
   dent_set(&mut d, i, E_PARENT, p);
   dent_setb(&mut d, i, E_NLEN, cast[u8](l));
   dent_zero(&mut d, i, E_NAME, DENT);
+  if had && !long {
+    dent_clear_cont(&mut d, i);
+  }
+  if long {
+    dent_zero(&mut d, i + 1, 0, DENT);
+    dent_setb(&mut d, i + 1, E_KIND, cast[u8](K_XNAME));
+  }
   j = 0;
   while j < l
-    invariant j <= l && disk_ok(d)
+    invariant j <= l && l <= DNAME_MAX && (l <= DNAME_HEAD || i + 1 < DSLOTS) && i < DSLOTS && disk_ok(d)
   {
-    dent_setb(&mut d, i, E_NAME + j, bget(name, k + j));
+    dname_set(&mut d, i, j, bget(name, k + j));
     j = j + 1;
   }
   let mut ok = false;
@@ -1813,9 +1969,12 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
     // As after a failed write: memory keeps the old name.
     j = 0;
     while j < DENT
-      invariant j <= DENT && blen(save) == DENT && disk_ok(d)
+      invariant j <= DENT && blen(save) == 2 * DENT && disk_ok(d)
     {
       dent_setb(&mut d, i, j, bget(save, j));
+      if both && i + 1 < DSLOTS {
+        dent_setb(&mut d, i + 1, j, bget(save, DENT + j));
+      }
       j = j + 1;
     }
   }
@@ -1861,7 +2020,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   }
   let r = dent_tree(d, i);
   let file = dent_byte(d, i, E_KIND) == 1 || cast[u64](dent_byte(d, i, E_KIND)) == K_ORPHAN;
-  dent_setb(&mut d, i, E_KIND, 0);
+  dent_clear(&mut d, i);
   if i < d.free0 {
     d.free0 = i;
   }
@@ -1929,7 +2088,7 @@ fn disk_comp(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
   while k < n
     invariant k <= n && blen(buf) == l
   {
-    bset(&mut buf, at + k, dent_byte(d, i, E_NAME + k));
+    bset(&mut buf, at + k, dname_byte(d, i, k));
     k = k + 1;
   }
   return n;
@@ -1977,7 +2136,7 @@ fn disk_name(d: &DiskFs, i: u64, buf: &mut Bytes, at: u64) -> u64
     while k < l
       invariant k <= l && blen(buf) == bl
     {
-      bset(&mut buf, e - l + k, dent_byte(d, c, E_NAME + k));
+      bset(&mut buf, e - l + k, dname_byte(d, c, k));
       k = k + 1;
     }
     e = e - l;
@@ -2259,7 +2418,7 @@ fn set_big(d: &mut DiskFs) -> bool
   ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
 {
   let was = get_u64(d.sb, 0);
-  if was == DISK_MAGIC5 {
+  if was == DISK_MAGIC5 || was == DISK_MAGIC6 {
     return true;
   }
   disk_drain(&mut d);
@@ -2267,6 +2426,30 @@ fn set_big(d: &mut DiskFs) -> bool
     return false;
   }
   put_u64(&mut d.sb, 0, DISK_MAGIC5);
+  if !sec_out(&mut d.dev, d.plo, &mut d.sec, 0, d.sb, 0) {
+    put_u64(&mut d.sb, 0, was);
+    return false;
+  }
+  return true;
+}
+
+/// Makes the superblock say that names may go on into a second entry
+/// (BSTDISK6), on the disk, before the first such entry is made: a kernel
+/// that does not know them leaves the disk alone. False if that cannot be
+/// done.
+fn set_long(d: &mut DiskFs) -> bool
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  let was = get_u64(d.sb, 0);
+  if was == DISK_MAGIC6 {
+    return true;
+  }
+  disk_drain(&mut d);
+  if d.q.dead {
+    return false;
+  }
+  put_u64(&mut d.sb, 0, DISK_MAGIC6);
   if !sec_out(&mut d.dev, d.plo, &mut d.sec, 0, d.sb, 0) {
     put_u64(&mut d.sb, 0, was);
     return false;
