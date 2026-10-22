@@ -17,7 +17,7 @@ import "pages.bastio";
 import "core/bytes.bastio";
 
 const NFILES: u64 = 32768;          // more than every descriptor of a process, or a build tree
-const FNAME_MAX: u64 = 255;
+const FNAME_MAX: u64 = 1023;      // a whole path; one name is at most NAME_MAX
 const FILE_PAGES: u64 = 262144;
 const FILE_MAX: u64 = 1073741824;     // FILE_PAGES * 4096 (1 GiB)
 

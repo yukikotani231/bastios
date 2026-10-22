@@ -685,9 +685,9 @@ spec fn lx_count_or_fail(r: u64, n: u64) -> bool {
 const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
-const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
+const CWD_STRIDE: u64 = 1024;          // FNAME_MAX + 1
 const CWD_LEN: u64 = NPROC * CWD_STRIDE;
-const DPATH_LEN: u64 = 1048576;       // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
+const DPATH_LEN: u64 = 4194304;       // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
 const MT_N: u64 = 256;                // mounts of mount namespaces, in all (src/lxns.bastio)
 const ME_W: u64 = 5;                  // words per mount
 // After the mounts, k.mns keeps the other namespaces (src/lxns.bastio):
@@ -807,7 +807,7 @@ const MNS_IO: u64 = MNS_TM + TM_N * TM_W;
 const CO_N: u64 = 32;
 const MNS_CO: u64 = MNS_IO + IO_N * 2;
 const MNS_LEN: u64 = MNS_CO + CO_N * 2;
-const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the key descriptions begin (the extended attributes have k.xab)
+const XAB: u64 = 1024 + MT_N * 2048 + 1024;      // where k.mstr keeps the key descriptions begin (the extended attributes have k.xab)
 const XAB_LEN: u64 = 256 * 320;                 // k.xab: XA_N rows of XA_ROW bytes (src/lxxattr.bastio), allocated by the first attribute
 const KDB: u64 = XAB;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
 const KPB: u64 = KDB + KEY_N * KDESC;              // then KP_N payload slots of KPAY bytes
@@ -869,17 +869,17 @@ const INO_N: u64 = 32;                // inotify instances, in k.evt from INO_AT
 const INO_W: u64 = 64;                // watches per instance
 const INO_WAT: u64 = 3;               // a watch: the handle + 1 (0: free), its mask, its descriptor
 const INO_Q: u64 = 32;                // events an instance queues, IN_Q_OVERFLOW included
-const INO_NAMEW: u64 = 32;            // words of an event's name: 8 bytes each
-const INO_EV: u64 = 36;               // an event: wd, mask, cookie, name length, then INO_NAMEW words
+const INO_NAMEW: u64 = 128;           // words of an event's name: 8 bytes each
+const INO_EV: u64 = 132;              // an event: wd, mask, cookie, name length, then INO_NAMEW words
 const INO_HEAD: u64 = 4;              // in use, the next watch descriptor, events queued, the first
-const INO_STRIDE: u64 = 1348;         // INO_HEAD + INO_W * INO_WAT + INO_Q * INO_EV
+const INO_STRIDE: u64 = 4420;         // INO_HEAD + INO_W * INO_WAT + INO_Q * INO_EV
 const INO_AT: u64 = 34080;            // FIFO_AT + FIFO_N * FIFO_STRIDE
-const INO_G: u64 = 77216;            // INO_AT + INO_N * INO_STRIDE: what all instances share
+const INO_G: u64 = 175520;           // INO_AT + INO_N * INO_STRIDE: what all instances share
 const FAN_M: u64 = 15;               // fanotify marks per instance (an inotify instance's slot: src/lxinotify.bastio)
 const FAN_MK: u64 = 12;              // a mark: the handle + 1 (0: free), its type, mask, ignored mask, flags, prefix length, then 6 words of prefix
 const FAN_Q: u64 = 32;               // events an instance queues, the overflow event included
 const FAN_EV: u64 = 5;               // an event: mask, process, handle + 1, thread, descriptor + 1 opened for its read
-const EVT_LEN: u64 = 77340;           // INO_G + 124
+const EVT_LEN: u64 = 175932;          // INO_G + 412
 const OF_UNIX: u64 = 11;              // an AF_UNIX socket: see src/lxunix.bastio
 const OF_PTY: u64 = 14;               // a pseudo-terminal end: x DEV_PTM + N or DEV_PTS + N; word 3: nonblocking (src/lxpty.bastio)
 const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; word 3: nonblocking + 2 * access mode (src/lxmq.bastio)
@@ -921,7 +921,7 @@ const UX_PATH: u64 = 255;             // the longest name (a path name is kept a
 const UX_XTRA: u64 = 7;               // descriptions a message passes besides the first
 const UX_LEN: u64 = 2272;             // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files, then UX_XTRA words per channel, then one offset per channel
 const UXB_LEN: u64 = 532448;          // UX_N * UX_CAP + UX_LIS * UX_PATH
-const PATH_OUT: u64 = 512;              // room for a name being built (lx_lex_xfer, k.lexb)
+const PATH_OUT: u64 = 2048;             // room for a name being built (lx_lex_xfer, k.lexb)
 
 const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptions
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux

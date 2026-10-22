@@ -110,15 +110,15 @@ const G_COOKIE: u64 = 1;
 const G_CALL: u64 = 2;                         // the call ino_before looked at + 1 (0: none)
 const G_KEPT: u64 = 3;                         // 1 if it kept paths in P1 and P2
 const P1: u64 = 4;
-const P2: u64 = 42;
-const P3: u64 = 80;                            // P1 + 2 * P_LEN; INO_GLEN is P3 + P_LEN
-const P_LEN: u64 = 38;
-const G_A0: u64 = 118;                         // the call's first argument (the result may overwrite its register)
-const G_PID: u64 = 119;
-const G_FANM: u64 = 120;
-const G_COOL: u64 = 121;                       // no call waits for a reader before this time (ns): the last wait found none, and nothing was read since
-const G_PROG: u64 = 122;                       // events queued in all when the wait began: a reader that took some is making progress
-const G_READ: u64 = 123;                       // when an instance was last read with events queued (ns)
+const P2: u64 = 138;
+const P3: u64 = 272;                           // P1 + 2 * P_LEN; INO_GLEN is P3 + P_LEN
+const P_LEN: u64 = 134;
+const G_A0: u64 = 406;                         // the call's first argument (the result may overwrite its register)
+const G_PID: u64 = 407;
+const G_FANM: u64 = 408;
+const G_COOL: u64 = 409;                       // no call waits for a reader before this time (ns): the last wait found none, and nothing was read since
+const G_PROG: u64 = 410;                       // events queued in all when the wait began: a reader that took some is making progress
+const G_READ: u64 = 411;                       // when an instance was last read with events queued (ns)
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -806,7 +806,7 @@ fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
       store_le32(&mut k.fs.xfer, off + 12, cast[u32](plen));
       let mut j = 0;
       while j < plen
-        invariant j <= plen && plen <= 272 && off + IN_EVENT + plen <= room && room <= XFER && kok(k)
+        invariant j <= plen && plen <= 1024 && off + IN_EVENT + plen <= room && room <= XFER && kok(k)
       {
         let mut c = 0;
         if j < nlen {

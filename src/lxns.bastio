@@ -111,7 +111,7 @@ const OI_NONE: u64 = 0;                   // MNS_INTENT: the lookup only reads
 const OI_WRITE: u64 = 1;                  // it makes or changes the file: copy it up, make its directories
 const OI_REMOVE: u64 = 2;                 // it removes the file: see where it is (ovl_pending)
 const OI_RENAME: u64 = 3;                 // it is the source of a rename: copied up, unless it is a directory
-const STASH: u64 = 256 + MT_N * 512;      // where k.mstr keeps the path ovl_stash kept
+const STASH: u64 = 1024 + MT_N * 2048;      // where k.mstr keeps the path ovl_stash kept
 const LSTR: u64 = 0x100000;               // positions one layer takes in a merged directory
 
 /// Where layer li's path starts in an overlay's source at k.mstr[at..],

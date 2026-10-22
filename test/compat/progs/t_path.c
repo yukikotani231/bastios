@@ -67,6 +67,45 @@ static int long_paths(void) {
     return ok && chdir(here) == 0;
 }
 
+/* A tree whose paths pass 255 bytes (the limit BastiOS once had for a whole path);
+ * one part of a name is still at most NAME_MAX. */
+static int deep_tree(void) {
+    char here[256], top[64], name[32], abs[PATH_MAX], cwd[PATH_MAX];
+    if (!getcwd(here, sizeof here)) return 0;
+    snprintf(top, sizeof top, "pt_deep%d", (int)getpid());
+    int ok = mkdir(top, 0755) == 0 && chdir(top) == 0;
+    int made = 0;
+    for (int i = 0; ok && i < 28; i++) {
+        memset(name, 'a' + i % 26, 30);
+        name[30] = 0;
+        ok = ok && mkdir(name, 0755) == 0 && chdir(name) == 0;
+        made++;
+    }
+    ok = ok && getcwd(cwd, sizeof cwd) != NULL && strlen(cwd) > 800;
+    int fd = ok ? open("deep_file", O_CREAT | O_WRONLY, 0644) : -1;
+    ok = ok && fd >= 0 && write(fd, "deep", 4) == 4 && close(fd) == 0;
+    snprintf(abs, sizeof abs, "%s/deep_file", cwd);
+    struct stat st;
+    ok = ok && stat(abs, &st) == 0 && st.st_size == 4 && stat("deep_file", &st) == 0;
+    ok = ok && chdir(here) == 0 && chdir(cwd) == 0;       /* an absolute path of over 800 bytes */
+    unlink("deep_file");
+    for (int i = 0; i < made; i++) {                      /* back up and remove each level */
+        chdir("..");
+        memset(name, 'a' + (made - 1 - i) % 26, 30);
+        name[30] = 0;
+        ok = ok && rmdir(name) == 0;
+    }
+    chdir(here);
+    rmdir(top);
+    char big[300];
+    memset(big, 'n', 256);
+    big[256] = 0;
+    ok = ok && fails(mkdir(big, 0755), ENAMETOOLONG);     /* one part over NAME_MAX */
+    big[255] = 0;
+    ok = ok && mkdir(big, 0755) == 0 && rmdir(big) == 0;
+    return ok;
+}
+
 static int loop_is_eloop(void) {
     static char p[64 * 8];
     struct stat st;
@@ -263,6 +302,7 @@ int main(void) {
     EXPECT("a path in unmapped memory is EFAULT", unreadable_is_efault());
     EXPECT("an empty path is ENOENT, except with AT_EMPTY_PATH", empty_is_enoent());
     EXPECT("paths are read up to PATH_MAX", long_paths());
+    EXPECT("paths of 800 bytes and more work; a part over NAME_MAX is ENAMETOOLONG", deep_tree());
     EXPECT("a loop of links through a long path is ELOOP", loop_is_eloop());
     EXPECT("pread and pwrite take no negative offset", offsets());
     EXPECT("fstat of a directory gives its mode", fstat_dir());

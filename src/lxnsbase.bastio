@@ -23,8 +23,8 @@ const MNS_SLEN: u64 = NPROC + 13;         // its length, in k.mstr from STASH
 const MNS_SE: u64 = NPROC + 14;           // the overlay mount it is in
 const MNS_SLOW: u64 = NPROC + 15;         // whether a lower layer has the name
 const MNS_ENT: u64 = NPROC + 16;
-const MS_ROW: u64 = 256;                  // FNAME_MAX + 1
-const LPATH: u64 = 256;                   // where the mounts' strings start in k.mstr
+const MS_ROW: u64 = 1024;                 // FNAME_MAX + 1
+const LPATH: u64 = 1024;                  // where the mounts' strings start in k.mstr
 
 const MNS_MAX: u64 = 0x10000000000;       // namespace ids and sequence numbers stay below it
 const ME_NS: u64 = 0;
