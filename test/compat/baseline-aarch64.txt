@@ -689,6 +689,7 @@ t_misc: /proc/net/unix lists a bound socket
 t_misc: /proc/self/exe
 t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/self/mountinfo lists the root and /proc
+t_misc: /proc/self/smaps_rollup sums the resident pages, as psutil's uss reads them
 t_misc: /proc/self/statm counts the pages and io has its counters
 t_misc: /proc/stat has cpu lines
 t_misc: SIOCGIFHWADDR and SIOCGIFNETMASK on lo
@@ -700,6 +701,8 @@ t_misc: prctl PR_SET_NAME
 t_misc: printf %f
 t_misc: qsort
 t_misc: sched_getaffinity
+t_misc: sched_getaffinity names every processor /proc/stat lists, as sysconf counts them
+t_misc: sched_setaffinity to a processor that is not there is EINVAL
 t_misc: seccomp filter denies getpid
 t_misc: forty stacked seccomp filters
 t_misc: statfs

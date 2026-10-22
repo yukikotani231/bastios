@@ -2226,6 +2226,26 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       if w == 10 {
         return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
       }
+      if w == 11 {
+        // The sums /proc/PID/smaps_rollup gives, with the pages statm counts
+        // as resident: all of them private and dirty, none shared.
+        let sp = smaller((what - SY_PX) / PXF_N, NPROC - 1);
+        let kb = 4 * smaller(anon_count(&mut k, sp, 0, WPAGES), WPAGES);
+        let mut a = put_s(&mut o, 0, "00400000-7ffffffff000 ---p 00000000 00:00 0                          [rollup]\n");
+        a = put_s(&mut o, a, "Rss:               ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nPss:               ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nPss_Dirty:         ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nShared_Clean:        0 kB\nShared_Dirty:        0 kB\nPrivate_Clean:       0 kB\nPrivate_Dirty:     ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nReferenced:        ");
+        a = put_n(&mut o, a, kb);
+        a = put_s(&mut o, a, " kB\nAnonymous:         ");
+        a = put_n(&mut o, a, kb);
+        return put_s(&mut o, a, " kB\nLazyFree:            0 kB\nAnonHugePages:       0 kB\nShmemPmdMapped:      0 kB\nFilePmdMapped:       0 kB\nShared_Hugetlb:      0 kB\nPrivate_Hugetlb:     0 kB\nSwap:                0 kB\nSwapPss:             0 kB\nLocked:              0 kB\n");
+      }
       return put_s(&mut o, 0, px_text(w));
     }
     if what >= SY_SC && what < SY_SC + SCT_NUM {

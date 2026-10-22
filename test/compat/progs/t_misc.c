@@ -110,6 +110,14 @@ int main(void) {
         if (f >= 0) close(f);
         u[n > 0 ? n : 0] = 0;
         sz > 0 && res > 0 && sh == 0 && strstr(u, "rchar: ") && strstr(u, "write_bytes: "); }));
+    EXPECT("/proc/self/smaps_rollup sums the resident pages, as psutil's uss reads them", ({
+        char t[1024]; int f = open("/proc/self/smaps_rollup", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        unsigned long rss = 0, priv = 0; char *p = strstr(t, "\nRss:"), *q = strstr(t, "\nPrivate_Dirty:");
+        if (p) sscanf(p + 5, "%lu", &rss);
+        if (q) sscanf(q + 15, "%lu", &priv);
+        rss > 0 && priv == rss && strstr(t, "\nPss:") && strstr(t, "\nSwap:"); }));
     EXPECT("core_pattern and nr_open read, drop_caches takes 3 and refuses 9", ({
         char t[64], u[64]; int f = open("/proc/sys/kernel/core_pattern", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
         if (f >= 0) close(f);
@@ -157,6 +165,11 @@ int main(void) {
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
     EXPECT("sched_getaffinity", ({ cpu_set_t c; sched_getaffinity(0, sizeof c, &c) == 0; }));
+    EXPECT("sched_getaffinity names every processor /proc/stat lists, as sysconf counts them", ({ cpu_set_t c; int n = sched_getaffinity(0, sizeof c, &c) == 0 ? CPU_COUNT(&c) : -1;
+        char t[4096]; int f = open("/proc/stat", O_RDONLY); int r = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); t[r > 0 ? r : 0] = 0;
+        int m = 0; for (char *q = t; (q = strstr(q, "\ncpu")) != 0; q += 4) m++;
+        n == m && m >= 1 && sysconf(_SC_NPROCESSORS_ONLN) == m; }));
+    EXPECT("sched_setaffinity to a processor that is not there is EINVAL", ({ cpu_set_t c; CPU_ZERO(&c); CPU_SET(100, &c); sched_setaffinity(0, sizeof c, &c) == -1 && errno == EINVAL; }));
     EXPECT("SSE floating point", ({ volatile double x = 2.0; x * x / 3.0 > 1.33; }));
     EXPECT("printf %f", (snprintf(b, sizeof b, "%.3f", 3.14159), strcmp(b, "3.142") == 0));
     EXPECT("strtod", strtod("2.5e3", 0) == 2500.0);
