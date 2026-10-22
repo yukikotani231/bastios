@@ -1792,6 +1792,151 @@ fn line_take(l: &mut Buf, t: u64)
   }
 }
 
+/// Copies up to m bytes of page p of a file, from byte `from` of it, to user
+/// address va in one copy, from the page itself. A hole, a page past the
+/// end of `pages`, or a user page that cannot be written ends it short: 0
+/// here, and the staged read takes over.
+fn ram_page_to_user(spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, pages: &mut Vec[Slot], p: u64, from: u64, va: u64, m: u64) -> u64
+  requires spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && vlen(pages) <= FILE_PAGES && from + m <= 4096
+  ensures spaces_ok(spaces) && mem_ok(mem) && vlen(pages) == old(vlen(pages))
+  ensures result <= m
+{
+  if p >= vec_len(pages) {
+    return 0;
+  }
+  let mut got = 0;
+  match vec_swap(&mut pages, p, Slot::Hole) {
+    Slot::Hole => {},
+    Slot::Page(fr) => {
+      let r = copy_frame_to_user(&mut spaces, &mut mem, an, pid, va, fr, from, m);
+      if r != NO_RESULT {
+        got = r;
+      }
+      match vec_swap(&mut pages, p, Slot::Page(fr)) {
+        Slot::Hole => {},
+        Slot::Page(_x) => { unreachable; },
+      }
+    },
+  }
+  return got;
+}
+
+fn pcu_frame(f: &mut Frame, spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, from: u64, va: u64, m: u64) -> u64
+  requires spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && from + m <= 4096
+  ensures spaces_ok(spaces) && mem_ok(mem)
+  ensures result <= m
+{
+  let r = copy_frame_to_user(&mut spaces, &mut mem, an, pid, va, f, from, m);
+  if r == NO_RESULT {
+    return 0;
+  }
+  return r;
+}
+
+fn pcu_l1(l1: &mut PageTable, i: u64, spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, from: u64, va: u64, m: u64) -> u64
+  requires pt_level(l1) == 1 && i < 512 && spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && from + m <= 4096
+  ensures pt_level(l1) == 1 && spaces_ok(spaces) && mem_ok(mem)
+  ensures result <= m
+{
+  if !pt_has(l1, i) {
+    return 0;
+  }
+  return pt_borrow_frame(&mut l1, i, pcu_frame, &mut spaces, &mut mem, an, pid, from, va, m);
+}
+
+/// Copies up to m bytes of page pg of file h, from byte `from` of it, from
+/// the page cache's page to user address va in one copy. 0 if the cache
+/// does not hold the page, or the user page cannot be written.
+fn pc_page_to_user(c: &mut PCache, spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, h: u64, pg: u64, from: u64, va: u64, m: u64) -> u64
+  requires pc_ok(c) && spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && from + m <= 4096
+  ensures pc_ok(c) && spaces_ok(spaces) && mem_ok(mem)
+  ensures result <= m
+{
+  let slot = pc_get(&mut c, h, pg);
+  if slot >= PC_N {
+    return 0;
+  }
+  let mut got = 0;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_has(t, slot / 512) {
+        got = pt_borrow(&mut t, slot / 512, pcu_l1, slot % 512, &mut spaces, &mut mem, an, pid, from, va, m);
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return got;
+}
+
+/// read(2) of up to `want` bytes of disk file `node` from offset `off`,
+/// from the page cache's pages straight to the process's, as
+/// ram_read_direct does for a RAM file. It stops at the end of the file or
+/// at the first page the cache does not hold (or a user page that cannot
+/// be written), and the staged read goes on from there.
+fn disk_read_direct(k: &mut Kernel, pid: u64, node: u64, off: u64, va: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC && node < DSLOTS && want <= READ_MAX && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX
+  ensures kok(k)
+  ensures result <= want
+{
+  let size = disk_size(k.fs.disk, node);
+  if size == NO_DISK_FILE || off >= size || off >= 0x1000000000000 {
+    return 0;
+  }
+  let lim = smaller(want, size - off);
+  let f = NFILES + node;
+  let mut done = 0;
+  let mut go = true;
+  while go && done < lim
+    invariant done <= lim && lim <= want && off < 0x1000000000000 && kok(k)
+  {
+    let a = off + done;
+    let m = page_chunk(a, lim - done);
+    let got = pc_page_to_user(&mut k.fs.pc, &mut k.spaces, &mut k.mem, k.anon, pid, f, a / 4096, a % 4096, va + done, m);
+    done = done + got;
+    if got < m {
+      go = false;
+    }
+  }
+  return done;
+}
+
+/// read(2) of up to `want` bytes of RAM file f from offset `off`, straight
+/// from the file's pages to the process's, with no staging buffer between
+/// them. Returns how many bytes it copied: it stops at the end of the file,
+/// a hole, or a user page it cannot write, and the staged read goes on from
+/// there.
+fn ram_read_direct(k: &mut Kernel, pid: u64, f: u64, off: u64, va: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC && f < NFILES && want <= READ_MAX && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX
+  ensures kok(k)
+  ensures result <= want
+{
+  let mut done = 0;
+  match take_node(&mut k.fs.ram, f) {
+    Node::Free => {},
+    Node::File(g0) => {
+      let mut g = g0;
+      if off < g.size {
+        let lim = smaller(want, g.size - off);
+        let mut go = true;
+        while go && done < lim
+          invariant done <= lim && lim <= want && file_ok(g) && kok(k) && slot_free(k.fs.ram, f)
+        {
+          let a = off + done;
+          let m = page_chunk(a, lim - done);
+          let got = ram_page_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, &mut g.pages, a / 4096, a % 4096, va + done, m);
+          done = done + got;
+          if got < m {
+            go = false;
+          }
+        }
+      }
+      put_node(&mut k.fs.ram, f, Node::File(g));
+    },
+  }
+  return done;
+}
+
 /// read from the file open on native row `row`: up to READ_MAX bytes, a
 /// transfer buffer at a time, so a regular file is not read short (as
 /// programs expect of one, and the JDK's jimage reader takes the count for
@@ -1806,6 +1951,26 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   let want = smaller(n, READ_MAX);
   let start = vfs_offset(k.fs, row);
   let mut done = 0;
+  if want > 0 && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX && fget(k.fs.ftab, row, FD_FS) == FS_RAM && fget(k.fs.ftab, row, FD_MODE) / O_READ % 2 == 1 {
+    // A RAM file nothing has cached: its pages go to the process's pages in
+    // one copy each (src/ramfs.bastio holds them as pages).
+    let node = fget(k.fs.ftab, row, FD_NODE);
+    if node < NFILES {
+      let f = vfs_target(&mut k.fs, node);
+      if f < NFILES && !pc_any(k.fs.pc, f) {
+        done = ram_read_direct(&mut k, pid, f, start, va, want);
+        vfs_advance(&mut k.fs, row, start, done);
+      }
+    }
+  }
+  if want > 0 && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX && fget(k.fs.ftab, row, FD_FS) == FS_DISK && fget(k.fs.ftab, row, FD_MODE) / O_READ % 2 == 1 && pc_on(k.fs.pc) {
+    // A disk file whose pages the cache holds: the same, from the cache.
+    let node = fget(k.fs.ftab, row, FD_NODE);
+    if node < DSLOTS {
+      done = disk_read_direct(&mut k, pid, node, start, va, want);
+      vfs_advance(&mut k.fs, row, start, done);
+    }
+  }
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
   {

@@ -704,7 +704,11 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
   } else if kind == OF_NETLINK {
     nic_nl_close(&mut k.nic, x);           // src/rtnl.bastio
   } else if kind == OF_TCP && x < TCBS {
-    tcp_close(&mut k.nic, x);               // sends the FIN after what is buffered
+    if sock_linger0(k, h) {
+      tcp_reset_close(&mut k.nic, x);       // SO_LINGER {1, 0}: a reset, and the buffered data is dropped
+    } else {
+      tcp_close(&mut k.nic, x);             // sends the FIN after what is buffered
+    }
   } else if kind == OF_TIMER && x < TFD_N {
     evs(&mut k, x * TFD_STRIDE, 0);  // the timer is free again
   } else if kind == OF_EPOLL && x < EP_N {

@@ -120,6 +120,19 @@ int main(void) {
 
     EXPECT("PR_SET_DUMPABLE and PR_GET_DUMPABLE", prctl(PR_SET_DUMPABLE, 1, 0, 0, 0) == 0 && prctl(PR_GET_DUMPABLE, 0, 0, 0, 0) == 1);
 
+    // close with SO_LINGER {1, 0} resets the connection: the peer's read is
+    // ECONNRESET (Node's socket.resetAndDestroy()); a plain close is end of file.
+    EXPECT("close with SO_LINGER {1, 0} resets the peer: its read is ECONNRESET", ({
+           int c2 = -1, s2 = -1; struct linger lg = {1, 0}; char rb[16];
+           int ok = tcp_pair(&c2, &s2) && setsockopt(s2, SOL_SOCKET, SO_LINGER, &lg, sizeof lg) == 0;
+           close(s2); long r = ok ? read(c2, rb, sizeof rb) : 0; int e = errno; close(c2);
+           ok && r == -1 && e == ECONNRESET; }));
+    EXPECT("a close with SO_LINGER {1, 5} is an ordinary close: the peer reads end of file", ({
+           int c2 = -1, s2 = -1; struct linger lg = {1, 5}; char rb[16];
+           int ok = tcp_pair(&c2, &s2) && setsockopt(s2, SOL_SOCKET, SO_LINGER, &lg, sizeof lg) == 0;
+           close(s2); long r = ok ? read(c2, rb, sizeof rb) : -1; close(c2);
+           ok && r == 0; }));
+
     // The waits a server sits in: they end on time, on input from another
     // process, and on a signal.
     struct timespec t0;

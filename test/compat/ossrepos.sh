@@ -126,5 +126,6 @@ nm() {  # NAME URL TAG RUNNER
 nm mri https://github.com/lukeed/mri v1.2.0 tape@4.13.3
 nm debug https://github.com/debug-js/debug 4.3.7 "mocha@10.8.2 sinon@14.0.2"
 nm express https://github.com/expressjs/express 4.21.1 "mocha@10.2.0 supertest@6.3.0 after@0.8.2 connect-redis@3.4.2 cookie-parser@1.4.6 cookie-session@2.0.0 ejs@3.1.9 express-session@1.17.2 hbs@4.2.0 marked@0.7.0 method-override@3.0.0 morgan@1.10.0 pbkdf2-password@1.2.1 vhost@3.0.2"
+nm ws https://github.com/websockets/ws 8.18.0 "mocha@10.2.0"
 
 tb nanoid https://github.com/ai/nanoid 5.0.7
