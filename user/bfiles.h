@@ -15,7 +15,9 @@
  * "bfiles: not found") and Ctrl-G goes to a line number ("bfiles: line N"); the header shows
  * the line the cursor is on. "bfiles /path/to/file" opens the file in the viewer.
  * In the list n makes an empty file (untitled, untitled2, ...) and opens it
- * in the editor. The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
+ * in the editor; c or x marks the entry under the cursor to copy (a file) or move (a file or
+ * directory) and v puts it into the directory shown ("bfiles: copy PATH", "bfiles: move PATH",
+ * then "bfiles: copied SRC to DST" or "bfiles: moved SRC to DST"). The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
  * window is open and "bfiles: dir PATH" or "bfiles: view PATH" as it
  * moves.
  * It is part of the bterm program, which runs it when started as "bfiles"
@@ -505,25 +507,30 @@ static void bf_rename_key(int c)
     }
 }
 
-/* c in the viewer: copies the file shown to "NAME.copy" ("NAME.copy2", ...)
- * next to it. */
-static void bf_copy_file(void)
+/* Copies SRC into the directory DIR under its own name, or "NAME.copy" ("NAME.copy2", ...) when
+ * that is taken. Says "bfiles: copied SRC to DST"; returns 0 if it did. */
+static int bf_copy_into(const char *src, const char *dir)
 {
-    int in = open(bf_vpath, O_RDONLY);
+    int in = open(src, O_RDONLY);
     if (in < 0)
-        return;
+        return -1;
+    const char *base = strrchr(src, '/');
+    base = base ? base + 1 : src;
+    const char *sep = strcmp(dir, "/") == 0 ? "" : "/";
     char to[PATH_MAX];
     int out = -1;
-    for (int i = 1; i < 100 && out < 0; i++) {
-        if (i == 1)
-            snprintf(to, sizeof to, "%s.copy", bf_vpath);
+    for (int i = 0; i < 100 && out < 0; i++) {
+        if (i == 0)
+            snprintf(to, sizeof to, "%s%s%s", dir, sep, base);
+        else if (i == 1)
+            snprintf(to, sizeof to, "%s%s%s.copy", dir, sep, base);
         else
-            snprintf(to, sizeof to, "%s.copy%d", bf_vpath, i);
+            snprintf(to, sizeof to, "%s%s%s.copy%d", dir, sep, base, i);
         out = open(to, O_WRONLY | O_CREAT | O_EXCL, 0644);
     }
     if (out < 0) {
         close(in);
-        return;
+        return -1;
     }
     char buf[4096];
     ssize_t n;
@@ -537,10 +544,73 @@ static void bf_copy_file(void)
     close(out);
     if (bad || n < 0) {
         unlink(to);
-        printf("bfiles: cannot copy %s\n", bf_vpath);
+        printf("bfiles: cannot copy %s\n", src);
+        fflush(stdout);
+        return -1;
+    }
+    printf("bfiles: copied %s to %s\n", src, to);
+    fflush(stdout);
+    bf_stale = 1;
+    return 0;
+}
+
+/* c in the viewer: copies the file shown to "NAME.copy" ("NAME.copy2", ...)
+ * next to it. */
+static void bf_copy_file(void)
+{
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", bf_vpath);
+    char *sl = strrchr(dir, '/');
+    if (sl == NULL)
+        return;
+    if (sl == dir)
+        sl[1] = 0;
+    else
+        *sl = 0;
+    bf_copy_into(bf_vpath, dir);
+}
+
+/* c or x in the list: marks the entry under the cursor to be copied (c) or moved (x) by the next v. */
+static char bf_clip[PATH_MAX];
+static int bf_clip_move;
+
+static void bf_mark(int move)
+{
+    if (bf_sel <= 0 || bf_sel >= bf_nent)
+        return;
+    bf_path_of(bf_ents[bf_sel].name, bf_clip, sizeof bf_clip);
+    bf_clip_move = move;
+    printf("bfiles: %s %s\n", move ? "move" : "copy", bf_clip);
+    fflush(stdout);
+}
+
+/* v in the list: copies the marked file here, or moves the marked file or directory here (never
+ * over a name that is taken). */
+static void bf_paste(void)
+{
+    if (bf_clip[0] == 0)
+        return;
+    if (!bf_clip_move) {
+        struct stat st;
+        if (stat(bf_clip, &st) != 0 || S_ISDIR(st.st_mode)) {
+            printf("bfiles: cannot copy %s\n", bf_clip);
+            fflush(stdout);
+            return;
+        }
+        if (bf_copy_into(bf_clip, bf_cwd) == 0)
+            bf_load_dir();
+        return;
+    }
+    const char *base = strrchr(bf_clip, '/');
+    char to[PATH_MAX];
+    bf_path_of(base ? base + 1 : bf_clip, to, sizeof to);
+    struct stat st;
+    if (lstat(to, &st) == 0 || rename(bf_clip, to) != 0) {
+        printf("bfiles: cannot move %s\n", bf_clip);
     } else {
-        printf("bfiles: copied %s to %s\n", bf_vpath, to);
-        bf_stale = 1;
+        printf("bfiles: moved %s to %s\n", bf_clip, to);
+        bf_clip[0] = 0;
+        bf_load_dir();
     }
     fflush(stdout);
 }
@@ -854,6 +924,12 @@ static int bfiles_main(int argc, char **argv)
                 bf_renaming = 1;
             } else if (c == 'c' && bf_viewing)
                 bf_copy_file();
+            else if (c == 'c' && !bf_viewing)
+                bf_mark(0);
+            else if (c == 'x' && !bf_viewing)
+                bf_mark(1);
+            else if (c == 'v' && !bf_viewing)
+                bf_paste();
             else if (c == 'i' && bf_viewing)
                 bf_spawn("bview", bf_vpath, "image");
             else if (c == 'e' && bf_viewing)
