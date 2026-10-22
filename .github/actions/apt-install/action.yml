@@ -1,0 +1,59 @@
+name: Install apt packages
+description: >
+  Installs packages from a cache of the .deb files (the closure that the
+  runner image lacks), so a job does not wait on the Ubuntu mirror, which
+  takes from half a minute to a quarter of an hour. A miss installs from the
+  mirror as before and saves the files for the next job.
+inputs:
+  packages:
+    description: Space-separated package names.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Speed up dpkg
+      shell: bash
+      run: |
+        # The runner is thrown away, so dpkg need not fsync, and man-db's
+        # index rebuild after each install is wasted time.
+        echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/unsafe-io >/dev/null
+        echo 'man-db man-db/auto-update boolean false' | sudo debconf-set-selections
+    - name: Key the package cache
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        sum=$(echo "$PACKAGES" | tr ' ' '\n' | grep . | sort -u | sha256sum | cut -c1-16)
+        echo "key=apt-${ImageVersion:-none}-$sum" >> "$GITHUB_OUTPUT"
+    - name: Restore the package files
+      id: debs
+      uses: actions/cache/restore@v4
+      with:
+        key: ${{ steps.key.outputs.key }}
+        path: ${{ runner.temp }}/apt-debs
+    - name: Install the packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        DEBS: ${{ runner.temp }}/apt-debs
+      run: |
+        if [ "${{ steps.debs.outputs.cache-hit }}" = true ] && ls "$DEBS"/*.deb >/dev/null 2>&1 \
+           && sudo apt-get install -y --no-download "$DEBS"/*.deb; then
+          echo "from the cache"
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        sudo apt-get update
+        sudo apt-get install -y --download-only $PACKAGES
+        mkdir -p "$DEBS"
+        rm -f "$DEBS"/*.deb
+        cp /var/cache/apt/archives/*.deb "$DEBS"/
+        sudo apt-get install -y $PACKAGES
+    - name: Save the package files
+      if: steps.install.outputs.saved != 'true'
+      uses: actions/cache/save@v4
+      with:
+        key: ${{ steps.key.outputs.key }}
+        path: ${{ runner.temp }}/apt-debs
