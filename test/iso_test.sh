@@ -963,6 +963,28 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The desktop has an icon for each launcher entry; a click on one starts the program.
+        mark = len(out)
+        q.stdin.write(b"bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            at = (96 * w + 48) * 3                                 # the middle of the Files tile
+            good = tuple(px[at:at + 3]) == (230, 180, 40)
+            print(("ok  " if good else "FAIL"), f"({name}) the desktop shows an icon for each launcher entry")
+            fails += not good
+            monitor("mouse_move -464 -288")                        # onto the Files icon
+            monitor("mouse_button 1", "mouse_button 0")
+            good = until(b"bfiles: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a click on a desktop icon starts its program")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # A line of /etc/bwm.menu adds a launcher entry that runs its command in a terminal window.
         mark = len(out)
         q.stdin.write(b"printf 'Say=echo menu-ok > /tmp/mm.out\\n' > /etc/bwm.menu; bwm -n\r"); q.stdin.flush()
