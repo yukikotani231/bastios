@@ -287,6 +287,60 @@ static void be_move_rows(int by)
     bf_cur = bf_erow[r] + (col < n ? col : n);
 }
 
+/* Undo (Ctrl-Z): before an edit the text and cursor are kept, but a run of the same kind of edit (typing,
+ * backspacing) with no cursor move between is kept once, so one Ctrl-Z undoes the run. The last
+ * BE_UNDO_MAX are kept. */
+#define BE_UNDO_MAX 16
+static struct { char *text; size_t len, cur; } be_undo[BE_UNDO_MAX];
+static int be_nundo, be_ulast;
+
+static void be_undo_clear(void)
+{
+    while (be_nundo > 0)
+        free(be_undo[--be_nundo].text);
+    be_ulast = 0;
+}
+
+/* Called before an edit of KIND (1 typing, 2 backspace, 3 anything else, which is always kept). */
+static void be_undo_push(int kind)
+{
+    if (kind == be_ulast && kind != 3)
+        return;
+    be_ulast = kind;
+    char *t = malloc(bf_vlen + 1);
+    if (!t)
+        return;
+    memcpy(t, bf_vtext, bf_vlen + 1);
+    if (be_nundo == BE_UNDO_MAX) {
+        free(be_undo[0].text);
+        memmove(&be_undo[0], &be_undo[1], sizeof be_undo[0] * (BE_UNDO_MAX - 1));
+        be_nundo--;
+    }
+    be_undo[be_nundo].text = t;
+    be_undo[be_nundo].len = bf_vlen;
+    be_undo[be_nundo].cur = bf_cur;
+    be_nundo++;
+}
+
+/* Ctrl-Z: puts back the text as it was before the last edit (or run of edits). */
+static void be_undo_pop(void)
+{
+    be_ulast = 0;
+    if (be_nundo == 0) {
+        puts("bfiles: nothing to undo");
+        fflush(stdout);
+        return;
+    }
+    be_nundo--;
+    memcpy(bf_vtext, be_undo[be_nundo].text, be_undo[be_nundo].len + 1);
+    bf_vlen = be_undo[be_nundo].len;
+    bf_cur = be_undo[be_nundo].cur;
+    free(be_undo[be_nundo].text);
+    bf_modified = 1;
+    puts("bfiles: undo");
+    fflush(stdout);
+}
+
 static void be_insert(unsigned char c)
 {
     if (bf_vlen + 1 >= BF_VIEWMAX)
@@ -377,6 +431,7 @@ static void be_goto_line(void)
 /* A key typed at the find or goto-line prompt. */
 static void be_prompt_key(int c)
 {
+    be_ulast = 0;
     if (c == 27) {
         bf_eprompt = 0;
         bf_esc = 1;
@@ -425,6 +480,7 @@ static void be_start(void)
     }
     bf_editing = 1;
     bf_modified = 0;
+    be_undo_clear();
     bf_eprompt = 0;
     bf_cur = 0;
     bf_etop = 0;
@@ -763,6 +819,8 @@ static void be_key(int c)
         }
         int num = bf_esc == 3 ? bf_escnum : 0;
         bf_esc = 0;
+        be_ulast = 0;
+        if (c == '~' && num == 3) be_undo_push(3);
         if (c == 'A') be_move_rows(-1);
         else if (c == 'B') be_move_rows(1);
         else if (c == 'C') { if (bf_cur < bf_vlen) bf_cur++; }
@@ -782,24 +840,34 @@ static void be_key(int c)
         be_save();
     } else if (c == 24) {
         bf_editing = 0;
+        be_undo_clear();
         bf_load_file(bf_vpath);
     } else if (c == 6 || c == 7) {
         bf_eprompt = c == 6 ? 'f' : 'g';
         bf_ebuf[0] = 0;
         bf_ebn = 0;
+    } else if (c == 26) {
+        be_undo_pop();
     } else if (c == 11) {
+        be_undo_push(3);
         be_cut_line();
     } else if (c == 21) {
+        be_undo_push(3);
         be_paste_kill();
     } else if (c == 127 || c == 8) {
-        if (bf_cur > 0)
+        if (bf_cur > 0) {
+            be_undo_push(2);
             be_delete(--bf_cur);
+        }
     } else if (c == '\n' || c == '\r') {
+        be_undo_push(3);
         be_insert('\n');
     } else if (c == '\t') {
+        be_undo_push(3);
         for (int i = 0; i < 4; i++)
             be_insert(' ');
     } else if (c >= 32 && c < 127) {
+        be_undo_push(1);
         be_insert(c);
     }
 }
@@ -809,6 +877,7 @@ static void be_click(int row, int x)
     int r = bf_etop + row - 1;
     if (row < 1)
         return;
+    be_ulast = 0;
     if (r >= bf_nerow) r = bf_nerow - 1;
     size_t col = x / BF_CW, n = be_row_len(r);
     bf_cur = bf_erow[r] + (col < n ? col : n);
