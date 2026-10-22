@@ -463,6 +463,42 @@ static struct win *bar_window(int x)
     return NULL;
 }
 
+/* Desktop icons: one for each launcher entry but Hello window and Quit bwm, in a column at the left. */
+#define ICON_X 12
+#define ICON_Y0 12
+#define ICON_W 72
+#define ICON_H 64
+#define ICON_MAX 8
+static uint32_t icon_colour(int i)
+{
+    static const uint32_t c[] = { 0x001E1E1E, 0x00E6B428, 0x003CA05A };
+    return i < 3 ? c[i] : 0x009658C8;
+}
+
+/* The icon at (x, y), or -1; no more icons than fit above the task bar. */
+static int icon_at(int x, int y)
+{
+    int n = menu_n - 2 < ICON_MAX ? menu_n - 2 : ICON_MAX;
+    if (x < ICON_X || x >= ICON_X + ICON_W || y < ICON_Y0)
+        return -1;
+    int i = (y - ICON_Y0) / ICON_H;
+    return i < n && ICON_Y0 + (i + 1) * ICON_H <= (int)H - BAR_H ? i : -1;
+}
+
+static void draw_icons(void)
+{
+    int n = menu_n - 2 < ICON_MAX ? menu_n - 2 : ICON_MAX;
+    for (int i = 0; i < n; i++) {
+        int x = ICON_X, y = ICON_Y0 + i * ICON_H;
+        if (y + ICON_H > (int)H - BAR_H)
+            break;
+        fill(scene, x + 16, y + 4, x + 56, y + 36, icon_colour(i));
+        char lab[9];
+        snprintf(lab, sizeof lab, "%.8s", menu_label[i]);
+        text(scene, x + (ICON_W - (int)strlen(lab) * CELL_W) / 2, y + 42, lab, rgb(255, 255, 255));
+    }
+}
+
 static void draw_scene(void)
 {
     for (unsigned y = 0; y < H; y++) {
@@ -470,6 +506,7 @@ static void draw_scene(void)
         for (unsigned x = 0; x < W; x++)
             scene[y * W + x] = c;
     }
+    draw_icons();
     for (int i = 0; i < nz; i++)
         if (!z[i]->hidden)
             draw_win(z[i], z[i] == focus());
@@ -1137,6 +1174,24 @@ static void launch_command(const char *cmd)
     }
 }
 
+/* Starts menu entry IT; returns 1 for Quit bwm. */
+static int launch_entry(int it)
+{
+    if (it == 0)
+        launch_terminal();
+    else if (it == 1)
+        launch_program("bfiles", "bterm");
+    else if (it == 2)
+        launch_program("bsys", "bterm");
+    else if (it >= 3 && it < menu_n - 2)
+        launch_command(menu_cmd[it - 3]);
+    else if (it == menu_n - 2)
+        launch_program("bhello", "bhello");
+    else if (it == menu_n - 1)
+        return 1;
+    return 0;
+}
+
 /* Gives one typed byte to the focused window; returns 1 for Ctrl-Q. */
 static int type_byte(struct win *top, char c)
 {
@@ -1413,17 +1468,7 @@ int main(int argc, char **argv)
                     int it = menu_at(mx, my);            /* a click chooses an entry or, anywhere else, closes the menu */
                     menu_open = 0;
                     touch_all();
-                    if (it == 0)
-                        launch_terminal();
-                    else if (it == 1)
-                        launch_program("bfiles", "bterm");
-                    else if (it == 2)
-                        launch_program("bsys", "bterm");
-                    else if (it >= 3 && it < menu_n - 2)
-                        launch_command(menu_cmd[it - 3]);
-                    else if (it == menu_n - 2)
-                        launch_program("bhello", "bhello");
-                    else if (it == menu_n - 1)
+                    if (launch_entry(it))
                         running = 0;
                     buttons = m[0];
                     continue;
@@ -1498,6 +1543,9 @@ int main(int argc, char **argv)
                             drag = NULL;
                         }
                     }
+                } else if (down && !(buttons & 1) && !in_bar && icon_at(mx, my) >= 0) {
+                    if (launch_entry(icon_at(mx, my)))
+                        running = 0;
                 } else if (!down) {
                     drag = NULL;
                     if (sizing && !sizing->pend)
