@@ -239,29 +239,38 @@ fn pc_find(c: &PCache, h: u64, pg: u64) -> u64
   requires pc_ok(c)
   ensures result < PC_N || result == PC_NONE
 {
+  return pc_find_in(c.keys, c.link, h, pg);
+}
+
+/// pc_find on the two index tables alone, for a caller that holds the
+/// cache's page table out of it.
+fn pc_find_in(keys: &Buf, link: &Buf, h: u64, pg: u64) -> u64
+  requires len(keys) == PCK_LEN && len(link) == PC_LK
+  ensures result < PC_N || result == PC_NONE
+{
   if h >= PC_NONE - 1 {
     return PC_NONE;
   }
   let k = pc_key(h, pg);
   if k != PC_NONE {
-    let mut j = get(c.link, pc_bucket(k));
+    let mut j = get(link, pc_bucket(k));
     let mut steps = 0;
     while j != 0 && j <= PC_N && steps < PC_N
-      invariant pc_ok(c)
+      invariant len(keys) == PCK_LEN && len(link) == PC_LK
     {
-      if get(c.keys, 3 * (j - 1)) == h + 1 && get(c.keys, 3 * (j - 1) + 1) == pg {
+      if get(keys, 3 * (j - 1)) == h + 1 && get(keys, 3 * (j - 1) + 1) == pg {
         return j - 1;
       }
-      j = get(c.link, PC_B + j - 1);
+      j = get(link, PC_B + j - 1);
       steps = steps + 1;
     }
     return PC_NONE;
   }
   let mut i = 0;
   while i < PC_N
-    invariant i <= PC_N && pc_ok(c)
+    invariant i <= PC_N && len(keys) == PCK_LEN && len(link) == PC_LK
   {
-    if get(c.keys, 3 * i) == h + 1 && get(c.keys, 3 * i + 1) == pg {
+    if get(keys, 3 * i) == h + 1 && get(keys, 3 * i + 1) == pg {
       return i;
     }
     i = i + 1;
@@ -921,6 +930,53 @@ fn pc_map(l1: &mut PageTable, c: &mut PCache, slot: u64, i: u64, w: bool) -> boo
     },
   }
   return ok;
+}
+
+/// Maps up to n pages of file h, from page pg on, at slots i .. i + n of a
+/// process's level-1 table l1, stopping at the first one the cache does not
+/// hold (or, with `text`, that is not program text). Returns how many.
+/// A cached page is program text unless a MAP_SHARED mapping added it,
+/// which is the mark 2 in keys (pc_add), so no reference is taken to ask.
+fn pc_map_run(l1: &mut PageTable, c: &mut PCache, h: u64, pg: u64, i: u64, n: u64, w: bool, text: bool) -> u64
+  requires pt_level(l1) == 1 && i <= 512 && n <= 512 - i && pc_ok(c) && h < PC_NONE - 1 && pg <= 0xFFFFFFFFFFFFF
+  ensures pc_ok(c) && pt_level(l1) == 1
+  ensures result <= n
+{
+  let mut done = 0;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      let mut go = true;
+      let mut prev = 0;
+      while go && done < n
+        invariant done <= n && prev < PC_N && len(c.keys) == PCK_LEN && len(c.link) == PC_LK && pt_level(t) == 2 && pt_level(l1) == 1
+      {
+        // A file read in order fills consecutive slots: try the next one
+        // before the index.
+        let mut s = PC_NONE;
+        if done > 0 && prev + 1 < PC_N && get(c.keys, 3 * (prev + 1)) == h + 1 && get(c.keys, 3 * (prev + 1) + 1) == pg + done {
+          s = prev + 1;
+        } else {
+          s = pc_find_in(c.keys, c.link, h, pg + done);
+        }
+        if s >= PC_N || !pt_has(t, s / 512) {
+          go = false;
+        } else if text && get(c.keys, 3 * s + 2) == 2 {
+          go = false;                         // a MAP_SHARED mapping's page: the caller copies it
+        } else if pt_borrow(&mut t, s / 512, dup_l1, s % 512, &mut l1, i + done, w) {
+          if get(c.keys, 3 * s + 2) == 0 {
+            c.keys = set(c.keys, 3 * s + 2, 1);
+          }
+          prev = s;
+          done = done + 1;
+        } else {
+          go = false;
+        }
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return done;
 }
 
 fn text_l1(t: &mut PageTable, j: u64, m: &mut Mem) -> bool

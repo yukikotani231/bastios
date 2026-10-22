@@ -1565,6 +1565,8 @@ t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
 t_sock2: bytes sent before a message with descriptors are read first, and leave the descriptors for the recvmsg
 t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
 t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
+t_sock2: a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once
+t_sock2: TCP listeners that set SO_REUSEPORT share a port; one that did not is refused
 t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
@@ -1675,6 +1677,7 @@ apps: micropython: json, re, files, os
 apps: micropython: threads and a lock
 tty: epoll: keys reach a program waiting in epoll_wait on /dev/tty
 tty: kilo: edit and save a file
+tty: job control: Ctrl-Z stops the foreground group, not the shell
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
 tty: stty: the terminal is in canonical mode again after an editor

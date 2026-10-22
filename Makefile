@@ -539,7 +539,7 @@ CRUN_SHA256   ?= eaa2408dee92432d142d58317127b5974d39a8ad48689ba8b2eff8f74614f4b
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
-                 build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll \
+                 build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll build/compat/ttysusp \
                  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/rg
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
@@ -739,6 +739,10 @@ build/compat/micropython: | build/compat/src
 
 # A program that waits for keys in epoll_wait, as libuv does (test/compat/tty.txt).
 build/compat/ttyepoll: test/compat/progs/ttyepoll.c | build/compat
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
+# A job-control shell in miniature: Ctrl-Z stops its child (test/compat/tty.txt).
+build/compat/ttysusp: test/compat/progs/ttysusp.c | build/compat
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
 
 # kilo, a small editor that puts the terminal in raw mode (test/compat/tty.txt).
@@ -1049,7 +1053,7 @@ COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.i
 GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
 
-# Real open-source projects (zlib, Lua, LZ4, toml, semver, fastrand, itoa, either, testify, fzf, nanoid, debug, express) as git repositories the web
+# Real open-source projects (zlib, Lua, LZ4, toml, semver, fastrand, itoa, either, testify, fzf, nanoid, debug, express, Tornado) as git repositories the web
 # server serves, for alpine.txt to clone, build and test.
 build/compat/oss: test/compat/ossrepos.sh
 	test/compat/ossrepos.sh $@

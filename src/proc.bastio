@@ -439,7 +439,8 @@ const TT_SET: u64 = 4097;             // LINE_MAX + 2
 const TT0: u64 = 4098;
 const TERMIOS_SIZE: u64 = 36;         // the kernel's struct termios
 const TT_WS: u64 = 4134;              // TT0 + TERMIOS_SIZE: the window size TIOCSWINSZ set (rows + 65536 * columns + 2^32), or 0
-const LINE_LEN: u64 = 4135;           // TT_WS + 1
+const TT_FG: u64 = 4135;              // the group TIOCSPGRP made the console's foreground group, or 0
+const LINE_LEN: u64 = 4136;           // TT_FG + 1
 
 spec fn lineok(l: &Buf) -> bool {
   len(l) == LINE_LEN && get(l, 0) <= LINE_MAX && get(l, 1) <= 1

@@ -1004,6 +1004,7 @@ t_ovpivot: stat finds /bin/sh as a regular file
 t_ovpivot: lstat sees the link
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
+t_path: a name below a directory, a file or a link that replaced a directory
 t_path: a name ending in / or /. must be a directory
 t_path: a path in unmapped memory is EFAULT
 t_path: a set-group-ID bit at create is kept only for a member of the group
@@ -1381,6 +1382,8 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sock2: a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once
+t_sock2: TCP listeners that set SO_REUSEPORT share a port; one that did not is refused
 t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
@@ -1480,6 +1483,7 @@ t_userns: nor mounts in a mount namespace that another user namespace made
 t_userns: nor sets the hostname of a UTS namespace that another user namespace made
 t_userns: a user namespace made inside one mounts in a mount namespace of its own
 tty: kilo: edit and save a file
+tty: job control: Ctrl-Z stops the foreground group, not the shell
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
 tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
@@ -1550,6 +1554,7 @@ python: pip: build a C extension from source (setuptools, gcc) and import it
 python: pytest: the whole test suite of a real project (Jinja2's)
 python: pytest: the whole test suite of a second real project (Click's, without its pager tests)
 python: pytest: the whole test suite of a third real project (Flask's, without two tests that fail on Linux too)
+python: python: the test suite of a fourth real project (Tornado's socket tests: event loop, TCP client and server, child processes, HTTP server and client, WebSockets)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes

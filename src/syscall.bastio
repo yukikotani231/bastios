@@ -613,7 +613,7 @@ fn net_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
     if a == 0 {
       return NO_SOCK;                 // a listener nobody could find
     }
-    return tcp_listen(&mut k.nic, 0, a, FAM_V4);
+    return tcp_listen(&mut k.nic, 0, a, FAM_V4, false);
   }
   if n == SYS_TCP_ACCEPT {
     return tcp_accept(&mut k.nic, a);

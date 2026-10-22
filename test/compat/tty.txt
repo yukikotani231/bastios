@@ -51,6 +51,13 @@ $ /disk/ttyepoll /tmp/ct_e
 $ cat /tmp/ct_e; echo; rm /tmp/ct_e
 abcq
 
+== job control: Ctrl-Z stops the foreground group, not the shell
+$ /disk/ttysusp /tmp/ct_z
+> \x1a
+$ cat /tmp/ct_z; rm /tmp/ct_z
+stopped
+resumed
+
 == kilo: edit and save a file
 $ echo abc > /tmp/ct_k; /disk/kilo /tmp/ct_k
 > X\x1b[C\x1b[CY\rline2
