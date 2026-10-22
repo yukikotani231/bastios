@@ -1952,6 +1952,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.cwd);
   free(sys.k.croot);
   free(sys.k.dpath);
+  free(sys.k.cwdx);
+  free(sys.k.crootx);
+  free(sys.k.dpathx);
   free(sys.k.alarms);
   free(sys.k.maps);
   free(sys.k.holes);

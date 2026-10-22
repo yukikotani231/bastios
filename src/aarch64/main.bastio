@@ -797,6 +797,9 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.cwd);
   free(s.k.croot);
   free(s.k.dpath);
+  free(s.k.cwdx);
+  free(s.k.crootx);
+  free(s.k.dpathx);
   free(s.k.alarms);
   free(s.k.maps);
   free(s.k.holes);

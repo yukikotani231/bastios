@@ -67,6 +67,42 @@ static int long_paths(void) {
     return ok && chdir(here) == 0;
 }
 
+/* A path of a few thousand bytes (PATH_MAX is 4096) made of components below NAME_MAX: made, used, and removed again; a component of 256 bytes is ENAMETOOLONG. */
+static int deep_paths(void) {
+    enum { L = 100, N = 30 };
+    static char comp[L + 1], full[PATH_MAX + 16], cwd[PATH_MAX + 16], base[PATH_MAX + 16], nm[300];
+    struct stat st;
+    if (!getcwd(base, sizeof base) || strlen(base) + N * (L + 1) + 8 >= PATH_MAX) return 1;   /* not enough room under here: skip */
+    memset(comp, 'd', L);
+    size_t len = 0;
+    int ok = 1;
+    for (int i = 0; i < N && ok; i++) {
+        if (len) full[len++] = '/';
+        memcpy(full + len, comp, L);
+        len += L;
+        full[len] = 0;
+        ok = mkdir(full, 0755) == 0;
+    }
+    ok = ok && len > 3000 && stat(full, &st) == 0 && S_ISDIR(st.st_mode);
+    strcat(full, "/f");
+    int fd = ok ? open(full, O_CREAT | O_WRONLY, 0644) : -1;
+    ok = ok && fd >= 0 && write(fd, "deep", 4) == 4 && close(fd) == 0 && stat(full, &st) == 0 && st.st_size == 4;
+    full[len] = 0;
+    ok = ok && chdir(full) == 0 && getcwd(cwd, sizeof cwd) && strlen(cwd) == (strcmp(base, "/") ? strlen(base) : 0) + 1 + len
+        && stat("f", &st) == 0 && chdir(base) == 0;
+    memset(nm, 'n', 256); nm[256] = 0;
+    ok = ok && mkdir(nm, 0755) == -1 && errno == ENAMETOOLONG;
+    nm[255] = 0;
+    ok = ok && mkdir(nm, 0755) == 0 && rmdir(nm) == 0;
+    full[len] = '/'; full[len + 1] = 'f'; full[len + 2] = 0;
+    ok = ok && unlink(full) == 0;
+    for (int i = N; i > 0; i--) {
+        full[i * (L + 1) - 1] = 0;
+        ok = ok && rmdir(full) == 0;
+    }
+    return ok;
+}
+
 static int loop_is_eloop(void) {
     static char p[64 * 8];
     struct stat st;
@@ -263,6 +299,7 @@ int main(void) {
     EXPECT("a path in unmapped memory is EFAULT", unreadable_is_efault());
     EXPECT("an empty path is ENOENT, except with AT_EMPTY_PATH", empty_is_enoent());
     EXPECT("paths are read up to PATH_MAX", long_paths());
+    EXPECT("a path of 3000 bytes works; a component of 256 bytes is ENAMETOOLONG", deep_paths());
     EXPECT("a loop of links through a long path is ELOOP", loop_is_eloop());
     EXPECT("pread and pwrite take no negative offset", offsets());
     EXPECT("fstat of a directory gives its mode", fstat_dir());
