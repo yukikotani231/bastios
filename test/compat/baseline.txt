@@ -1557,6 +1557,7 @@ python: pytest: the whole test suite of a real project (Jinja2's)
 python: pytest: the whole test suite of a second real project (Click's, without its pager tests)
 python: pytest: the whole test suite of a third real project (Flask's, without two tests that fail on Linux too)
 python: python: the test suite of a fourth real project (Tornado's socket tests: event loop, TCP client and server, child processes, HTTP server and client, WebSockets)
+python: pytest: pytest's own tests for capture, temporary directories, paths and conftest files (without one test of a 250-byte name)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes

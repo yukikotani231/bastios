@@ -58,6 +58,11 @@ $ bb chroot /disk/a /bin/sh -c 'python3 -m venv /root/vf && . /root/vf/bin/activ
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O - HOSTURL/wheels/tornado-6.6.tar.gz | tar xz && cd tornado-6.6 && wget -q -O /tmp/tornado_tests.py HOSTURL/pyprogs/tornado_tests.py && python3 /tmp/tornado_tests.py 2>&1 | cut -c1-110'
 Ran 411 tests
 OK
+== pytest: pytest's own tests for capture, temporary directories, paths and conftest files (without one test of a 250-byte name)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c 'python3 -m venv /root/vp && . /root/vp/bin/activate && pip install -q "pytest<9" setuptools 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pytest-8.4.2.tar.gz | tar xz && cd pytest-8.4.2 && python -m pytest -q -p no:cacheprovider --deselect testing/test_pathlib.py::test_long_path_during_cleanup testing/test_capture.py testing/test_tmpdir.py testing/test_pathlib.py testing/test_faulthandler.py testing/test_conftest.py 2>&1 | tail -n 1 | sed "s/ in .*//"'
+339 passed, 6 skipped, 1 deselected, 1 xfailed
+
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0
