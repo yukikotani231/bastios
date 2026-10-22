@@ -485,6 +485,51 @@ fn w_write(l3: &mut PageTable, a: u64, buf: &Bytes, k: u64, m: u64) -> bool
   return pt_borrow(&mut l3, t, l2_write, o, buf, k, m);
 }
 
+/// Copies src[s .. s + m] to offset o of page f.
+fn frame_to_page(f: &mut Frame, o: u64, src: &Frame, s: u64, m: u64)
+  requires o + m <= 4096 && s + m <= 4096
+{
+  frame_to_frame(&mut f, o, src, s, m);
+}
+
+fn l1_write_fr(l1: &mut PageTable, i: u64, o: u64, src: &Frame, s: u64, m: u64) -> bool
+  requires pt_level(l1) == 1 && i < 512 && o + m <= 4096 && s + m <= 4096
+{
+  if !pt_has(l1, i) || !pt_writable(l1, i) {
+    return false;
+  }
+  pt_borrow_frame(&mut l1, i, frame_to_page, o, src, s, m);
+  return true;
+}
+
+fn l2_write_fr(l2: &mut PageTable, a: u64, src: &Frame, s: u64, m: u64) -> bool
+  requires pt_level(l2) == 2 && a < L2_SIZE && a % 4096 + m <= 4096 && s + m <= 4096
+  ensures pt_level(l2) == 2
+{
+  let p = a / 4096;
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  return pt_borrow(&mut l2, t, l1_write_fr, p % 512, a % 4096, src, s, m);
+}
+
+/// w_write from another page: copies src[s .. s + m] to window offset a
+/// (all on one page), with no buffer in between. False if the page is not
+/// mapped, or mapped read-only.
+fn w_write_fr(l3: &mut PageTable, a: u64, src: &Frame, s: u64, m: u64) -> bool
+  requires pt_level(l3) == 3 && a < USER_SIZE && a % 4096 + m <= 4096 && s + m <= 4096
+  ensures pt_level(l3) == 3
+{
+  let t = a / L2_SIZE;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let o = a - t * L2_SIZE;
+  assert o < L2_SIZE && o % 4096 == a % 4096;
+  return pt_borrow(&mut l3, t, l2_write_fr, o, src, s, m);
+}
+
 fn frame_byte(f: &mut Frame, o: u64) -> u64
   requires o < 4096
   ensures result <= 255

@@ -1348,6 +1348,28 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
   return true;
 }
 
+/// close with SO_LINGER {1, 0}: an established connection (or one that
+/// already got the peer's FIN) is dropped with a reset, and what is still
+/// buffered is lost, as on Linux. Any other state closes as tcp_release does.
+fn tcp_abort(n: &mut Net, t: u64) -> bool
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  tcb_enter(&mut n, t);
+  if !tcb_held(n, t) {
+    return false;
+  }
+  let st = tw(n, t, W_STATE);
+  if st == T_ESTABLISHED || st == T_CLOSE_WAIT || st == T_FIN_WAIT_1 || st == T_FIN_WAIT_2 {
+    tcp_emit(&mut n, t, TF_RST + TF_ACK, twb(n, t, W_NXT, SEQ_MOD), 0, 0);
+    tset(&mut n, t, W_HELD, 0);
+    tset(&mut n, t, W_PARENT, TCBS);
+    tcb_close(&mut n, t, false);
+    return true;
+  }
+  return tcp_release(&mut n, t);
+}
+
 /// Listener lis stops: the connections that came in on it and were never
 /// accepted close (their FIN after anything buffered), and no longer name
 /// it, so a new listener in its slot does not hand them out.
@@ -1601,6 +1623,20 @@ fn tcp_close(c: &mut Nic, t: u64) -> bool
     Nic::None => { c = Nic::None; return false; },
     Nic::Up(mut n) => {
       let r = tcp_release(&mut n, t);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn tcp_reset_close(c: &mut Nic, t: u64) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return false; },
+    Nic::Up(mut n) => {
+      let r = tcp_abort(&mut n, t);
       c = Nic::Up(n);
       return r;
     },
