@@ -24,7 +24,7 @@ const LX_SYMLINK: u64 = 88;
 const LX_LINKAT: u64 = 265;
 const LX_SYMLINKAT: u64 = 266;
 const LINK_HOPS: u64 = 8;
-const SPLICE: u64 = 4096;            // 2 * PATH_OUT: a link's directory, its target and the rest
+const SPLICE: u64 = 1024;             // 2 * PATH_OUT: a link's directory, its target and the rest
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 
 /// Normalizes src[..sl] into dst: empty parts and "." dropped, ".." going

@@ -111,7 +111,7 @@ const OI_NONE: u64 = 0;                   // MNS_INTENT: the lookup only reads
 const OI_WRITE: u64 = 1;                  // it makes or changes the file: copy it up, make its directories
 const OI_REMOVE: u64 = 2;                 // it removes the file: see where it is (ovl_pending)
 const OI_RENAME: u64 = 3;                 // it is the source of a rename: copied up, unless it is a directory
-const STASH: u64 = 1024 + MT_N * 2048;      // where k.mstr keeps the path ovl_stash kept
+const STASH: u64 = 256 + MT_N * 512;      // where k.mstr keeps the path ovl_stash kept
 const LSTR: u64 = 0x100000;               // positions one layer takes in a merged directory
 
 /// Where layer li's path starts in an overlay's source at k.mstr[at..],
@@ -1608,7 +1608,7 @@ fn ovl_rest(k: &mut Kernel, pid: u64, h: u64, p: &mut Bytes) -> u64
   while i < n
     invariant i <= n && n <= FNAME_MAX && blen(lp) == PATH_OUT && h < OFD_N && kok(k)
   {
-    bset(&mut lp, i, cast[u8](pbyte(k.dpath, h, i) % 256));
+    bset(&mut lp, i, cast[u8](wget(k.dpath, h * CWD_STRIDE + 1 + i) % 256));
     i = i + 1;
   }
   let e = ns_find(k, ns_of(k, pid), lp, n);
@@ -2108,7 +2108,7 @@ fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
   while i < n
     invariant i <= n && n <= FNAME_MAX && at + n <= blen(s) && len(t) <= CWD_LEN && row < NPROC
   {
-    if pbyte(t, row, i) != cast[u64](bget(s, at + i)) {
+    if wget(t, row * CWD_STRIDE + 1 + i) != cast[u64](bget(s, at + i)) {
       return false;
     }
     i = i + 1;
@@ -2128,7 +2128,7 @@ fn dname_is(k: &Kernel, h: u64, s: &Bytes, n: u64) -> bool
   while i < n
     invariant i <= n && n <= FNAME_MAX && n <= blen(s) && h < OFD_N
   {
-    if pbyte(k.dpath, h, i) != cast[u64](bget(s, i)) {
+    if wget(k.dpath, h * CWD_STRIDE + 1 + i) != cast[u64](bget(s, i)) {
       return false;
     }
     i = i + 1;
@@ -2157,7 +2157,7 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= FNAME_MAX && blen(orl) == MS_ROW && kok(k) && pid < NPROC
   {
-    bset(&mut orl, i, cast[u8](pbyte(k.croot, pid, i) % 256));
+    bset(&mut orl, i, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256));
     i = i + 1;
   }
   let ol = ns_tr(&mut k, ns, orl, rl);
@@ -2301,7 +2301,7 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
         while i < rl
           invariant i <= rl && rl <= kl && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k) && p < NPROC
         {
-          if cast[u64](bget(k.mstr, at + i)) != pbyte(k.croot, p, i) % 256 {
+          if cast[u64](bget(k.mstr, at + i)) != wget(k.croot, p * CWD_STRIDE + 1 + i) % 256 {
             inr = false;
           }
           i = i + 1;

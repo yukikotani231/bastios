@@ -82,7 +82,7 @@ spec fn nopen_ok(n: &Buf) -> bool {
 const VDIR_ROOT: u64 = NFILES + 2 * DSLOTS;  // the top directory
 const VDIR_DISK: u64 = NFILES + 2 * DSLOTS + 1;  // "disk"
 const VDIR_LO: u64 = NFILES + 2 * DSLOTS + 2;    // the loop mount's top directory
-const NAMEBUF: u64 = 1024;            // holds any in-memory node's name
+const NAMEBUF: u64 = 256;             // holds any in-memory node's name
 const MNT_N: u64 = 64;                // tmpfs mounts at once
 const MNT_LEN: u64 = 128;             // MNT_N * 2: per mount, its directory node + 1 (0: free) and 1 if read-only
 

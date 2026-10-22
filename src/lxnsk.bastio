@@ -1640,9 +1640,9 @@ fn mnt_join(k: &mut Kernel, pid: u64, id: u64, p: u64)
         && (from + 1) * CWD_STRIDE <= len(k.croot) && (pid + 1) * CWD_STRIDE <= len(k.croot)
         && (pid + 1) * CWD_STRIDE <= len(k.cwd)
     {
-      let c = pbyte(k.croot, from, i);
-      pput(&mut k.croot, pid, i, c);
-      pput(&mut k.cwd, pid, i, c);
+      let c = get(k.croot, from * CWD_STRIDE + 1 + i);
+      k.croot = set(k.croot, pid * CWD_STRIDE + 1 + i, c);
+      k.cwd = set(k.cwd, pid * CWD_STRIDE + 1 + i, c);
       i = i + 1;
     }
   }

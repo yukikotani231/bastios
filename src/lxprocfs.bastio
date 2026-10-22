@@ -3063,7 +3063,7 @@ fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= n && n <= blen(x) && rl <= FNAME_MAX && kok(k) && p < NPROC
   {
-    if cast[u64](bget(x, i)) != pbyte(k.croot, p, i) % 256 {
+    if cast[u64](bget(x, i)) != wget(k.croot, p * CWD_STRIDE + 1 + i) % 256 {
       return 0;
     }
     i = i + 1;
@@ -3194,7 +3194,7 @@ fn fd_link(k: &mut Kernel, r: u64, p: u64, fd: u64, o: &mut Bytes) -> u64
         while inside && i < rl
           invariant i <= rl && rl <= FNAME_MAX && s0 <= 1 && (!inside || s0 + rl <= n) && n <= FNAME_MAX && kok(k) && p < NPROC && q < NPROC
         {
-          if cast[u8](pbyte(k.croot, q, i) % 256) != base_byte(k, p, h, s0 + i) {
+          if cast[u8](wget(k.croot, q * CWD_STRIDE + 1 + i) % 256) != base_byte(k, p, h, s0 + i) {
             inside = false;
           }
           i = i + 1;
@@ -3490,7 +3490,7 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
     while same && j < rl
       invariant j <= rl && rl + 1 < full && full <= PROC_OUT && rl <= FNAME_MAX && blen(out) == PROC_OUT && kok(k) && pid < NPROC
     {
-      if cast[u64](bget(out, j + 1)) != pbyte(k.croot, pid, j) % 256 {
+      if cast[u64](bget(out, j + 1)) != wget(k.croot, pid * CWD_STRIDE + 1 + j) % 256 {
         same = false;
       }
       j = j + 1;

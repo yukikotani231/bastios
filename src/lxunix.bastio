@@ -1401,7 +1401,7 @@ fn sun_root_skip(k: &Kernel, pid: u64, l: u64, n: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= FNAME_MAX && rl < n && n <= UX_PATH && l < UX_LIS && kok(k) && pid < NPROC
   {
-    if cast[u64](bget(k.uxb, UXP0 + l * UX_PATH + i)) != pbyte(k.croot, pid, i) % 256 {
+    if cast[u64](bget(k.uxb, UXP0 + l * UX_PATH + i)) != wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
       return 0;
     }
     i = i + 1;
