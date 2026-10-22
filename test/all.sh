@@ -6,18 +6,19 @@
 #   b: the TCP and IPv6 tests (the two IPv6 tests share build/ipv6, so
 #      they stay in one lane) and one DHCP test;
 #   c: everything else but e;
-#   e: the ISO and installer boots and the crash simulation, the longest of
-#      the rest, so that c and e each take about as long as the shell test;
+#   e: the installer boot and the crash simulation;
+#   f: the ISO boots (BIOS and UEFI, with the window manager's checks), the
+#      longest of the rest, a lane of its own so that a runner can take it;
 #   d: the AArch64 kernel's boots (they build it first), a lane of their own
 #      so that a runner can take them apart from the rest (LANES below).
 # Three lanes and not more: the TCP tests time a stalled wire against the
 # guest's resend timer, and a test of the shell's checks that a process is
 # asleep, so a machine much busier than this makes them fail for the wrong
-# reason (c and e count as one: they run as one lane unless LANES splits
-# them, as CI does on a runner of their own). LANES names the lanes to run,
+# reason (c, e and f count as one: they run as one lane unless LANES splits
+# them, as CI does on runners of their own). LANES names the lanes to run,
 # each group of letters one lane run beside the others (LANES="a b" runs a
 # and b; LANES="b c" runs b and c one after the other as a single lane), so
-# CI can give each part to a runner of its own; it defaults to "a b cde".
+# CI can give each part to a runner of its own; it defaults to "a b cdef".
 # With fewer than 4 CPUs, or JOBS=1, every test runs one after another, as
 # before. The output of each test is printed whole, in the order below,
 # followed by how long it took; the run fails if any test fails. A test that
@@ -57,7 +58,7 @@ tests=(
   "ipv6 e1000|b|NIC=e1000 test/ipv6_test.sh"
   "dhcp virtio|b|test/dhcp_test.sh"
   "dhcp e1000|c|NIC=e1000 test/dhcp_test.sh"
-  "iso|e|test/iso_test.sh"
+  "iso|f|test/iso_test.sh"
   "install|e|test/install_test.sh"
   "nmi|c|test/nmi_test.sh"
   "stackguard|c|test/stackguard_test.sh"
@@ -74,7 +75,7 @@ run() {  # index
   timeout -k 15 "${TEST_TIMEOUT:-1200}" bash -c "$cmd" >"$tmp/$1.out" 2>&1
   echo "$? $((SECONDS - t0))" >"$tmp/$1.status"
 }
-LANES=${LANES:-a b cde}
+LANES=${LANES:-a b cdef}
 selected() {  # index: is the test in one of the lanes asked for?
   local rest=${tests[$1]#*|} g
   rest=${rest%%|*}

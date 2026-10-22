@@ -1140,9 +1140,10 @@ build/ltp/.built: build/ltp/configure
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs
 # (25 boots, three at a time; about 10 minutes on four processors). Fails
-# only if a test in ltp_baseline.txt stops passing.
+# only if a test in ltp_baseline.txt stops passing. LTP_SHARD=K/N runs a share
+# of it (ltp.py --shard), which CI gives to a machine each.
 compat-ltp: build/bastios.elf build/ltp/.built build/libc-test/.built
-	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
+	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES) $(if $(LTP_SHARD),--shard $(LTP_SHARD))
 
 compat-ltp-baseline: build/bastios.elf build/ltp/.built build/libc-test/.built
 	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
