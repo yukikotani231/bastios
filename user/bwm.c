@@ -396,8 +396,18 @@ static void draw_bar(void)
 static char menu_label[MENU_MAX][24];
 static char menu_cmd[MENU_USER][160];     /* the shell command of entry 3 + i, run in a terminal window */
 static int menu_n;
-#define MENU_X0 ((int)W - 4 - MENU_ITEM_W)
-#define MENU_Y0 ((int)H - BAR_H - menu_n * MENU_ITEM_H)
+static int menu_x0, menu_y0;             /* where the menu is: above the Menu button, or at a right click */
+#define MENU_X0 menu_x0
+#define MENU_Y0 menu_y0
+
+/* Opens the menu with its corner at (x, y), kept inside the screen above the task bar. */
+static void menu_show(int x, int y)
+{
+    int h = menu_n * MENU_ITEM_H;
+    menu_x0 = x + MENU_ITEM_W > (int)W ? (int)W - MENU_ITEM_W : x;
+    menu_y0 = y + h > (int)H - BAR_H ? (int)H - BAR_H - h : y;
+    menu_open = 1;
+}
 
 /* Builds the menu: Terminal, Files and System, then a line "Label=command" of /etc/bwm.menu
  * for each program to start in a terminal window, then Hello window and Quit bwm. */
@@ -916,6 +926,8 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         if (w) {
             t.title[sizeof t.title - 1] = 0;
             snprintf(w->title, sizeof w->title, "%s", t.title);
+            printf("bwm: title %u %s\n", t.id, w->title);
+            fflush(stdout);
             touch_win(w);
             touch_bar();
         }
@@ -1461,7 +1473,7 @@ int main(int argc, char **argv)
                 int in_bar = my >= (int)H - BAR_H;
                 struct win *under = in_bar ? NULL : hit(mx, my);
                 if (menu_open && (dx || dy)) {
-                    touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, (int)H - BAR_H);
+                    touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + menu_n * MENU_ITEM_H + 1);
                     menu_mx = mx; menu_my = my;
                 }
                 if (down && !(buttons & 1) && menu_open) {
@@ -1473,8 +1485,12 @@ int main(int argc, char **argv)
                     buttons = m[0];
                     continue;
                 }
-                if (down && !(buttons & 1) && in_bar && mx >= (int)W - MENU_W - 4) {
-                    menu_open = 1;
+                if ((m[0] & 2) && !(buttons & 2) && !in_bar && !under && !menu_open) {
+                    menu_show(mx, my);                   /* a right click on the desktop opens the menu there */
+                    menu_mx = mx; menu_my = my;
+                    touch_all();
+                } else if (down && !(buttons & 1) && in_bar && mx >= (int)W - MENU_W - 4) {
+                    menu_show((int)W - 4 - MENU_ITEM_W, (int)H - BAR_H - menu_n * MENU_ITEM_H);
                     menu_mx = mx; menu_my = my;
                     touch_all();
                 } else if (down && !(buttons & 1) && in_bar) {
