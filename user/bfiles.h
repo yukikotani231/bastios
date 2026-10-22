@@ -10,9 +10,14 @@
  * than 64 KiB in place: typing inserts, Enter, Backspace, Delete, the arrow,
  * Home, End and Page keys and a click move and change the text, Ctrl-S saves
  * ("bfiles: saved PATH") and Ctrl-X goes back to the viewer, which shows the
- * file as it is on disk. "bfiles /path/to/file" opens the file in the viewer.
+ * file as it is on disk. In the editor Ctrl-K cuts the rest of the line and Ctrl-U puts it back,
+ * Ctrl-F finds text (Enter on an empty prompt repeats the last search; "bfiles: found at N" or
+ * "bfiles: not found") and Ctrl-G goes to a line number ("bfiles: line N"); the header shows
+ * the line the cursor is on. "bfiles /path/to/file" opens the file in the viewer.
  * In the list n makes an empty file (untitled, untitled2, ...) and opens it
- * in the editor. The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
+ * in the editor; c or x marks the entry under the cursor to copy (a file) or move (a file or
+ * directory) and v puts it into the directory shown ("bfiles: copy PATH", "bfiles: move PATH",
+ * then "bfiles: copied SRC to DST" or "bfiles: moved SRC to DST"). The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
  * window is open and "bfiles: dir PATH" or "bfiles: view PATH" as it
  * moves.
  * It is part of the bterm program, which runs it when started as "bfiles"
@@ -65,6 +70,11 @@ static int bf_etop;                             /* the first display row shown w
 static int bf_esc, bf_escnum;                   /* where we are in an ESC [ ... key sequence */
 static size_t bf_erow[BF_MAXLINES + 1];         /* where each display row starts while editing */
 static int bf_nerow;
+static char bf_kill[512];                       /* the line Ctrl-K cut last, for Ctrl-U */
+static size_t bf_killn;
+static int bf_eprompt;                          /* 'f' or 'g' while a find or goto-line prompt reads a line, else 0 */
+static char bf_ebuf[40], bf_efind[40];          /* what was typed, and what was last searched for */
+static size_t bf_ebn;
 
 static int bf_sel;                              /* the entry the keyboard cursor is on (arrows move it, Enter opens it) */
 static int bf_by_size;                          /* 1: files largest first, 0: by name */
@@ -298,6 +308,94 @@ static void be_delete(size_t at)
     bf_modified = 1;
 }
 
+/* Ctrl-K: cuts the rest of the line (the whole newline if the line is empty) into the kill buffer. */
+static void be_cut_line(void)
+{
+    size_t end = bf_cur;
+    while (end < bf_vlen && bf_vtext[end] != '\n')
+        end++;
+    if (end == bf_cur && end < bf_vlen)
+        end++;
+    size_t n = end - bf_cur;
+    if (n == 0)
+        return;
+    if (n > sizeof bf_kill)
+        n = sizeof bf_kill;
+    memcpy(bf_kill, bf_vtext + bf_cur, n);
+    bf_killn = n;
+    for (size_t i = 0; i < n; i++)
+        be_delete(bf_cur);
+    printf("bfiles: cut %zu\n", n);
+    fflush(stdout);
+}
+
+/* Ctrl-U: inserts the kill buffer at the cursor. */
+static void be_paste_kill(void)
+{
+    for (size_t i = 0; i < bf_killn; i++)
+        be_insert((unsigned char)bf_kill[i]);
+}
+
+/* Ctrl-F, then Enter: moves to the next place the text typed occurs, after the cursor and wrapping
+ * round; Enter on an empty prompt searches for the last text again. */
+static void be_find(void)
+{
+    if (bf_ebn > 0)
+        snprintf(bf_efind, sizeof bf_efind, "%s", bf_ebuf);
+    size_t n = strlen(bf_efind);
+    if (n == 0 || n > bf_vlen)
+        return;
+    for (size_t k = 1; k <= bf_vlen; k++) {
+        size_t at = (bf_cur + k) % (bf_vlen + 1);
+        if (at + n <= bf_vlen && memcmp(bf_vtext + at, bf_efind, n) == 0) {
+            bf_cur = at;
+            printf("bfiles: found at %zu\n", at);
+            fflush(stdout);
+            return;
+        }
+    }
+    printf("bfiles: not found\n");
+    fflush(stdout);
+}
+
+/* Ctrl-G, then a number and Enter: moves to the start of that line of the file. */
+static void be_goto_line(void)
+{
+    long want = atol(bf_ebuf);
+    size_t at = 0;
+    for (long l = 1; l < want && at < bf_vlen; l++) {
+        while (at < bf_vlen && bf_vtext[at] != '\n')
+            at++;
+        if (at < bf_vlen)
+            at++;
+    }
+    bf_cur = at;
+    printf("bfiles: line %ld\n", want);
+    fflush(stdout);
+}
+
+/* A key typed at the find or goto-line prompt. */
+static void be_prompt_key(int c)
+{
+    if (c == 27) {
+        bf_eprompt = 0;
+        bf_esc = 1;
+    } else if (c == '\r' || c == '\n') {
+        int which = bf_eprompt;
+        bf_eprompt = 0;
+        if (which == 'f')
+            be_find();
+        else
+            be_goto_line();
+    } else if (c == 127 || c == 8) {
+        if (bf_ebn > 0)
+            bf_ebuf[--bf_ebn] = 0;
+    } else if (c >= 32 && c < 127 && bf_ebn + 1 < sizeof bf_ebuf) {
+        bf_ebuf[bf_ebn++] = (char)c;
+        bf_ebuf[bf_ebn] = 0;
+    }
+}
+
 static void be_save(void)
 {
     int f = open(bf_vpath, O_WRONLY | O_TRUNC);
@@ -327,6 +425,7 @@ static void be_start(void)
     }
     bf_editing = 1;
     bf_modified = 0;
+    bf_eprompt = 0;
     bf_cur = 0;
     bf_etop = 0;
     bf_esc = 0;
@@ -408,25 +507,30 @@ static void bf_rename_key(int c)
     }
 }
 
-/* c in the viewer: copies the file shown to "NAME.copy" ("NAME.copy2", ...)
- * next to it. */
-static void bf_copy_file(void)
+/* Copies SRC into the directory DIR under its own name, or "NAME.copy" ("NAME.copy2", ...) when
+ * that is taken. Says "bfiles: copied SRC to DST"; returns 0 if it did. */
+static int bf_copy_into(const char *src, const char *dir)
 {
-    int in = open(bf_vpath, O_RDONLY);
+    int in = open(src, O_RDONLY);
     if (in < 0)
-        return;
+        return -1;
+    const char *base = strrchr(src, '/');
+    base = base ? base + 1 : src;
+    const char *sep = strcmp(dir, "/") == 0 ? "" : "/";
     char to[PATH_MAX];
     int out = -1;
-    for (int i = 1; i < 100 && out < 0; i++) {
-        if (i == 1)
-            snprintf(to, sizeof to, "%s.copy", bf_vpath);
+    for (int i = 0; i < 100 && out < 0; i++) {
+        if (i == 0)
+            snprintf(to, sizeof to, "%s%s%s", dir, sep, base);
+        else if (i == 1)
+            snprintf(to, sizeof to, "%s%s%s.copy", dir, sep, base);
         else
-            snprintf(to, sizeof to, "%s.copy%d", bf_vpath, i);
+            snprintf(to, sizeof to, "%s%s%s.copy%d", dir, sep, base, i);
         out = open(to, O_WRONLY | O_CREAT | O_EXCL, 0644);
     }
     if (out < 0) {
         close(in);
-        return;
+        return -1;
     }
     char buf[4096];
     ssize_t n;
@@ -440,10 +544,73 @@ static void bf_copy_file(void)
     close(out);
     if (bad || n < 0) {
         unlink(to);
-        printf("bfiles: cannot copy %s\n", bf_vpath);
+        printf("bfiles: cannot copy %s\n", src);
+        fflush(stdout);
+        return -1;
+    }
+    printf("bfiles: copied %s to %s\n", src, to);
+    fflush(stdout);
+    bf_stale = 1;
+    return 0;
+}
+
+/* c in the viewer: copies the file shown to "NAME.copy" ("NAME.copy2", ...)
+ * next to it. */
+static void bf_copy_file(void)
+{
+    char dir[PATH_MAX];
+    snprintf(dir, sizeof dir, "%s", bf_vpath);
+    char *sl = strrchr(dir, '/');
+    if (sl == NULL)
+        return;
+    if (sl == dir)
+        sl[1] = 0;
+    else
+        *sl = 0;
+    bf_copy_into(bf_vpath, dir);
+}
+
+/* c or x in the list: marks the entry under the cursor to be copied (c) or moved (x) by the next v. */
+static char bf_clip[PATH_MAX];
+static int bf_clip_move;
+
+static void bf_mark(int move)
+{
+    if (bf_sel <= 0 || bf_sel >= bf_nent)
+        return;
+    bf_path_of(bf_ents[bf_sel].name, bf_clip, sizeof bf_clip);
+    bf_clip_move = move;
+    printf("bfiles: %s %s\n", move ? "move" : "copy", bf_clip);
+    fflush(stdout);
+}
+
+/* v in the list: copies the marked file here, or moves the marked file or directory here (never
+ * over a name that is taken). */
+static void bf_paste(void)
+{
+    if (bf_clip[0] == 0)
+        return;
+    if (!bf_clip_move) {
+        struct stat st;
+        if (stat(bf_clip, &st) != 0 || S_ISDIR(st.st_mode)) {
+            printf("bfiles: cannot copy %s\n", bf_clip);
+            fflush(stdout);
+            return;
+        }
+        if (bf_copy_into(bf_clip, bf_cwd) == 0)
+            bf_load_dir();
+        return;
+    }
+    const char *base = strrchr(bf_clip, '/');
+    char to[PATH_MAX];
+    bf_path_of(base ? base + 1 : bf_clip, to, sizeof to);
+    struct stat st;
+    if (lstat(to, &st) == 0 || rename(bf_clip, to) != 0) {
+        printf("bfiles: cannot move %s\n", bf_clip);
     } else {
-        printf("bfiles: copied %s to %s\n", bf_vpath, to);
-        bf_stale = 1;
+        printf("bfiles: moved %s to %s\n", bf_clip, to);
+        bf_clip[0] = 0;
+        bf_load_dir();
     }
     fflush(stdout);
 }
@@ -477,6 +644,10 @@ static void bf_spawn(const char *name, const char *arg, const char *msg)
 static void be_key(int c)
 {
     int page = BF_ROWS - 2;
+    if (bf_eprompt) {
+        be_prompt_key(c);
+        return;
+    }
     if (bf_esc == 1) {
         bf_esc = c == '[' ? 2 : 0;
         if (bf_esc)
@@ -509,6 +680,14 @@ static void be_key(int c)
     } else if (c == 24) {
         bf_editing = 0;
         bf_load_file(bf_vpath);
+    } else if (c == 6 || c == 7) {
+        bf_eprompt = c == 6 ? 'f' : 'g';
+        bf_ebuf[0] = 0;
+        bf_ebn = 0;
+    } else if (c == 11) {
+        be_cut_line();
+    } else if (c == 21) {
+        be_paste_kill();
     } else if (c == 127 || c == 8) {
         if (bf_cur > 0)
             be_delete(--bf_cur);
@@ -541,9 +720,12 @@ static void be_paint(void)
     int cr = be_row_of(bf_cur);
     if (cr < bf_etop) bf_etop = cr;
     if (cr > bf_etop + BF_ROWS - 2) bf_etop = cr - (BF_ROWS - 2);
-    char h[BF_COLS + 1];
-    snprintf(h, sizeof h, "%.30s%s  ^S save ^X done", bf_vpath, bf_modified ? " [modified]" : "");
-    bf_put_row(0, h, strlen(h), 0x00FFFFFF, hd);
+    char h[BF_COLS + 80];
+    if (bf_eprompt)
+        snprintf(h, sizeof h, "%s: %.40s_", bf_eprompt == 'f' ? "Find" : "Go to line", bf_ebuf);
+    else
+        snprintf(h, sizeof h, "%.12s%s ^S save ^X done ^F find ^G line ^K ^U %d", bf_vpath, bf_modified ? " *" : "", cr + 1);
+    bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_eprompt ? 0x00A03030 : hd);
     for (int r = 1; r < BF_ROWS; r++) {
         int i = bf_etop + r - 1;
         char t[BF_COLS + 1];
@@ -742,6 +924,12 @@ static int bfiles_main(int argc, char **argv)
                 bf_renaming = 1;
             } else if (c == 'c' && bf_viewing)
                 bf_copy_file();
+            else if (c == 'c' && !bf_viewing)
+                bf_mark(0);
+            else if (c == 'x' && !bf_viewing)
+                bf_mark(1);
+            else if (c == 'v' && !bf_viewing)
+                bf_paste();
             else if (c == 'i' && bf_viewing)
                 bf_spawn("bview", bf_vpath, "image");
             else if (c == 'e' && bf_viewing)

@@ -150,7 +150,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
-    deadline = time.time() + 360
+    deadline = time.time() + 900
     def until(marker, start):
         nonlocal out
         while marker not in out[start:]:
@@ -907,6 +907,85 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"cat /tmp/e.txt\r"); q.stdin.flush()
         good = until(b"xy\r\nhello", mark) or until(b"xy\nhello", mark)
         print(("ok  " if good else "FAIL"), f"({name}) the saved file holds the edit")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The editor's Ctrl-G (go to a line), Ctrl-K and Ctrl-U (cut the rest of a line, put it
+        # back) and Ctrl-F (find).
+        mark = len(out)
+        q.stdin.write(b"printf 'one\\ntwo\\nthree\\nfour\\n' > /tmp/g.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/g.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/g.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/g.txt", mark)
+        if good:
+            monitor("sendkey ctrl-g", "sendkey 3", "sendkey ret")
+            good = until(b"bfiles: line 3", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-G in the editor goes to a line")
+        fails += not good
+        if good:
+            monitor("sendkey ctrl-k")
+            good = until(b"bfiles: cut 5", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-K cuts the rest of the line")
+        fails += not good
+        if good:
+            monitor("sendkey ctrl-g", "sendkey 1", "sendkey ret", "sendkey ctrl-u")
+            monitor("sendkey ctrl-f", "sendkey f", "sendkey o", "sendkey u", "sendkey r", "sendkey ret")
+            good = until(b"bfiles: found at 14", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-F finds text")
+        fails += not good
+        if good:
+            monitor("sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/g.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/g.txt\r"); q.stdin.flush()
+        good = good and (until(b"threeone\r\ntwo\r\n\r\nfour", mark) or until(b"threeone\ntwo\n\nfour", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-U puts the cut text back and the file holds the edits")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # c, x and v in the list of bfiles copy and move a file into another directory.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/pf/d; echo pa > /tmp/pf/a.txt; echo pb > /tmp/pf/b.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/pf\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/pf", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down", "sendkey down", "sendkey c")           # a.txt
+            good = until(b"bfiles: copy /tmp/pf/a.txt", mark)
+            monitor("sendkey up", "sendkey ret")                            # into d
+            good = good and until(b"bfiles: dir /tmp/pf/d", mark)
+            monitor("sendkey v")
+            good = good and until(b"bfiles: copied /tmp/pf/a.txt to /tmp/pf/d/a.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) c and v in the bfiles list copy a file into the directory shown")
+        fails += not good
+        if good:
+            monitor("sendkey ret")                                          # ".." goes back up
+            time.sleep(0.5)
+            monitor("sendkey down", "sendkey down", "sendkey down", "sendkey x")   # b.txt
+            good = until(b"bfiles: move /tmp/pf/b.txt", mark)
+            monitor("sendkey up", "sendkey up", "sendkey ret", "sendkey v")
+            good = good and until(b"bfiles: moved /tmp/pf/b.txt to /tmp/pf/d/b.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) x and v in the bfiles list move a file into the directory shown")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/pf/d/a.txt /tmp/pf/d/b.txt; [ -f /tmp/pf/a.txt ] && [ ! -e /tmp/pf/b.txt ] && echo ok$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"pa\r\npb\r\nok2", mark) or until(b"pa\npb\nok2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) the copy is there, the original stays, and the moved file is gone from its old place")
         fails += not good
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()

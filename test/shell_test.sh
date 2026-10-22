@@ -543,8 +543,8 @@ steps = [
     ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
-    # Names of 250 bytes, the longest that fits a path of FNAME_MAX (255) bytes written as disk/NAME (past 200 the disk keeps the rest of a name in the entry after it): create, read back, list, stat, rename between short and long names, and refuse 256.
-    ("n=a; i=0; while [ $i -lt 8 ]; do n=$n$n; i=$((i+1)); done; l=${n#??????}; m=${l%?}; echo hi > disk/$l; cat disk/$l; for f in disk/*; do [ \"${f#disk/}\" = \"$l\" ] && echo listed; done; stat -c %s disk/$l; (echo no > disk/${l}aa) 2>/dev/null; echo r=$?; mv disk/$l disk/s; cat disk/s; mv disk/s disk/$m; cat disk/$m; [ -e disk/$l ] || echo gone; rm disk/$m; mkdir disk/$l; [ -d disk/$l ] && echo isdir; rmdir disk/$l; [ -e disk/$l ] || echo gone2",
+    # Names of 255 bytes, the longest NAME_MAX allows (past 200 the disk keeps the rest of a name in the entry after it): create, read back, list, stat, rename between short and long names, and refuse 256.
+    ("n=a; i=0; while [ $i -lt 8 ]; do n=$n$n; i=$((i+1)); done; l=${n%?}; m=${l%?}; echo hi > disk/$l; cat disk/$l; for f in disk/*; do [ \"${f#disk/}\" = \"$l\" ] && echo listed; done; stat -c %s disk/$l; (echo no > disk/$n) 2>/dev/null; echo r=$?; mv disk/$l disk/s; cat disk/s; mv disk/s disk/$m; cat disk/$m; [ -e disk/$l ] || echo gone; rm disk/$m; mkdir disk/$l; [ -d disk/$l ] && echo isdir; rmdir disk/$l; [ -e disk/$l ] || echo gone2",
      b"hi\r\nlisted\r\n3\r\nr=1\r\nhi\r\nhi\r\ngone\r\nisdir\r\ngone2\r\n", b"\n# "),
     # The disk finds names through a hash index once it holds more than IX_MIN entries (src/diskfs.bastio), built when the
     # directory first grows past it and kept up by each create, rename and removal: every name stays findable across the crossing.
@@ -2162,13 +2162,16 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
+    # A processor keeps a process's translations across system calls, and
+    # still drops the ones an unmap, mprotect or fork made wrong (user/mtlb.c).
+    ("/disk/mt", b"mtlb: ok, 400 rounds each", b"\n# "),
     ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
     # Two at once: their code pages come from one page cache entry each,
     # and a fault that waits for the disk sleeps while the other runs.
