@@ -1957,7 +1957,7 @@ fn auxv_random(k: &mut Kernel, p: u64, top: u64) -> u64
   let mut j = 0;
   let mut found = false;
   while j < 8 && !found
-    invariant j <= 8 && blen(k.fs.xfer) == XFER
+    invariant j <= 8 && blen(k.fs.xfer) == XBUF
   {
     if rd64(k.fs.xfer, 8 * j) == 3 && rd64(k.fs.xfer, 8 * (j + 2)) == 4 && rd64(k.fs.xfer, 8 * (j + 3)) == PH_SIZE && rd64(k.fs.xfer, 8 * (j + 4)) == 5 {
       found = true;
@@ -1970,7 +1970,7 @@ fn auxv_random(k: &mut Kernel, p: u64, top: u64) -> u64
   }
   let mut e = j;
   while e < 38 && rd64(k.fs.xfer, 8 * e) != 0
-    invariant j <= e && e <= 39 && blen(k.fs.xfer) == XFER
+    invariant j <= e && e <= 39 && blen(k.fs.xfer) == XBUF
   {
     if rd64(k.fs.xfer, 8 * e) == 25 {
       return rd64(k.fs.xfer, 8 * (e + 1));
@@ -2006,7 +2006,7 @@ fn environ_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
   let mut len = 0;
   let mut i = 0;
   while i < n
-    invariant i <= n && n < PROC_OUT && len <= i && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+    invariant i <= n && n < PROC_OUT && len <= i && blen(o) == PROC_OUT && blen(k.fs.xfer) == XBUF
   {
     let c = bget(k.fs.xfer, i);
     bset(&mut o, i, c);
