@@ -685,9 +685,106 @@ spec fn lx_count_or_fail(r: u64, n: u64) -> bool {
 const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
-const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
+const CWD_STRIDE: u64 = 33;            // words in a row of k.cwd, k.croot and k.dpath: the length of the path, then its first CWD_INL bytes, eight to a word
+const CWD_INL: u64 = 256;              // bytes of a path kept in its row; the others are in the same row of k.cwdx, k.crootx or k.dpathx
+const SPILL_STRIDE: u64 = 480;         // words in a row of those: FNAME_MAX + 1 - CWD_INL bytes
 const CWD_LEN: u64 = NPROC * CWD_STRIDE;
-const DPATH_LEN: u64 = 1048576;       // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
+const CWDX_LEN: u64 = NPROC * SPILL_STRIDE;
+const DPATH_LEN: u64 = 135168;         // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
+const DPATHX_LEN: u64 = 1966080;       // OFD_N * SPILL_STRIDE
+
+// A row of k.cwd, k.croot and k.dpath is CWD_STRIDE words: the length of the
+// path, then its bytes, eight to a word (byte i in word 1 + i / 8, from the
+// low end). A path longer than CWD_INL goes on in the same row of the table
+// beside it (k.cwdx, k.crootx, k.dpathx), which has rows only as far as one
+// needed it (spill_room), so a process whose paths are short costs 264 bytes.
+// Read the same way as the words: past the end, 0.
+
+/// Byte i of the path in row `row` of t, with the rest in tx.
+fn rbyte(t: &Buf, tx: &Buf, row: u64, i: u64) -> u64
+  ensures result < 256
+{
+  if i < CWD_INL {
+    return (wget(t, wrap_add(wrap_mul(row, CWD_STRIDE), 1 + i / 8)) >> (8 * (i % 8))) % 256;
+  }
+  let j = i - CWD_INL;
+  return (wget(tx, wrap_add(wrap_mul(row, SPILL_STRIDE), j / 8)) >> (8 * (j % 8))) % 256;
+}
+
+/// Sets byte i of the path in row `row` of t (and tx) to b (below 256); a
+/// byte of a row that does not exist is not kept.
+fn rsetb(t: &mut Buf, tx: &mut Buf, row: u64, i: u64, b: u64)
+  requires b < 256
+  ensures len(t) == old(len(t)) && len(tx) == old(len(tx))
+{
+  if i < CWD_INL {
+    let at = wrap_add(wrap_mul(row, CWD_STRIDE), 1 + i / 8);
+    if at < len(t) {
+      let sh = 8 * (i % 8);
+      let w = get(t, at);
+      t = set(t, at, w ^ wrap_mul(((w >> sh) % 256) ^ b, 1 << sh));
+    }
+    return;
+  }
+  let j = i - CWD_INL;
+  let at = wrap_add(wrap_mul(row, SPILL_STRIDE), j / 8);
+  if at < len(tx) {
+    let sh = 8 * (j % 8);
+    let w = get(tx, at);
+    tx = set(tx, at, w ^ wrap_mul(((w >> sh) % 256) ^ b, 1 << sh));
+  }
+}
+
+/// Row `row` of tx, grown to hold it (doubling), of at most `rows` rows. False,
+/// with tx as it was, when memory runs out.
+fn spill_room(tx: &mut Buf, row: u64, rows: u64) -> bool
+  requires row < rows && rows <= NPROC * 8 && len(tx) <= rows * SPILL_STRIDE
+  ensures len(tx) <= rows * SPILL_STRIDE && (result ==> (row + 1) * SPILL_STRIDE <= len(tx))
+{
+  if (row + 1) * SPILL_STRIDE <= len(tx) {
+    return true;
+  }
+  let mut n = len(tx) / SPILL_STRIDE * 2;
+  if n < 4 {
+    n = 4;
+  }
+  if n < row + 1 {
+    n = row + 1;
+  }
+  if n > rows {
+    n = rows;
+  }
+  let ok = zgrow(&mut tx, n * SPILL_STRIDE);
+  return ok && (row + 1) * SPILL_STRIDE <= len(tx);
+}
+
+/// Swaps the spill rows a and b of tx (see spill_room). Rows past the end of
+/// tx are empty; when tx cannot grow to hold them the swap is skipped.
+fn swap_spill(tx: &mut Buf, a: u64, b: u64)
+  requires a < NPROC && b < NPROC && len(tx) <= CWDX_LEN
+  ensures len(tx) <= CWDX_LEN
+{
+  if a == b || len(tx) == 0 {
+    return;
+  }
+  let mut hi = a;
+  if b > a {
+    hi = b;
+  }
+  if !spill_room(&mut tx, hi, NPROC) {
+    return;
+  }
+  let mut i = 0;
+  while i < SPILL_STRIDE
+    invariant i <= SPILL_STRIDE && len(tx) <= CWDX_LEN && (a + 1) * SPILL_STRIDE <= len(tx) && (b + 1) * SPILL_STRIDE <= len(tx)
+  {
+    let x = get(tx, a * SPILL_STRIDE + i);
+    tx = set(tx, a * SPILL_STRIDE + i, get(tx, b * SPILL_STRIDE + i));
+    tx = set(tx, b * SPILL_STRIDE + i, x);
+    i = i + 1;
+  }
+}
+
 const MT_N: u64 = 256;                // mounts of mount namespaces, in all (src/lxns.bastio)
 const ME_W: u64 = 5;                  // words per mount
 // After the mounts, k.mns keeps the other namespaces (src/lxns.bastio):
@@ -807,7 +904,7 @@ const MNS_IO: u64 = MNS_TM + TM_N * TM_W;
 const CO_N: u64 = 32;
 const MNS_CO: u64 = MNS_IO + IO_N * 2;
 const MNS_LEN: u64 = MNS_CO + CO_N * 2;
-const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the key descriptions begin (the extended attributes have k.xab)
+const XAB: u64 = 4096 + MT_N * 512 + 4096;     // where k.mstr keeps the key descriptions begin (the extended attributes have k.xab)
 const XAB_LEN: u64 = 256 * 320;                 // k.xab: XA_N rows of XA_ROW bytes (src/lxxattr.bastio), allocated by the first attribute
 const KDB: u64 = XAB;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
 const KPB: u64 = KDB + KEY_N * KDESC;              // then KP_N payload slots of KPAY bytes
@@ -921,7 +1018,7 @@ const UX_PATH: u64 = 255;             // the longest name (a path name is kept a
 const UX_XTRA: u64 = 7;               // descriptions a message passes besides the first
 const UX_LEN: u64 = 2272;             // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files, then UX_XTRA words per channel, then one offset per channel
 const UXB_LEN: u64 = 532448;          // UX_N * UX_CAP + UX_LIS * UX_PATH
-const PATH_OUT: u64 = 512;              // room for a name being built (lx_lex_xfer, k.lexb)
+const PATH_OUT: u64 = 8192;             // room for a name being built (lx_lex_xfer, k.lexb)
 
 const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptions
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
@@ -1050,7 +1147,7 @@ struct Kernel {
   procs: Buf,           // the process table
   q: Queue,             // console input waiting for a READ
   line: Buf,            // the line a Linux program is typing (see tty_cook)
-  lexb: Bytes,          // the name lx_lex_xfer builds, PATH_OUT bytes: kept here so a path costs no allocation
+  lexb: Bytes,          // the name lx_lex_xfer builds, PATH_OUT bytes: kept here so a path costs no allocation. lx_follow, which runs after the lexer is done with it, borrows it as its work buffer (zeroing 8 KiB on every lookup cost 10% of an open); while it does, this is empty and lx_lex_xfer makes a new one
   lxfd: Buf,            // Linux descriptors (src/lxfd.bastio)
   ofd: Buf,             // open file descriptions they share
   pipes: Buf,           // pipe state, PIPE_STRIDE words each
@@ -1066,6 +1163,9 @@ struct Kernel {
   sigact: Buf,          // Linux signal actions (src/lxsig.bastio)
   cwd: Buf,             // Linux working directories (src/lxdir.bastio)
   croot: Buf,           // each process's root (chroot), laid out like cwd; length 0 is the top
+  cwdx: Buf,            // the bytes of each working directory past CWD_INL, SPILL_STRIDE words a row, grown by spill_room
+  crootx: Buf,          // the same for each root
+  dpathx: Buf,          // the same for each open directory's name
   dpath: Buf,           // the path of each open directory description, laid out like cwd; grows as directories are opened (dpath_room), a row past the end reads 0
   sigsave: Buf,         // per process, the mask rt_sigsuspend replaced; then each pending signal's sender (src/lxsig.bastio)
   alarms: Buf,          // Linux ITIMER_REAL per process: deadline (0: off) and interval (src/lxtime.bastio)
@@ -1184,7 +1284,7 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && blen(k.lexb) == PATH_OUT && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN && (blen(k.xab) == 0 || blen(k.xab) == XAB_LEN)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.cwdx) <= CWDX_LEN && len(k.crootx) <= CWDX_LEN && len(k.dpathx) <= DPATHX_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && (blen(k.lexb) == PATH_OUT || blen(k.lexb) == 0) && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN && (blen(k.xab) == 0 || blen(k.xab) == XAB_LEN)
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }

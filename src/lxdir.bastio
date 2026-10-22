@@ -38,7 +38,7 @@ struct Ent { len: u64, dir: bool, end: bool }
 /// transfer buffer. len 0 is an unused slot; `end` is past the last.
 fn dir_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   requires kok(k) && pid < NPROC
-  ensures kok(k) && result.len <= XFER
+  ensures kok(k) && result.len <= XBUF
 {
   if dir == DIR_ROOT {
     if i == 0 {
@@ -89,7 +89,7 @@ fn dir_gap(k: &mut Kernel, dir: u64, i: u64) -> u64
 /// Entry i of the file layer's directory d.
 fn vfs_entry(k: &mut Kernel, d: u64, i: u64) -> Ent
   requires kok(k)
-  ensures kok(k) && result.len <= XFER
+  ensures kok(k) && result.len <= XBUF
 {
   let n = vfs_readdir(&mut k.fs, d, i);
   if n == NO_FILE {
@@ -160,13 +160,13 @@ fn ent_dt(k: &mut Kernel, dir: u64, i: u64, e: Ent) -> Dt
 
 /// Copies `name` (up to FNAME_MAX bytes) into the start of x.
 fn name_out(x: &mut Bytes, name: Str) -> u64
-  requires blen(x) == XFER
-  ensures blen(x) == XFER && result <= FNAME_MAX
+  requires blen(x) == XBUF
+  ensures blen(x) == XBUF && result <= FNAME_MAX
 {
   let n = smaller(slen(name), FNAME_MAX);
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= FNAME_MAX && blen(x) == XFER
+    invariant i <= n && n <= FNAME_MAX && blen(x) == XBUF
   {
     bset(&mut x, i, sget(name, i));
     i = i + 1;
@@ -255,7 +255,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
         }
         let mut j = 0;
         while j < e.len
-          invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen && name <= DENT_HDR
+          invariant j <= e.len && e.len <= XBUF && DENT_HDR + e.len < reclen && name <= DENT_HDR
           invariant used + reclen <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
         {
           bset(&mut out, used + name + j, bget(k.fs.xfer, j));
@@ -351,20 +351,52 @@ fn dir_at(k: &mut Kernel, n: u64) -> u64
   return DIR_VFS + d;
 }
 
-/// A child process starts in its parent's working directory.
-fn cwd_fork(t: &mut Buf, parent: u64, child: u64)
-  requires len(t) <= CWD_LEN && parent < NPROC && child < NPROC
-  ensures len(t) <= CWD_LEN
+/// A child process starts in its parent's working directory. False if the
+/// rest of a long path has no room (then the child's row is as it was).
+fn cwd_fork(t: &mut Buf, tx: &mut Buf, parent: u64, child: u64) -> bool
+  requires len(t) <= CWD_LEN && len(tx) <= CWDX_LEN && parent < NPROC && child < NPROC
+  ensures len(t) <= CWD_LEN && len(tx) <= CWDX_LEN
 {
   // The length word and the path it counts; nothing reads past them.
-  let n = 1 + smaller(wget(t, parent * CWD_STRIDE), FNAME_MAX);
+  let pl = smaller(wget(t, parent * CWD_STRIDE), FNAME_MAX);
+  if pl > CWD_INL && !spill_room(&mut tx, child, NPROC) {
+    return false;
+  }
+  let n = 1 + (smaller(pl, CWD_INL) + 7) / 8;
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= CWD_STRIDE && len(t) <= CWD_LEN
+    invariant i <= n && n <= CWD_STRIDE && len(t) <= CWD_LEN && len(tx) <= CWDX_LEN
   {
     wset(&mut t, child * CWD_STRIDE + i, wget(t, parent * CWD_STRIDE + i));
     i = i + 1;
   }
+  wset(&mut t, child * CWD_STRIDE, pl);
+  if pl > CWD_INL {
+    let w = (pl - CWD_INL + 7) / 8;
+    let mut j = 0;
+    while j < w
+      invariant j <= w && w <= SPILL_STRIDE && len(t) <= CWD_LEN && len(tx) <= CWDX_LEN
+    {
+      wset(&mut tx, child * SPILL_STRIDE + j, wget(tx, parent * SPILL_STRIDE + j));
+      j = j + 1;
+    }
+  }
+  return true;
+}
+
+/// Makes room in the spill tables for a copy of pid's working directory and
+/// root as process c's, so that cwd_fork cannot fail. False when memory runs out.
+fn cwd_reserve(k: &mut Kernel, pid: u64, c: u64) -> bool
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  if smaller(wget(k.cwd, pid * CWD_STRIDE), FNAME_MAX) > CWD_INL && !spill_room(&mut k.cwdx, c, NPROC) {
+    return false;
+  }
+  if smaller(wget(k.croot, pid * CWD_STRIDE), FNAME_MAX) > CWD_INL && !spill_room(&mut k.crootx, c, NPROC) {
+    return false;
+  }
+  return true;
 }
 
 /// chdir(path): the directory becomes process pid's working directory.
@@ -389,7 +421,9 @@ fn lx_chdir(k: &mut Kernel, pid: u64, path: u64) -> u64
   // The logical name, as the lookup left it (src/lxns.bastio).
   let tl = len(k.cwd);
   if (pid + 1) * CWD_STRIDE <= tl {           // a live process has its row
-    name_keep(&mut k.cwd, tl, pid, k.mstr, lpath_len(k));
+    if !name_keep(&mut k.cwd, &mut k.cwdx, tl, pid, NPROC, k.mstr, lpath_len(k)) {
+      return ENOMEM;
+    }
   }
   return 0;
 }
@@ -423,7 +457,9 @@ fn lx_chroot(k: &mut Kernel, pid: u64, path: u64) -> u64
   }
   let rlen = len(k.croot);
   if (pid + 1) * CWD_STRIDE <= rlen {         // a live process has its row
-    name_keep(&mut k.croot, rlen, pid, k.mstr, lpath_len(k));   // the logical name (src/lxns.bastio)
+    if !name_keep(&mut k.croot, &mut k.crootx, rlen, pid, NPROC, k.mstr, lpath_len(k)) {   // the logical name (src/lxns.bastio)
+      return ENOMEM;
+    }
   }
   return 0;
 }
@@ -449,27 +485,33 @@ fn cwd_in_root(k: &Kernel, pid: u64) -> bool
   while i < rl
     invariant i <= rl && rl <= n && n <= FNAME_MAX && kok(k) && pid < NPROC
   {
-    if wget(k.cwd, pid * CWD_STRIDE + 1 + i) != wget(k.croot, pid * CWD_STRIDE + 1 + i) {
+    if rbyte(k.cwd, k.cwdx, pid, i) != rbyte(k.croot, k.crootx, pid, i) {
       return false;
     }
     i = i + 1;
   }
-  return n == rl || rl == 0 || wget(k.cwd, pid * CWD_STRIDE + 1 + rl) == 47;
+  return n == rl || rl == 0 || rbyte(k.cwd, k.cwdx, pid, rl) == 47;
 }
 
-/// Keeps x[0..n] as row `row` of a path table (cwd or dpath).
-fn name_keep(t: &mut Buf, tlen: u64, row: u64, x: &Bytes, n: u64)
-  requires len(t) == tlen && (row + 1) * CWD_STRIDE <= tlen && n <= FNAME_MAX && n <= blen(x)
-  ensures len(t) == tlen
+/// Keeps x[0..n] as row `row` of a path table (cwd or dpath), of `rows` rows
+/// at most, with tx beside it. False, with the row as it was, if the part
+/// past CWD_INL has no room.
+fn name_keep(t: &mut Buf, tx: &mut Buf, tlen: u64, row: u64, rows: u64, x: &Bytes, n: u64) -> bool
+  requires len(t) == tlen && (row + 1) * CWD_STRIDE <= tlen && row < rows && rows <= NPROC * 8 && len(tx) <= rows * SPILL_STRIDE && n <= FNAME_MAX && n <= blen(x)
+  ensures len(t) == tlen && len(tx) <= rows * SPILL_STRIDE
 {
+  if n > CWD_INL && !spill_room(&mut tx, row, rows) {
+    return false;
+  }
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= FNAME_MAX && n <= blen(x) && len(t) == tlen && (row + 1) * CWD_STRIDE <= tlen
+    invariant i <= n && n <= FNAME_MAX && n <= blen(x) && len(t) == tlen && (row + 1) * CWD_STRIDE <= tlen && len(tx) <= rows * SPILL_STRIDE
   {
-    t = set(t, row * CWD_STRIDE + 1 + i, cast[u64](bget(x, i)));
+    rsetb(&mut t, &mut tx, row, i, cast[u64](bget(x, i)));
     i = i + 1;
   }
   t = set(t, row * CWD_STRIDE, n);
+  return true;
 }
 
 /// Saves the last lookup's logical path to t[at..], returning its length.
@@ -491,25 +533,25 @@ fn lname_save(k: &Kernel, t: &mut Bytes, at: u64) -> u64
 /// A directory was renamed from x[0..on] to x[F..F+nn] (F = FNAME_MAX, logical names, saved by lname_save):
 /// every row of path table t (cwd or dpath) at or below the old name
 /// follows it. A name that would not fit stays as it was.
-fn path_moved(t: &mut Buf, x: &Bytes, on: u64, nn: u64)
-  requires len(t) <= DPATH_LEN && on > 0 && on <= FNAME_MAX && nn <= FNAME_MAX && blen(x) == 2 * FNAME_MAX
-  ensures len(t) <= DPATH_LEN
+fn path_moved(t: &mut Buf, tx: &mut Buf, rows: u64, x: &Bytes, on: u64, nn: u64)
+  requires len(t) <= DPATH_LEN && rows <= OFD_N && len(tx) <= rows * SPILL_STRIDE && on > 0 && on <= FNAME_MAX && nn <= FNAME_MAX && blen(x) == 2 * FNAME_MAX
+  ensures len(t) <= DPATH_LEN && len(tx) <= rows * SPILL_STRIDE
 {
   let mut tmp = balloc(FNAME_MAX);
   let mut r = 0;
-  while (r + 1) * CWD_STRIDE <= len(t)
-    invariant len(t) <= DPATH_LEN && r <= OFD_N && on > 0 && on <= FNAME_MAX && nn <= FNAME_MAX && blen(x) == 2 * FNAME_MAX && blen(tmp) == FNAME_MAX
+  while (r + 1) * CWD_STRIDE <= len(t) && r < rows
+    invariant len(t) <= DPATH_LEN && len(tx) <= rows * SPILL_STRIDE && rows <= OFD_N && r <= OFD_N && on > 0 && on <= FNAME_MAX && nn <= FNAME_MAX && blen(x) == 2 * FNAME_MAX && blen(tmp) == FNAME_MAX
   {
     let cl = smaller(wget(t, r * CWD_STRIDE), FNAME_MAX);
     let mut hit = cl >= on;
-    if hit && cl > on && wget(t, r * CWD_STRIDE + 1 + on) != 47 {
+    if hit && cl > on && rbyte(t, tx, r, on) != 47 {
       hit = false;
     }
     let mut i = 0;
     while i < on && hit
-      invariant i <= on && on <= FNAME_MAX && cl <= FNAME_MAX && blen(x) == 2 * FNAME_MAX && len(t) <= DPATH_LEN && (r + 1) * CWD_STRIDE <= len(t)
+      invariant i <= on && on <= FNAME_MAX && cl <= FNAME_MAX && blen(x) == 2 * FNAME_MAX && len(t) <= DPATH_LEN && (r + 1) * CWD_STRIDE <= len(t) && len(tx) <= rows * SPILL_STRIDE
     {
-      if wget(t, r * CWD_STRIDE + 1 + i) != cast[u64](bget(x, i)) {
+      if rbyte(t, tx, r, i) != cast[u64](bget(x, i)) {
         hit = false;
       }
       i = i + 1;
@@ -525,12 +567,12 @@ fn path_moved(t: &mut Buf, x: &Bytes, on: u64, nn: u64)
       }
       let mut q = 0;
       while q < rest
-        invariant q <= rest && nn + rest <= FNAME_MAX && on + rest == cl && cl <= FNAME_MAX && blen(tmp) == FNAME_MAX && len(t) <= DPATH_LEN && (r + 1) * CWD_STRIDE <= len(t)
+        invariant q <= rest && nn + rest <= FNAME_MAX && on + rest == cl && cl <= FNAME_MAX && blen(tmp) == FNAME_MAX && len(t) <= DPATH_LEN && (r + 1) * CWD_STRIDE <= len(t) && len(tx) <= rows * SPILL_STRIDE
       {
-        bset(&mut tmp, nn + q, cast[u8](wget(t, r * CWD_STRIDE + 1 + on + q) % 256));
+        bset(&mut tmp, nn + q, cast[u8](rbyte(t, tx, r, on + q)));
         q = q + 1;
       }
-      name_keep(&mut t, len(t), r, tmp, nn + rest);
+      let kept = name_keep(&mut t, &mut tx, len(t), r, rows, tmp, nn + rest);
     }
     r = r + 1;
   }
@@ -548,8 +590,8 @@ fn dpath_room(t: &mut Buf, h: u64) -> bool
     return true;
   }
   let mut rows = len(t) / CWD_STRIDE * 2;
-  if rows < 8 {
-    rows = 8;
+  if rows < 4 {
+    rows = 4;
   }
   if rows < h + 1 {
     rows = h + 1;
@@ -563,12 +605,12 @@ fn dpath_room(t: &mut Buf, h: u64) -> bool
 
 /// Keeps x[0..n] as the name of open directory description h. When there
 /// is no memory for its row the name is not kept: it reads as empty.
-fn dpath_keep(t: &mut Buf, h: u64, x: &Bytes, n: u64)
-  requires h < OFD_N && len(t) <= DPATH_LEN && n <= FNAME_MAX && n <= blen(x)
-  ensures len(t) <= DPATH_LEN
+fn dpath_keep(t: &mut Buf, tx: &mut Buf, h: u64, x: &Bytes, n: u64)
+  requires h < OFD_N && len(t) <= DPATH_LEN && len(tx) <= DPATHX_LEN && n <= FNAME_MAX && n <= blen(x)
+  ensures len(t) <= DPATH_LEN && len(tx) <= DPATHX_LEN
 {
   if dpath_room(&mut t, h) {
-    name_keep(&mut t, len(t), h, x, n);
+    let kept = name_keep(&mut t, &mut tx, len(t), h, OFD_N, x, n);
   }
 }
 
@@ -597,12 +639,8 @@ fn lx_fchdir(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if e != 0 {
     return e;
   }
-  let mut i = 0;
-  while i < CWD_STRIDE
-    invariant i <= CWD_STRIDE && kok(k) && pid < NPROC && h < OFD_N
-  {
-    wset(&mut k.cwd, pid * CWD_STRIDE + i, wget(k.dpath, h * CWD_STRIDE + i));
-    i = i + 1;
+  if (pid + 1) * CWD_STRIDE <= len(k.cwd) && !name_keep(&mut k.cwd, &mut k.cwdx, len(k.cwd), pid, NPROC, k.fs.xfer, dl) {
+    return ENOMEM;
   }
   return 0;
 }
@@ -628,7 +666,7 @@ fn lx_getcwd(k: &mut Kernel, pid: u64, va: u64, size: u64) -> u64
   while i < m
     invariant i <= m && s + m == n && n <= FNAME_MAX && kok(k) && pid < NPROC
   {
-    bset(&mut k.fs.xfer, 1 + i, cast[u8](wget(k.cwd, pid * CWD_STRIDE + 1 + s + i) % 256));
+    bset(&mut k.fs.xfer, 1 + i, cast[u8](rbyte(k.cwd, k.cwdx, pid, s + i)));
     i = i + 1;
   }
   bset(&mut k.fs.xfer, m + 1, 0);
@@ -979,8 +1017,8 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   }
   if d != NO_FILE && oln > 0 {
     // Working directories and open directories under it follow the new name.
-    path_moved(&mut k.cwd, lg, oln, nln);
-    path_moved(&mut k.dpath, lg, oln, nln);
+    path_moved(&mut k.cwd, &mut k.cwdx, NPROC, lg, oln, nln);
+    path_moved(&mut k.dpath, &mut k.dpathx, OFD_N, lg, oln, nln);
   }
   bfree(t);
   bfree(lg);

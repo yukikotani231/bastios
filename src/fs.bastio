@@ -37,6 +37,7 @@ const FTAB_LEN: u64 = FD_ROWS * FD_STRIDE;   // the most the table grows to (new
 const FTAB_START: u64 = 24576;        // what it starts with: the pool and 32 processes' rows ((FD_POOL + PGROW * NFD) * FD_STRIDE)
 const ZEROS: u64 = 160;                // the longest lx_fill
 const XFER: u64 = 4096;               // the most bytes one call moves
+const XBUF: u64 = 8192;               // the size of v.xfer: room for two paths (PATH_MAX each), or XFER bytes of data
 
 /// The first row of process pid's native block.
 fn nbase(pid: u64) -> u64
@@ -82,7 +83,7 @@ spec fn nopen_ok(n: &Buf) -> bool {
 const VDIR_ROOT: u64 = NFILES + 2 * DSLOTS;  // the top directory
 const VDIR_DISK: u64 = NFILES + 2 * DSLOTS + 1;  // "disk"
 const VDIR_LO: u64 = NFILES + 2 * DSLOTS + 2;    // the loop mount's top directory
-const NAMEBUF: u64 = 256;             // holds any in-memory node's name
+const NAMEBUF: u64 = 4096;            // holds any in-memory node's name
 const MNT_N: u64 = 64;                // tmpfs mounts at once
 const MNT_LEN: u64 = 128;             // MNT_N * 2: per mount, its directory node + 1 (0: free) and 1 if read-only
 
@@ -113,7 +114,7 @@ struct Vfs {
 }
 
 spec fn vfs_ok(v: &Vfs) -> bool {
-  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XFER && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
+  nodes_ok(v.ram) && rix_ok(v.rix) && v.rhi <= NFILES && v.pool_hi <= FD_POOL && len(v.ftab) <= FTAB_LEN && len(v.holds) == HOLD_LEN && blen(v.xfer) == XBUF && blen(v.zeros) == ZEROS && disk_ok(v.disk) && blen(v.name) == NAMEBUF && len(v.mnt) == MNT_LEN && v.mnt_hi <= MNT_N && nopen_ok(v.nopen)
     && disk_ok(v.lo) && blen(v.lname) == NAMEBUF && pc_ok(v.pc) && v.nat_hi <= FD_ROWS
 }
 
@@ -121,7 +122,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
   requires disk_ok(disk)
   ensures vfs_ok(result)
 {
-  return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XFER), zeros: balloc(ZEROS), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), mnt_hi: 0, now: 0,
+  return Vfs { ram: ram_new(), ftab: alloc(FTAB_START), holds: alloc(HOLD_LEN), xfer: balloc(XBUF), zeros: balloc(ZEROS), disk: disk, name: balloc(NAMEBUF), mnt: alloc(MNT_LEN), mnt_hi: 0, now: 0,
     lo: disk_mount(Blk::Loop(loopdev_new(vec_new[Slot](), 0)), DM_WHOLE, NC_STD), lname: balloc(NAMEBUF), lo_at: 0, lo_file: NFILES, lo_size: 0, lo_dev: 0, lo_ro: false, pc: pc_new(), nopen: alloc(NOPEN_START), rix: alloc(KBASE + KB), rhi: 0, pool_hi: 0, nat_hi: 0 };
 }
 
@@ -129,7 +130,7 @@ fn vfs_new(disk: DiskFs) -> Vfs
 /// so ram_find reaches it. Every creation in memory goes through this, or
 /// through vfs_ram_link, or notes `rhi` itself (vfs_install_bytes, which creates from its own buffer).
 fn vfs_ram_create(v: &mut Vfs, n: u64, dir: bool) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v) && result <= NFILES
 {
   let i = ram_create(&mut v.ram, &mut v.rix, v.xfer, n, dir, v.now);
@@ -141,7 +142,7 @@ fn vfs_ram_create(v: &mut Vfs, n: u64, dir: bool) -> u64
 
 /// ram_link, noting the new node in `rhi`.
 fn vfs_ram_link(v: &mut Vfs, n: u64, t: u64) -> u64
-  requires vfs_ok(v) && n <= XFER && t < NFILES
+  requires vfs_ok(v) && n <= XBUF && t < NFILES
   ensures vfs_ok(v) && result <= NFILES
 {
   let i = ram_link(&mut v.ram, &mut v.rix, v.xfer, n, t, v.now);
@@ -234,7 +235,7 @@ fn vfs_mount_target(v: &mut Vfs)
 /// Is the name in the first n bytes of the transfer buffer on the disk
 /// ("disk/" and at least one more byte)?
 fn on_disk(v: &Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures result ==> DISK_PREFIX < n
 {
   if n <= DISK_PREFIX {
@@ -248,7 +249,7 @@ fn on_disk(v: &Vfs, n: u64) -> bool
 /// n bytes of the transfer buffer lies below its directory, the length of
 /// that directory's name and the "/" after it (less than n); else 0.
 fn lo_pfx(v: &mut Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v) && (result == 0 || result < n)
 {
   if v.lo_at == 0 || v.lo_at > NFILES {
@@ -264,7 +265,7 @@ fn lo_pfx(v: &mut Vfs, n: u64) -> u64
 /// Is the name in the first n bytes of the transfer buffer the directory
 /// the loop mount is on?
 fn lo_root(v: &mut Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   if v.lo_at == 0 || v.lo_at > NFILES {
@@ -410,7 +411,7 @@ fn node_open(n: &Buf, fs: u64, i: u64) -> bool
 /// rows - 1) or NO_FD: no such file without O_CREATE, no room, or a name
 /// that is empty or too long.
 fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64) -> u64
-  requires vfs_ok(v) && mem_ok(mem) && base + rows <= FD_ROWS && n <= XFER
+  requires vfs_ok(v) && mem_ok(mem) && base + rows <= FD_ROWS && n <= XBUF
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result < rows || result == NO_FD
 {
@@ -423,7 +424,7 @@ fn vfs_open(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64
 
 /// vfs_open without the page cache's upkeep.
 fn open_row(v: &mut Vfs, mem: &mut Mem, base: u64, rows: u64, flags: u64, n: u64) -> u64
-  requires vfs_ok(v) && mem_ok(mem) && base + rows <= FD_ROWS && n <= XFER
+  requires vfs_ok(v) && mem_ok(mem) && base + rows <= FD_ROWS && n <= XBUF
   ensures vfs_ok(v) && mem_ok(mem)
   ensures result < rows || result == NO_FD
 {
@@ -1014,7 +1015,7 @@ fn vfs_seek(v: &mut Vfs, row: u64, off: u64) -> bool
 /// Returns false if there is none (or it is a directory). A file that is
 /// open loses its name now and its data at the last close, as on Linux.
 fn vfs_unlink(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
-  requires vfs_ok(v) && mem_ok(mem) && n <= XFER
+  requires vfs_ok(v) && mem_ok(mem) && n <= XBUF
   ensures vfs_ok(v) && mem_ok(mem)
 {
   if on_disk(v, n) {
@@ -1078,7 +1079,7 @@ fn dk_unlink(d: &mut DiskFs, nopen: &Buf, x: &Bytes, p: u64, n: u64, fs: u64) ->
 /// like vfs_dirent: 0 to NFILES - 1 in memory, then DSLOTS on the disk. A
 /// handle names the same file until that file is removed.
 fn vfs_lookup(v: &mut Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
   ensures result < HFILES || result == NO_FILE
 {
@@ -1280,7 +1281,7 @@ fn read_at(v: &mut Vfs, f0: u64, off: u64, n: u64) -> u64
 /// The size of the file named by the first n bytes of the transfer
 /// buffer, or NO_FILE.
 fn vfs_stat(v: &mut Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   let f = vfs_lookup(&mut v, n);
@@ -1305,7 +1306,7 @@ fn vfs_orphan(v: &mut Vfs, f: u64) -> bool
 fn vfs_dirent(v: &mut Vfs, i: u64) -> u64
   requires vfs_ok(v)
   ensures vfs_ok(v)
-  ensures result <= XFER || result == NO_FILE
+  ensures result <= XBUF || result == NO_FILE
 {
   if i >= HFILES {
     return NO_FILE;
@@ -1329,7 +1330,7 @@ fn vfs_dirent(v: &mut Vfs, i: u64) -> u64
   if n == NO_FILE {
     return 0;
   }
-  if n > XFER {
+  if n > XBUF {
     return 0;     // cannot happen: names are at most FNAME_MAX bytes
   }
   return n;
@@ -1340,7 +1341,7 @@ fn vfs_dirent(v: &mut Vfs, i: u64) -> u64
 fn lo_dirent(v: &mut Vfs, e: u64) -> u64
   requires vfs_ok(v) && e < DSLOTS
   ensures vfs_ok(v)
-  ensures result <= XFER || result == NO_FILE
+  ensures result <= XBUF || result == NO_FILE
 {
   if v.lo_at == 0 || v.lo_at > NFILES {
     return 0;
@@ -1350,7 +1351,7 @@ fn lo_dirent(v: &mut Vfs, e: u64) -> u64
     return 0;
   }
   let d = disk_name(v.lo, e, &mut v.xfer, l + 1);
-  if d == NO_DISK_FILE || l + 1 + d > XFER {
+  if d == NO_DISK_FILE || l + 1 + d > XBUF {
     return 0;
   }
   let mut j = 0;
@@ -1457,7 +1458,7 @@ fn vfs_sync(v: &mut Vfs)
 /// file or directory: not empty, no "/" at either end or twice in a row,
 /// and not "disk"?
 fn path_ok(v: &Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
 {
   if n == 0 || bget(v.xfer, 0) == 47 || bget(v.xfer, n - 1) == 47 {
     return false;
@@ -1481,7 +1482,7 @@ fn path_ok(v: &Vfs, n: u64) -> bool
 /// The position of the last "/" in the first n bytes of the transfer
 /// buffer, or n if there is none.
 fn last_slash(v: &Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures result <= n
 {
   let mut k = n;
@@ -1499,7 +1500,7 @@ fn last_slash(v: &Vfs, n: u64) -> u64
 /// Does the directory that a new file named by the first n bytes of the
 /// transfer buffer would go in exist?
 fn parent_ok(v: &mut Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   let k = last_slash(v, n);
@@ -1528,7 +1529,7 @@ fn parent_ok(v: &mut Vfs, n: u64) -> bool
 /// Makes the directory named by the first n bytes of the transfer buffer.
 /// Fails if the name is taken, its parent is missing, or there is no room.
 fn vfs_mkdir(v: &mut Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   if !path_ok(v, n) || !parent_ok(&mut v, n) {
@@ -1558,7 +1559,7 @@ fn vfs_mkdir(v: &mut Vfs, n: u64) -> bool
 /// Removes the directory named by the first n bytes of the transfer buffer
 /// if nothing is in it.
 fn vfs_rmdir(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
-  requires vfs_ok(v) && mem_ok(mem) && n <= XFER
+  requires vfs_ok(v) && mem_ok(mem) && n <= XBUF
   ensures vfs_ok(v) && mem_ok(mem)
 {
   if on_disk(v, n) {
@@ -1612,7 +1613,7 @@ fn vfs_is_dir(v: &mut Vfs, f0: u64) -> bool
 /// "disk", VDIR_LO for the loop mount's directory, or a directory node.
 /// NO_FILE if there is no such directory.
 fn vfs_dir_lookup(v: &mut Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
   ensures result <= VDIR_LO || result == NO_FILE
 {
@@ -1685,7 +1686,7 @@ fn child_at(x: &mut Bytes, n: u64, p: &Bytes, l: u64, top: bool) -> u64
 fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
   requires vfs_ok(v)
   ensures vfs_ok(v)
-  ensures result <= XFER || result == NO_FILE
+  ensures result <= XBUF || result == NO_FILE
 {
   if d == VDIR_ROOT || d < NFILES {
     let mut l = 0;
@@ -1712,7 +1713,7 @@ fn vfs_readdir(v: &mut Vfs, d: u64, i: u64) -> u64
       return NO_FILE;                     // no node lives at or past rhi (the top directory goes on to "disk")
     }
     let n = ram_name(&mut v.ram, i, &mut v.xfer);
-    if n > XFER {
+    if n > XBUF {
       return 0;
     }
     return child_at(&mut v.xfer, n, v.name, l, d == VDIR_ROOT);
@@ -1803,9 +1804,9 @@ fn vfs_skip(v: &mut Vfs, d: u64, i: u64) -> u64
 /// vfs_readdir of entry i of directory entry p (DTOP: the top) of disk
 /// file system d.
 fn dk_readdir(d: &DiskFs, x: &mut Bytes, p: u64, i: u64) -> u64
-  requires disk_ok(d) && blen(x) == XFER
-  ensures blen(x) == XFER
-  ensures result <= XFER || result == NO_FILE
+  requires disk_ok(d) && blen(x) == XBUF
+  ensures blen(x) == XBUF
+  ensures result <= XBUF || result == NO_FILE
 {
   if i >= DSLOTS || i >= d.slots {
     return NO_FILE;                       // past the directory's last block: no entry lives there
@@ -1814,7 +1815,7 @@ fn dk_readdir(d: &DiskFs, x: &mut Bytes, p: u64, i: u64) -> u64
     return 0;
   }
   let n = disk_comp(d, i, &mut x, 0);
-  if n == NO_DISK_FILE || n > XFER {
+  if n == NO_DISK_FILE || n > XBUF {
     return 0;
   }
   return n;
@@ -1850,7 +1851,7 @@ fn vfs_child(d: u64, i: u64) -> u64
 /// On the disk this is one sector write, so a power cut leaves either
 /// name; in memory a directory's contents are renamed with it.
 fn vfs_rename(v: &mut Vfs, n: u64, m: u64) -> bool
-  requires vfs_ok(v) && n <= XFER && m <= XFER - n
+  requires vfs_ok(v) && n <= XBUF && m <= XBUF - n
   ensures vfs_ok(v)
 {
   if n == 0 || m == 0 || n > FNAME_MAX || m > FNAME_MAX {
@@ -1892,7 +1893,7 @@ fn vfs_rename(v: &mut Vfs, n: u64, m: u64) -> bool
   }
   k = 0;
   while k < m
-    invariant k <= m && vfs_ok(v) && n <= XFER && m <= XFER - n
+    invariant k <= m && vfs_ok(v) && n <= XBUF && m <= XBUF - n
   {
     bset(&mut v.xfer, k, bget(v.xfer, n + k));
     k = k + 1;
@@ -1909,7 +1910,7 @@ fn vfs_rename(v: &mut Vfs, n: u64, m: u64) -> bool
     let mut same = true;
     let mut j = 0;
     while j < n
-      invariant j <= n && n < m && m <= XFER && vfs_ok(v)
+      invariant j <= n && n < m && m <= XBUF && vfs_ok(v)
     {
       if bget(v.xfer, j) != bget(v.name, j) {
         same = false;
@@ -2274,8 +2275,8 @@ fn vfs_mkdata_at(v: &mut Vfs, mem: &mut Mem, n: u64, m: u64, mode: u64) -> bool
 
 /// vfs_mkdata on disk file system d, whose names start p bytes in.
 fn dk_symlink(d: &mut DiskFs, pc: &mut PCache, mem: &mut Mem, h0: u64, x: &mut Bytes, p: u64, n: u64, m: u64, mode: u64, now: u64) -> bool
-  requires disk_ok(d) && blen(x) == XFER && p < n && n <= XFER && m <= FNAME_MAX && mode < 65536 && pc_ok(pc) && mem_ok(mem) && h0 <= LO0
-  ensures disk_ok(d) && blen(x) == XFER && pc_ok(pc) && mem_ok(mem)
+  requires disk_ok(d) && blen(x) == XBUF && p < n && n <= XBUF && m <= FNAME_MAX && mode < 65536 && pc_ok(pc) && mem_ok(mem) && h0 <= LO0
+  ensures disk_ok(d) && blen(x) == XBUF && pc_ok(pc) && mem_ok(mem)
 {
   let e = disk_create(&mut d, x, p, n - p, false, now);
   if e >= DSLOTS {
@@ -2292,15 +2293,15 @@ fn dk_symlink(d: &mut DiskFs, pc: &mut PCache, mem: &mut Mem, h0: u64, x: &mut B
 
 /// Moves x[from .. from + m] to the front of x.
 fn xfer_shift(x: &mut Bytes, from: u64, m: u64)
-  requires blen(x) == XFER
-  ensures blen(x) == XFER
+  requires blen(x) == XBUF
+  ensures blen(x) == XBUF
 {
-  if from > XFER || m > XFER - from {
+  if from > XBUF || m > XBUF - from {
     return;
   }
   let mut i = 0;
   while i < m
-    invariant i <= m && from + m <= XFER && blen(x) == XFER
+    invariant i <= m && from + m <= XBUF && blen(x) == XBUF
   {
     bset(&mut x, i, bget(x, from + i));
     i = i + 1;
@@ -2321,7 +2322,7 @@ const LINK_FULL: u64 = 5;             // no free node or entry
 /// it opens the file, and the file lives until its last name goes. A link
 /// to a link names the file the first one names.
 fn vfs_link(v: &mut Vfs, n: u64, m: u64) -> u64
-  requires vfs_ok(v) && n <= XFER && m <= XFER - n
+  requires vfs_ok(v) && n <= XBUF && m <= XBUF - n
   ensures vfs_ok(v)
 {
   if n == 0 || m == 0 || n > FNAME_MAX || m > FNAME_MAX {
@@ -2394,7 +2395,7 @@ const XCHG_TMP: u64 = 16;             // ".rename-exchange", a name at the disk'
 /// can leave the first file under the spare name. False, changing nothing,
 /// if the spare name is taken or a name is not there.
 fn vfs_exchange(v: &mut Vfs, n: u64, m: u64) -> bool
-  requires vfs_ok(v) && n <= XFER && m <= XFER - n
+  requires vfs_ok(v) && n <= XBUF && m <= XBUF - n
   ensures vfs_ok(v)
 {
   if n == 0 || m == 0 || n > FNAME_MAX || m > FNAME_MAX {
@@ -2433,11 +2434,11 @@ fn vfs_exchange(v: &mut Vfs, n: u64, m: u64) -> bool
 
 /// vfs_exchange on disk file system d, where both names start p bytes in.
 fn dk_exchange(d: &mut DiskFs, x: &Bytes, p: u64, n: u64, m: u64) -> bool
-  requires disk_ok(d) && blen(x) == XFER && n <= XFER && m <= XFER - n && p < n
+  requires disk_ok(d) && blen(x) == XBUF && n <= XBUF && m <= XBUF - n && p < n
   ensures disk_ok(d)
 {
   let i = disk_find(d, x, p, n - p);
-  if i >= DSLOTS || n + p > XFER || m <= p {
+  if i >= DSLOTS || n + p > XBUF || m <= p {
     return false;
   }
   let j = disk_find(d, x, n + p, m - p);
@@ -2581,7 +2582,7 @@ fn same_start(a: &Bytes, b: &Bytes, l: u64) -> bool
 /// Does the path in the first n bytes of the transfer buffer lie in a
 /// read-only mount (or name its directory)?
 fn vfs_ro(v: &mut Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   return vfs_in_mount(&mut v, n, true) || (v.lo_ro && vfs_in_lo(&mut v, n));
@@ -2590,7 +2591,7 @@ fn vfs_ro(v: &mut Vfs, n: u64) -> bool
 /// Does the path in the first n bytes of the transfer buffer lie in a
 /// mount (a read-only one, if ro_only), or name its directory?
 fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   if on_disk(v, n) {
@@ -2598,7 +2599,7 @@ fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
   }
   let mut s = 0;
   while s < v.mnt_hi
-    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XFER
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XBUF
   {
     let i = vfs_mount_node(v, s);
     if i < NFILES && (vfs_mount_ro(v, s) || !ro_only) {
@@ -2618,7 +2619,7 @@ fn vfs_in_mount(v: &mut Vfs, n: u64, ro_only: bool) -> bool
 /// names), or FS_RAM. Names on different ones cannot be linked or renamed
 /// into each other (EXDEV).
 fn vfs_dev_of(v: &mut Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   let k = vfs_fs_of(&mut v, n);
@@ -2629,7 +2630,7 @@ fn vfs_dev_of(v: &mut Vfs, n: u64) -> u64
   let mut best_l = 0;
   let mut s = 0;
   while s < v.mnt_hi
-    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XFER
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XBUF
   {
     let i = vfs_mount_node(v, s);
     if i < NFILES {
@@ -2649,7 +2650,7 @@ fn vfs_dev_of(v: &mut Vfs, n: u64) -> u64
 /// mount that holds the name in the first n bytes of the transfer buffer,
 /// or 0.
 fn vfs_path_mflags(v: &mut Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   if on_disk(v, n) {
@@ -2660,7 +2661,7 @@ fn vfs_path_mflags(v: &mut Vfs, n: u64) -> u64
   let mut found = false;
   let mut s = 0;
   while s < v.mnt_hi
-    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XFER
+    invariant s <= v.mnt_hi && v.mnt_hi <= MNT_N && vfs_ok(v) && n <= XBUF
   {
     let i = vfs_mount_node(v, s);
     if i < NFILES {
@@ -2713,7 +2714,7 @@ fn vfs_file_in_mount(v: &mut Vfs, f: u64) -> bool
 /// Is anything under the in-memory directory named by the first n bytes
 /// of the transfer buffer?
 fn vfs_ram_has_children(v: &mut Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   if !ram_has_under(v.rix, v.xfer, n) {
@@ -2721,7 +2722,7 @@ fn vfs_ram_has_children(v: &mut Vfs, n: u64) -> bool
   }
   let mut j = 0;
   while j < NFILES
-    invariant j <= NFILES && vfs_ok(v) && n <= XFER
+    invariant j <= NFILES && vfs_ok(v) && n <= XBUF
   {
     if ram_under(&mut v.ram, j, v.xfer, n) {
       return true;
@@ -2733,7 +2734,7 @@ fn vfs_ram_has_children(v: &mut Vfs, n: u64) -> bool
 
 /// Does the first n bytes of the transfer buffer name a mount's directory?
 fn vfs_is_mount(v: &mut Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   if on_disk(v, n) {
@@ -2783,7 +2784,7 @@ fn vfs_umount(v: &mut Vfs, mem: &mut Mem, s: u64) -> bool
 /// transfer buffer and every node under it. True if it was removed or was
 /// not there; false, changing nothing, if a file under it is open.
 fn vfs_drop_tree(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
-  requires vfs_ok(v) && mem_ok(mem) && n <= XFER
+  requires vfs_ok(v) && mem_ok(mem) && n <= XBUF
   ensures vfs_ok(v) && mem_ok(mem)
 {
   if on_disk(v, n) {
@@ -2936,7 +2937,7 @@ fn lo_give_back(v: &mut Vfs, mem: &mut Mem, f: u64)
 /// The file system the name in the first n bytes of the transfer buffer is
 /// on: FS_DISK, FS_LO (below the loop mount's directory) or FS_RAM.
 fn vfs_fs_of(v: &mut Vfs, n: u64) -> u64
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   if on_disk(v, n) {
@@ -2951,7 +2952,7 @@ fn vfs_fs_of(v: &mut Vfs, n: u64) -> u64
 /// Is a disk image mounted, and does the path in the first n bytes of the
 /// transfer buffer lie in it (or name its directory)?
 fn vfs_in_lo(v: &mut Vfs, n: u64) -> bool
-  requires vfs_ok(v) && n <= XFER
+  requires vfs_ok(v) && n <= XBUF
   ensures vfs_ok(v)
 {
   return lo_pfx(&mut v, n) != 0 || lo_root(&mut v, n);
