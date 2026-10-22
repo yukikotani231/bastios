@@ -1375,6 +1375,8 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sock2: a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once
+t_sock2: TCP listeners that set SO_REUSEPORT share a port; one that did not is refused
 t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
@@ -1544,6 +1546,7 @@ python: pip: build a C extension from source (setuptools, gcc) and import it
 python: pytest: the whole test suite of a real project (Jinja2's)
 python: pytest: the whole test suite of a second real project (Click's, without its pager tests)
 python: pytest: the whole test suite of a third real project (Flask's, without two tests that fail on Linux too)
+python: python: the test suite of a fourth real project (Tornado's socket tests: event loop, TCP client and server, child processes, HTTP server and client, WebSockets)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes

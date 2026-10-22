@@ -194,7 +194,9 @@ fn ofd_v6only(k: &Kernel, h: u64) -> bool {
 
 /// The address family (FAM_*) the stack gives the socket of open file
 /// description h.
-fn ofd_fam(k: &Kernel, h: u64) -> u64 {
+fn ofd_fam(k: &Kernel, h: u64) -> u64
+  ensures result <= 6
+{
   if ofd_v6only(k, h) {
     return FAM_V6;
   }
@@ -969,9 +971,9 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
 }
 
 /// getsockopt(fd, level, name, val, lenp): SO_TYPE says stream or
-/// datagram; SO_SNDBUF and SO_RCVBUF the buffer sizes; SO_ERROR and every
-/// other option the kernel accepts and
-/// ignores (setsockopt) read as 0. Options at other levels than
+/// datagram; SO_SNDBUF and SO_RCVBUF the buffer sizes; SO_ERROR a refused
+/// TCP connect (once); every other option the kernel accepts and ignores
+/// (setsockopt) and SO_ERROR otherwise read as 0. Options at other levels than
 /// SOL_SOCKET and (on TCP) SOL_TCP are -ENOPROTOOPT.
 fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u64, lenp: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -1022,6 +1024,9 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
     if tcp && !ux_dgram(k, pid, fd) {
       v = 1;                                // SOCK_STREAM
     }
+  }
+  if level == SOL_SOCKET && name == SO_ERROR && is_tcp(k, pid, fd) {
+    v = lx_tcp_soerror(&mut k, pid, fd);
   }
   if level == 41 && name % 0x100000000 == IPV6_V6ONLY {
     let h = fd_ofd(k, pid, fd);
