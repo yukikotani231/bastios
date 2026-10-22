@@ -3150,6 +3150,29 @@ fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
   return p * LXNFD + fd;
 }
 
+/// If x[..n] is /proc/PID/cwd or /proc/PID/root: PID * 2, plus 1 for root;
+/// else NO_RESULT. Only readlink knows these links.
+fn proc_cwd(procs: &Buf, x: &Bytes, n: u64) -> u64
+  requires ptab_ok(procs) && n <= blen(x)
+  ensures result == NO_RESULT || result < 2 * NPROC
+{
+  if n < 6 || !xfer_is(x, 0, 5, "proc/") {
+    return NO_RESULT;
+  }
+  let e = comp_end(x, 5, n);
+  let p = proc_pid(procs, x, 5, e);
+  if p >= NPROC || n < e + 4 {
+    return NO_RESULT;
+  }
+  if n == e + 4 && xfer_is(x, e, n, "/cwd") {
+    return 2 * p;
+  }
+  if n == e + 5 && xfer_is(x, e, n, "/root") {
+    return 2 * p + 1;
+  }
+  return NO_RESULT;
+}
+
 /// Where the name x[..n] (no leading "/") goes on once process p's root is
 /// taken off its front: 0 if the name is not inside the root.
 fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
@@ -3176,6 +3199,37 @@ fn root_skip(k: &Kernel, p: u64, x: &Bytes, n: u64) -> u64
     return 0;
   }
   return rl + 1;
+}
+
+/// The target of /proc/PID/cwd for process t as reader r sees it: t's working
+/// directory from r's root (the whole name when it is outside it), or "/" for
+/// /proc/PID/root. Returns its length.
+fn cwd_link(k: &mut Kernel, r: u64, t: u64, root: bool, o: &mut Bytes) -> u64
+  requires kok(k) && r < NPROC && t < NPROC && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = put_c(&mut o, 0, 47);
+  if root {
+    return a;
+  }
+  let n = smaller(wget(k.cwd, t * CWD_STRIDE), FNAME_MAX);
+  let mut lg = balloc(FNAME_MAX);
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= FNAME_MAX && FNAME_MAX <= blen(lg) && kok(k) && t < NPROC
+  {
+    bset(&mut lg, i, cast[u8](wget(k.cwd, t * CWD_STRIDE + 1 + i) % 256));
+    i = i + 1;
+  }
+  let mut j = root_skip(k, r, lg, n);
+  while j < n
+    invariant j <= n && n <= FNAME_MAX && a <= PROC_OUT && blen(o) == PROC_OUT && FNAME_MAX <= blen(lg) && kok(k)
+  {
+    a = put_c(&mut o, a, bget(lg, j));
+    j = j + 1;
+  }
+  bfree(lg);
+  return a;
 }
 
 /// The row of k.croot that holds process p's root now. The threads of a
@@ -3545,6 +3599,30 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
       bfree(lo);
       return ENOENT;
     }
+    let m = smaller(ln, smaller(size, XFER));
+    let mut i = 0;
+    while i < m
+      invariant i <= m && m <= PROC_OUT && m <= XFER && blen(lo) == PROC_OUT && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, bget(lo, i));
+      i = i + 1;
+    }
+    bfree(lo);
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, m) != m {
+      return EFAULT;
+    }
+    return m;
+  }
+  let mut pc = NO_RESULT;
+  if n <= XFER {
+    pc = proc_cwd(k.procs, k.fs.xfer, n);
+  }
+  if pc != NO_RESULT {
+    if !proc_peek(k.procs, pid, pc / 2) {
+      return EACCES;
+    }
+    let mut lo = balloc(PROC_OUT);
+    let ln = cwd_link(&mut k, pid, pc / 2, pc % 2 == 1, &mut lo);
     let m = smaller(ln, smaller(size, XFER));
     let mut i = 0;
     while i < m

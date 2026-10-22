@@ -1035,6 +1035,7 @@ t_perm: setgroups and getgroups keep supplementary groups
 t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
+t_proc: /proc/PID/cwd and root are links: the working directory, and /
 t_proc: /proc/PID/stat of an ended process is ESRCH
 t_proc: /proc/self/environ holds the environment execve passed
 t_proc: sixteen forks after a process ended do not reuse its id

@@ -103,6 +103,10 @@ int main(int argc, char **argv) {
     EXPECT("/proc/self/environ holds the environment execve passed", ({ char *envp[] = {"A=1", "BB=two", 0};
            (p = fork()) >= 0 && (p == 0 ? (execle(argv[0], argv[0], "env", (char *)0, envp), _exit(99), 0) :
            waitpid(p, &st, 0) == p && WEXITSTATUS(st) == 0); }));
+    EXPECT("/proc/PID/cwd and root are links: the working directory, and /", ({ char old[256], l[256], pp[64], m[256];
+           getcwd(old, sizeof old); int ok = chdir("/tmp") == 0; ssize_t n = readlink("/proc/self/cwd", l, sizeof l - 1); ok = ok && n == 4 && memcmp(l, "/tmp", 4) == 0;
+           snprintf(pp, sizeof pp, "/proc/%d/cwd", (int)getpid()); n = readlink(pp, l, sizeof l - 1); ok = ok && n == 4 && memcmp(l, "/tmp", 4) == 0;
+           n = readlink("/proc/self/root", m, sizeof m - 1); ok = ok && n == 1 && m[0] == '/'; chdir(old); ok; }));
     EXPECT("execve missing is ENOENT", execl("/no/such", "x", (char *)0) == -1 && errno == ENOENT);
     EXPECT("waitpid WNOHANG", (p = fork()) >= 0 && (p == 0 ? (sleep(1), _exit(0), 0) :
            waitpid(p, &st, WNOHANG) == 0 && waitpid(p, &st, 0) == p));
