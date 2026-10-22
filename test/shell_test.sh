@@ -2166,13 +2166,16 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
+    # A processor keeps a process's translations across system calls, and
+    # still drops the ones an unmap, mprotect or fork made wrong (user/mtlb.c).
+    ("/disk/mt", b"mtlb: ok, 400 rounds each", b"\n# "),
     ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
     # Two at once: their code pages come from one page cache entry each,
     # and a fault that waits for the disk sleeps while the other runs.
