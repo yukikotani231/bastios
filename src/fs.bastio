@@ -1616,21 +1616,36 @@ fn vfs_dir_lookup(v: &mut Vfs, n: u64) -> u64
   ensures vfs_ok(v)
   ensures result <= VDIR_LO || result == NO_FILE
 {
+  let dl = vfs_dir_look(&mut v, n);
+  return dl.d;
+}
+
+/// What vfs_dir_lookup gives (d), and, when it had to look the name up as a
+/// file to tell, what vfs_lookup gives for it (f, with `looked` set), so a
+/// caller that wants both does not hash the name twice.
+struct DirLook { d: u64, f: u64, looked: bool }
+
+fn vfs_dir_look(v: &mut Vfs, n: u64) -> DirLook
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+  ensures result.d <= VDIR_LO || result.d == NO_FILE
+  ensures result.f < HFILES || result.f == NO_FILE
+{
   if n == 0 {
-    return VDIR_ROOT;
+    return DirLook { d: VDIR_ROOT, f: NO_FILE, looked: false };
   }
   if lo_root(&mut v, n) {
-    return VDIR_LO;
+    return DirLook { d: VDIR_LO, f: NO_FILE, looked: false };
   }
   if n == 4 && bget(v.xfer, 0) == 100 && bget(v.xfer, 1) == 105 && bget(v.xfer, 2) == 115
     && bget(v.xfer, 3) == 107 {
-    return VDIR_DISK;
+    return DirLook { d: VDIR_DISK, f: NO_FILE, looked: false };
   }
   let f = vfs_lookup(&mut v, n);
   if f != NO_FILE && vfs_is_dir(&mut v, f) {
-    return f;
+    return DirLook { d: f, f: f, looked: true };
   }
-  return NO_FILE;
+  return DirLook { d: NO_FILE, f: f, looked: true };
 }
 
 /// If x[0..n] names something directly in the directory named p[0..l]

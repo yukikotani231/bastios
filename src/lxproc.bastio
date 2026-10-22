@@ -1231,9 +1231,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
   if pf != 0 {
     return proc_file_meta(k, pf);
   }
-  let dir = dir_at(&mut k, n);
-  if dir != NO_FILE {
-    return dir_meta(&mut k, dir);
+  let dl = dir_look(&mut k, n);
+  if dl.d != NO_FILE {
+    return dir_meta(&mut k, dl.d);
   }
   if n > 4 && xfer_bin(k.fs.xfer) {
     let prog = bin_prog(k.fs.xfer, n);
@@ -1245,6 +1245,9 @@ fn path_meta(k: &mut Kernel, n: u64) -> Meta
       bm = S_IFREG_X + S_ISUID;
     }
     return Meta { ok: true, mode: bm, size: slen(prog_image(prog)), ino: INO_PROGS + prog, mtime: 0, own: 0 };
+  }
+  if dl.looked {
+    return file_meta(&mut k.fs, dl.f);
   }
   return file_meta(&mut k.fs, vfs_lookup(&mut k.fs, n));
 }

@@ -330,25 +330,37 @@ fn dir_at(k: &mut Kernel, n: u64) -> u64
   requires kok(k) && n <= FNAME_MAX
   ensures kok(k)
 {
+  let dl = dir_look(&mut k, n);
+  return dl.d;
+}
+
+/// dir_at, and with it what vfs_lookup gives for the name if that was
+/// looked up on the way (see DirLook in src/fs.bastio): `d` is the
+/// directory description, `f` and `looked` the file handle.
+fn dir_look(k: &mut Kernel, n: u64) -> DirLook
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+  ensures result.f < HFILES || result.f == NO_FILE
+{
   if n == 0 {
-    return DIR_ROOT;
+    return DirLook { d: DIR_ROOT, f: NO_FILE, looked: false };
   }
   if is_bin(k.fs.xfer, n) {
-    return DIR_BIN;
+    return DirLook { d: DIR_BIN, f: NO_FILE, looked: false };
   }
   let pd = proc_dir(k.procs, k.fs.xfer, n);
   if pd != NO_FILE {
-    return pd;
+    return DirLook { d: pd, f: NO_FILE, looked: false };
   }
   let cd = cg_dir(k, n);
   if cd != NO_FILE {
-    return cd;
+    return DirLook { d: cd, f: NO_FILE, looked: false };
   }
-  let d = vfs_dir_lookup(&mut k.fs, n);
-  if d == NO_FILE {
-    return NO_FILE;
+  let dl = vfs_dir_look(&mut k.fs, n);
+  if dl.d == NO_FILE {
+    return DirLook { d: NO_FILE, f: dl.f, looked: dl.looked };
   }
-  return DIR_VFS + d;
+  return DirLook { d: DIR_VFS + dl.d, f: dl.f, looked: dl.looked };
 }
 
 /// A child process starts in its parent's working directory.
