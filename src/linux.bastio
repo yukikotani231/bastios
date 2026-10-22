@@ -2594,6 +2594,10 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
   ensures kok(k)
 {
   let bad = Lex { n: NO_RESULT, floor: 0, trail: false, abs: false, esc: false, dirend: false };
+  if blen(k.lexb) != PATH_OUT {
+    bfree(k.lexb);                          // lx_follow has it (see Kernel.lexb)
+    k.lexb = balloc(PATH_OUT);
+  }
   k.perr = ENAMETOOLONG;
   k.pdir = false;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
