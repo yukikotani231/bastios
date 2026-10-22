@@ -166,12 +166,32 @@ fn nl_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   return fd;
 }
 
+/// The network namespace descriptor fd of pid holds, or NNET.
+fn nl_fd_ns(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_DEV || !is_ns_file(d.x) || nsf_kind(d.x) != 3 {
+    return NNET;                    // 3 is NF_NET
+  }
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return NNET;
+  }
+  let id = nsf_held(k, h);
+  if id >= NNET || !nic_ns_live(k.nic, id) {
+    return NNET;
+  }
+  return id;
+}
+
 /// The namespace a request moves a link to: what its first
 /// IFLA_NET_NS_PID names (the process's), NS_UNSAID if no message names
-/// one, NNET if it names none we can find (IFLA_NET_NS_FD included: no
-/// namespace files yet).
-fn nl_target(k: &Kernel, len: u64) -> u64
-  requires kok(k) && len <= XFER
+/// one, NNET if it names none we can find. IFLA_NET_NS_FD names the network
+/// namespace the descriptor (pid's) holds a /proc/PID/ns/net link or a
+/// bind mount of one to.
+fn nl_target(k: &Kernel, pid: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC && len <= XFER
 {
   let mut at = 0;
   while at < len && len - at >= 32
@@ -190,8 +210,9 @@ fn nl_target(k: &Kernel, len: u64) -> u64
         }
         return NNET;
       }
-      if nla_find(k.fs.xfer, at + 32, at + ml, IFLA_NET_NS_FD) != 0 {
-        return NNET;
+      let fd = nla_u32(k.fs.xfer, at + 32, at + ml, IFLA_NET_NS_FD, NO_IF);
+      if fd != NO_IF {
+        return nl_fd_ns(k, pid, fd);
       }
     }
     let step = (ml + 3) / 4 * 4;
@@ -216,7 +237,7 @@ fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
     return EFAULT;
   }
   netns_gc(&mut k);                          // a link whose namespace ended is gone
-  let tgt = nl_target(k, n);
+  let tgt = nl_target(k, pid, n);
   let admin = net_admin(k, pid);
   nic_nl_request(&mut k.nic, q, k.fs.xfer, n, tgt, admin);
   return n;
