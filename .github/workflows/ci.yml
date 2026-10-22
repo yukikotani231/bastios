@@ -256,6 +256,12 @@ jobs:
           bench/ab.py --a build/bastios.elf --b build/bastios.elf --append nopcid --append-b "" --rounds 5 --runs 3 \
             --tests syscall,fault,forkbig,pipelat,pipebw,tcplat,tcpbw --out build/bench/ab-pcid.json | tee build/bench/ab-pcid.md
           { echo '### bench/ab.py under KVM: default PCIDs (B) against boot command line `nopcid` (A)'; echo; cat build/bench/ab-pcid.md; } >> "$GITHUB_STEP_SUMMARY"
+      - if: steps.want.outputs.run == 'true'
+        name: Compare bulk copies with and without rep movsb, the same kernel
+        run: |
+          bench/ab.py --a build/bastios.elf --b build/bastios.elf --append noerms --append-b "" --rounds 5 --runs 3 \
+            --tests fileread,filewrite,filemap,fork,forkbig,pipebw,tcpbw,memcpy --out build/bench/ab-erms.json | tee build/bench/ab-erms.md
+          { echo '### bench/ab.py under KVM: default (B, rep movsb where CPUID has ERMS) against boot command line `noerms` (A)'; echo; cat build/bench/ab-erms.md; } >> "$GITHUB_STEP_SUMMARY"
       - if: always() && steps.want.outputs.run == 'true'
         name: Print the full table again, last in the log
         run: cat build/bench/kvm.md || true
@@ -268,6 +274,8 @@ jobs:
             build/bench/kvm.md
             build/bench/ab-pcid.json
             build/bench/ab-pcid.md
+            build/bench/ab-erms.json
+            build/bench/ab-erms.md
             build/bench/ab.json
             build/bench/ab.md
             build/bench/ab-native.json

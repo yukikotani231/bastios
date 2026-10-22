@@ -90,11 +90,24 @@ static int cmdline_has(const char *w) {
  * bst_cpu_enter). Read by bst_cpu_enter on each processor. */
 uint64_t bst_pcid_on;
 
+/* Enhanced REP MOVSB (CPUID.7:EBX bit 9) unless the command line says
+ * `noerms`: then the compiled bulk copies are one rep movsb instead of rep
+ * movsq and rep movsb (the compiler's runtime, bst_copy_fwd). An emulator
+ * that lacks the bit runs rep movsb byte by byte. */
+extern uint8_t bst_copy_erms __attribute__((weak));   /* absent from a compiler that does not switch */
+
 void bst_platform_init(void) {
     alias_init();
     uint32_t a = 1, b, c = 0, d;
     __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
     bst_pcid_on = (c >> 17 & 1) && !cmdline_has("nopcid");
+    uint32_t top;
+    a = 0; c = 0;
+    __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    top = a;
+    a = 7; c = 0;
+    __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
+    if (&bst_copy_erms) bst_copy_erms = top >= 7 && (b >> 9 & 1) && !cmdline_has("noerms");
 
     /* Each processor's task state segment is set up by bst_core_init (smp.c). */
 
