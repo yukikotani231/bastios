@@ -41,9 +41,9 @@ jobs:
           code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
           guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
           if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
-  # test/all.sh in four parts that run on runners of their own (LANES, see
-  # test/all.sh): the x86-64 boots in three, the shell and network tests
-  # (a b), the lane c and the lane e, and the AArch64 kernel's. The x86-64
+  # test/all.sh in five parts that run on runners of their own (LANES, see
+  # test/all.sh): the x86-64 boots in four, the shell and network tests
+  # (a b), the lanes c, e and f, and the AArch64 kernel's. The x86-64
   # parts build the same kernel, so they share one proof cache; the AArch64
   # part keeps its own, since the caches are saved and restored whole.
   test:
@@ -64,6 +64,9 @@ jobs:
             cache: x86-64
           - part: x86-64 e
             lanes: e
+            cache: x86-64
+          - part: x86-64 f
+            lanes: f
             cache: x86-64
           - part: aarch64
             lanes: d
@@ -153,7 +156,7 @@ jobs:
       - name: Unpack the proof cache
         run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
       - if: matrix.part == 'x86-64'
-        run: make test NATIVE=1 LANES='a b ce' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+        run: make test NATIVE=1 LANES='a b cef' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       # The AArch64 port's kernel and Bastio user programs (shell, hello, spin,
       # true) built by the native AArch64 backend, booted once on QEMU virt.
       - if: matrix.part == 'aarch64'
