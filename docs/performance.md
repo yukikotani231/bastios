@@ -292,7 +292,11 @@ It counts instructions, not cycles: a TLB flush or a cache miss costs nothing
 in it, so compare two kernels with it, and do not read it against Linux's
 times. `bench/insnprof.py -- COMMAND` says where the instructions go: it
 single-steps the guest from gdb and charges each to a kernel function, per
-call. On 2026-10-13 a `getppid` call took 2640 instructions (after the
+call. A test that ends before gdb attaches (`fault`, `create`, a few
+milliseconds of guest time) is run with `osbench -r`, which repeats its tests
+until killed: `bench/insnprof.py -- /disk/osbench -d /tmp -r create=100`
+(`fault=4` for page faults; a page fault is about 1400 steps, over a third of
+them the page's zeroing). On 2026-10-13 a `getppid` call took 2640 instructions (after the
 `sock_wake` fix; the FPU page's copy in and out by loops in the compiler's
 runtime is about 600 of them, the 21 registers' save and 18 restores about
 500, `sched`, `finish` and `next_job` the rest), and a `stat` of a tmpfs file
@@ -388,15 +392,21 @@ to the same table with the lease never dropped, and nothing is taken out of
 a table while it is leased, so `bst_cpu_enter` loads the shadow table with
 the no-flush bit (bit 0 of `CORE_UROOT` is set when it enters, and cleared
 by the prelude's next `bst_mmu_enter`, so it survives only a loop of such
-calls). Any other trap drops the lease, and the next entry flushes: no user
-translation can outlive a change to its mapping. They are on by default; QEMU's TCG has no PCID, so
+calls). A call that takes the lock enters the process's table again (to copy
+a path from it, say), which clears the bit; `bst_cpu_enter` then still loads
+the shadow table without flushing if it is the same process table as at this
+processor's last flushing load (`CORE_LROOT`) and the prelude's count of
+entries taken out of or changed in any table (`bst_pt_gen`, `pt_take` and
+`pt_set_access`) has not moved since (`CORE_LGEN`). Otherwise the next entry
+flushes: no user translation can outlive a change to its mapping. They are on by default; QEMU's TCG has no PCID, so
 the code can only be tested under KVM: the `pcid-kvm` job in CI checks
 that CR4.PCIDE follows the command line, runs the memory, process, thread,
 signal, ptrace, IPC and file programs of the compat suite with PCIDs on, and
-compares the benchmarks with and without PCIDs on the same kernel, booted by turns (`bench/ab.py --append nopcid`), in its summary. A later step could keep
-the user table's translations too (a PCID per address space, flushed when
-`bst_pt_take` or `bst_pt_set_access` changed an entry), which needs the
-prelude's generation count to cover permission changes.
+compares the benchmarks with and without PCIDs on the same kernel, booted by turns (`bench/ab.py --append nopcid`), in its summary. `user/mtlb.c` (run by the shell test, and by `test/pcid_test.py` under KVM with PCIDs on and off) caches a
+translation, makes a call that reads user memory, and changes the page by
+unmap, `mprotect` or fork; it also has two processes use one address in turn.
+A later step could keep the user table's translations across processes too (a
+PCID per address space).
 
 ## Reading the numbers
 

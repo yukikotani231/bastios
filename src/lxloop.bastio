@@ -89,7 +89,7 @@ fn is_loop(d: u64) -> bool
 /// The loop device the n-byte path in the transfer buffer names
 /// ("dev/loop3", "dev/loop-control"), or DEV_NONE.
 fn loop_at(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && n <= FNAME_MAX
+  requires blen(x) == XBUF && n <= FNAME_MAX
 {
   if xfer_is(x, 0, n, "dev/loop-control") {
     return DEV_LOOPCTL;

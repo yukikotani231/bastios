@@ -101,7 +101,7 @@ fn pt_set(t: &mut Buf, p: u64, f: u64, v: u64)
 /// The slave device the n-byte path in the transfer buffer names
 /// ("dev/pts/3"), or DEV_NONE.
 fn pts_at(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && n <= FNAME_MAX
+  requires blen(x) == XBUF && n <= FNAME_MAX
 {
   if (n == 9 || n == 10) && xfer_is(x, 0, 8, "dev/pts/") {
     let c = cast[u64](bget(x, 8));
