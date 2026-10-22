@@ -1476,6 +1476,7 @@ t_userns: nor mounts in a mount namespace that another user namespace made
 t_userns: nor sets the hostname of a UTS namespace that another user namespace made
 t_userns: a user namespace made inside one mounts in a mount namespace of its own
 tty: kilo: edit and save a file
+tty: job control: Ctrl-Z stops the foreground group, not the shell
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
 tty: python: the REPL, and Ctrl-C is KeyboardInterrupt

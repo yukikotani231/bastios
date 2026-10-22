@@ -254,7 +254,7 @@ GIT_TAG       ?= v2.47.0
 RIPGREP_VER   ?= 14.1.1
 KILO_GIT      ?= https://github.com/antirez/kilo
 KILO_REV      ?= 323d93b29bd89a2cb446de90c4ed4fea1764176e
-COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll $(B)/compat/python $(B)/compat/git $(B)/compat/rg $(B)/compat/perl
+COMPAT_APPS := $(B)/compat/lua $(B)/compat/qjs $(B)/compat/sqlite3 $(B)/compat/micropython $(B)/compat/kilo $(B)/compat/ttyepoll $(B)/compat/ttysusp $(B)/compat/python $(B)/compat/git $(B)/compat/rg $(B)/compat/perl
 
 $(B)/compat/lua: | $(B)/compat
 	rm -rf $(B)/compat/src/lua && mkdir -p $(B)/compat/src
@@ -377,6 +377,9 @@ $(B)/compat/kilo: | $(B)/compat
 	$(APPCC) -s -o $@ $(B)/compat/src/kilo/kilo.c
 
 $(B)/compat/ttyepoll: test/compat/progs/ttyepoll.c | $(B)/compat
+	$(APPCC) -s -o $@ $<
+
+$(B)/compat/ttysusp: test/compat/progs/ttysusp.c | $(B)/compat
 	$(APPCC) -s -o $@ $<
 
 $(B)/compat/disk.img: $(COMPAT_BINS) $(COMPAT_APPS) $(B)/compat/perllib $(B)/compat/busybox $(B)/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys test/compat/mkdisk.py

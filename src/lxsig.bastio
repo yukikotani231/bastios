@@ -749,7 +749,9 @@ fn is_linux(procs: &Buf, p: u64) -> bool
 
 /// Ctrl-C on the console: with a Linux program on it, throws away what was
 /// typed and posts SIGINT to every Linux program (there are no process
-/// groups: they all share the console). Otherwise the byte stays queued
+/// groups: they all share the console). Ctrl-Z (VSUSP) posts SIGTSTP the
+/// same way, but to the group a shell made the foreground one with
+/// tcsetpgrp when it still has members. Otherwise the byte stays queued
 /// for a BastiOS program.
 fn tty_intr(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
@@ -758,18 +760,20 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   if tt_flags(k.line, 12) & ISIG == 0 {
     return;                                 // Ctrl-C is a byte like any other (ISIG off)
   }
+  let susp = tt_byte(k.line, VSUSP_AT);
   let n = k.q.r.n;
-  let mut hit = false;
+  let mut hit = 0;
   let mut i = 0;
   while i < n
     invariant i <= n && n == k.q.r.n && kok(k) && con_ok(con)
   {
-    if get(k.q.q, ring_slot(k.q.r, i)) == 3 {
-      hit = true;
+    let b = get(k.q.q, ring_slot(k.q.r, i));
+    if hit == 0 && (b == 3 || (b == susp && susp != 0)) {
+      hit = b;
     }
     i = i + 1;
   }
-  if !hit {
+  if hit == 0 {
     return;
   }
   let mut any = false;
@@ -789,13 +793,35 @@ fn tty_intr(con: &mut Con, k: &mut Kernel)
   ring_clear(&mut k.q.r);
   k.line = set(k.line, 0, 0);
   k.line = set(k.line, 1, 0);
-  puts(&mut con, "^C\r\n");
+  let mut s = SIGINT;
+  if hit == 3 {
+    puts(&mut con, "^C\r\n");
+  } else {
+    s = SIGTSTP;
+    puts(&mut con, "^Z\r\n");
+  }
+  // Ctrl-Z goes to the foreground group the shell set (tcsetpgrp), if
+  // someone is still in it; everything else, as Ctrl-C, to every Linux program.
+  let mut fg = 0;
+  if s == SIGTSTP {
+    let g = get(k.line, TT_FG);
+    p = 1;
+    while p < NPROC
+      invariant 1 <= p && p <= NPROC && kok(k) && con_ok(con)
+    {
+      let st = state(k.procs, p);
+      if g != 0 && st != FREE && st != ZOMBIE && is_linux(k.procs, p) && pgid_of(k.procs, p) == g {
+        fg = g;
+      }
+      p = p + 1;
+    }
+  }
   p = 1;
   while p < NPROC
     invariant 1 <= p && p <= NPROC && kok(k) && con_ok(con)
   {
-    if is_linux(k.procs, p) {
-      post_sig(&mut k, p, SIGINT);
+    if is_linux(k.procs, p) && (fg == 0 || pgid_of(k.procs, p) == fg) {
+      post_sig(&mut k, p, s);
     }
     p = p + 1;
   }
