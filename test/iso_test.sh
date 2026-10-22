@@ -895,6 +895,48 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The editor's Ctrl-G (go to a line), Ctrl-K and Ctrl-U (cut the rest of a line, put it
+        # back) and Ctrl-F (find).
+        mark = len(out)
+        q.stdin.write(b"printf 'one\\ntwo\\nthree\\nfour\\n' > /tmp/g.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/g.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/g.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/g.txt", mark)
+        if good:
+            monitor("sendkey ctrl-g", "sendkey 3", "sendkey ret")
+            good = until(b"bfiles: line 3", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-G in the editor goes to a line")
+        fails += not good
+        if good:
+            monitor("sendkey ctrl-k")
+            good = until(b"bfiles: cut 5", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-K cuts the rest of the line")
+        fails += not good
+        if good:
+            monitor("sendkey ctrl-g", "sendkey 1", "sendkey ret", "sendkey ctrl-u")
+            monitor("sendkey ctrl-f", "sendkey f", "sendkey o", "sendkey u", "sendkey r", "sendkey ret")
+            good = until(b"bfiles: found at 14", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-F finds text")
+        fails += not good
+        if good:
+            monitor("sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/g.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/g.txt\r"); q.stdin.flush()
+        good = good and (until(b"threeone\r\ntwo\r\n\r\nfour", mark) or until(b"threeone\ntwo\n\nfour", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-U puts the cut text back and the file holds the edits")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # n in the list of bfiles makes a new empty file and edits it.
         mark = len(out)
         q.stdin.write(b"mkdir /tmp/nf\r"); q.stdin.flush()
