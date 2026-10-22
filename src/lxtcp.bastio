@@ -52,6 +52,27 @@ fn tk_look(k: &Kernel, pid: u64, fd: u64) -> Tk
   return Tk { err: 0, h: h, t: t, nb: w % 2, port: w / 2 % 65536, mode: w / 131072 % 4, rd: w / TM_RDSHUT };
 }
 
+/// SO_ERROR of a TCP socket: ECONNREFUSED (111, as a positive number) once,
+/// if a connect that has not reported success failed (the peer refused it or
+/// it timed out), which leaves the socket unconnected as the connect call
+/// itself does; else 0.
+fn lx_tcp_soerror(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 || tk.mode != TM_CONN || tk.port != 0 || tk.t >= TCBS {
+    return 0;
+  }
+  if tcp_status(k.nic, tk.t) != 2 {
+    return 0;
+  }
+  tcp_close(&mut k.nic, tk.t);
+  of_set(&mut k.ofd, tk.h, 2, TCBS);
+  of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, 0, TM_NEW));
+  return 111;
+}
+
 fn is_tcp(k: &Kernel, pid: u64, fd: u64) -> bool
   requires kok(k) && pid < NPROC
 {
@@ -149,7 +170,7 @@ fn lx_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if tk.mode != TM_NEW {
     return EINVAL;
   }
-  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port, ofd_fam(k, tk.h));    // port 0: an ephemeral one
+  let t = tcp_listen(&mut k.nic, net_ns(k, pid), tk.port, ofd_fam(k, tk.h), sock_flag(k, tk.h, SOF_REUSEPORT));    // port 0: an ephemeral one
   if t >= TCBS {
     return EADDRINUSE;
   }

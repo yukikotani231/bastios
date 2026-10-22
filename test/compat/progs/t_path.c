@@ -244,6 +244,20 @@ static int trailing_slash(void) {
     return ok;
 }
 
+static int deep_names(void) {
+    struct stat st;
+    int ok = mkdir("pd_a", 0755) == 0 && mkdir("pd_a/b", 0755) == 0 && make("pd_a/b/f");
+    ok = ok && symlink("pd_a/b", "pd_ln") == 0;
+    ok = ok && stat("pd_a/b/f", &st) == 0 && stat("pd_ln/f", &st) == 0 && stat("pd_a/b/../b/./f", &st) == 0;
+    ok = ok && fails(stat("pd_a/b/f/x", &st), ENOTDIR) && fails(stat("pd_a/nob/f", &st), ENOENT);
+    ok = ok && fails(open("pd_a/b/f/x", O_RDONLY), ENOTDIR) && fails(open("pd_ln/nof", O_RDONLY), ENOENT);
+    unlink("pd_a/b/f"); rmdir("pd_a/b");
+    ok = ok && symlink("../pd_a", "pd_a/b") == 0 && make("pd_a/f");   /* a link where a directory was */
+    ok = ok && stat("pd_a/b/f", &st) == 0 && stat("pd_a/b/b/b/f", &st) == 0 && fails(stat("pd_a/b/nof", &st), ENOENT);
+    unlink("pd_a/f"); unlink("pd_a/b"); unlink("pd_ln"); rmdir("pd_a");
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("a path in unmapped memory is EFAULT", unreadable_is_efault());
@@ -258,6 +272,7 @@ int main(void) {
     EXPECT("chroot keeps absolute paths, links and .. inside the new root", chroot_jail());
     EXPECT("mknod makes device and socket nodes; a device node opens its device", device_nodes());
     EXPECT("a name ending in / or /. must be a directory", trailing_slash());
+    EXPECT("a name below a directory, a file or a link that replaced a directory", deep_names());
     EXPECT("execve of a missing /bin program is ENOENT", ({ char *av[] = {"nope", 0};
            fails(execve("/bin/no_such_program", av, 0), ENOENT); }));
     return done();
