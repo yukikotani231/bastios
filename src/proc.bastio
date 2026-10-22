@@ -684,10 +684,34 @@ spec fn lx_count_or_fail(r: u64, n: u64) -> bool {
 // (VFS_MISS): the caller sleeps in DISKWAIT and its call restarts.
 const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
-// (without the leading "/", at most FNAME_MAX) and one byte a word after.
-const CWD_STRIDE: u64 = 1024;          // FNAME_MAX + 1
+// (without the leading "/", at most FNAME_MAX) and the bytes after it, eight
+// to a word (pbyte, pput).
+const CWD_BYTES: u64 = 1024;           // FNAME_MAX + 1
+const CWD_STRIDE: u64 = 129;           // words in a row: the length and CWD_BYTES / 8
 const CWD_LEN: u64 = NPROC * CWD_STRIDE;
-const DPATH_LEN: u64 = 4194304;       // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
+const DPATH_LEN: u64 = 528384;        // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
+
+/// Byte i of a path in row `row` of k.cwd, k.croot or k.dpath: a row is
+/// CWD_STRIDE words, the length and then eight bytes to a word. Past the end
+/// of the table it reads as 0.
+fn pbyte(t: &Buf, row: u64, i: u64) -> u64
+  requires row <= 1048576 && i < CWD_BYTES
+  ensures result < 256
+{
+  return (wget(t, row * CWD_STRIDE + 1 + i / 8) >> (8 * (i % 8))) & 255;
+}
+
+/// Sets byte i of the path in row `row` to b % 256.
+fn pput(t: &mut Buf, row: u64, i: u64, b: u64)
+  requires row <= 1048576 && i < CWD_BYTES
+  ensures len(t) == old(len(t))
+{
+  let at = row * CWD_STRIDE + 1 + i / 8;
+  let sh = 8 * (i % 8);
+  let w = wget(t, at);
+  wset(&mut t, at, (w ^ (((w >> sh) & 255) << sh)) | ((b % 256) << sh));
+}
+
 const MT_N: u64 = 256;                // mounts of mount namespaces, in all (src/lxns.bastio)
 const ME_W: u64 = 5;                  // words per mount
 // After the mounts, k.mns keeps the other namespaces (src/lxns.bastio):

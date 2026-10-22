@@ -41,7 +41,7 @@ converting it first.
    cannot be mounted today: there is no second `Blk`. The loop mount
    (`Blk::Loop`) is the only second block source.
 5. **Names are whole paths.** A RAM node stores its full path, at most
-   255 bytes (`FNAME_MAX`), not a directory entry.
+   1023 bytes (`FNAME_MAX`), not a directory entry.
 
 ## The choice: import into a read-only tmpfs mount
 

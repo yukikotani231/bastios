@@ -96,20 +96,20 @@ fn lx_openat2(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, how: u64, size: u
     return open2_go(&mut k, pid, dirfd, h, path, flags, mode, res);
   }
   // RESOLVE_IN_ROOT: the directory is the root for this call.
-  let mut was = balloc(CWD_STRIDE);
+  let mut was = balloc(CWD_BYTES);
   let wl = root_len(k, pid);
   let mut j = 0;
   while j < wl
-    invariant j <= wl && wl <= FNAME_MAX && blen(was) == CWD_STRIDE && kok(k) && pid < NPROC
+    invariant j <= wl && wl <= FNAME_MAX && blen(was) == CWD_BYTES && kok(k) && pid < NPROC
   {
-    bset(&mut was, j, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + j) % 256));
+    bset(&mut was, j, cast[u8](pbyte(k.croot, pid, j) % 256));
     j = j + 1;
   }
-  let mut base = balloc(CWD_STRIDE);
+  let mut base = balloc(CWD_BYTES);
   let bl = base_len(k, pid, h);
   j = 0;
   while j < bl
-    invariant j <= bl && bl <= FNAME_MAX && blen(base) == CWD_STRIDE && kok(k) && pid < NPROC && h <= OFD_N
+    invariant j <= bl && bl <= FNAME_MAX && blen(base) == CWD_BYTES && kok(k) && pid < NPROC && h <= OFD_N
   {
     bset(&mut base, j, base_byte(k, pid, h, j));
     j = j + 1;
@@ -171,31 +171,31 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
   }
   // Where it starts: the root for an absolute path, else the base
   // (lx_path_lex refused a relative path with no base).
-  let mut sp = balloc(CWD_STRIDE);
+  let mut sp = balloc(CWD_BYTES);
   let mut sl = 0;
   if x.abs || h > OFD_N {
     sl = root_len(k, pid);
     let mut j = 0;
     while j < sl
-      invariant j <= sl && sl <= FNAME_MAX && blen(sp) == CWD_STRIDE && kok(k) && pid < NPROC
+      invariant j <= sl && sl <= FNAME_MAX && blen(sp) == CWD_BYTES && kok(k) && pid < NPROC
     {
-      bset(&mut sp, j, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + j) % 256));
+      bset(&mut sp, j, cast[u8](pbyte(k.croot, pid, j) % 256));
       j = j + 1;
     }
   } else {
     sl = base_len(k, pid, h);
     let mut j = 0;
     while j < sl
-      invariant j <= sl && sl <= FNAME_MAX && blen(sp) == CWD_STRIDE && kok(k) && pid < NPROC && h <= OFD_N
+      invariant j <= sl && sl <= FNAME_MAX && blen(sp) == CWD_BYTES && kok(k) && pid < NPROC && h <= OFD_N
     {
       bset(&mut sp, j, base_byte(k, pid, h, j));
       j = j + 1;
     }
   }
-  let mut lp = balloc(CWD_STRIDE);
+  let mut lp = balloc(CWD_BYTES);
   let mut j = 0;
   while j < ln
-    invariant j <= ln && ln <= FNAME_MAX && blen(lp) == CWD_STRIDE && kok(k)
+    invariant j <= ln && ln <= FNAME_MAX && blen(lp) == CWD_BYTES && kok(k)
   {
     bset(&mut lp, j, bget(k.fs.xfer, j));
     j = j + 1;
@@ -211,10 +211,10 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
   } else if res & RES_BENEATH != 0 && !is_under(k.mstr, lpath_len(k), sp, sl) {   // the logical name: mounts move the file layer's
     e = EXDEV;                              // a link led out
   } else if res & RES_NO_XDEV != 0 {
-    let mut fp = balloc(CWD_STRIDE);
+    let mut fp = balloc(CWD_BYTES);
     let mut c = 0;
     while c < fl
-      invariant c <= fl && fl <= FNAME_MAX && blen(fp) == CWD_STRIDE && kok(k)
+      invariant c <= fl && fl <= FNAME_MAX && blen(fp) == CWD_BYTES && kok(k)
     {
       bset(&mut fp, c, bget(k.fs.xfer, c));
       c = c + 1;
@@ -222,14 +222,14 @@ fn open2_check(k: &mut Kernel, pid: u64, h: u64, path: u64, flags: u64, res: u64
     // The start in the file layer: lp and sp are the namespace's names,
     // which a mount moves (a container's /sys/fs/cgroup is not under its
     // root's name there), fp is the file layer's already.
-    let mut st = balloc(CWD_STRIDE);
+    let mut st = balloc(CWD_BYTES);
     let mut stl = ns_tr(&mut k, ns_of(k, pid), sp, sl);
     if stl == NO_RESULT || stl > FNAME_MAX {
       stl = 0;
     }
     c = 0;
     while c < stl
-      invariant c <= stl && stl <= FNAME_MAX && blen(st) == CWD_STRIDE && kok(k)
+      invariant c <= stl && stl <= FNAME_MAX && blen(st) == CWD_BYTES && kok(k)
     {
       bset(&mut st, c, bget(k.fs.xfer, c));
       c = c + 1;
