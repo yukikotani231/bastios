@@ -1081,6 +1081,7 @@ const OPOST: u64 = 1;                     // c_oflag: process output
 const ONLCR: u64 = 4;                     // c_oflag: LF goes out as CR LF
 const VTIME_AT: u64 = 22;                 // c_cc[VTIME], in tenths of a second
 const VMIN_AT: u64 = 23;                  // c_cc[VMIN]
+const VSUSP_AT: u64 = 27;                 // c_cc[VSUSP]
 
 /// Byte i of the terminal's settings until a program sets them: canonical
 /// mode with echo, as a Linux console starts.
@@ -1095,6 +1096,7 @@ fn tt_default(i: u64) -> u64 {
   if i == 19 { return 0x7F; }             // c_cc[VERASE] = DEL
   if i == 20 { return 0x15; }             // c_cc[VKILL] = Ctrl-U
   if i == 21 { return 4; }                // c_cc[VEOF] = Ctrl-D
+  if i == VSUSP_AT { return 0x1A; }       // c_cc[VSUSP] = Ctrl-Z
   if i == VMIN_AT { return 1; }
   return 0;
 }
@@ -1320,7 +1322,13 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return lx_put_out(&mut k, pid, arg, 4);
   }
   if req == TIOCSPGRP {
-    return 0;                               // accepted: see TIOCGPGRP
+    // Kept only for Ctrl-Z (tty_intr): TIOCGPGRP still answers with the asker's group.
+    let g = pty_int_in(&mut k, pid, arg);
+    if g == NO_RESULT {
+      return EFAULT;
+    }
+    k.line = set(k.line, TT_FG, pidarg_k(k, pid, g) % 0x100000000);
+    return 0;
   }
   if req == TIOCGWINSZ {
     lx_fill(&mut k, 0, WINSIZE_SIZE);
