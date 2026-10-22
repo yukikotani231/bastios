@@ -359,11 +359,41 @@ static void csi(int final)
     }
 }
 
+static char osc[64];                       /* the text of an ESC ] ... string being read (state 4; 5 after an ESC in it) */
+static int osc_n;
+static char new_title[24];                 /* a title the program set (OSC 0 or 2), not yet sent to bwm */
+static int title_set;
+
+static void osc_end(void)
+{
+    osc[osc_n] = 0;
+    if ((osc[0] == '0' || osc[0] == '2') && osc[1] == ';') {
+        snprintf(new_title, sizeof new_title, "%.23s", osc + 2);
+        title_set = 1;
+    }
+}
+
 static void feed(unsigned char b)
 {
+    if (state == 4 || state == 5) {                     /* ends at BEL or ESC \ */
+        if (b == 7 || (state == 5 && b == '\\')) {
+            osc_end();
+            state = 0;
+        } else if (b == 27) {
+            state = 5;
+        } else {
+            state = 4;
+            if (osc_n < (int)sizeof osc - 1)
+                osc[osc_n++] = b;
+        }
+        return;
+    }
     if (state == 1) {
         state = 0;
-        if (b == '[') {
+        if (b == ']') {
+            state = 4;
+            osc_n = 0;
+        } else if (b == '[') {
             state = 2;
             nparam = 0;
             priv = 0;
@@ -671,6 +701,13 @@ int main(int argc, char **argv)
             if (sel_on && !selecting) {
                 sel_on = 0;                       /* new output: the lit text may be gone */
                 memset(dirty, 1, sizeof dirty);
+            }
+            if (title_set) {
+                struct bwm_settitle st = { (uint32_t)id, "" };
+                snprintf(st.title, sizeof st.title, "%s", new_title);
+                title_set = 0;
+                if (bwm_send(fd, BWM_SETTITLE, &st, sizeof st) != 0)
+                    break;
             }
             if (repaint(fd, id, &ocx, &ocy) != 0)
                 break;

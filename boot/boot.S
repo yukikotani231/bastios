@@ -314,7 +314,18 @@ bst_cpu_enter:
         and     $1, %edi                        /* set below by the entry before this one, unless the prelude entered a table since */
         orq     $1, CORE_UROOT(%rsi)
         and     $-2, %rax
-        mov     CORE_INDEX(%rsi), %rdx
+        test    %edi, %edi
+        jnz     7f
+        mov     bst_pt_gen(%rip), %r8           /* read before CR3 is loaded: a take after it shows at the next entry */
+        cmp     CORE_LROOT(%rsi), %rax          /* the table of the last flushing load, and no entry taken out of any table since (the prelude entered the table for a system call's copy, say) */
+        jne     8f
+        cmp     CORE_LGEN(%rsi), %r8
+        je      9f
+8:      mov     %rax, CORE_LROOT(%rsi)
+        mov     %r8, CORE_LGEN(%rsi)
+        jmp     7f
+9:      inc     %edi
+7:      mov     CORE_INDEX(%rsi), %rdx
         shl     $12, %rdx
         movabs  $bst_shadow_pml4, %rcx
         add     %rcx, %rdx

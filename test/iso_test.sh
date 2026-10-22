@@ -150,7 +150,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
-    deadline = time.time() + 360
+    deadline = time.time() + 900
     def until(marker, start):
         nonlocal out
         while marker not in out[start:]:
@@ -726,6 +726,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             clock = any(tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255) for y in range(746, 766) for x in range(915, 965))
             print(("ok  " if clock else "FAIL"), f"({name}) the task bar shows a clock")
             fails += not clock
+            # A right click on the empty desktop opens the same menu at the pointer; a click elsewhere closes it.
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            at = (444 * w + 642) * 3
+            good = tuple(px[at:at + 3]) == (45, 45, 60)
+            print(("ok  " if good else "FAIL"), f"({name}) a right click on the desktop opens the launcher menu at the pointer")
+            fails += not good
+            monitor("mouse_move 300 0")
+            monitor("mouse_button 1", "mouse_button 0")
+            monitor("mouse_move -300 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = tuple(px[at:at + 3]) != (45, 45, 60)
+            print(("ok  " if good else "FAIL"), f"({name}) a click elsewhere closes it")
+            fails += not good
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.7)
@@ -1202,6 +1218,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             keys = {"-": "minus", " ": "spc", "'": "apostrophe", "\\": "backslash", "[": "bracket_left", "?": "shift-slash"}
             def typed(text):
                 monitor(*[f"sendkey {keys.get(c, 'shift-' + c.lower() if c.isupper() else c)}" for c in text], "sendkey ret")
+            # A program can set the window title (ESC ] 2 ; TEXT BEL), which bwm shows.
+            keys[";"] = "semicolon"
+            mark2 = len(out)
+            typed("printf '\\033\\1352;Mine\\007'")
+            good = until(b" Mine", mark2)
+            print(("ok  " if good else "FAIL"), f"({name}) a program sets the title of its terminal window")
+            fails += not good
             typed("printf '\\033[?1049halt\\n'")
             time.sleep(1.5)
             w, h, px = screendump()

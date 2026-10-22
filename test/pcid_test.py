@@ -53,6 +53,21 @@ def boot_and_read(kernel, append, smp, cpu="host"):
             pass
 
 
+def run_mtlb(kernel, append, smp, cpu="host"):
+    """Boots with user/mtlb.c as the disk's only file and returns its last line."""
+    args = argparse.Namespace(accel="kvm", cpu=cpu, mem="512M", smp=smp, kernel=kernel, append=append)
+    tmp = tempfile.mkdtemp()
+    g = R.boot("bastios", args, os.path.join(os.path.dirname(HERE), "build", "user", "mtlb.elf"), tmp)
+    try:
+        at = len(g.out)
+        g.send("/disk/mtlb.elf; echo @@do''ne")
+        if not g.until(rb"@@done", at, 300):
+            raise SystemExit("pcid_test: mtlb did not finish")
+        return [l for l in g.out[at:].decode(errors="replace").splitlines() if l.startswith("mtlb:")][-1:]
+    finally:
+        g.stop()
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--kernel", default=os.path.join(os.path.dirname(HERE), "build", "bastios.elf"))
@@ -80,6 +95,17 @@ def main():
         ok = bool(cr4s) and (any(on) if want else not any(on))
         print(f"pcid_test: command line {append!r}, -cpu {cpu}: CR4.PCIDE per processor {on}: {'ok' if ok else 'FAIL'}; {timing}")
         bad += not ok
+    # Translations cached across system calls must not outlive an unmap, a
+    # protection change or a fork (user/mtlb.c); with PCIDs on they are kept.
+    if os.path.exists(os.path.join(os.path.dirname(HERE), "build", "user", "mtlb.elf")):
+        for append in ("", "nopcid"):
+            try:
+                res = run_mtlb(args.kernel, append, args.smp)
+            except BaseException as e:
+                res = [f"{e}"]
+            ok = bool(res) and res[0].startswith("mtlb: ok")
+            print(f"pcid_test: mtlb, command line {append!r}: {'ok' if ok else 'FAIL'}; {res[0] if res else 'no result line'}")
+            bad += not ok
     return 1 if bad else 0
 
 
