@@ -3236,7 +3236,7 @@ fn cwd_link(k: &mut Kernel, r: u64, t: u64, root: bool, o: &mut Bytes) -> u64
   while i < n
     invariant i <= n && n <= FNAME_MAX && FNAME_MAX <= blen(lg) && kok(k) && t < NPROC
   {
-    bset(&mut lg, i, cast[u8](wget(k.cwd, t * CWD_STRIDE + 1 + i) % 256));
+    bset(&mut lg, i, cast[u8](rbyte(k.cwd, k.cwdx, t, i)));
     i = i + 1;
   }
   let mut j = root_skip(k, r, lg, n);
