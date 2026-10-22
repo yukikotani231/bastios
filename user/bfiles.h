@@ -554,6 +554,109 @@ static int bf_copy_into(const char *src, const char *dir)
     return 0;
 }
 
+/* Copies the file SRC to the new file DST (mode kept). Returns 0 if it did. */
+static int bf_copy_data(const char *src, const char *dst, mode_t mode)
+{
+    int in = open(src, O_RDONLY);
+    if (in < 0)
+        return -1;
+    int out = open(dst, O_WRONLY | O_CREAT | O_EXCL, mode & 0777);
+    if (out < 0) {
+        close(in);
+        return -1;
+    }
+    char buf[4096];
+    ssize_t n;
+    int bad = 0;
+    while ((n = read(in, buf, sizeof buf)) > 0)
+        if (write(out, buf, (size_t)n) != n) {
+            bad = 1;
+            break;
+        }
+    close(in);
+    close(out);
+    if (bad || n < 0) {
+        unlink(dst);
+        return -1;
+    }
+    return 0;
+}
+
+#define BF_TREE_DEPTH 8
+
+/* Copies the directory SRC and everything under it to the new directory DST: regular files and
+ * directories only (anything else is skipped), at most BF_TREE_DEPTH levels. Returns 0 if all of it
+ * was copied. */
+static int bf_copy_tree(const char *src, const char *dst, int depth)
+{
+    struct stat st;
+    if (depth > BF_TREE_DEPTH || stat(src, &st) != 0 || mkdir(dst, st.st_mode & 0777) != 0)
+        return -1;
+    DIR *d = opendir(src);
+    if (!d)
+        return -1;
+    int bad = 0;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0)
+            continue;
+        char a[PATH_MAX], b[PATH_MAX];
+        if (snprintf(a, sizeof a, "%s/%s", src, e->d_name) >= (int)sizeof a
+            || snprintf(b, sizeof b, "%s/%s", dst, e->d_name) >= (int)sizeof b
+            || lstat(a, &st) != 0) {
+            bad = 1;
+            continue;
+        }
+        if (S_ISDIR(st.st_mode))
+            bad |= bf_copy_tree(a, b, depth + 1);
+        else if (S_ISREG(st.st_mode))
+            bad |= bf_copy_data(a, b, st.st_mode);
+    }
+    closedir(d);
+    return bad ? -1 : 0;
+}
+
+/* Copies the directory SRC into the directory DIR under its own name, or "NAME.copy" ("NAME.copy2",
+ * ...) when that is taken; refuses to copy a directory into itself. Says "bfiles: copied SRC to DST". */
+static int bf_copy_dir_into(const char *src, const char *dir)
+{
+    size_t n = strlen(src);
+    if (strncmp(dir, src, n) == 0 && (dir[n] == 0 || dir[n] == '/')) {
+        printf("bfiles: cannot copy %s into itself\n", src);
+        fflush(stdout);
+        return -1;
+    }
+    const char *base = strrchr(src, '/');
+    base = base ? base + 1 : src;
+    const char *sep = strcmp(dir, "/") == 0 ? "" : "/";
+    char to[PATH_MAX];
+    for (int i = 0; i < 100; i++) {
+        struct stat st;
+        if (i == 0)
+            snprintf(to, sizeof to, "%s%s%s", dir, sep, base);
+        else if (i == 1)
+            snprintf(to, sizeof to, "%s%s%s.copy", dir, sep, base);
+        else
+            snprintf(to, sizeof to, "%s%s%s.copy%d", dir, sep, base, i);
+        if (lstat(to, &st) != 0)
+            break;
+        if (i == 99) {
+            printf("bfiles: cannot copy %s\n", src);
+            fflush(stdout);
+            return -1;
+        }
+    }
+    if (bf_copy_tree(src, to, 0) != 0) {
+        printf("bfiles: cannot copy %s\n", src);
+        fflush(stdout);
+        return -1;
+    }
+    printf("bfiles: copied %s to %s\n", src, to);
+    fflush(stdout);
+    bf_stale = 1;
+    return 0;
+}
+
 /* c in the viewer: copies the file shown to "NAME.copy" ("NAME.copy2", ...)
  * next to it. */
 static void bf_copy_file(void)
@@ -592,12 +695,12 @@ static void bf_paste(void)
         return;
     if (!bf_clip_move) {
         struct stat st;
-        if (stat(bf_clip, &st) != 0 || S_ISDIR(st.st_mode)) {
+        if (stat(bf_clip, &st) != 0) {
             printf("bfiles: cannot copy %s\n", bf_clip);
             fflush(stdout);
             return;
         }
-        if (bf_copy_into(bf_clip, bf_cwd) == 0)
+        if ((S_ISDIR(st.st_mode) ? bf_copy_dir_into(bf_clip, bf_cwd) : bf_copy_into(bf_clip, bf_cwd)) == 0)
             bf_load_dir();
         return;
     }
