@@ -93,7 +93,8 @@ uint64_t bst_pcid_on;
 /* Enhanced REP MOVSB (CPUID.7:EBX bit 9) unless the command line says
  * `noerms`: then the compiled bulk copies are one rep movsb instead of rep
  * movsq and rep movsb (the compiler's runtime, bst_copy_fwd). An emulator
- * that lacks the bit runs rep movsb byte by byte. */
+ * that lacks the bit runs rep movsb byte by byte. docs/performance.md has
+ * the A/B (bench-kvm boots this kernel with and without `noerms`). */
 extern uint8_t bst_copy_erms __attribute__((weak));   /* absent from a compiler that does not switch */
 
 void bst_platform_init(void) {
