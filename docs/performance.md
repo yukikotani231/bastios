@@ -398,6 +398,17 @@ the user table's translations too (a PCID per address space, flushed when
 `bst_pt_take` or `bst_pt_set_access` changed an entry), which needs the
 prelude's generation count to cover permission changes.
 
+## Bulk copies (boot option `noerms`)
+
+The compiler's copies (`bst_copy_fwd`, the page copy) are one `rep movsb` on a
+processor with enhanced REP MOVSB (CPUID.7:EBX bit 9), which `bst_platform_init`
+(boot/platform.c) turns on in the byte `bst_copy_erms` unless the boot command
+line says `noerms`; fast strings then copy by whole cache lines, which a
+`rep movsq` loop does not. Without the bit (QEMU's TCG, which runs `rep movsb`
+one byte at a time) they stay `rep movsq` and `rep movsb`. `bench-kvm` boots
+the same kernel with and without the word (`bench/ab.py --append noerms`) for
+the copy-heavy tests, in its summary.
+
 ## Reading the numbers
 
 TCG is not a processor. It inflates some costs and hides others, and it
