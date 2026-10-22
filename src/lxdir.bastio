@@ -38,7 +38,7 @@ struct Ent { len: u64, dir: bool, end: bool }
 /// transfer buffer. len 0 is an unused slot; `end` is past the last.
 fn dir_entry(k: &mut Kernel, pid: u64, dir: u64, i: u64) -> Ent
   requires kok(k) && pid < NPROC
-  ensures kok(k) && result.len <= XFER
+  ensures kok(k) && result.len <= XBUF
 {
   if dir == DIR_ROOT {
     if i == 0 {
@@ -89,7 +89,7 @@ fn dir_gap(k: &mut Kernel, dir: u64, i: u64) -> u64
 /// Entry i of the file layer's directory d.
 fn vfs_entry(k: &mut Kernel, d: u64, i: u64) -> Ent
   requires kok(k)
-  ensures kok(k) && result.len <= XFER
+  ensures kok(k) && result.len <= XBUF
 {
   let n = vfs_readdir(&mut k.fs, d, i);
   if n == NO_FILE {
@@ -160,13 +160,13 @@ fn ent_dt(k: &mut Kernel, dir: u64, i: u64, e: Ent) -> Dt
 
 /// Copies `name` (up to FNAME_MAX bytes) into the start of x.
 fn name_out(x: &mut Bytes, name: Str) -> u64
-  requires blen(x) == XFER
-  ensures blen(x) == XFER && result <= FNAME_MAX
+  requires blen(x) == XBUF
+  ensures blen(x) == XBUF && result <= FNAME_MAX
 {
   let n = smaller(slen(name), FNAME_MAX);
   let mut i = 0;
   while i < n
-    invariant i <= n && n <= FNAME_MAX && blen(x) == XFER
+    invariant i <= n && n <= FNAME_MAX && blen(x) == XBUF
   {
     bset(&mut x, i, sget(name, i));
     i = i + 1;
@@ -255,7 +255,7 @@ fn lx_getdents(k: &mut Kernel, pid: u64, fd: u64, va: u64, count: u64, legacy: b
         }
         let mut j = 0;
         while j < e.len
-          invariant j <= e.len && e.len <= XFER && DENT_HDR + e.len < reclen && name <= DENT_HDR
+          invariant j <= e.len && e.len <= XBUF && DENT_HDR + e.len < reclen && name <= DENT_HDR
           invariant used + reclen <= cap && cap <= DENT_BUF && blen(out) == DENT_BUF && kok(k)
         {
           bset(&mut out, used + name + j, bget(k.fs.xfer, j));

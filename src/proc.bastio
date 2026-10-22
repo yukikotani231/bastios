@@ -685,9 +685,9 @@ spec fn lx_count_or_fail(r: u64, n: u64) -> bool {
 const DISK_RETRY: u64 = 0x8000000000000002;
 // Linux working directories: per process, word 0 the length of the path
 // (without the leading "/", at most FNAME_MAX) and one byte a word after.
-const CWD_STRIDE: u64 = 256;           // FNAME_MAX + 1
+const CWD_STRIDE: u64 = 4096;          // FNAME_MAX + 1
 const CWD_LEN: u64 = NPROC * CWD_STRIDE;
-const DPATH_LEN: u64 = 1048576;       // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
+const DPATH_LEN: u64 = 16777216;      // OFD_N * CWD_STRIDE: the most it grows to (dpath_room)
 const MT_N: u64 = 256;                // mounts of mount namespaces, in all (src/lxns.bastio)
 const ME_W: u64 = 5;                  // words per mount
 // After the mounts, k.mns keeps the other namespaces (src/lxns.bastio):
@@ -807,7 +807,7 @@ const MNS_IO: u64 = MNS_TM + TM_N * TM_W;
 const CO_N: u64 = 32;
 const MNS_CO: u64 = MNS_IO + IO_N * 2;
 const MNS_LEN: u64 = MNS_CO + CO_N * 2;
-const XAB: u64 = 256 + MT_N * 512 + 256;      // where k.mstr keeps the key descriptions begin (the extended attributes have k.xab)
+const XAB: u64 = 4096 + MT_N * 512 + 4096;     // where k.mstr keeps the key descriptions begin (the extended attributes have k.xab)
 const XAB_LEN: u64 = 256 * 320;                 // k.xab: XA_N rows of XA_ROW bytes (src/lxxattr.bastio), allocated by the first attribute
 const KDB: u64 = XAB;                 // where k.mstr keeps the key descriptions: KEY_N rows of KDESC bytes (src/lxkeys.bastio)
 const KPB: u64 = KDB + KEY_N * KDESC;              // then KP_N payload slots of KPAY bytes
@@ -921,7 +921,7 @@ const UX_PATH: u64 = 255;             // the longest name (a path name is kept a
 const UX_XTRA: u64 = 7;               // descriptions a message passes besides the first
 const UX_LEN: u64 = 2272;             // UX_N * UX_W + UX_LIS * UXL_W + UX_N, then 2 * (UX_N + UX_LIS) credential words, then UX_LIS socket files, then UX_XTRA words per channel, then one offset per channel
 const UXB_LEN: u64 = 532448;          // UX_N * UX_CAP + UX_LIS * UX_PATH
-const PATH_OUT: u64 = 512;              // room for a name being built (lx_lex_xfer, k.lexb)
+const PATH_OUT: u64 = 8192;             // room for a name being built (lx_lex_xfer, k.lexb)
 
 const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptions
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux

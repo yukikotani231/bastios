@@ -24,7 +24,7 @@ const LX_SYMLINK: u64 = 88;
 const LX_LINKAT: u64 = 265;
 const LX_SYMLINKAT: u64 = 266;
 const LINK_HOPS: u64 = 8;
-const SPLICE: u64 = 1024;             // 2 * PATH_OUT: a link's directory, its target and the rest
+const SPLICE: u64 = 16384;            // 2 * PATH_OUT: a link's directory, its target and the rest
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 
 /// Normalizes src[..sl] into dst: empty parts and "." dropped, ".." going
@@ -294,7 +294,7 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
   let mut tb = balloc(FNAME_MAX);
   let mut i = 0;
   while i < tl
-    invariant i <= tl && tl <= FNAME_MAX && tl <= XFER && blen(tb) == FNAME_MAX && kok(k)
+    invariant i <= tl && tl <= FNAME_MAX && tl <= XBUF && blen(tb) == FNAME_MAX && kok(k)
   {
     bset(&mut tb, i, bget(k.fs.xfer, i));
     i = i + 1;

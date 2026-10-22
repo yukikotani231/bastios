@@ -574,7 +574,7 @@ fn exe_src(k: &mut Kernel, p: u64) -> Src
 
 /// Whether the transfer buffer starts with "bin/".
 fn xfer_bin(x: &Bytes) -> bool
-  requires blen(x) == XFER
+  requires blen(x) == XBUF
 {
   return bget(x, 0) == 98 && bget(x, 1) == 105 && bget(x, 2) == 110 && bget(x, 3) == 47;
 }
@@ -1402,7 +1402,7 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
 
 /// Whether the first n bytes of x are "bin".
 fn is_bin(x: &Bytes, n: u64) -> bool
-  requires blen(x) == XFER
+  requires blen(x) == XBUF
 {
   return n == 3 && bget(x, 0) == 98 && bget(x, 1) == 105 && bget(x, 2) == 110;
 }
@@ -1412,7 +1412,7 @@ fn is_bin(x: &Bytes, n: u64) -> bool
 /// argv[0]), and so is /bin/sh: a Linux program running sh (system,
 /// popen) wants a POSIX shell, not the BastiOS one.
 fn bin_prog(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && 4 <= n && n <= FNAME_MAX
+  requires blen(x) == XBUF && 4 <= n && n <= FNAME_MAX
 {
   if xfer_is(x, 4, n, "sh") {
     return ASH_PROG;
@@ -1574,7 +1574,7 @@ fn suid_name(j: u64) -> Str {
 /// the applet its argv[0] names needs it, so a /bin/su run under another
 /// argv[0] gets nothing.
 fn bin_suid(x: &Bytes, n: u64) -> bool
-  requires blen(x) == XFER && 4 <= n && n <= FNAME_MAX
+  requires blen(x) == XBUF && 4 <= n && n <= FNAME_MAX
 {
   let mut j = 0;
   while j < NSUID_APPLETS

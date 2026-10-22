@@ -275,14 +275,14 @@ fn proc_task(k: &mut Kernel, n: u64) -> u64
   let l = te - e - 6;
   let mut i = 0;
   while i < l
-    invariant i <= l && l <= 3 && e + 6 + l == te && te <= n && n <= FNAME_MAX && blen(k.fs.xfer) == XFER && kok(k)
+    invariant i <= l && l <= 3 && e + 6 + l == te && te <= n && n <= FNAME_MAX && blen(k.fs.xfer) == XBUF && kok(k)
   {
     bset(&mut k.fs.xfer, 5 + i, bget(k.fs.xfer, e + 6 + i));
     i = i + 1;
   }
   let mut j = te;
   while j < n
-    invariant te <= j && j <= n && n <= FNAME_MAX && l <= 3 && e + 6 + l == te && blen(k.fs.xfer) == XFER && kok(k)
+    invariant te <= j && j <= n && n <= FNAME_MAX && l <= 3 && e + 6 + l == te && blen(k.fs.xfer) == XBUF && kok(k)
   {
     bset(&mut k.fs.xfer, 5 + l + (j - te), bget(k.fs.xfer, j));
     j = j + 1;
@@ -341,7 +341,7 @@ fn proc_vpid(k: &mut Kernel, n: u64, pid: u64) -> u64
   if d <= l {
     let mut j = e;
     while j < n
-      invariant e <= j && j <= n && n <= FNAME_MAX && 1 <= d && d <= l && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
+      invariant e <= j && j <= n && n <= FNAME_MAX && 1 <= d && d <= l && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XBUF && kok(k)
     {
       bset(&mut k.fs.xfer, j - l + d, bget(k.fs.xfer, j));
       j = j + 1;
@@ -351,7 +351,7 @@ fn proc_vpid(k: &mut Kernel, n: u64, pid: u64) -> u64
   }
   let mut j = n;
   while j > e
-    invariant e <= j && j <= n && n + d - l <= FNAME_MAX && l < d && d <= 4 && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XFER && kok(k)
+    invariant e <= j && j <= n && n + d - l <= FNAME_MAX && l < d && d <= 4 && l == e - 5 && 6 <= e && blen(k.fs.xfer) == XBUF && kok(k)
   {
     bset(&mut k.fs.xfer, j - 1 + d - l, bget(k.fs.xfer, j - 1));
     j = j - 1;
@@ -2742,7 +2742,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       if got == n {
         let mut i = 0;
         while i < n
-          invariant i <= n && n < PROC_OUT && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+          invariant i <= n && n < PROC_OUT && blen(o) == PROC_OUT && blen(k.fs.xfer) == XBUF
         {
           bset(&mut o, i, bget(k.fs.xfer, i));
           i = i + 1;
@@ -2765,7 +2765,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         let mut j = 0;
         let mut found = false;
         while j < 8 && !found
-          invariant j <= 8 && blen(k.fs.xfer) == XFER
+          invariant j <= 8 && blen(k.fs.xfer) == XBUF
         {
           if rd64(k.fs.xfer, 8 * j) == 3 && rd64(k.fs.xfer, 8 * (j + 2)) == 4 && rd64(k.fs.xfer, 8 * (j + 3)) == PH_SIZE && rd64(k.fs.xfer, 8 * (j + 4)) == 5 {
             found = true;
@@ -2776,14 +2776,14 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         if found {
           let mut e = j;
           while e < 38 && rd64(k.fs.xfer, 8 * e) != 0
-            invariant j <= e && e <= 39 && blen(k.fs.xfer) == XFER
+            invariant j <= e && e <= 39 && blen(k.fs.xfer) == XBUF
           {
             e = e + 2;
           }
           let n = 8 * (e + 2 - j);
           let mut i = 0;
           while i < n && i < 320
-            invariant i <= 320 && 8 * j + i <= 8 * 7 + 320 && blen(o) == PROC_OUT && blen(k.fs.xfer) == XFER
+            invariant i <= 320 && 8 * j + i <= 8 * 7 + 320 && blen(o) == PROC_OUT && blen(k.fs.xfer) == XBUF
           {
             bset(&mut o, i, bget(k.fs.xfer, 8 * j + i));
             i = i + 1;
@@ -3229,7 +3229,7 @@ fn magic_link(k: &mut Kernel, pid: u64, n: u64) -> u64
   ensures kok(k)
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
-  if n > XFER || n < 11 || n > FNAME_MAX || !xfer_is(k.fs.xfer, 0, 5, "proc/") {
+  if n > XBUF || n < 11 || n > FNAME_MAX || !xfer_is(k.fs.xfer, 0, 5, "proc/") {
     return NO_RESULT;                       // the common case, quickly
   }
   // "self" and a PID namespace's ids are rewritten as at the end of a walk;

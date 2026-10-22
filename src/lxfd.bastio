@@ -1229,7 +1229,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       if nm == 0 && f < NFILES {
         return lx_open_orphan(&mut k, pid, f, flags);   // unlinked while open: no name to open, only the file
       }
-      if nm != NO_FILE && nm <= FNAME_MAX && nm <= XFER {
+      if nm != NO_FILE && nm <= FNAME_MAX && nm <= XBUF {
         return lx_open_n(&mut k, pid, nm, flags, mode);
       }
     }
