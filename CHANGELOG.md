@@ -18,6 +18,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
+- `bwm`'s launcher menu gains an entry for each `Label=command` line of `/etc/bwm.menu`, which runs the command in a terminal window; `bterm -e COMMAND` runs a command in place of the shell prompt.
 - `bfiles` moves a cursor along the list with the Up and Down arrow keys and opens the entry under it on Enter.
 - `bsys` reads its numbers again every 2 seconds.
 - `bfiles` opens a `.ppm` or `.bmp` in the image viewer on a click in the list.

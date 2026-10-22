@@ -963,6 +963,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # A line of /etc/bwm.menu adds a launcher entry that runs its command in a terminal window.
+        mark = len(out)
+        q.stdin.write(b"printf 'Say=echo menu-ok > /tmp/mm.out\\n' > /etc/bwm.menu; bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            monitor("mouse_move 482 372")                          # onto the Menu button
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            monitor("mouse_move -34 -72")                          # onto Say, the fourth of six entries
+            monitor("mouse_button 1", "mouse_button 0")
+            good = until(b"bterm: window", mark)
+        if good:
+            time.sleep(2)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"wc -c /tmp/mm.out; rm -f /etc/bwm.menu\r"); q.stdin.flush()
+        good = good and until(b"8 /tmp/mm.out", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a line of /etc/bwm.menu adds a launcher entry that runs a command")
+        fails += not good
         # bview shows a PPM: a 2 x 2 red image becomes a block of pure red.
         mark = len(out)
         q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nf/t.ppm; bwm -n -c bview /tmp/nf/t.ppm\r"); q.stdin.flush()

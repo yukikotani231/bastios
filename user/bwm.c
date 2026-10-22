@@ -391,15 +391,46 @@ static void draw_bar(void)
 }
 
 /* The launcher menu: what it starts, and where its entries are. */
-static const char *const menu_item[] = { "Terminal", "Files", "System", "Hello window", "Quit bwm" };
-#define MENU_N 5
+#define MENU_USER 8                       /* entries read from /etc/bwm.menu */
+#define MENU_MAX (MENU_USER + 5)
+static char menu_label[MENU_MAX][24];
+static char menu_cmd[MENU_USER][160];     /* the shell command of entry 3 + i, run in a terminal window */
+static int menu_n;
 #define MENU_X0 ((int)W - 4 - MENU_ITEM_W)
-#define MENU_Y0 ((int)H - BAR_H - MENU_N * MENU_ITEM_H)
+#define MENU_Y0 ((int)H - BAR_H - menu_n * MENU_ITEM_H)
+
+/* Builds the menu: Terminal, Files and System, then a line "Label=command" of /etc/bwm.menu
+ * for each program to start in a terminal window, then Hello window and Quit bwm. */
+static void menu_load(void)
+{
+    const char *fixed[] = { "Terminal", "Files", "System" };
+    menu_n = 0;
+    for (int i = 0; i < 3; i++)
+        snprintf(menu_label[menu_n++], sizeof menu_label[0], "%s", fixed[i]);
+    FILE *f = fopen("/etc/bwm.menu", "r");
+    char line[200];
+    int nu = 0;
+    while (f && nu < MENU_USER && fgets(line, sizeof line, f)) {
+        char *eq = strchr(line, '=');
+        char *nl = strchr(line, '\n');
+        if (nl)
+            *nl = 0;
+        if (!eq || eq == line || !eq[1] || line[0] == '#')
+            continue;
+        *eq = 0;
+        snprintf(menu_label[menu_n++], sizeof menu_label[0], "%.23s", line);
+        snprintf(menu_cmd[nu++], sizeof menu_cmd[0], "%s", eq + 1);
+    }
+    if (f)
+        fclose(f);
+    snprintf(menu_label[menu_n++], sizeof menu_label[0], "Hello window");
+    snprintf(menu_label[menu_n++], sizeof menu_label[0], "Quit bwm");
+}
 
 /* The entry of the menu at (x, y), or -1. */
 static int menu_at(int x, int y)
 {
-    if (x < MENU_X0 || x >= MENU_X0 + MENU_ITEM_W || y < MENU_Y0 || y >= MENU_Y0 + MENU_N * MENU_ITEM_H)
+    if (x < MENU_X0 || x >= MENU_X0 + MENU_ITEM_W || y < MENU_Y0 || y >= MENU_Y0 + menu_n * MENU_ITEM_H)
         return -1;
     return (y - MENU_Y0) / MENU_ITEM_H;
 }
@@ -409,11 +440,11 @@ static void draw_menu(void)
     if (!menu_open)
         return;
     int lit = menu_at(menu_mx, menu_my);
-    fill(scene, MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + MENU_N * MENU_ITEM_H + 1, rgb(200, 200, 210));
-    for (int i = 0; i < MENU_N; i++) {
+    fill(scene, MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + menu_n * MENU_ITEM_H + 1, rgb(200, 200, 210));
+    for (int i = 0; i < menu_n; i++) {
         int y = MENU_Y0 + i * MENU_ITEM_H;
         fill(scene, MENU_X0, y, MENU_X0 + MENU_ITEM_W, y + MENU_ITEM_H, i == lit ? rgb(40, 90, 200) : rgb(45, 45, 60));
-        text(scene, MENU_X0 + 10, y + 4, menu_item[i], rgb(255, 255, 255));
+        text(scene, MENU_X0 + 10, y + 4, menu_label[i], rgb(255, 255, 255));
     }
 }
 
@@ -1093,6 +1124,19 @@ static void launch_program(const char *name, const char *image)
     }
 }
 
+/* Runs the shell command CMD in a terminal window, which waits for Enter when the command ends. */
+static void launch_command(const char *cmd)
+{
+    if (fork() == 0) {
+        char sh[256];
+        char *argv[] = { "bterm", "-e", sh, NULL };
+        snprintf(sh, sizeof sh, "%s; echo; echo '[done, press Enter]'; read x", cmd);
+        signal(SIGCHLD, SIG_DFL);
+        execv("/bin/bterm", argv);
+        _exit(127);
+    }
+}
+
 /* Gives one typed byte to the focused window; returns 1 for Ctrl-Q. */
 static int type_byte(struct win *top, char c)
 {
@@ -1190,6 +1234,7 @@ int main(int argc, char **argv)
 
     signal(SIGCHLD, SIG_IGN);                                 /* launched terminals need no wait */
     int mx = W / 2, my = H / 2;
+    menu_load();
     draw_scene();
     flush(0, 0, W, H, mx, my);
     printf("bwm: ready %ux%u\n", W, H);
@@ -1374,9 +1419,11 @@ int main(int argc, char **argv)
                         launch_program("bfiles", "bterm");
                     else if (it == 2)
                         launch_program("bsys", "bterm");
-                    else if (it == 3)
+                    else if (it >= 3 && it < menu_n - 2)
+                        launch_command(menu_cmd[it - 3]);
+                    else if (it == menu_n - 2)
                         launch_program("bhello", "bhello");
-                    else if (it == 4)
+                    else if (it == menu_n - 1)
                         running = 0;
                     buttons = m[0];
                     continue;
