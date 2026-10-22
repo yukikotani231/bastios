@@ -916,6 +916,8 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         if (w) {
             t.title[sizeof t.title - 1] = 0;
             snprintf(w->title, sizeof w->title, "%s", t.title);
+            printf("bwm: title %u %s\n", t.id, w->title);
+            fflush(stdout);
             touch_win(w);
             touch_bar();
         }
