@@ -286,6 +286,7 @@ t_fanotify: remove the mark
 t_fanotify: the event says who did it
 t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: 200 separate byte-range locks on one file
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
