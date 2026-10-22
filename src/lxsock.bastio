@@ -53,6 +53,7 @@ const SO_REUSEADDR: u64 = 2;
 const SO_BROADCAST: u64 = 6;
 const SO_KEEPALIVE: u64 = 9;
 const SO_REUSEPORT: u64 = 15;
+const SO_LINGER: u64 = 13;
 const SO_SNDBUF: u64 = 7;
 const SO_RCVBUF: u64 = 8;
 const SIN_LEN: u64 = 16;               // struct sockaddr_in
@@ -478,6 +479,7 @@ const SOF_REUSEADDR: u64 = 1;
 const SOF_REUSEPORT: u64 = 2;
 const SOF_KEEPALIVE: u64 = 4;
 const SOF_BROADCAST: u64 = 8;
+const SOF_LINGER0: u64 = 16;           // SO_LINGER with l_onoff set and l_linger 0: close resets the connection
 const SOF_SPAN: u64 = 256;
 const SOF_BASE: u64 = 8;
 const SOF_IP: u64 = 2048;
@@ -499,14 +501,22 @@ fn sock_bound_ip(k: &Kernel, h: u64) -> u64
 
 /// Whether option bit (SOF_*) is set on the socket of description h.
 fn sock_flag(k: &Kernel, h: u64, bit: u64) -> bool
-  requires kok(k) && bit >= 1 && bit <= 8
+  requires kok(k) && bit >= 1 && bit <= 16
 {
   return h < OFD_N && of_get(k.ofd, h, OF_ACC) % SOF_IP / SOF_BASE / bit % 2 == 1;
 }
 
+/// Whether closing the socket of description h resets the connection
+/// (SO_LINGER with l_onoff set and l_linger 0).
+fn sock_linger0(k: &Kernel, h: u64) -> bool
+  requires kok(k)
+{
+  return sock_flag(k, h, SOF_LINGER0);
+}
+
 /// Sets or clears option bit (SOF_*) on the socket of description h.
 fn sock_flag_set(k: &mut Kernel, h: u64, bit: u64, on: bool)
-  requires kok(k) && h < OFD_N && bit >= 1 && bit <= 8
+  requires kok(k) && h < OFD_N && bit >= 1 && bit <= 16
   ensures kok(k)
 {
   let acc = of_get(k.ofd, h, OF_ACC);
@@ -523,7 +533,7 @@ fn sock_flag_set(k: &mut Kernel, h: u64, bit: u64, on: bool)
 
 /// The SOF_* bit of SOL_SOCKET option name, or 0.
 fn sof_of(name: u64) -> u64
-  ensures result <= 8
+  ensures result <= 16
 {
   if name == SO_REUSEADDR {
     return SOF_REUSEADDR;
@@ -909,6 +919,23 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   if lv == SOL_SOCKET {
     if ln < 4 || ln >= 0x80000000 {
       return EINVAL;
+    }
+    if name == SO_LINGER && tcp {
+      // struct linger { int l_onoff; int l_linger; }: only {nonzero, 0}
+      // changes what close does (a reset); a longer linger just closes.
+      if ln < 8 {
+        return EINVAL;
+      }
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 8) != 8 {
+        return EFAULT;
+      }
+      let on = get_u64(k.fs.xfer, 0) % 0x100000000 != 0;
+      let secs = get_u64(k.fs.xfer, 0) / 0x100000000;
+      let h = fd_ofd(k, pid, fd);
+      if h < OFD_N {
+        sock_flag_set(&mut k, h, SOF_LINGER0, on && secs % 0x100000000 == 0);
+      }
+      return 0;
     }
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 4) != 4 {
       return EFAULT;

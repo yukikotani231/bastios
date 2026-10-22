@@ -1521,6 +1521,7 @@ node: node: a real package (nanoid) fetched from the host, tested with node --te
 node: node: a real package with its installed dependencies (mri, tape), tested with tape
 node: node: a real package (debug) with its installed dependencies, tested with mocha and sinon
 node: node: a web framework (express) with its installed dependencies, tested with mocha and supertest over the loopback
+node: node: a WebSocket library (ws) tested with mocha over the loopback (but one test that depends on the Node.js version's header limit)
 node: node: a script with arrays and JSON
 node: node: an expression
 node: node: exit status and uncaught exceptions

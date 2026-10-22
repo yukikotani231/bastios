@@ -1073,6 +1073,8 @@ t_server: reading the other end makes room: EPOLLOUT
 t_server: sendfile to a TCP connection moves the whole file, in order
 t_server: sendfile to a full nonblocking connection is EAGAIN after what fits
 t_server: sigsuspend ends when another process signals
+t_server: close with SO_LINGER {1, 0} resets the peer: its read is ECONNRESET
+t_server: a close with SO_LINGER {1, 5} is an ordinary close: the peer reads end of file
 t_ropivot: unshare a mount namespace
 t_ropivot: bind the root directory onto itself
 t_ropivot: before the pivot, remount the descriptor's path read-only
