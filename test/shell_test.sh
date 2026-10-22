@@ -433,6 +433,10 @@ steps = [
     # user without a mount namespace of its own (or without any) mounts nothing.
     ("su alice -c 'mkdir -p /tmp/ur; unshare -U -r -m sh -c \"mount -t tmpfs t /tmp/ur && echo own > /tmp/ur/f && cat /tmp/ur/f; ls -ln /tmp/ur/f\"; ls -A /tmp/ur | wc -l; unshare -U -r sh -c \"mount -t tmpfs t /tmp/ur || echo nons\"; mount -t tmpfs t /tmp/ur || echo plain; rmdir /tmp/ur'",
      [b"\r\nown\r\n", b"0        0", b"\r\n0\r\n", b"nons", b"plain"], b"\n# "),
+    # /sys/class/power_supply exists and is empty (a machine without a battery;
+    # psutil.sensors_battery lists it).
+    ("ls -A /sys/class/power_supply | wc -l; echo ps=$?",
+     [b"\r\n0\r\n", b"ps=0"], b"\n# "),
     # Control groups (src/lxcgroup.bastio): a group is made with mkdir, a
     # shell moves into it, and pids.max stops the fork that would pass it;
     # cgroup.kill empties a group so that rmdir works, and non-root users may
