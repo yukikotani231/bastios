@@ -30,6 +30,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The `bfiles` editor deletes the word before the cursor with Ctrl-W (one Ctrl-Z puts it back).
 - `bterm` reads UTF-8: a character takes one cell, drawn as a look-alike for box drawing, blocks, arrows, bullets and quotes (`-`, `|`, `+`, `#`, `*` and so on) and as `?` for anything else the 128-glyph font lacks; combining and zero-width characters take none. Before, every byte of such a character was dropped, so tmux borders and non-ASCII file names vanished or shifted the line.
 - The `bfiles` editor goes to the start and the end of the text with Ctrl-Home and Ctrl-End.
+- The `bfiles` editor selects text with Shift and the arrow keys, Home or End; typing, Backspace or Delete replaces or removes the selection, Ctrl-C copies it and Ctrl-W cuts it (into the clipboard other windows paste from). `bwm` now sends the Shift-modified arrow sequences.
 - The task bar clock of `bwm` follows `TZ` (or `/etc/TZ`) in POSIX form such as `JST-9`; there is still no zone database, so it shows UTC when neither is set.
 - `bfiles` copies a directory with everything in it (down to 8 levels), not only a file.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.

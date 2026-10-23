@@ -1256,6 +1256,37 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Shift-arrows select in the editor; typing replaces the selection, Ctrl-C copies it and Ctrl-W cuts it.
+        mark = len(out)
+        q.stdin.write(b"printf 'hello world\\n' > /tmp/ds.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ds.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ds.txt", mark)
+        if good:
+            monitor("sendkey ctrl-a", *["sendkey shift-right"] * 5, "sendkey ctrl-c")
+            good = until(b"bfiles: copied 5", mark)
+            monitor("sendkey x", "sendkey ctrl-e", "sendkey ctrl-v")
+            good = good and until(b"bfiles: pasted 5", mark)
+            monitor("sendkey ctrl-a", "sendkey shift-right", "sendkey ctrl-w")
+            good = good and until(b"bfiles: cut 1", mark)
+            monitor("sendkey ctrl-s")
+            good = good and until(b"bfiles: saved /tmp/ds.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ds.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b" worldhello\r\nend2", mark) or until(b" worldhello\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Shift-arrows select in the editor and typing, Ctrl-C and Ctrl-W work on the selection")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # The clock in the task bar follows TZ (POSIX form): XXX-5 is five hours east of UTC.
         import datetime
         utc_h = datetime.datetime.utcnow().hour    # the guest clock comes from the host RTC
