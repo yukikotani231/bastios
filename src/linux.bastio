@@ -1617,19 +1617,25 @@ fn lx_reading(k: &Kernel) -> bool
   while p < NPROC
     invariant 1 <= p && p <= NPROC && kok(k)
   {
-    if state(k.procs, p) == LXREADING {
+    let st = state(k.procs, p);
+    if st == LXREADING {
       return true;
     }
-    let n = pget(k.procs, p, F_REGS + R_LXNR);
-    let st = state(k.procs, p);
-    let fd = fd_look(k, p, pget(k.procs, p, F_REGS + R_RDI));
     // A process that ended keeps its registers and restart word until its
     // row is used again: it must not count (it would take the next typed line).
-    if st != FREE && st != ZOMBIE && pget(k.procs, p, F_RESTART) >= 2
-      && (n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
-        || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2
-        || (n == LX_READ && fd.kind == K_CONSOLE)) {
-      return true;                          // a timed read of the console (console_read; the key events and the mouse sleep the same way but are not its); the waits may be for it
+    // (The cheap tests come first: this runs for every row on every poll.)
+    if st != FREE && st != ZOMBIE && pget(k.procs, p, F_RESTART) >= 2 {
+      let n = pget(k.procs, p, F_REGS + R_LXNR);
+      if n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
+        || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 {
+        return true;                          // the waits may be for the console
+      }
+      if n == LX_READ {
+        let fd = fd_look(k, p, pget(k.procs, p, F_REGS + R_RDI));
+        if fd.kind == K_CONSOLE {
+          return true;                        // a timed read of the console (console_read; the key events and the mouse sleep the same way but are not its)
+        }
+      }
     }
     p = p + 1;
   }
