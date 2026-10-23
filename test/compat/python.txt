@@ -88,6 +88,11 @@ $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q attrs h
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q pyyaml 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pyyaml-6.0.3.tar.gz | tar xz && cd pyyaml-6.0.3 && timeout -s KILL 700 python -m pytest -q -p no:cacheprovider tests 2>&1 | tail -n 1 | sed "s/ in .*//; s/, [0-9]* warning.*//"'
 2608 passed
 
+== pytest: greenlet's own tests (the quick modules; the memory-measuring leak tests take minutes and are left out)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q greenlet psutil objgraph 2>&1 | tail -n 3; cd /root; T=/root/v/lib/python3.14/site-packages/greenlet/tests; timeout -s KILL 700 python -m pytest -q -p no:cacheprovider $T/test_extension_interface.py $T/test_generator.py $T/test_gc.py $T/test_throw.py $T/test_tracing.py $T/test_weakref.py $T/test_stack_saved.py $T/test_cpp.py $T/test_contextvars.py $T/test_greenlet_trash.py $T/test_version.py $T/test_generator_nested.py -k "not untracked_memory" > /root/g.log 2>&1; tail -n 1 /root/g.log | grep -qE "[0-9]+ passed" && ! tail -n 1 /root/g.log | grep -qE "[0-9]+ (failed|error)" && echo ok; grep -E "^FAILED|^ERROR" /root/g.log | cut -c1-140 | head -n 6'
+ok
+
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0
