@@ -753,6 +753,7 @@ t_misc: sched_getaffinity names every processor /proc/stat lists, as sysconf cou
 t_misc: sched_setaffinity to a processor that is not there is EINVAL
 t_misc: sched_getaffinity returns the mask sched_setaffinity set
 t_misc: getcpu names a processor the affinity mask allows
+t_misc: voluntary_ctxt_switches counts the sleeps, and /proc/stat ctxt and getrusage count them too
 t_misc: seccomp filter denies getpid
 t_misc: forty stacked seccomp filters
 t_misc: statfs
@@ -1566,7 +1567,7 @@ python: pytest: the whole test suite of a second real project (Click's, without 
 python: pytest: the whole test suite of a third real project (Flask's, without two tests that fail on Linux too)
 python: python: the test suite of a fourth real project (Tornado's socket tests: event loop, TCP client and server, child processes, HTTP server and client, WebSockets)
 python: pytest: pytest's own tests for capture, temporary directories, paths and conftest files (without one test of a 250-byte name)
-python: pytest: psutil's own tests for processes, the system and the utilities (without the ones that need affinity, I/O counters, context switches, utmp or disk statistics)
+python: pytest: psutil's own tests for processes, the system and the utilities (without the ones that need affinity, I/O counters, utmp or disk statistics)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes

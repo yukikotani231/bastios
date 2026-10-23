@@ -2517,7 +2517,11 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_s(&mut o, a, " 0 0 0 0 0 0\n");
       c = c + 1;
     }
-    a = put_s(&mut o, a, "intr 0\nctxt 0\nbtime ");
+    a = put_s(&mut o, a, "intr ");
+    a = put_n(&mut o, a, k.ticks);          // only the timer interrupt is counted
+    a = put_s(&mut o, a, "\nctxt ");
+    a = put_n(&mut o, a, get(k.sys, SYS_CSWT));
+    a = put_s(&mut o, a, "\nbtime ");
     a = put_n(&mut o, a, k.epoch / NS_PER_S);
     a = put_s(&mut o, a, "\nprocesses ");
     let mut live = 0;
@@ -2538,7 +2542,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, live);
     a = put_s(&mut o, a, "\nprocs_running ");
     a = put_n(&mut o, a, run);
-    return put_s(&mut o, a, "\nprocs_blocked 0\n");
+    return put_s(&mut o, a, "\nprocs_blocked 0\nsoftirq 0 0 0 0 0 0 0 0 0 0 0\n");   // soft interrupts are not counted
   }
   if what == PF_DISKSTATS && p == 0 {
     // One line for the disk (major 8, minor 0, "bastio0"): reads, merges
@@ -2817,8 +2821,10 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, sc_mode(k, p));
     a = put_s(&mut o, a, "\nSeccomp_filters:\t");
     a = put_n(&mut o, a, sc_depth(k, p));
-    // Nothing counts context switches.
-    a = put_s(&mut o, a, "\nvoluntary_ctxt_switches:\t0\nnonvoluntary_ctxt_switches:\t0");
+    a = put_s(&mut o, a, "\nvoluntary_ctxt_switches:\t");
+    a = put_n(&mut o, a, csw_get(k, p, false));
+    a = put_s(&mut o, a, "\nnonvoluntary_ctxt_switches:\t");
+    a = put_n(&mut o, a, csw_get(k, p, true));
     return put_c(&mut o, a, 10);
   }
   if what == PF_COMM {

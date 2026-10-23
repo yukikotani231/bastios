@@ -641,6 +641,7 @@ fn linux_trap(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64) -> u64
   }
   sock_wake(&mut s.k);
   if what == SWITCH {
+    csw_count(&mut s.k, p, false);        // the call blocked or yielded
     sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
   }
   if disk_hold(&mut s.k, p, EIO) || what == SWITCH || ino_pressed(s.k) {
@@ -679,6 +680,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   group_take(&mut s.k, mmu, p);
   let killed = state(s.k.procs, p) == KILLED;
   if state(s.k.procs, p) == RUNNING || killed {
+    if v == V_TIMER && !killed {
+      csw_count(&mut s.k, p, true);         // the tick took the processor away
+    }
     pset(&mut s.k.procs, p, F_STATE, READY);
   }
   if killed {
