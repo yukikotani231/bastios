@@ -68,6 +68,11 @@ $ bb chroot /disk/a /bin/sh -c 'python3 -m venv /root/vp && . /root/vp/bin/activ
 $ bb mkdir -p /disk/a/sys/class/power_supply; bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q psutil pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/psutil-7.2.2.tar.gz | tar xz && mkdir -p pt && cp -r psutil-7.2.2/tests pt/tests && cd pt && python -m pytest -q -p no:cacheprovider tests/test_process.py tests/test_misc.py tests/test_system.py -k "not (test_memory_maps_lists_lib or test_cpu_affinity or test_users or test_disk_io_counters or test_disk_partitions)" > /root/ps.log 2>&1; grep -E "passed|failed" /root/ps.log | tail -n 1 | grep -oE "^[0-9]{3} passed" | sed "s/.*/ok/"; grep -E "FAIL|Error" /root/ps.log | cut -c1-140 | head -8'
 ok
 
+== pytest: numpy's own tests for memmap, .npy and .npz files, text files and the file formats (the big-array tests, which need more memory than the guest has, are left out)
+# timeout 1500
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q numpy pytest hypothesis 2>&1 | tail -n 3; cd /root; SP=/root/v/lib/python3.14/site-packages; T=$SP/numpy/_core/tests; L=$SP/numpy/lib/tests; timeout -s KILL 1300 python -m pytest -q -p no:cacheprovider $T/test_memmap.py $L/test_io.py $L/test_format.py $L/test__datasource.py $L/test_loadtxt.py -k "not (big or large)" > /root/np.log 2>&1; tail -n 1 /root/np.log | grep -qE "[0-9]+ passed" && ! tail -n 1 /root/np.log | grep -qE "[0-9]+ (failed|error)" && echo ok; grep -E "^FAILED|^ERROR" /root/np.log | cut -c1-140 | head -n 6'
+ok
+
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0
