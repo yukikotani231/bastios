@@ -68,6 +68,7 @@ static size_t bf_vlen;                          /* bytes in bf_vtext */
 static int bf_editing, bf_modified;
 static size_t bf_cur;                           /* the cursor, as an offset in bf_vtext */
 static int bf_etop;                             /* the first display row shown while editing */
+#define BF_CLIP_FILE "/tmp/bwm.clip"            /* the text a bterm window selected (and the editor's cuts), for any window to paste */
 static int bf_esc, bf_escnum;                   /* where we are in an ESC [ ... key sequence */
 static size_t bf_erow[BF_MAXLINES + 1];         /* where each display row starts while editing */
 static int bf_nerow;
@@ -383,9 +384,44 @@ static void be_cut_line(void)
         n = sizeof bf_kill;
     memcpy(bf_kill, bf_vtext + bf_cur, n);
     bf_killn = n;
+    int cf = open(BF_CLIP_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (cf >= 0) {
+        if (write(cf, bf_kill, n) < 0)
+            puts("bfiles: cannot write the clipboard");
+        close(cf);
+    }
     for (size_t i = 0; i < n; i++)
         be_delete(bf_cur);
     printf("bfiles: cut %zu\n", n);
+    fflush(stdout);
+}
+
+/* Ctrl-V: inserts the clipboard at the cursor (up to what fits; control characters other than newline
+ * and tab are left out). */
+static void be_paste_clip(void)
+{
+    int f = open(BF_CLIP_FILE, O_RDONLY);
+    if (f < 0) {
+        puts("bfiles: the clipboard is empty");
+        fflush(stdout);
+        return;
+    }
+    char buf[1024];
+    ssize_t n;
+    size_t put = 0;
+    be_undo_push(3);
+    while ((n = read(f, buf, sizeof buf)) > 0)
+        for (ssize_t i = 0; i < n; i++) {
+            unsigned char ch = (unsigned char)buf[i];
+            if (ch == '\r')
+                continue;
+            if (ch == '\n' || ch == '\t' || (ch >= 32 && ch < 127)) {
+                be_insert(ch);
+                put++;
+            }
+        }
+    close(f);
+    printf("bfiles: pasted %zu\n", put);
     fflush(stdout);
 }
 
@@ -873,6 +909,8 @@ static void be_key(int c)
         bf_ebn = 0;
     } else if (c == 26) {
         be_undo_pop();
+    } else if (c == 22) {
+        be_paste_clip();
     } else if (c == 11) {
         be_undo_push(3);
         be_cut_line();
