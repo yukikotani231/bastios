@@ -1074,10 +1074,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if good:
             monitor("sendkey x", "sendkey y", "sendkey ctrl-z")
             good = until(b"bfiles: undo", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Z in the editor undoes the typing")
+        fails += not good
+        # Ctrl-Y puts it back, and a second Ctrl-Z takes it off again before the save.
+        if good:
+            monitor("sendkey ctrl-y")
+            good = until(b"bfiles: redo", mark)
+        if good:
+            mark2 = len(out)
+            monitor("sendkey ctrl-z")
+            good = until(b"bfiles: undo", mark2)
         if good:
             monitor("sendkey ctrl-s")
             good = until(b"bfiles: saved /tmp/z.txt", mark)
-        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Z in the editor undoes the typing")
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Y in the editor redoes what Ctrl-Z took off")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -1086,6 +1096,37 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"cat /tmp/z.txt; echo end$((1+1))\r"); q.stdin.flush()
         good = good and (until(b"abc\r\nend2", mark) or until(b"abc\nend2", mark))
         print(("ok  " if good else "FAIL"), f"({name}) the saved file is as it was before the typing")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Ctrl-R in the editor replaces every occurrence of a text.
+        mark = len(out)
+        q.stdin.write(b"printf 'foo bar foo\\n' > /tmp/rp.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/rp.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/rp.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/rp.txt", mark)
+        if good:
+            monitor("sendkey ctrl-r", "sendkey f", "sendkey o", "sendkey o", "sendkey ret",
+                    "sendkey x", "sendkey y", "sendkey ret")
+            good = until(b"bfiles: replaced 2", mark)
+        if good:
+            monitor("sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/rp.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-R in the editor replaces every occurrence")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/rp.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"xy bar xy\r\nend2", mark) or until(b"xy bar xy\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) the saved file has the text replaced")
         fails += not good
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
