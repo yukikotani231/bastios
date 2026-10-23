@@ -20,6 +20,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The `bsys` System window lists the processes (`p`), moves along the list (`j`, `k` or the arrow keys) and ends the selected one (`x`).
 - The `bfiles` editor cuts and pastes a line (Ctrl-K, Ctrl-U), finds text (Ctrl-F) and goes to a line (Ctrl-G), and shows the cursor's line number.
 - `bfiles` copies and moves files between directories: `c` or `x` marks the entry under the cursor and `v` puts it into the directory shown.
+- `bfiles` renames (`r`) and deletes (`D` twice) the entry under the cursor in the list, as it did for the file in the viewer; an empty directory can be deleted too.
 - The `bfiles` editor undoes edits with Ctrl-Z (a run of typing is one edit; the last 16 are kept).
 - `bfiles` copies a directory with everything in it (down to 8 levels), not only a file.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
