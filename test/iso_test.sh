@@ -1231,6 +1231,33 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The clock in the task bar follows TZ (POSIX form): XXX-5 is five hours east of UTC.
+        mark = len(out)
+        q.stdin.write(b"date -u +%H; echo end$((1+1))\r"); q.stdin.flush()
+        good = until(b"end2", mark)
+        m = re.search(rb"\n(\d\d)\r?\n", out[mark:]) if good else None
+        good = good and m is not None
+        if good:
+            utc_h = int(m.group(1))
+            mark = len(out)
+            q.stdin.write(b"TZ=XXX-5 bwm -n -c bsys\r"); q.stdin.flush()
+            good = until(b"bsys: window", mark) or until(b"bwm: ", mark)
+        if good:
+            time.sleep(2)
+            w, h, px = screendump()
+            clk = screen_text_at(px, w, 920, 748, 5, 1)[0]
+            hh = clk[:2]
+            good = hh.isdigit() and int(hh) in ((utc_h + 5) % 24, (utc_h + 6) % 24)
+            if not good:
+                print("clock:", repr(clk), "utc hour:", utc_h)
+        print(("ok  " if good else "FAIL"), f"({name}) the task bar clock follows TZ")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # c, x and v in the list of bfiles copy and move a file into another directory.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/pf/d; echo pa > /tmp/pf/a.txt; echo pb > /tmp/pf/b.txt\r"); q.stdin.flush()
