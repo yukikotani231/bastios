@@ -12,7 +12,8 @@
  * ("bfiles: saved PATH") and Ctrl-X goes back to the viewer, which shows the
  * file as it is on disk. In the editor Ctrl-K cuts the rest of the line and Ctrl-U puts it back,
  * Ctrl-F finds text (Enter on an empty prompt repeats the last search; "bfiles: found at N" or
- * "bfiles: not found") and Ctrl-G goes to a line number ("bfiles: line N"); the header shows
+ * "bfiles: not found"), Ctrl-R replaces every occurrence of a text with another ("bfiles: replaced N",
+ * one undo step) and Ctrl-G goes to a line number ("bfiles: line N"); the header shows
  * the line the cursor is on. "bfiles /path/to/file" opens the file in the viewer.
  * In the list n makes an empty file (untitled, untitled2, ...) and opens it
  * in the editor; c or x marks the entry under the cursor to copy (a file) or move (a file or
@@ -74,7 +75,7 @@ static size_t bf_erow[BF_MAXLINES + 1];         /* where each display row starts
 static int bf_nerow;
 static char bf_kill[512];                       /* the line Ctrl-K cut last, for Ctrl-U */
 static size_t bf_killn;
-static int bf_eprompt;                          /* 'f' or 'g' while a find or goto-line prompt reads a line, else 0 */
+static int bf_eprompt;                          /* 'f', 'g', 'r' or 'w' while a find, goto-line, replace or replace-with prompt reads a line, else 0 */
 static char bf_ebuf[40], bf_efind[40];          /* what was typed, and what was last searched for */
 static size_t bf_ebn;
 
@@ -520,7 +521,60 @@ static void be_goto_line(void)
     fflush(stdout);
 }
 
-/* A key typed at the find or goto-line prompt. */
+/* Ctrl-R, the text to find, Enter (empty: the last text found), the text to put in its place, Enter:
+ * replaces every occurrence in the file, as one undo step. */
+static void be_replace_all(void)
+{
+    size_t n = strlen(bf_efind), m = strlen(bf_ebuf), hits = 0;
+    if (n == 0)
+        return;
+    for (size_t i = 0; i + n <= bf_vlen; ) {
+        if (memcmp(bf_vtext + i, bf_efind, n) == 0) {
+            hits++;
+            i += n;
+        } else {
+            i++;
+        }
+    }
+    if (hits == 0) {
+        printf("bfiles: not found\n");
+        fflush(stdout);
+        return;
+    }
+    if (bf_vlen - hits * n + hits * m + 1 >= BF_VIEWMAX) {
+        printf("bfiles: replace would make the file too large\n");
+        fflush(stdout);
+        return;
+    }
+    char *out = malloc(BF_VIEWMAX);
+    if (!out)
+        return;
+    be_undo_push(3);
+    size_t o = 0, newcur = bf_cur;
+    for (size_t i = 0; i < bf_vlen; ) {
+        if (i + n <= bf_vlen && memcmp(bf_vtext + i, bf_efind, n) == 0) {
+            if (bf_cur >= i + n)
+                newcur = newcur - n + m;
+            else if (bf_cur > i)
+                newcur = o;
+            memcpy(out + o, bf_ebuf, m);
+            o += m;
+            i += n;
+        } else {
+            out[o++] = bf_vtext[i++];
+        }
+    }
+    memcpy(bf_vtext, out, o);
+    free(out);
+    bf_vlen = o;
+    bf_vtext[o] = 0;
+    bf_cur = newcur < bf_vlen ? newcur : bf_vlen;
+    bf_modified = 1;
+    printf("bfiles: replaced %zu\n", hits);
+    fflush(stdout);
+}
+
+/* A key typed at the find, goto-line or replace prompt. */
 static void be_prompt_key(int c)
 {
     be_ulast = 0;
@@ -530,10 +584,21 @@ static void be_prompt_key(int c)
     } else if (c == '\r' || c == '\n') {
         int which = bf_eprompt;
         bf_eprompt = 0;
-        if (which == 'f')
+        if (which == 'f') {
             be_find();
-        else
+        } else if (which == 'r') {
+            if (bf_ebn > 0)
+                snprintf(bf_efind, sizeof bf_efind, "%s", bf_ebuf);
+            if (bf_efind[0]) {
+                bf_eprompt = 'w';
+                bf_ebuf[0] = 0;
+                bf_ebn = 0;
+            }
+        } else if (which == 'w') {
+            be_replace_all();
+        } else {
             be_goto_line();
+        }
     } else if (c == 127 || c == 8) {
         if (bf_ebn > 0)
             bf_ebuf[--bf_ebn] = 0;
@@ -957,6 +1022,10 @@ static void be_key(int c)
         bf_eprompt = c == 6 ? 'f' : 'g';
         bf_ebuf[0] = 0;
         bf_ebn = 0;
+    } else if (c == 18) {
+        bf_eprompt = 'r';
+        bf_ebuf[0] = 0;
+        bf_ebn = 0;
     } else if (c == 25) {
         be_redo_pop();
     } else if (c == 26) {
@@ -1009,7 +1078,8 @@ static void be_paint(void)
     if (cr > bf_etop + BF_ROWS - 2) bf_etop = cr - (BF_ROWS - 2);
     char h[BF_COLS + 80];
     if (bf_eprompt)
-        snprintf(h, sizeof h, "%s: %.40s_", bf_eprompt == 'f' ? "Find" : "Go to line", bf_ebuf);
+        snprintf(h, sizeof h, "%s: %.40s_", bf_eprompt == 'f' ? "Find" : bf_eprompt == 'r' ? "Replace" :
+                 bf_eprompt == 'w' ? "With" : "Go to line", bf_ebuf);
     else
         snprintf(h, sizeof h, "%.12s%s ^S save ^X done ^F find ^G line ^K ^U %d", bf_vpath, bf_modified ? " *" : "", cr + 1);
     bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_eprompt ? 0x00A03030 : hd);

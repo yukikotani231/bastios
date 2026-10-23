@@ -23,6 +23,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The `bfiles` editor pastes the clipboard (Ctrl-V, the text a `bterm` window selected), and what Ctrl-K cuts goes to the clipboard too.
 - `bfiles` renames (`r`) and deletes (`D` twice) the entry under the cursor in the list, as it did for the file in the viewer; an empty directory can be deleted too.
 - The `bfiles` editor undoes edits with Ctrl-Z (a run of typing is one edit; the last 16 are kept) and puts them back with Ctrl-Y.
+- The `bfiles` editor replaces text: Ctrl-R asks for the text to find and the text to put in its place, replaces every occurrence and says how many; one Ctrl-Z undoes it.
 - `bfiles` copies a directory with everything in it (down to 8 levels), not only a file.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
