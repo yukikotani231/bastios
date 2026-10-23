@@ -624,6 +624,7 @@ fn linux_trap(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64) -> u64
     return (p + 1) % NPROC;               // (a reader of a half-full inotify queue goes first)
   }
   ino_before(&mut s.k, p);                // src/lxinotify.bastio
+  let nr = pget(s.k.procs, p, F_REGS + R_LXNR);
   let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
   ino_after(&mut s.k, p);
   let ended = tsc_now(s.k.tsc, s.k.ns, cpu);
@@ -631,6 +632,9 @@ fn linux_trap(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64) -> u64
     tm_sys_add(&mut s.k, p, ended - began);   // system time (src/lxrlimit.bastio)
   }
   call_done(&mut s.k, p);
+  if what == KEEP {
+    io_account(&mut s.k, p, nr);
+  }
   if what == POWEROFF || what == REBOOT {
     s.stop = true;
     s.reboot = what == REBOOT;

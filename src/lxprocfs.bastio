@@ -2849,8 +2849,18 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_s(&mut o, a, " 0\n");
   }
   if what == PF_IO {
-    // Nothing counts bytes read or written yet.
-    return put_s(&mut o, 0, "rchar: 0\nwchar: 0\nsyscr: 0\nsyscw: 0\nread_bytes: 0\nwrite_bytes: 0\ncancelled_write_bytes: 0\n");
+    // rchar, wchar, syscr, syscw as read and write calls counted them
+    // (io_account); nothing is counted of what reaches the disk, so
+    // read_bytes and write_bytes stay 0.
+    let mut a = put_s(&mut o, 0, "rchar: ");
+    a = put_n(&mut o, a, io_get(k, p, 0));
+    a = put_s(&mut o, a, "\nwchar: ");
+    a = put_n(&mut o, a, io_get(k, p, 1));
+    a = put_s(&mut o, a, "\nsyscr: ");
+    a = put_n(&mut o, a, io_get(k, p, 2));
+    a = put_s(&mut o, a, "\nsyscw: ");
+    a = put_n(&mut o, a, io_get(k, p, 3));
+    return put_s(&mut o, a, "\nread_bytes: 0\nwrite_bytes: 0\ncancelled_write_bytes: 0\n");
   }
   if what == PF_SLACK {
     let a = put_n(&mut o, 0, pr_slack(k, p));
