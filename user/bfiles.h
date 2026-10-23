@@ -1058,6 +1058,17 @@ static void be_key(int c)
         be_redo_pop();
     } else if (c == 26) {
         be_undo_pop();
+    } else if (c == 23) {
+        size_t end = bf_cur;
+        be_word_move(-1);
+        if (bf_cur < end) {
+            size_t at = bf_cur;
+            bf_cur = end;                       /* undo puts the cursor back where it was */
+            be_undo_push(3);
+            bf_cur = at;
+            for (size_t n = end - at; n > 0; n--)
+                be_delete(at);
+        }
     } else if (c == 1) {
         bf_cur = bf_erow[be_row_of(bf_cur)];
     } else if (c == 5) {
