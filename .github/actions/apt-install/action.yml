@@ -1,0 +1,81 @@
+name: Install apt packages
+description: >
+  Installs packages from a cache of the .deb files (the closure that the
+  runner image lacks), so a job does not wait on the Ubuntu mirror, which
+  takes from half a minute to a quarter of an hour. A miss installs from the
+  mirror as before and saves the files for the next job.
+inputs:
+  packages:
+    description: Space-separated package names.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Speed up dpkg
+      shell: bash
+      run: |
+        # The runner is thrown away, so dpkg need not fsync, and man-db's
+        # index rebuild after each install is wasted time.
+        echo force-unsafe-io | sudo tee /etc/dpkg/dpkg.cfg.d/unsafe-io >/dev/null
+        echo 'man-db man-db/auto-update boolean false' | sudo debconf-set-selections
+    - name: Key the package cache
+      id: key
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        sum=$(echo "$PACKAGES" | tr ' ' '\n' | grep . | sort -u | sha256sum | cut -c1-16)
+        echo "key=apt-${ImageVersion:-none}-$sum" >> "$GITHUB_OUTPUT"
+    - name: Restore the package files
+      id: debs
+      uses: actions/cache/restore@v4
+      with:
+        key: ${{ steps.key.outputs.key }}
+        path: ${{ runner.temp }}/apt-debs
+    - name: Install the packages
+      id: install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        DEBS: ${{ runner.temp }}/apt-debs
+      run: |
+        if [ "${{ steps.debs.outputs.cache-hit }}" = true ] && ls "$DEBS"/*.deb >/dev/null 2>&1 \
+           && sudo apt-get install -y --no-download "$DEBS"/*.deb; then
+          echo "from the cache"
+          echo "saved=true" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+        # The runner image lists packages.microsoft.com, which answers 403 to
+        # `apt-get update` from time to time; nothing here is installed from it.
+        sudo grep -rlE 'packages\.microsoft\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null \
+          | xargs -r sudo rm -f
+        # The Azure mirror that the runner image lists has stalled for the
+        # whole 30 minutes of a job's limit on a package archive. apt gives up
+        # on a connection that sends nothing for 30 s and tries each file
+        # three times; if that still fails, the second round reads
+        # archive.ubuntu.com instead of the mirror list.
+        APT="-o Acquire::http::Timeout=30 -o Acquire::Retries=3"
+        try() {
+          for n in 1 2 3; do
+            if [ "$n" = 2 ]; then
+              sudo sed -i -E 's#^URIs: .*#URIs: http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+              sudo sed -i -E 's#mirror\+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list 2>/dev/null || true
+              sudo apt-get $APT update || true
+            fi
+            timeout 480 "$@" && return 0
+            echo "try $n of $*: failed"
+          done
+          return 1
+        }
+        try sudo apt-get $APT update
+        try sudo apt-get $APT install -y --download-only $PACKAGES
+        mkdir -p "$DEBS"
+        rm -f "$DEBS"/*.deb
+        cp /var/cache/apt/archives/*.deb "$DEBS"/
+        sudo apt-get install -y $PACKAGES
+    - name: Save the package files
+      if: steps.install.outputs.saved != 'true'
+      uses: actions/cache/save@v4
+      with:
+        key: ${{ steps.key.outputs.key }}
+        path: ${{ runner.temp }}/apt-debs
