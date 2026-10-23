@@ -60,12 +60,6 @@ fn free_l1(m: &mut Mem, t: PageTable)
       }
     }
     i = i + 1;
-    while i < 512 && !pt_has(t1, i)
-      invariant i <= 512 && mem_ok(m) && pt_level(t1) == 1
-      invariant forall j: u64 :: j < i ==> !pt_used(t1, j)
-    {
-      i = i + 1;
-    }
   }
   give_page(&mut m, pt_free(t1));
 }
@@ -84,12 +78,6 @@ fn free_l2(m: &mut Mem, t: PageTable)
       free_l1(&mut m, pt_take(&mut t2, i));
     }
     i = i + 1;
-    while i < 512 && !pt_has(t2, i)
-      invariant i <= 512 && mem_ok(m) && pt_level(t2) == 2
-      invariant forall j: u64 :: j < i ==> !pt_used(t2, j)
-    {
-      i = i + 1;
-    }
   }
   give_page(&mut m, pt_free(t2));
 }
@@ -108,12 +96,6 @@ fn free_l3(m: &mut Mem, t: PageTable)
       free_l2(&mut m, pt_take(&mut t3, i));
     }
     i = i + 1;
-    while i < 512 && !pt_has(t3, i)
-      invariant i <= 512 && mem_ok(m) && pt_level(t3) == 3
-      invariant forall j: u64 :: j < i ==> !pt_used(t3, j)
-    {
-      i = i + 1;
-    }
   }
   give_page(&mut m, pt_free(t3));
 }
