@@ -70,7 +70,7 @@ static int bf_editing, bf_modified;
 static size_t bf_cur;                           /* the cursor, as an offset in bf_vtext */
 static int bf_etop;                             /* the first display row shown while editing */
 #define BF_CLIP_FILE "/tmp/bwm.clip"            /* the text a bterm window selected (and the editor's cuts), for any window to paste */
-static int bf_esc, bf_escnum;                   /* where we are in an ESC [ ... key sequence */
+static int bf_esc, bf_escnum, bf_escmod;        /* where we are in an ESC [ ... key sequence (state 4: after the ';', bf_escmod is xterm's modifier number) */
 static size_t bf_erow[BF_MAXLINES + 1];         /* where each display row starts while editing */
 static int bf_nerow;
 static char bf_kill[512];                       /* the line Ctrl-K cut last, for Ctrl-U */
@@ -282,6 +282,23 @@ static size_t be_row_len(int r)                 /* characters on a row, without 
     if (n > 0 && bf_vtext[end - 1] == '\n')
         n--;
     return n;
+}
+
+static int be_isword(char ch)
+{
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || ch == '_';
+}
+
+/* Ctrl-Left and Ctrl-Right: to the start of the word before the cursor, to the end of the word after it. */
+static void be_word_move(int dir)
+{
+    if (dir < 0) {
+        while (bf_cur > 0 && !be_isword(bf_vtext[bf_cur - 1])) bf_cur--;
+        while (bf_cur > 0 && be_isword(bf_vtext[bf_cur - 1])) bf_cur--;
+    } else {
+        while (bf_cur < bf_vlen && !be_isword(bf_vtext[bf_cur])) bf_cur++;
+        while (bf_cur < bf_vlen && be_isword(bf_vtext[bf_cur])) bf_cur++;
+    }
 }
 
 static void be_move_rows(int by)
@@ -987,20 +1004,31 @@ static void be_key(int c)
         bf_esc = c == '[' ? 2 : 0;
         if (bf_esc)
             return;
-    } else if (bf_esc == 2 || bf_esc == 3) {
-        if (c >= '0' && c <= '9') {
-            bf_escnum = bf_esc == 2 ? c - '0' : bf_escnum * 10 + c - '0';
-            bf_esc = 3;
+    } else if (bf_esc >= 2 && bf_esc <= 4) {
+        if (c == ';') {
+            if (bf_esc == 2) bf_escnum = 0;
+            bf_esc = 4;
+            bf_escmod = 0;
             return;
         }
-        int num = bf_esc == 3 ? bf_escnum : 0;
+        if (c >= '0' && c <= '9') {
+            if (bf_esc == 4) {
+                bf_escmod = bf_escmod * 10 + c - '0';
+            } else {
+                bf_escnum = bf_esc == 2 ? c - '0' : bf_escnum * 10 + c - '0';
+                bf_esc = 3;
+            }
+            return;
+        }
+        int num = bf_esc >= 3 ? bf_escnum : 0;
+        int ctrl = bf_esc == 4 && bf_escmod >= 5 && ((bf_escmod - 1) & 4);
         bf_esc = 0;
         be_ulast = 0;
         if (c == '~' && num == 3) be_undo_push(3);
         if (c == 'A') be_move_rows(-1);
         else if (c == 'B') be_move_rows(1);
-        else if (c == 'C') { if (bf_cur < bf_vlen) bf_cur++; }
-        else if (c == 'D') { if (bf_cur > 0) bf_cur--; }
+        else if (c == 'C') { if (ctrl) be_word_move(1); else if (bf_cur < bf_vlen) bf_cur++; }
+        else if (c == 'D') { if (ctrl) be_word_move(-1); else if (bf_cur > 0) bf_cur--; }
         else if (c == 'H' || (c == '~' && (num == 1 || num == 7))) bf_cur = bf_erow[be_row_of(bf_cur)];
         else if (c == 'F' || (c == '~' && (num == 4 || num == 8))) {
             int r = be_row_of(bf_cur);
@@ -1244,13 +1272,20 @@ static int bfiles_main(int argc, char **argv)
                     bf_esc = c == '[' ? 2 : 0;
                     continue;
                 }
-                if (bf_esc == 2 || bf_esc == 3) {
-                    if (c >= '0' && c <= '9') {
-                        bf_escnum = bf_esc == 2 ? c - '0' : bf_escnum * 10 + c - '0';
-                        bf_esc = 3;
+                if (bf_esc >= 2 && bf_esc <= 4) {
+                    if (c == ';') {
+                        if (bf_esc == 2) bf_escnum = 0;
+                        bf_esc = 4;
                         continue;
                     }
-                    int num = bf_esc == 3 ? bf_escnum : 0;
+                    if (c >= '0' && c <= '9') {
+                        if (bf_esc != 4) {
+                            bf_escnum = bf_esc == 2 ? c - '0' : bf_escnum * 10 + c - '0';
+                            bf_esc = 3;
+                        }
+                        continue;
+                    }
+                    int num = bf_esc >= 3 ? bf_escnum : 0;
                     bf_esc = 0;
                     int page = BF_ROWS - 2;
                     if (c == 'A') bf_move_sel(-1);
