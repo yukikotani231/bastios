@@ -215,6 +215,8 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
     // ru_maxrss in kilobytes: every page the process has counts as resident
     // (the peak is not kept; this is the current size).
     xfer_u64(&mut k.fs.xfer, 32, smaller(anon_count(&mut k, pid, 0, WPAGES), WPAGES) * 4);
+    xfer_u64(&mut k.fs.xfer, 128, csw_get(k, pid, false));   // ru_nvcsw, ru_nivcsw: the calling thread's
+    xfer_u64(&mut k.fs.xfer, 136, csw_get(k, pid, true));
   }
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, RUSAGE_SIZE) != RUSAGE_SIZE {
     return EFAULT;

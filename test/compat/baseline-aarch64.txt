@@ -706,6 +706,8 @@ t_misc: sched_getaffinity names every processor /proc/stat lists, as sysconf cou
 t_misc: sched_setaffinity to a processor that is not there is EINVAL
 t_misc: sched_getaffinity returns the mask sched_setaffinity set
 t_misc: getcpu names a processor the affinity mask allows
+t_misc: voluntary_ctxt_switches counts the sleeps, and /proc/stat ctxt and getrusage count them too
+t_misc: /proc/self/io counts the read and write calls and their characters
 t_misc: seccomp filter denies getpid
 t_misc: forty stacked seccomp filters
 t_misc: statfs
