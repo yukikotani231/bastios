@@ -83,6 +83,11 @@ ok
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q attrs hypothesis 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/attrs-26.1.0.tar.gz | tar xz && cd attrs-26.1.0 && timeout -s KILL 700 python -m pytest -q -p no:cacheprovider tests 2>&1 | tail -n 1 | sed "s/ in .*//"'
 1379 passed, 6 skipped, 2 xfailed
 
+== pytest: the whole test suite of a sixth real project (PyYAML's)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q pyyaml 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pyyaml-6.0.3.tar.gz | tar xz && cd pyyaml-6.0.3 && timeout -s KILL 700 python -m pytest -q -p no:cacheprovider tests 2>&1 | tail -n 1 | sed "s/ in .*//; s/, [0-9]* warning.*//"'
+2608 passed
+
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0
