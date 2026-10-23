@@ -1030,6 +1030,11 @@ static void be_key(int c)
         be_redo_pop();
     } else if (c == 26) {
         be_undo_pop();
+    } else if (c == 1) {
+        bf_cur = bf_erow[be_row_of(bf_cur)];
+    } else if (c == 5) {
+        int r = be_row_of(bf_cur);
+        bf_cur = bf_erow[r] + be_row_len(r);
     } else if (c == 22) {
         be_paste_clip();
     } else if (c == 11) {
