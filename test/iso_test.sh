@@ -1027,6 +1027,39 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-V in the editor pastes the clipboard (what a bterm window selected).
+        mark = len(out)
+        q.stdin.write(b"printf 'abc\\n' > /tmp/v.txt; printf 'CLIP' > /tmp/bwm.clip\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/v.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/v.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/v.txt", mark)
+        if good:
+            monitor("sendkey ctrl-v")
+            good = until(b"bfiles: pasted 4", mark)
+        if good:
+            monitor("sendkey ctrl-k")
+            good = until(b"bfiles: cut 3", mark)
+        if good:
+            monitor("sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/v.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-V in the editor pastes the clipboard")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/v.txt /tmp/bwm.clip; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"CLIP\r\nabcend2", mark) or until(b"CLIP\nabcend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) the clipboard text went into the file and a cut goes to the clipboard")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Ctrl-Z in the editor undoes a run of typing.
         mark = len(out)
         q.stdin.write(b"printf 'abc\\n' > /tmp/z.txt\r"); q.stdin.flush()
