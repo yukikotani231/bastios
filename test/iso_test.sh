@@ -1074,10 +1074,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         if good:
             monitor("sendkey x", "sendkey y", "sendkey ctrl-z")
             good = until(b"bfiles: undo", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Z in the editor undoes the typing")
+        fails += not good
+        # Ctrl-Y puts it back, and a second Ctrl-Z takes it off again before the save.
+        if good:
+            monitor("sendkey ctrl-y")
+            good = until(b"bfiles: redo", mark)
+        if good:
+            mark2 = len(out)
+            monitor("sendkey ctrl-z")
+            good = until(b"bfiles: undo", mark2)
         if good:
             monitor("sendkey ctrl-s")
             good = until(b"bfiles: saved /tmp/z.txt", mark)
-        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Z in the editor undoes the typing")
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Y in the editor redoes what Ctrl-Z took off")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
