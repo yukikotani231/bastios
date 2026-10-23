@@ -21,7 +21,7 @@ const DEV_DIR: u64 = 5;             // /dev itself
 /// The device the n-byte path in the transfer buffer ("dev/null", from
 /// lx_path_in) names, or DEV_NONE.
 fn dev_at(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && n <= FNAME_MAX
+  requires blen(x) == XBUF && n <= FNAME_MAX
 {
   if xfer_is(x, 0, n, "dev") {
     return DEV_DIR;

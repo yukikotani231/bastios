@@ -70,6 +70,7 @@ static unsigned char dirty[MAXR];
 static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse, cur_attr;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
 static int priv;                          /* the CSI had a '?' prefix */
+static int bracketed;                       /* bracketed paste: xterm mode 2004 */
 static int mouse_mode, mouse_sgr;           /* xterm mouse reporting: 1000 (1), 1002 (2), 1003 (3); 1006 (the SGR encoding) */
 static unsigned mouse_btn;                /* the buttons held at the last report */
 static int mouse_r = -1, mouse_c = -1;
@@ -244,6 +245,8 @@ static void csi(int final)
                     mouse_mode = final == 'h' ? (params[i] == 1000 ? 1 : params[i] == 1002 ? 2 : 3) : 0;
                 else if (params[i] == 1006)
                     mouse_sgr = final == 'h';
+                else if (params[i] == 2004)
+                    bracketed = final == 'h';
         return;
     }
     switch (final) {
@@ -359,11 +362,41 @@ static void csi(int final)
     }
 }
 
+static char osc[64];                       /* the text of an ESC ] ... string being read (state 4; 5 after an ESC in it) */
+static int osc_n;
+static char new_title[24];                 /* a title the program set (OSC 0 or 2), not yet sent to bwm */
+static int title_set;
+
+static void osc_end(void)
+{
+    osc[osc_n] = 0;
+    if ((osc[0] == '0' || osc[0] == '2') && osc[1] == ';') {
+        snprintf(new_title, sizeof new_title, "%.23s", osc + 2);
+        title_set = 1;
+    }
+}
+
 static void feed(unsigned char b)
 {
+    if (state == 4 || state == 5) {                     /* ends at BEL or ESC \ */
+        if (b == 7 || (state == 5 && b == '\\')) {
+            osc_end();
+            state = 0;
+        } else if (b == 27) {
+            state = 5;
+        } else {
+            state = 4;
+            if (osc_n < (int)sizeof osc - 1)
+                osc[osc_n++] = b;
+        }
+        return;
+    }
     if (state == 1) {
         state = 0;
-        if (b == '[') {
+        if (b == ']') {
+            state = 4;
+            osc_n = 0;
+        } else if (b == '[') {
             state = 2;
             nparam = 0;
             priv = 0;
@@ -538,7 +571,7 @@ static void click_select(int r, int c)
     copy_selection();
 }
 
-/* Types the clipboard into the shell. */
+/* Types the clipboard into the shell, between ESC [ 200 ~ and ESC [ 201 ~ when the program asked for that. */
 static void paste(int m)
 {
     int f = open(CLIP_FILE, O_RDONLY);
@@ -546,8 +579,12 @@ static void paste(int m)
         return;
     char b[512];
     ssize_t n;
+    if (bracketed)
+        (void)!write(m, "\033[200~", 6);
     while ((n = read(f, b, sizeof b)) > 0)
         (void)!write(m, b, n);
+    if (bracketed)
+        (void)!write(m, "\033[201~", 6);
     close(f);
 }
 
@@ -671,6 +708,13 @@ int main(int argc, char **argv)
             if (sel_on && !selecting) {
                 sel_on = 0;                       /* new output: the lit text may be gone */
                 memset(dirty, 1, sizeof dirty);
+            }
+            if (title_set) {
+                struct bwm_settitle st = { (uint32_t)id, "" };
+                snprintf(st.title, sizeof st.title, "%s", new_title);
+                title_set = 0;
+                if (bwm_send(fd, BWM_SETTITLE, &st, sizeof st) != 0)
+                    break;
             }
             if (repaint(fd, id, &ocx, &ocy) != 0)
                 break;

@@ -16,8 +16,20 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` opens its launcher menu at the pointer on a right click on the empty desktop.
+- The `bsys` System window lists the processes (`p`), moves along the list (`j`, `k` or the arrow keys) and ends the selected one (`x`).
+- The `bfiles` editor cuts and pastes a line (Ctrl-K, Ctrl-U), finds text (Ctrl-F) and goes to a line (Ctrl-G), and shows the cursor's line number.
+- `bfiles` copies and moves files between directories: `c` or `x` marks the entry under the cursor and `v` puts it into the directory shown.
+- The `bfiles` editor pastes the clipboard (Ctrl-V, the text a `bterm` window selected), and what Ctrl-K cuts goes to the clipboard too.
+- `bfiles` renames (`r`) and deletes (`D` twice) the entry under the cursor in the list, as it did for the file in the viewer; an empty directory can be deleted too.
+- The `bfiles` editor undoes edits with Ctrl-Z (a run of typing is one edit; the last 16 are kept) and puts them back with Ctrl-Y.
+- The `bfiles` editor replaces text: Ctrl-R asks for the text to find and the text to put in its place, replaces every occurrence and says how many; one Ctrl-Z undoes it.
+- The `bfiles` editor keeps the indentation of a line when Enter starts a new one.
+- The `bfiles` editor goes to the start and the end of the line with Ctrl-A and Ctrl-E.
+- `bfiles` copies a directory with everything in it (down to 8 levels), not only a file.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
+- `bterm` sets the window title when a program prints `ESC ] 0 ; TEXT` or `ESC ] 2 ; TEXT` ended by BEL or `ESC \`.
 - `bwm` draws a desktop icon for each launcher entry but Hello window and Quit bwm, and starts the program on a click.
 - `bwm`'s launcher menu gains an entry for each `Label=command` line of `/etc/bwm.menu`, which runs the command in a terminal window; `bterm -e COMMAND` runs a command in place of the shell prompt.
 - `bfiles` moves a cursor along the list with the arrow, Home, End and Page keys and opens the entry under it on Enter.
@@ -27,6 +39,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bterm` selects and copies the word under the pointer on a double click and the whole row on a triple click.
 - `bterm` scrolls back and forward a page on Shift-Page Up and Shift-Page Down (`bwm` sends the keys `BWM_KEY_SCROLL_UP` and `BWM_KEY_SCROLL_DOWN`, 0x101 and 0x102, to the focused client).
 - `bterm` draws the 256-colour palette (`38;5;N`, `48;5;N`), the bright backgrounds (`100`-`107`) and 24-bit colours (`38;2;R;G;B`, as the nearest of the 256).
+- `bterm` brackets a paste in `ESC [ 200 ~` and `ESC [ 201 ~` for a program that asked for it with `ESC [ ? 2004 h`, as shells and editors do to tell typed text from pasted text.
 - `bterm` reports the mouse to programs that ask for it (xterm modes 1000, 1002, 1003 and 1006), for example `mouse=a` in vim.
 - `bterm` draws italic (`ESC [ 3 m`, leaning glyphs) and strike-through (`9`) text.
 - `bterm` underlines text after `ESC [ 4 m` (until `24` or `0`).
@@ -120,7 +133,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Disk
 
-- File names on the disk file system can be 255 bytes long, as on Linux (`NAME_MAX`; the limit was 200, so a name of 201 to 255 bytes failed). A whole path is still limited to 255 bytes, so the longest name directly under `/disk` is 249 bytes; raising that limit is a separate change. A name past 200 bytes goes on into the entry after the one that holds it, which is of a new kind (5) and the other half of the same 512-byte sector, so a power cut leaves the whole name or none. The first such name rewrites the magic to `BSTDISK6` in one sector, so an older kernel leaves that disk alone instead of reading a cut name; a disk with no long name keeps its magic. `test/fsck.py` checks the new kind, and `mkdisk.py` can make such names.
+- A whole path can be 4095 bytes long (`PATH_MAX` 4096 with the NUL), as on Linux; it was 255. A component is still limited to 255 bytes (`NAME_MAX`), so a path past 4095 bytes fails with `ENAMETOOLONG` and so does a component past 255. The transfer buffer and the lexer's work buffer grew to hold two paths, and local path buffers are 4096 bytes. Working directories, roots and the names of open directories keep their first 256 bytes in the small rows they had (eight bytes to a word, 33 words a row, which is less than the 256-word rows before) and the rest in a side table that grows only when a path is that long, so the memory a machine spends is the same when no path is. A `fork` or `clone` whose parent has a long working directory fails with `ENOMEM` if that table cannot grow, and so do `chdir` and `chroot`. The key and source of a mount (`mount`, overlay layers) are still limited to 255 bytes each (`ENAMETOOLONG`). `test/compat/progs/t_path.c` builds a path of 3000 bytes of nested directories and checks `mkdir`, `open`, `stat`, `chdir`, `getcwd` and `unlink` on it, and that a 256-byte component is `ENAMETOOLONG`. Proved: the whole kernel is discharged; the trusted base is unchanged.
+- File names on the disk file system can be 255 bytes long, as on Linux (`NAME_MAX`; the limit was 200, so a name of 201 to 255 bytes failed). A name past 200 bytes goes on into the entry after the one that holds it, which is of a new kind (5) and the other half of the same 512-byte sector, so a power cut leaves the whole name or none. The first such name rewrites the magic to `BSTDISK6` in one sector, so an older kernel leaves that disk alone instead of reading a cut name; a disk with no long name keeps its magic. `test/fsck.py` checks the new kind, and `mkdisk.py` can make such names.
 - NVMe and AHCI take a run of consecutive blocks in one command, as virtio already did: up to 32 blocks (128 KiB), through a PRP list (NVMe, bounded by the drive's MDTS) or one PRD entry per block (AHCI). `diskbench` writes 2 MiB in 3-4 ticks on both, 8-10 and 6-7 before.
 - The disk file system holds 5119 files and directories (was 4095): the
   directory has up to 320 blocks, all named by the superblock's block, so
