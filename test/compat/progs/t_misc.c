@@ -32,6 +32,19 @@ struct sock_fprog { unsigned short len; struct sock_filter *filter; };
 #define SECCOMP_RET_ALLOW 0x7fff0000u
 #define SECCOMP_RET_ERRNO 0x00050000u
 
+/* The number after `key` in the file at path, or -1. */
+static long file_num(const char *path, const char *key) {
+    char b[4096];
+    int f = open(path, O_RDONLY);
+    if (f < 0) return -1;
+    ssize_t n = read(f, b, sizeof b - 1);
+    close(f);
+    if (n <= 0) return -1;
+    b[n] = 0;
+    char *q = strstr(b, key);
+    return q ? atol(q + strlen(key)) : -1;
+}
+
 int main(void) {
     setup();
     char b[32];
@@ -110,6 +123,14 @@ int main(void) {
         if (f >= 0) close(f);
         u[n > 0 ? n : 0] = 0;
         sz > 0 && res > 0 && sh == 0 && strstr(u, "rchar: ") && strstr(u, "write_bytes: "); }));
+    EXPECT("/proc/self/smaps_rollup sums the resident pages, as psutil's uss reads them", ({
+        char t[1024]; int f = open("/proc/self/smaps_rollup", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
+        if (f >= 0) close(f);
+        t[n > 0 ? n : 0] = 0;
+        unsigned long rss = 0, priv = 0; char *p = strstr(t, "\nRss:"), *q = strstr(t, "\nPrivate_Dirty:");
+        if (p) sscanf(p + 5, "%lu", &rss);
+        if (q) sscanf(q + 15, "%lu", &priv);
+        rss > 0 && priv == rss && strstr(t, "\nPss:") && strstr(t, "\nSwap:"); }));
     EXPECT("core_pattern and nr_open read, drop_caches takes 3 and refuses 9", ({
         char t[64], u[64]; int f = open("/proc/sys/kernel/core_pattern", O_RDONLY); int n = f < 0 ? 0 : read(f, t, sizeof t - 1);
         if (f >= 0) close(f);
@@ -154,9 +175,28 @@ int main(void) {
     EXPECT("/proc/diskstats has the disk's line with its counts", ({ char t[256]; int f = open("/proc/diskstats", O_RDONLY);
         int n = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); t[n > 0 ? n : 0] = 0;
         n > 0 && strstr(t, " bastio0 ") && t[n - 1] == '\n'; }));
+    EXPECT("/proc/partitions lists the disk that /proc/diskstats counts, with its size in 1 KiB blocks", ({ char t[256]; int f = open("/proc/partitions", O_RDONLY);
+        int n = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); t[n > 0 ? n : 0] = 0;
+        unsigned long blk = 0; char *q = strstr(t, "\n   8        0 "); if (q) sscanf(q + 16, "%lu", &blk);
+        n > 0 && strncmp(t, "major minor  #blocks  name\n", 27) == 0 && blk > 0 && strstr(t, " bastio0\n"); }));
     EXPECT("/etc/passwd", open("/etc/passwd", O_RDONLY) >= 0);
     EXPECT("getlogin or getpwuid", getpwuid(getuid()) != NULL);
     EXPECT("sched_getaffinity", ({ cpu_set_t c; sched_getaffinity(0, sizeof c, &c) == 0; }));
+    EXPECT("sched_getaffinity names every processor /proc/stat lists, as sysconf counts them", ({ cpu_set_t c; int n = sched_getaffinity(0, sizeof c, &c) == 0 ? CPU_COUNT(&c) : -1;
+        char t[4096]; int f = open("/proc/stat", O_RDONLY); int r = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); t[r > 0 ? r : 0] = 0;
+        int m = 0; for (char *q = t; (q = strstr(q, "\ncpu")) != 0; q += 4) m++;
+        n == m && m >= 1 && sysconf(_SC_NPROCESSORS_ONLN) == m; }));
+    EXPECT("sched_setaffinity to a processor that is not there is EINVAL", ({ cpu_set_t c; CPU_ZERO(&c); CPU_SET(100, &c); sched_setaffinity(0, sizeof c, &c) == -1 && errno == EINVAL; }));
+    EXPECT("sched_getaffinity returns the mask sched_setaffinity set", ({ cpu_set_t all, one, got; sched_getaffinity(0, sizeof all, &all); CPU_ZERO(&one); CPU_SET(0, &one); int ok = sched_setaffinity(0, sizeof one, &one) == 0 && sched_getaffinity(0, sizeof got, &got) == 0 && CPU_COUNT(&got) == 1 && CPU_ISSET(0, &got); ok = ok && sched_setaffinity(0, sizeof all, &all) == 0 && sched_getaffinity(0, sizeof got, &got) == 0 && CPU_COUNT(&got) == CPU_COUNT(&all); ok; }));
+    EXPECT("voluntary_ctxt_switches counts the sleeps, and /proc/stat ctxt and getrusage count them too", ({ long v0 = file_num("/proc/self/status", "voluntary_ctxt_switches:"), c0 = file_num("/proc/stat", "ctxt "); struct rusage r0, r1; getrusage(RUSAGE_SELF, &r0); struct timespec ts = {0, 5000000}; for (int i = 0; i < 4; i++) nanosleep(&ts, 0); getrusage(RUSAGE_SELF, &r1);
+        v0 >= 0 && file_num("/proc/self/status", "voluntary_ctxt_switches:") >= v0 + 4 && file_num("/proc/stat", "ctxt ") >= c0 + 4 && r1.ru_nvcsw >= r0.ru_nvcsw + 4 && file_num("/proc/stat", "softirq ") >= 0; }));
+    EXPECT("/proc/self/io counts the read and write calls and their characters", ({ long r0 = file_num("/proc/self/io", "syscr: "), c0 = file_num("/proc/self/io", "rchar: "), w0 = file_num("/proc/self/io", "syscw: "), x0 = file_num("/proc/self/io", "wchar: "); char b[100]; int f = open("/proc/version", O_RDONLY); ssize_t n = f >= 0 ? read(f, b, sizeof b) : -1; if (f >= 0) close(f); int g = open("/dev/null", O_WRONLY); ssize_t m = g >= 0 ? write(g, b, 10) : -1; if (g >= 0) close(g);
+        long r1 = file_num("/proc/self/io", "syscr: "), c1 = file_num("/proc/self/io", "rchar: "), w1 = file_num("/proc/self/io", "syscw: "), x1 = file_num("/proc/self/io", "wchar: ");
+        errno = r0 < 0 ? 1 : n <= 0 ? 2 : m != 10 ? 3 : r1 < r0 + 1 ? 4 : c1 < c0 + n ? 5 : w1 != w0 + 1 ? 6 : x1 < x0 + 10 ? 7 : 0; errno == 0; }));
+    EXPECT("a zombie's cmdline is empty and its exe link is gone, while its stat still says Z", ({ pid_t z = fork(); if (z == 0) _exit(0); usleep(50000); char path[64], buf[256]; snprintf(path, sizeof path, "/proc/%d/cmdline", z); int f = open(path, O_RDONLY); ssize_t n = f >= 0 ? read(f, buf, sizeof buf) : -1; if (f >= 0) close(f); snprintf(path, sizeof path, "/proc/%d/exe", z); ssize_t e = readlink(path, buf, sizeof buf); int en = errno; snprintf(path, sizeof path, "/proc/%d/stat", z); f = open(path, O_RDONLY); ssize_t m = f >= 0 ? read(f, buf, sizeof buf - 1) : -1; if (f >= 0) close(f); char *r = m > 0 ? (buf[m] = 0, strrchr(buf, ')')) : 0; int st; waitpid(z, &st, 0);
+        n == 0 && e == -1 && en == ENOENT && r && r[2] == 'Z'; }));
+    EXPECT("/proc/self/smaps gives each map of /proc/self/maps its sizes in kB", ({ char t[4096]; int f = open("/proc/self/smaps", O_RDONLY); ssize_t n = f >= 0 ? read(f, t, sizeof t - 1) : -1; if (f >= 0) close(f); if (n > 0) t[n] = 0; n > 0 && strstr(t, "\nSize: ") && strstr(t, "\nRss: ") && strstr(t, "\nPrivate_Dirty: ") && strstr(t, "\nSwap: "); }));
+    EXPECT("getcpu names a processor the affinity mask allows", ({ cpu_set_t all, one; sched_getaffinity(0, sizeof all, &all); int c = -1; for (int i = 0; i < CPU_SETSIZE; i++) if (CPU_ISSET(i, &all)) c = i; CPU_ZERO(&one); CPU_SET(c, &one); int ok = c >= 0 && sched_setaffinity(0, sizeof one, &one) == 0 && sched_getcpu() == c; sched_setaffinity(0, sizeof all, &all); ok; }));
     EXPECT("SSE floating point", ({ volatile double x = 2.0; x * x / 3.0 > 1.33; }));
     EXPECT("printf %f", (snprintf(b, sizeof b, "%.3f", 3.14159), strcmp(b, "3.142") == 0));
     EXPECT("strtod", strtod("2.5e3", 0) == 2500.0);
