@@ -1131,6 +1131,56 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-A and Ctrl-E in the editor go to the start and the end of the line.
+        mark = len(out)
+        q.stdin.write(b"printf 'bc\\n' > /tmp/ae.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ae.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ae.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ae.txt", mark)
+        if good:
+            monitor("sendkey ctrl-e", "sendkey d", "sendkey ctrl-a", "sendkey a", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ae.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ae.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"abcd\r\nend2", mark) or until(b"abcd\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-A and Ctrl-E in the editor go to the start and the end of the line")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Enter in the editor keeps the indentation of the line.
+        mark = len(out)
+        q.stdin.write(b": > /tmp/ai.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ai.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ai.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ai.txt", mark)
+        if good:
+            monitor("sendkey spc", "sendkey spc", "sendkey a", "sendkey b", "sendkey ret", "sendkey c", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ai.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ai.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"  ab\r\n  cend2", mark) or until(b"  ab\n  cend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Enter in the editor keeps the indentation")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # c, x and v in the list of bfiles copy and move a file into another directory.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/pf/d; echo pa > /tmp/pf/a.txt; echo pb > /tmp/pf/b.txt\r"); q.stdin.flush()
@@ -1749,10 +1799,26 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 if not good:
                     print("\n".join(l for l in lines4 if l))
                 fails += not good
-            time.sleep(1)
+            bracket = good
+            if good:
+                # A program that asked for bracketed paste (mode 2004) gets the paste between 200~ and 201~.
+                monitor("sendkey ctrl-u")
+                typed("printf '\\033[?2004h'; cat > /tmp/bp.txt")
+                time.sleep(1)
+                monitor("sendkey shift-insert", "sendkey ret", "sendkey ctrl-d")
+                time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
+            if bracket:
+                mark = len(out)
+                q.stdin.write(b"\r"); q.stdin.flush()
+                until(b"# ", mark)
+                mark = len(out)
+                q.stdin.write(b"cat /tmp/bp.txt; echo end$((1+1))\r"); q.stdin.flush()
+                good = until(b"\x1b[200~echo\x1b[201~", mark)
+                print(("ok  " if good else "FAIL"), f"({name}) a paste is bracketed after the program asked for mode 2004")
+                fails += not good
         mark = len(out)
         q.stdin.write(b"exit\r"); q.stdin.flush()
         until(b"bastios> ", mark)

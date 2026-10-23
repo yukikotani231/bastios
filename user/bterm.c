@@ -70,6 +70,7 @@ static unsigned char dirty[MAXR];
 static int cx, cy, cur_fg = 7, cur_bg = 0, bold, reverse, cur_attr;
 static int state, params[8], nparam;      /* 0 ground, 1 after ESC, 2 in CSI */
 static int priv;                          /* the CSI had a '?' prefix */
+static int bracketed;                       /* bracketed paste: xterm mode 2004 */
 static int mouse_mode, mouse_sgr;           /* xterm mouse reporting: 1000 (1), 1002 (2), 1003 (3); 1006 (the SGR encoding) */
 static unsigned mouse_btn;                /* the buttons held at the last report */
 static int mouse_r = -1, mouse_c = -1;
@@ -244,6 +245,8 @@ static void csi(int final)
                     mouse_mode = final == 'h' ? (params[i] == 1000 ? 1 : params[i] == 1002 ? 2 : 3) : 0;
                 else if (params[i] == 1006)
                     mouse_sgr = final == 'h';
+                else if (params[i] == 2004)
+                    bracketed = final == 'h';
         return;
     }
     switch (final) {
@@ -568,7 +571,7 @@ static void click_select(int r, int c)
     copy_selection();
 }
 
-/* Types the clipboard into the shell. */
+/* Types the clipboard into the shell, between ESC [ 200 ~ and ESC [ 201 ~ when the program asked for that. */
 static void paste(int m)
 {
     int f = open(CLIP_FILE, O_RDONLY);
@@ -576,8 +579,12 @@ static void paste(int m)
         return;
     char b[512];
     ssize_t n;
+    if (bracketed)
+        (void)!write(m, "\033[200~", 6);
     while ((n = read(f, b, sizeof b)) > 0)
         (void)!write(m, b, n);
+    if (bracketed)
+        (void)!write(m, "\033[201~", 6);
     close(f);
 }
 

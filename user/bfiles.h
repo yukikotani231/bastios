@@ -1030,6 +1030,11 @@ static void be_key(int c)
         be_redo_pop();
     } else if (c == 26) {
         be_undo_pop();
+    } else if (c == 1) {
+        bf_cur = bf_erow[be_row_of(bf_cur)];
+    } else if (c == 5) {
+        int r = be_row_of(bf_cur);
+        bf_cur = bf_erow[r] + be_row_len(r);
     } else if (c == 22) {
         be_paste_clip();
     } else if (c == 11) {
@@ -1045,7 +1050,19 @@ static void be_key(int c)
         }
     } else if (c == '\n' || c == '\r') {
         be_undo_push(3);
+        /* The new line starts with the blanks the one being left starts with (up to the cursor). */
+        size_t ls = bf_cur, ind = 0;
+        while (ls > 0 && bf_vtext[ls - 1] != '\n')
+            ls--;
+        while (ls + ind < bf_cur && (bf_vtext[ls + ind] == ' ' || bf_vtext[ls + ind] == '\t'))
+            ind++;
+        char blanks[BF_COLS];
+        if (ind > sizeof blanks)
+            ind = sizeof blanks;
+        memcpy(blanks, bf_vtext + ls, ind);
         be_insert('\n');
+        for (size_t i = 0; i < ind; i++)
+            be_insert((unsigned char)blanks[i]);
     } else if (c == '\t') {
         be_undo_push(3);
         for (int i = 0; i < 4; i++)
