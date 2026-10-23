@@ -1603,6 +1603,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # UTF-8: box drawing and other characters outside the font each take one cell, drawn as a look-alike or '?'.
+            typed("printf 'u\\342\\224\\200\\343\\201\\202v\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "u-?v" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal draws a UTF-8 character as one cell")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             # 256 colours (38;5;N and 48;5;N) and 24-bit colours (48;2;R;G;B, drawn as the nearest of them).
             keys[";"] = "semicolon"
             typed("printf '\\033[48;5;196m      \\033[48;5;21m      \\033[48;2;0;255;0m      \\033[0m'")

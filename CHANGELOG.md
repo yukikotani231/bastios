@@ -27,6 +27,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The `bfiles` editor keeps the indentation of a line when Enter starts a new one.
 - The `bfiles` editor goes to the start and the end of the line with Ctrl-A and Ctrl-E.
 - The `bfiles` editor moves by words with Ctrl-Left and Ctrl-Right, and `bwm` sends `ESC [ 1 ; 5 A` to `D` (and `H`, `F`) for an arrow key held with Ctrl, as xterm does; `bfiles` also skips such modifier numbers in a key sequence instead of typing them.
+- `bterm` reads UTF-8: a character takes one cell, drawn as a look-alike for box drawing, blocks, arrows, bullets and quotes (`-`, `|`, `+`, `#`, `*` and so on) and as `?` for anything else the 128-glyph font lacks; combining and zero-width characters take none. Before, every byte of such a character was dropped, so tmux borders and non-ASCII file names vanished or shifted the line.
 - `bfiles` copies a directory with everything in it (down to 8 levels), not only a file.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
