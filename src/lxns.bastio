@@ -61,7 +61,7 @@ fn me_covers(k: &Kernel, e: u64, p: &Bytes, c: u64) -> bool
   let at = me_key(e);
   let mut i = 0;
   while i < kl
-    invariant i <= kl && kl <= c && c <= blen(p) && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+    invariant i <= kl && kl <= c && c <= blen(p) && kl <= MNT_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
   {
     if bget(k.mstr, at + i) != bget(p, i) {
       return false;
@@ -111,20 +111,20 @@ const OI_NONE: u64 = 0;                   // MNS_INTENT: the lookup only reads
 const OI_WRITE: u64 = 1;                  // it makes or changes the file: copy it up, make its directories
 const OI_REMOVE: u64 = 2;                 // it removes the file: see where it is (ovl_pending)
 const OI_RENAME: u64 = 3;                 // it is the source of a rename: copied up, unless it is a directory
-const STASH: u64 = 256 + MT_N * 512;      // where k.mstr keeps the path ovl_stash kept
+const STASH: u64 = 4096 + MT_N * 512;     // where k.mstr keeps the path ovl_stash kept
 const LSTR: u64 = 0x100000;               // positions one layer takes in a merged directory
 
 /// Where layer li's path starts in an overlay's source at k.mstr[at..],
 /// sl bytes long: layers are separated by ":". sl + 1 if there is no such layer.
 fn ovl_start(k: &Kernel, at: u64, sl: u64, li: u64) -> u64
-  requires kok(k) && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN
+  requires kok(k) && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN
   ensures result <= sl + 1
 {
   let mut s = 0;
   let mut l = 0;
   let mut i = 0;
   while i < sl && l < li
-    invariant i <= sl && s <= i && l <= i && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+    invariant i <= sl && s <= i && l <= i && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
   {
     if bget(k.mstr, at + i) == 58 {
       l = l + 1;
@@ -140,12 +140,12 @@ fn ovl_start(k: &Kernel, at: u64, sl: u64, li: u64) -> u64
 
 /// Where the layer that starts at s ends: at the next ":" or at sl.
 fn ovl_end(k: &Kernel, at: u64, sl: u64, s: u64) -> u64
-  requires kok(k) && s <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN
+  requires kok(k) && s <= sl && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN
   ensures s <= result && result <= sl
 {
   let mut t = s;
   while t < sl && bget(k.mstr, at + t) != 58
-    invariant s <= t && t <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+    invariant s <= t && t <= sl && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
   {
     t = t + 1;
   }
@@ -162,7 +162,7 @@ fn ovl_count(k: &Kernel, e: u64) -> u64
   let mut n = 1;
   let mut i = 0;
   while i < sl
-    invariant i <= sl && n <= i + 1 && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+    invariant i <= sl && n <= i + 1 && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
   {
     if bget(k.mstr, at + i) == 58 {
       n = n + 1;
@@ -211,7 +211,7 @@ fn ovl_name(k: &mut Kernel, e: u64, li: u64, p: &Bytes, r: u64, a: u64, b: u64, 
   }
   let mut w = 0;
   while w < t - s
-    invariant w <= t - s && s <= t && t <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+    invariant w <= t - s && s <= t && t <= sl && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
   {
     bset(&mut k.fs.xfer, w, bget(k.mstr, at + s + w));
     w = w + 1;
@@ -396,7 +396,7 @@ fn ovl_make_up(k: &mut Kernel, pid: u64, e: u64, p: &Bytes, rr: u64, c: u64, li:
   } else if islink {
     let mut i = 0;
     while i < tl && un + tl <= XFER
-      invariant i <= tl && tl <= FNAME_MAX && un <= FNAME_MAX && un + FNAME_MAX <= XFER && blen(tb) == FNAME_MAX && kok(k)
+      invariant i <= tl && tl <= FNAME_MAX && un <= FNAME_MAX && un + FNAME_MAX <= XBUF && blen(tb) == FNAME_MAX && kok(k)
     {
       bset(&mut k.fs.xfer, un + i, bget(tb, i));
       i = i + 1;
@@ -601,7 +601,7 @@ fn ns_tr(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   }
   let mut i = 0;
   while i < sl
-    invariant i <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+    invariant i <= sl && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
   {
     bset(&mut k.fs.xfer, i, bget(k.mstr, at + i));
     i = i + 1;
@@ -1158,7 +1158,7 @@ fn ns_reap(k: &mut Kernel)
         let at = me_key(e) + MS_ROW;
         let mut i = 0;
         while i < sl
-          invariant i <= sl && sl <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+          invariant i <= sl && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
         {
           bset(&mut k.fs.xfer, i, bget(k.mstr, at + i));
           i = i + 1;
@@ -1235,22 +1235,26 @@ fn ns_add(k: &mut Kernel, ns: u64, flags: u64, src: &Bytes, sl: u64) -> bool
   requires kok(k) && ns < MNS_MAX && sl <= FNAME_MAX && sl <= blen(src)
   ensures kok(k)
 {
+  let kl = lpath_len(k);
+  if kl > MNT_MAX || sl > MNT_MAX {
+    k.perr = ENAMETOOLONG;            // a mount's key and source are kept in MS_ROW bytes
+    return false;
+  }
   let e = me_alloc(&mut k);
   if e >= MT_N {
     return false;
   }
-  let kl = lpath_len(k);
   let at = me_key(e);
   let mut i = 0;
   while i < kl
-    invariant i <= kl && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+    invariant i <= kl && kl <= MNT_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
   {
     bset(&mut k.mstr, at + i, bget(k.mstr, i));
     i = i + 1;
   }
   i = 0;
   while i < sl
-    invariant i <= sl && sl <= FNAME_MAX && sl <= blen(src) && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+    invariant i <= sl && sl <= MNT_MAX && sl <= blen(src) && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
   {
     bset(&mut k.mstr, at + MS_ROW + i, bget(src, i));
     i = i + 1;
@@ -1489,8 +1493,8 @@ fn ns_room(k: &mut Kernel, pid: u64) -> bool
 /// behind it here: its mount shows the directory it is on, and a cgroup2
 /// mount shows the host's tree (see lx_mount). sysfs shows the host's /sys, so /sys/fs/cgroup is there to mount on.
 fn kind_source(kind: u64, src: &mut Bytes) -> u64
-  requires blen(src) == MS_ROW
-  ensures blen(src) == MS_ROW && result <= 8
+  requires blen(src) == PBUF
+  ensures blen(src) == PBUF && result <= 8
 {
   if kind == MK_PROC {
     bset(&mut src, 0, 112);                 // "proc"
@@ -1698,7 +1702,7 @@ fn ovl_rest(k: &mut Kernel, pid: u64, h: u64, p: &mut Bytes) -> u64
   while i < n
     invariant i <= n && n <= FNAME_MAX && blen(lp) == PATH_OUT && h < OFD_N && kok(k)
   {
-    bset(&mut lp, i, cast[u8](wget(k.dpath, h * CWD_STRIDE + 1 + i) % 256));
+    bset(&mut lp, i, cast[u8](rbyte(k.dpath, k.dpathx, h, i)));
     i = i + 1;
   }
   let e = ns_find(k, ns_of(k, pid), lp, n);
@@ -1795,8 +1799,8 @@ fn opt_value(d: &Bytes, dl: u64, key: Str) -> u64
 /// d[s..t] names (relative to the caller's working directory, links
 /// followed). Returns the new length, or NO_RESULT with k.perr.
 fn ovl_push(k: &mut Kernel, pid: u64, d: &Bytes, s: u64, t: u64, src: &mut Bytes, sl: u64) -> u64
-  requires kok(k) && pid < NPROC && blen(d) == OVL_DATA + 1 && s <= t && t <= OVL_DATA && blen(src) == MS_ROW && sl <= FNAME_MAX
-  ensures kok(k) && blen(src) == MS_ROW
+  requires kok(k) && pid < NPROC && blen(d) == OVL_DATA + 1 && s <= t && t <= OVL_DATA && blen(src) == PBUF && sl <= FNAME_MAX
+  ensures kok(k) && blen(src) == PBUF
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
   if t == s {
@@ -1835,7 +1839,7 @@ fn ovl_push(k: &mut Kernel, pid: u64, d: &Bytes, s: u64, t: u64, src: &mut Bytes
   }
   i = 0;
   while i < n
-    invariant i <= n && n <= FNAME_MAX && sl + n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
+    invariant i <= n && n <= FNAME_MAX && sl + n <= FNAME_MAX && blen(src) == PBUF && kok(k)
   {
     bset(&mut src, sl + i, bget(k.fs.xfer, i));
     i = i + 1;
@@ -1847,8 +1851,8 @@ fn ovl_push(k: &mut Kernel, pid: u64, d: &Bytes, s: u64, t: u64, src: &mut Bytes
 /// r8): "lowerdir=A:B,upperdir=U,workdir=W". Other options are ignored.
 /// Returns its length, or NO_RESULT with k.perr.
 fn ovl_source(k: &mut Kernel, pid: u64, src: &mut Bytes) -> u64
-  requires kok(k) && pid < NPROC && blen(src) == MS_ROW
-  ensures kok(k) && blen(src) == MS_ROW
+  requires kok(k) && pid < NPROC && blen(src) == PBUF
+  ensures kok(k) && blen(src) == PBUF
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
   let va = pget(k.procs, pid, F_REGS + R_R8);
@@ -1893,7 +1897,7 @@ fn ovl_source(k: &mut Kernel, pid: u64, src: &mut Bytes) -> u64
   let lt = lo % 4096;
   let mut a = lo / 4096;
   while a <= lt
-    invariant a <= lt + 1 && lt <= dl && dl <= OVL_DATA && sl <= FNAME_MAX && blen(d) == OVL_DATA + 1 && blen(src) == MS_ROW && kok(k)
+    invariant a <= lt + 1 && lt <= dl && dl <= OVL_DATA && sl <= FNAME_MAX && blen(d) == OVL_DATA + 1 && blen(src) == PBUF && kok(k)
   {
     let mut b = a;
     while b < lt && bget(d, b) != 58
@@ -1927,7 +1931,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
   ensures kok(k)
 {
   let ns = ns_of(k, pid);
-  let mut src = balloc(MS_ROW);
+  let mut src = balloc(PBUF);
   let mut sl = 0;
   let mut sdir = true;
   let mut ovf = 0;
@@ -1963,7 +1967,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
       }
       let mut i = 0;
       while i < n
-        invariant i <= n && n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
+        invariant i <= n && blen(src) == PBUF && kok(k)
       {
         bset(&mut src, i, bget(k.fs.xfer, i));
         i = i + 1;
@@ -2021,7 +2025,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     let cgp = "sys/fs/cgroup";
     let mut i = 0;
     while i < 13 && i < slen(cgp)
-      invariant i <= 13 && blen(src) == MS_ROW && kok(k)
+      invariant i <= 13 && blen(src) == PBUF && kok(k)
     {
       bset(&mut src, i, sget(cgp, i));
       i = i + 1;
@@ -2036,7 +2040,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     }
     let mut i = 0;
     while i < dn
-      invariant i <= dn && dn <= 18 && blen(src) == MS_ROW && kok(k)
+      invariant i <= dn && dn <= 18 && blen(src) == PBUF && kok(k)
     {
       bset(&mut src, i, bget(k.fs.xfer, i));
       i = i + 1;
@@ -2046,7 +2050,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
     // Nothing behind it: the directory itself, as the file layer has it.
     let mut i = 0;
     while i < n
-      invariant i <= n && n <= FNAME_MAX && blen(src) == MS_ROW && kok(k)
+      invariant i <= n && n <= FNAME_MAX && blen(src) == PBUF && kok(k)
     {
       bset(&mut src, i, bget(k.fs.xfer, i));
       i = i + 1;
@@ -2118,19 +2122,19 @@ fn ns_tmpfs(k: &mut Kernel, pid: u64, n: u64, ro: bool) -> u64
     }
     return ENOENT;
   }
-  let mut src = balloc(MS_ROW);
+  let mut src = balloc(PBUF);
   let mut tries = 0;
   let mut sl = 0;
   let mut made = false;
   while tries < 8 && !made
-    invariant tries <= 8 && blen(src) == MS_ROW && sl <= 27 && kok(k)
+    invariant tries <= 8 && blen(src) == PBUF && sl <= 27 && kok(k)
   {
     sl = tmpfs_name(&mut k, sat_add(k.ns, tries));
     if vfs_mkdir(&mut k.fs, sl) {
       made = true;
       let mut i = 0;
       while i < sl
-        invariant i <= sl && sl <= 27 && blen(src) == MS_ROW && kok(k)
+        invariant i <= sl && sl <= 27 && blen(src) == PBUF && kok(k)
       {
         bset(&mut src, i, bget(k.fs.xfer, i));
         i = i + 1;
@@ -2200,7 +2204,7 @@ fn ns_umount(k: &mut Kernel, pid: u64) -> bool
   // mount that is the new root, which Linux refuses to take, as "." is
   // still in the old root's detached mount.
   let n = lpath_len(k);
-  if me_get(k, e, ME_FLAGS) % MT_RO != MK_OLDROOT && (pid + 1) * CWD_STRIDE <= len(k.croot) && row_is(k.croot, pid, k.mstr, 0, n) {
+  if me_get(k, e, ME_FLAGS) % MT_RO != MK_OLDROOT && (pid + 1) * CWD_STRIDE <= len(k.croot) && row_is(k.croot, k.crootx, pid, k.mstr, 0, n) {
     return false;
   }
   me_release(&mut k, e);
@@ -2209,7 +2213,7 @@ fn ns_umount(k: &mut Kernel, pid: u64) -> bool
 
 /// Is the logical path the first n bytes of k.mstr row `row` of table t
 /// (cwd or croot) equal to k.mstr[at..at + n]?
-fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
+fn row_is(t: &Buf, tx: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
   requires len(t) <= CWD_LEN && row < NPROC && n <= FNAME_MAX && at + n <= blen(s)
 {
   if wget(t, row * CWD_STRIDE) != n {
@@ -2219,7 +2223,7 @@ fn row_is(t: &Buf, row: u64, s: &Bytes, at: u64, n: u64) -> bool
   while i < n
     invariant i <= n && n <= FNAME_MAX && at + n <= blen(s) && len(t) <= CWD_LEN && row < NPROC
   {
-    if wget(t, row * CWD_STRIDE + 1 + i) != cast[u64](bget(s, at + i)) {
+    if rbyte(t, tx, row, i) != cast[u64](bget(s, at + i)) {
       return false;
     }
     i = i + 1;
@@ -2239,7 +2243,7 @@ fn dname_is(k: &Kernel, h: u64, s: &Bytes, n: u64) -> bool
   while i < n
     invariant i <= n && n <= FNAME_MAX && n <= blen(s) && h < OFD_N
   {
-    if wget(k.dpath, h * CWD_STRIDE + 1 + i) != cast[u64](bget(s, i)) {
+    if rbyte(k.dpath, k.dpathx, h, i) != cast[u64](bget(s, i)) {
       return false;
     }
     i = i + 1;
@@ -2263,12 +2267,12 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   let ns = ns_of(k, pid);
   // The old root: logical, and as the file layer has it.
   let rl = root_len(k, pid);
-  let mut orl = balloc(MS_ROW);
+  let mut orl = balloc(PBUF);
   let mut i = 0;
   while i < rl
-    invariant i <= rl && rl <= FNAME_MAX && blen(orl) == MS_ROW && kok(k) && pid < NPROC
+    invariant i <= rl && rl <= FNAME_MAX && blen(orl) == PBUF && kok(k) && pid < NPROC
   {
-    bset(&mut orl, i, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256));
+    bset(&mut orl, i, cast[u8](rbyte(k.croot, k.crootx, pid, i)));
     i = i + 1;
   }
   let ol = ns_tr(&mut k, ns, orl, rl);
@@ -2276,10 +2280,10 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
     bfree(orl);
     return ENAMETOOLONG;
   }
-  let mut ophys = balloc(MS_ROW);
+  let mut ophys = balloc(PBUF);
   i = 0;
   while i < ol
-    invariant i <= ol && ol <= FNAME_MAX && blen(ophys) == MS_ROW && kok(k)
+    invariant i <= ol && ol <= FNAME_MAX && blen(ophys) == PBUF && kok(k)
   {
     bset(&mut ophys, i, bget(k.fs.xfer, i));
     i = i + 1;
@@ -2297,15 +2301,15 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
     return ENOTDIR;
   }
   let nl = lpath_len(k);
-  let mut nr = balloc(MS_ROW);
+  let mut nr = balloc(PBUF);
   i = 0;
   while i < nl
-    invariant i <= nl && nl <= FNAME_MAX && blen(nr) == MS_ROW && kok(k)
+    invariant i <= nl && nl <= FNAME_MAX && blen(nr) == PBUF && kok(k)
   {
     bset(&mut nr, i, bget(k.mstr, i));
     i = i + 1;
   }
-  let mut bad = ns == 0 || ns_at(k, ns) >= MT_N || (nl == rl && row_is(k.croot, pid, nr, 0, nl));
+  let mut bad = ns == 0 || ns_at(k, ns) >= MT_N || (nl == rl && row_is(k.croot, k.crootx, pid, nr, 0, nl));
   // put_old: new_root or under it, a directory.
   let m = lx_path_at(&mut k, pid, AT_FDCWD, put_old);
   if m == NO_RESULT {
@@ -2326,7 +2330,7 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   } else {
     i = 0;
     while i < nl
-      invariant i <= nl && nl <= pl && pl <= FNAME_MAX && blen(nr) == MS_ROW && kok(k)
+      invariant i <= nl && nl <= pl && pl <= FNAME_MAX && blen(nr) == PBUF && kok(k)
     {
       if bget(k.mstr, i) != bget(nr, i) {
         bad = true;
@@ -2350,16 +2354,16 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   // Every process of the namespace with the old root moves to the new one.
   let mut q = 0;
   while q < NPROC
-    invariant q <= NPROC && kok(k) && blen(orl) == MS_ROW && blen(nr) == MS_ROW && rl <= FNAME_MAX && nl <= FNAME_MAX
+    invariant q <= NPROC && kok(k) && blen(orl) == PBUF && blen(nr) == PBUF && rl <= FNAME_MAX && nl <= FNAME_MAX
   {
     if pget(k.procs, q, F_STATE) != FREE && ns_of(k, q) == ns {
       let rtl = len(k.croot);
-      if (q + 1) * CWD_STRIDE <= rtl && row_is(k.croot, q, orl, 0, rl) {   // a live process has its row
-        name_keep(&mut k.croot, rtl, q, nr, nl);
+      if (q + 1) * CWD_STRIDE <= rtl && row_is(k.croot, k.crootx, q, orl, 0, rl) {   // a live process has its row
+        let kept = name_keep(&mut k.croot, &mut k.crootx, rtl, q, NPROC, nr, nl);
       }
       let ctl = len(k.cwd);
-      if (q + 1) * CWD_STRIDE <= ctl && row_is(k.cwd, q, orl, 0, rl) {
-        name_keep(&mut k.cwd, ctl, q, nr, nl);
+      if (q + 1) * CWD_STRIDE <= ctl && row_is(k.cwd, k.cwdx, q, orl, 0, rl) {
+        let kept = name_keep(&mut k.cwd, &mut k.cwdx, ctl, q, NPROC, nr, nl);
       }
     }
     q = q + 1;
@@ -2368,11 +2372,11 @@ fn lx_pivot_root(k: &mut Kernel, pid: u64, new_root: u64, put_old: u64) -> u64
   // it) names the old root's mount from now on.
   let mut fd = 0;
   while fd < LXNFD
-    invariant fd <= LXNFD && kok(k) && pid < NPROC && blen(orl) == MS_ROW && blen(nr) == MS_ROW && rl <= FNAME_MAX && nl <= FNAME_MAX
+    invariant fd <= LXNFD && kok(k) && pid < NPROC && blen(orl) == PBUF && blen(nr) == PBUF && rl <= FNAME_MAX && nl <= FNAME_MAX
   {
     let h = dir_ofd(k, pid, fd);
     if h < OFD_N && dname_is(k, h, orl, rl) {
-      dpath_keep(&mut k.dpath, h, nr, nl);
+      dpath_keep(&mut k.dpath, &mut k.dpathx, h, nr, nl);
     }
     fd = fd + 1;
   }
@@ -2410,9 +2414,9 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
       if inr {
         let mut i = 0;
         while i < rl
-          invariant i <= rl && rl <= kl && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k) && p < NPROC
+          invariant i <= rl && rl <= kl && kl <= MNT_MAX && at + 2 * MS_ROW <= MSTR_LEN && kok(k) && p < NPROC
         {
-          if cast[u64](bget(k.mstr, at + i)) != wget(k.croot, p * CWD_STRIDE + 1 + i) % 256 {
+          if cast[u64](bget(k.mstr, at + i)) != rbyte(k.croot, k.crootx, p, i) {
             inr = false;
           }
           i = i + 1;
@@ -2454,7 +2458,7 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
           j = rl + 1;                       // past the root's "/"
         }
         while j < kl
-          invariant j <= kl && kl <= FNAME_MAX && at + 2 * MS_ROW <= MSTR_LEN && w <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+          invariant j <= kl && kl <= MNT_MAX && at + 2 * MS_ROW <= MSTR_LEN && w <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
         {
           w = put_c(&mut o, w, bget(k.mstr, at + j));
           j = j + 1;

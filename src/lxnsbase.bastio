@@ -23,8 +23,10 @@ const MNS_SLEN: u64 = NPROC + 13;         // its length, in k.mstr from STASH
 const MNS_SE: u64 = NPROC + 14;           // the overlay mount it is in
 const MNS_SLOW: u64 = NPROC + 15;         // whether a lower layer has the name
 const MNS_ENT: u64 = NPROC + 16;
-const MS_ROW: u64 = 256;                  // FNAME_MAX + 1
-const LPATH: u64 = 256;                   // where the mounts' strings start in k.mstr
+const MS_ROW: u64 = 256;                  // a mount's key and its source: the longest path a mount can have is MS_ROW - 1, MNT_MAX
+const PBUF: u64 = 4096;                   // a local buffer for a path (PATH_MAX)
+const MNT_MAX: u64 = 255;                 // MS_ROW - 1: a mount's key or source cannot be longer (ENAMETOOLONG)
+const LPATH: u64 = 4096;                  // where the mounts' strings start in k.mstr
 
 const MNS_MAX: u64 = 0x10000000000;       // namespace ids and sequence numbers stay below it
 const ME_NS: u64 = 0;
@@ -85,19 +87,19 @@ fn me_key(e: u64) -> u64
   return LPATH + e * 2 * MS_ROW;
 }
 
-/// The key length of mount e, at most FNAME_MAX.
+/// The key length of mount e, at most MNT_MAX.
 fn me_klen(k: &Kernel, e: u64) -> u64
   requires kok(k) && e < MT_N
-  ensures result <= FNAME_MAX
+  ensures result <= MNT_MAX
 {
-  return smaller(me_get(k, e, ME_KLEN), FNAME_MAX);
+  return smaller(me_get(k, e, ME_KLEN), MNT_MAX);
 }
 
 fn me_slen(k: &Kernel, e: u64) -> u64
   requires kok(k) && e < MT_N
-  ensures result <= FNAME_MAX
+  ensures result <= MNT_MAX
 {
-  return smaller(me_get(k, e, ME_SLEN), FNAME_MAX);
+  return smaller(me_get(k, e, ME_SLEN), MNT_MAX);
 }
 
 /// The logical name of the file-layer path in the first n bytes of the
@@ -130,7 +132,7 @@ fn ns_back(k: &Kernel, ns: u64, n: u64, o: &mut Bytes) -> u64
   let at = me_key(best);
   let mut w = 0;
   while w < kl
-    invariant w <= kl && kl <= FNAME_MAX && FNAME_MAX <= blen(o) && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
+    invariant w <= kl && kl <= MNT_MAX && FNAME_MAX <= blen(o) && at + 2 * MS_ROW <= MSTR_LEN && kok(k)
   {
     bset(&mut o, w, bget(k.mstr, at + w));
     w = w + 1;
@@ -170,7 +172,7 @@ fn ns_src_covers(k: &Kernel, e: u64, n: u64) -> bool
   let at = me_key(e) + MS_ROW;
   let mut i = 0;
   while i < sl
-    invariant i <= sl && sl <= n && n <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+    invariant i <= sl && sl <= n && sl <= MNT_MAX && n <= FNAME_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
   {
     if bget(k.mstr, at + i) != bget(k.fs.xfer, i) {
       return false;

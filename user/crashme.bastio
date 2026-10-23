@@ -22,8 +22,9 @@
 //              nothing, cut while made). Removing the name a file was made
 //              under while the other remains is the case diskfs commits
 //              with one sector write (disk_take_name).
-//   disk/mK/f  (K a digit) a directory and a file in it, made together (step_dir):
-//              fsck must find no file whose directory is missing.
+//   disk/mK/f  (K a digit) a directory, a file in it and a chain of directories
+//              a/b/c under it with a file in the last, made together (step_dir):
+//              fsck must find no file or directory whose parent is missing.
 //   disk/g/    files 000, 001, ... up to some count and none past it, each
 //              holding its own three digits (the last may be empty, cut
 //              while made). Three more each 16 records, up to GMAX, so
@@ -587,34 +588,58 @@ fn put_g(nm: &mut Bytes, buf: &mut Bytes, k: u64) -> bool
   return ok;
 }
 
-/// Makes directory disk/mK (K = k % 10) and a file in it, after removing
-/// the ones left by ten steps ago. The directory's entry and the file's
-/// entry inside it wait for the same commit, which must write the
-/// directory's block first: a power cut may leave the directory empty or
-/// absent, never the file without its directory (fsck says "parent ... is
-/// not a directory" if it does).
+/// Makes directory disk/mK (K = k % 10), a chain of three directories in
+/// it (a, a/b, a/b/c) and a file in the first and the last, after removing
+/// the ones left by ten steps ago. The entries wait for the same commit or
+/// for a few, and each directory's block must reach the disk before the
+/// entries in it: a power cut may leave a directory empty or absent, never
+/// a file or directory without its parent (fsck says "parent ... is not a
+/// directory" if it does). The chain is deeper than the two levels one
+/// commit can order, so the commit that makes the third level follows an
+/// earlier one in the queue.
 fn step_dir(buf: &mut Bytes, k: u64) -> bool
   requires blen(buf) == 4096
   ensures blen(buf) == 4096
 {
   let mut d = bfrom("disk/m0");
   let mut f = bfrom("disk/m0/f");
+  let mut a = bfrom("disk/m0/a");
+  let mut b = bfrom("disk/m0/a/b");
+  let mut c = bfrom("disk/m0/a/b/c");
+  let mut e = bfrom("disk/m0/a/b/c/f");
   let dg = cast[u8](48 + k % 10);
-  let mut ok = blen(d) == 7 && blen(f) == 9;
+  let mut ok = blen(d) == 7 && blen(f) == 9 && blen(a) == 9 && blen(b) == 11 && blen(c) == 13 && blen(e) == 15;
   if ok {
     bset(&mut d, 6, dg);
     bset(&mut f, 6, dg);
+    bset(&mut a, 6, dg);
+    bset(&mut b, 6, dg);
+    bset(&mut c, 6, dg);
+    bset(&mut e, 6, dg);
+    f_unlink(e, 15);
+    f_rmdir(c, 13);
+    f_rmdir(b, 11);
+    f_rmdir(a, 9);
     f_unlink(f, 9);
     f_rmdir(d, 7);
-    ok = f_mkdir(d, 7) != NOT_OK;
+    ok = f_mkdir(d, 7) != NOT_OK && f_mkdir(a, 9) != NOT_OK && f_mkdir(b, 11) != NOT_OK && f_mkdir(c, 13) != NOT_OK;
   }
   if ok {
     let fd = f_open(f, 9, O_WRITE + O_CREATE + O_TRUNC);
     ok = fd != NOT_OK && f_write(fd, buf, 3) == 3;
     f_close(fd);
   }
+  if ok {
+    let fd = f_open(e, 15, O_WRITE + O_CREATE + O_TRUNC);
+    ok = fd != NOT_OK && f_write(fd, buf, 3) == 3;
+    f_close(fd);
+  }
   bfree(d);
   bfree(f);
+  bfree(a);
+  bfree(b);
+  bfree(c);
+  bfree(e);
   return ok;
 }
 

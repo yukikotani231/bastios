@@ -223,6 +223,8 @@ fn fs_swap(k: &mut Kernel, a: u64, b: u64)
     wset(&mut k.croot, b * CWD_STRIDE + i, y);
     i = i + 1;
   }
+  swap_spill(&mut k.cwdx, a, b);
+  swap_spill(&mut k.crootx, a, b);
   let u = pget(k.procs, a, F_UMASK);
   pset(&mut k.procs, a, F_UMASK, pget(k.procs, b, F_UMASK));
   pset(&mut k.procs, b, F_UMASK, u);
@@ -754,8 +756,8 @@ fn fs_unshare(k: &mut Kernel, p: u64)
   }
   fs_take(&mut k, p);
   fs_leave(&mut k, p);
-  cwd_fork(&mut k.cwd, n, p);
-  cwd_fork(&mut k.croot, n, p);
+  let c1 = cwd_fork(&mut k.cwd, &mut k.cwdx, n, p);
+  let c2 = cwd_fork(&mut k.croot, &mut k.crootx, n, p);
   pset(&mut k.procs, p, F_UMASK, pget(k.procs, n, F_UMASK));
 }
 
@@ -1161,7 +1163,8 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   // Permissions (src/lxperm.bastio): on the file, for what the flags
   // ask; on its directory, for a new name.
-  let kept = kept_meta(&mut k, n);
+  let fh0 = vfs_lookup(&mut k.fs, n);
+  let kept = kept_meta_f(&mut k, n, fh0);
   if kept && flags & LO_NOATIME != 0 {
     let nm = meta_keep(&mut k, n, n);
     if nm.ok && !owns(k.procs, pid, nm.own) {
@@ -1189,7 +1192,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return e;
     }
   }
-  return lx_open_tail(&mut k, pid, n, flags, mode);
+  return lx_open_tail(&mut k, pid, n, flags, mode, fh0);
 }
 
 /// open of /proc/PID/fd/N, which Linux follows to the file the descriptor
@@ -1223,7 +1226,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       bset(&mut k.fs.xfer, i, base_byte(k, t, h, i));
       i = i + 1;
     }
-    dpath_keep(&mut k.dpath, hd, k.fs.xfer, l);
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.fs.xfer, l);
     return fd_install(&mut k, pid, hd);
   }
   if d.kind == K_FILE {
@@ -1233,7 +1236,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       if nm == 0 && f < NFILES {
         return lx_open_orphan(&mut k, pid, f, flags);   // unlinked while open: no name to open, only the file
       }
-      if nm != NO_FILE && nm <= FNAME_MAX && nm <= XFER {
+      if nm != NO_FILE && nm <= FNAME_MAX && nm <= XBUF {
         return lx_open_n(&mut k, pid, nm, flags, mode);
       }
     }
@@ -1385,8 +1388,8 @@ fn lx_open_bin(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
 
 /// lx_open_n, once the permission checks are done: /proc files, devices
 /// and nodes.
-fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
-  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX && (fh < HFILES || fh == NO_FILE)
   ensures kok(k)
 {
   let pf = proc_node(k, n);
@@ -1450,7 +1453,7 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if dev != DEV_NONE && dev != DEV_DIR {
     return lx_open_dev(&mut k, pid, dev, flags);
   }
-  return lx_open_node(&mut k, pid, n, flags, mode);
+  return lx_open_node(&mut k, pid, n, flags, mode, fh);
 }
 
 
@@ -1477,7 +1480,7 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
     return ENFILE;
   }
   if dev == DEV_PTSDIR {
-    dpath_keep(&mut k.dpath, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
   }
   ofd_access(&mut k, hv, flags);
   return fd_install(&mut k, pid, hv);
@@ -1503,11 +1506,10 @@ fn console_may(procs: &Buf, pid: u64, flags: u64) -> bool
 
 /// lx_open_n for a path that names no /proc file and no device path:
 /// a node in a file system (split off to keep each proof small).
-fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
-  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX && (fh < HFILES || fh == NO_FILE)
   ensures kok(k)
 {
-  let fh = vfs_lookup(&mut k.fs, n);
   if fh == NO_FILE && n > 4 && xfer_bin(k.fs.xfer) && flags % 4 == 0 && flags & (LO_CREAT + LO_TRUNC + LO_PATH + LO_DIRECTORY) == 0 {
     return lx_open_bin(&mut k, pid, n, flags);
   }
@@ -1565,7 +1567,8 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
     return fd_install(&mut k, pid, hn);
   }
-  let dir = dir_at(&mut k, n);
+  let dl = dir_look_with(&mut k, n, true, fh);
+  let dir = dl.d;
   let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
   if excl && (dir != NO_FILE || vfs_lookup(&mut k.fs, n) != NO_FILE) {
     return EEXIST;
@@ -1585,7 +1588,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if hd >= OFD_N {
       return ENFILE;
     }
-    dpath_keep(&mut k.dpath, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;

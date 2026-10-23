@@ -442,7 +442,7 @@ fn ino_rm_watch(k: &mut Kernel, pid: u64, fd: u64, wd: u64) -> u64
 /// event queued, it is dropped; one short of full, IN_Q_OVERFLOW goes in
 /// instead.
 fn ino_queue(k: &mut Kernel, i: u64, wd: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
-  requires kok(k) && i < INO_N && nat + INO_NAMEW <= EVT_LEN && nlen <= FNAME_MAX
+  requires kok(k) && i < INO_N && nat + INO_NAMEW <= EVT_LEN && nlen <= COMP_MAX
   ensures kok(k)
 {
   let b = ino_base(i);
@@ -484,7 +484,7 @@ fn ino_queue(k: &mut Kernel, i: u64, wd: u64, mask: u64, cookie: u64, nat: u64, 
 fn ino_same_name(k: &Kernel, a: u64, c: u64, nlen: u64) -> bool
   requires kok(k) && a + INO_NAMEW <= EVT_LEN && c + INO_NAMEW <= EVT_LEN
 {
-  let words = (smaller(nlen, FNAME_MAX) + 7) / 8;
+  let words = (smaller(nlen, COMP_MAX) + 7) / 8;
   let mut j = 0;
   while j < words
     invariant j <= words && words <= INO_NAMEW
@@ -502,7 +502,7 @@ fn ino_same_name(k: &Kernel, a: u64, c: u64, nlen: u64) -> bool
 /// it happened in, without one for a watch on the file itself. A one-shot
 /// watch goes once it has reported.
 fn ino_note(k: &mut Kernel, h: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
-  requires kok(k) && nat + INO_NAMEW <= EVT_LEN && nlen <= FNAME_MAX
+  requires kok(k) && nat + INO_NAMEW <= EVT_LEN && nlen <= COMP_MAX
   ensures kok(k)
 {
   if h == NO_FILE {
@@ -579,10 +579,10 @@ fn byte_or0(x: &Bytes, j: u64, end: u64) -> u64
   return 0;
 }
 
-/// Keeps x[from..from + l] (l <= FNAME_MAX) as the name of path slot p:
+/// Keeps x[from..from + l] (l <= COMP_MAX) as the name of path slot p:
 /// 8 bytes to a word, the first in the low byte.
 fn keep_name(k: &mut Kernel, p: u64, from: u64, l: u64)
-  requires kok(k) && (p == P1 || p == P2 || p == P3) && l <= FNAME_MAX && from <= XFER
+  requires kok(k) && (p == P1 || p == P2 || p == P3) && l <= COMP_MAX && from <= XBUF
   ensures kok(k)
 {
   let at = INO_G + p + P_NAME;
@@ -638,7 +638,7 @@ fn keep_path(k: &mut Kernel, p: u64, n: u64)
     keep_name(&mut k, p, 0, 0);
     return;
   }
-  keep_name(&mut k, p, s, n - s);
+  keep_name(&mut k, p, s, smaller(n - s, COMP_MAX));
   let mut pl = 0;
   if s > 0 {
     pl = s - 1;
@@ -679,7 +679,7 @@ fn note_entry(k: &mut Kernel, p: u64, mask: u64, cookie: u64)
   if iget(k, at + P_DIR) == 1 {
     m = m | IN_ISDIR;
   }
-  ino_note(&mut k, iget(k, at + P_PAR), m, cookie, at + P_NAME, smaller(iget(k, at + P_NAMELEN), FNAME_MAX));
+  ino_note(&mut k, iget(k, at + P_PAR), m, cookie, at + P_NAME, smaller(iget(k, at + P_NAMELEN), COMP_MAX));
 }
 
 /// An event on handle f that its directory hears of too (IN_ACCESS,
@@ -703,7 +703,7 @@ fn ino_child(k: &mut Kernel, f: u64, mask: u64)
     if n > 0 && n <= FNAME_MAX {
       keep_path(&mut k, P3, n);
       ino_note(&mut k, iget(k, INO_G + P3 + P_PAR), m, 0, INO_G + P3 + P_NAME,
-        smaller(iget(k, INO_G + P3 + P_NAMELEN), FNAME_MAX));
+        smaller(iget(k, INO_G + P3 + P_NAMELEN), COMP_MAX));
     }
   }
   ino_note(&mut k, f, m, 0, INO_G + P3 + P_NAME, 0);
@@ -801,7 +801,7 @@ fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
     invariant taken <= q && q <= INO_Q && off <= room && room <= XFER && kok(k)
   {
     let e = ev_at(i, (first + taken) % INO_Q);
-    let nlen = smaller(iget(k, e + 3), FNAME_MAX);
+    let nlen = smaller(iget(k, e + 3), COMP_MAX);
     let mut plen = 0;
     if nlen > 0 {
       plen = (nlen + 16) / 16 * 16;         // the name, its NUL and padding to 16

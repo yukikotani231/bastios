@@ -78,7 +78,9 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools xorriso dosfstools mtools ovmf
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools xorriso dosfstools mtools ovmf
       - name: Tool versions
         run: |
           echo "bastiolang $(git -C bastiolang rev-parse HEAD)"
@@ -143,7 +145,9 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 qemu-system-arm gcc-aarch64-linux-gnu musl-tools
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 qemu-system-arm gcc-aarch64-linux-gnu musl-tools
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
@@ -199,7 +203,9 @@ jobs:
           ref: main
           path: bastiolang
       - if: steps.want.outputs.run == 'true'
-        run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+        uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
       - if: steps.want.outputs.run == 'true'
         run: cd bastiolang/stage0 && cargo build --release --locked
       - if: steps.want.outputs.run == 'true'
@@ -306,7 +312,9 @@ jobs:
           ref: main
           path: bastiolang
       - if: steps.want.outputs.run == 'true'
-        run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+        uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
       - if: steps.want.outputs.run == 'true'
         run: cd bastiolang/stage0 && cargo build --release --locked
       - if: steps.want.outputs.run == 'true'
@@ -381,7 +389,9 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
@@ -443,10 +453,9 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y z3 qemu-system-x86 musl-tools ninja-build pkg-config \
-            libglib2.0-dev libpixman-1-dev libslirp-dev python3-venv flex bison
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 musl-tools ninja-build pkg-config libglib2.0-dev libpixman-1-dev libslirp-dev python3-venv flex bison
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the patched QEMU
         id: qemu
@@ -543,10 +552,9 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y z3 qemu-system-x86 musl-tools autoconf automake autopoint libtool \
-            bison flex texinfo pkg-config tcl gettext
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 musl-tools autoconf automake autopoint libtool bison flex texinfo pkg-config tcl gettext
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Cache keys
         id: keys
@@ -724,7 +732,9 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: sudo apt-get update && sudo apt-get install -y z3 qemu-system-arm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu tcl autopoint texinfo
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-arm gcc-aarch64-linux-gnu g++-aarch64-linux-gnu tcl autopoint texinfo
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
@@ -830,9 +840,9 @@ jobs:
           repository: yukikotani231/bastiolang
           ref: main
           path: bastiolang
-      - run: |
-          sudo apt-get update
-          sudo apt-get install -y z3 qemu-system-x86 musl-tools autoconf automake libtool pkg-config
+      - uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 musl-tools autoconf automake libtool pkg-config
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Cache keys
         id: keys
