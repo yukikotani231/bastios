@@ -996,6 +996,36 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-Z in the editor undoes a run of typing.
+        mark = len(out)
+        q.stdin.write(b"printf 'abc\\n' > /tmp/z.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/z.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/z.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/z.txt", mark)
+        if good:
+            monitor("sendkey x", "sendkey y", "sendkey ctrl-z")
+            good = until(b"bfiles: undo", mark)
+        if good:
+            monitor("sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/z.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Z in the editor undoes the typing")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/z.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"abc\r\nend2", mark) or until(b"abc\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) the saved file is as it was before the typing")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # c, x and v in the list of bfiles copy and move a file into another directory.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/pf/d; echo pa > /tmp/pf/a.txt; echo pb > /tmp/pf/b.txt\r"); q.stdin.flush()
