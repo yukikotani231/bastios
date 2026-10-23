@@ -174,6 +174,8 @@ struct DiskFs {
   q: DiskQ,             // the block cache and the queue of disk commands (src/diskq.bastio)
   txn: u64,             // the last transaction a write queued, for its caller to wait on
   pw: u64,              // 1 + the entry whose writes are batched and not committed yet (0: none); see disk_write
+  mr: u64,              // the root map block that root holds as of the batch's last write (0: none, or root is scratch)
+  ma: u64,              // likewise the leaf map block that la holds
   pb: Buf,              // the blocks the batch made: nothing on the disk names them yet (pn of BATCH_MAX)
   pn: u64,
   bmax: u64,            // the blocks a batch holds before it commits: BATCH_MAX with a big cache, else BATCH_LOW
@@ -556,6 +558,7 @@ fn walk_from(d: &mut DiskFs, r: u64, from: u64, u: u8)
   requires disk_ok(d) && r >= DATA_B0 && r < MAX_BLOCKS
   ensures disk_ok(d) && d.dcap == old(d.dcap) && d.slots == old(d.slots)
 {
+  d.mr = 0;
   if from >= PTRS || !block_in(&mut d.dev, d.plo, &mut d.sec, r, &mut d.root) {
     return;
   }
@@ -947,7 +950,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
     bmax = BATCH_MAX;    // room in the cache for a batch of that many held blocks
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
-    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, pb: alloc(BATCH_MAX), pn: 0, bmax: bmax, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, pf: alloc(PD_MAX), pdd: alloc(PDD_MAX), pddn: 0, pde: alloc(PDE_MAX), pden: 0, pek: alloc(PDE_MAX), ppt: 0, pr: 0, tick: 0,
+    la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, mr: 0, ma: 0, pb: alloc(BATCH_MAX), pn: 0, bmax: bmax, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, pf: alloc(PD_MAX), pdd: alloc(PDD_MAX), pddn: 0, pde: alloc(PDE_MAX), pden: 0, pek: alloc(PDE_MAX), ppt: 0, pr: 0, tick: 0,
     used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, lkb: balloc(LK_BYTES), psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
@@ -2068,6 +2071,7 @@ fn batch_drop(d: &mut DiskFs)
   d.pn = 0;
   d.on = 0;
   d.pw = 0;
+  d.mr = 0;
   d.pr = 0;
 }
 
@@ -2731,6 +2735,7 @@ fn disk_commit(d: &mut DiskFs) -> bool
   d.pn = 0;
   d.on = 0;
   d.pw = 0;
+  d.mr = 0;
   d.pr = 0;
   d.pdn = 0;
   d.pddn = 0;
@@ -2777,6 +2782,7 @@ fn settle_batch(d: &mut DiskFs)
   if d.pw != 0 || d.pdn != 0 {
     dq_kill(&mut d.q);
     d.pw = 0;
+    d.mr = 0;
     d.pr = 0;
     d.pn = 0;
     d.on = 0;
@@ -2876,6 +2882,7 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     if rdb < d.dcap && dir_block(d, rdb) != 0 && note_dir(&mut d, rdb) {
       d.pr = 1;
       d.pw = 0;
+      d.mr = 0;
     }
   }
   if d.pw != 0 && (d.pw != i + 1 || d.pn + 6 > d.bmax || d.on + 6 > d.bmax + 8) {
@@ -2905,7 +2912,10 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     }
     root0 = ptr_in(d, d.sp, 8 * seg);
   }
-  if !gather(&mut d.q, root0, &mut d.root) {
+  // The batch's previous write to this file left the maps it made in root
+  // and la: they are the current ones (d.mr, d.ma), already in memory.
+  let mine = !big && d.pw == i + 1 && d.mr != 0 && root0 == d.mr;
+  if !mine && !gather(&mut d.q, root0, &mut d.root) {
     return DISK_MISS;
   }
   let la0 = ptr_in(d, d.root, 8 * ia);
@@ -2913,7 +2923,10 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
   if ib != ia {
     lb0 = ptr_in(d, d.root, 8 * ib);
   }
-  let ga = gather(&mut d.q, la0, &mut d.la);
+  let mut ga = true;
+  if !mine || la0 != d.ma {
+    ga = gather(&mut d.q, la0, &mut d.la);
+  }
   let gb = gather(&mut d.q, lb0, &mut d.lb);
   if !ga || !gb {
     return DISK_MISS;
@@ -3050,6 +3063,11 @@ fn disk_write(d: &mut DiskFs, i: u64, off: u64, buf: &Bytes, n: u64, now: u64) -
     d.pt = d.tick;
   }
   d.pw = i + 1;
+  d.mr = 0;
+  if !big && ib == ia {
+    d.mr = nr;                        // root and la hold the maps just made
+    d.ma = na;
+  }
   if !ok {
     dq_kill(&mut d.q);                // dq_fits said there was room: not reached
     return 0;
