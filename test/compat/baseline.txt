@@ -732,9 +732,11 @@ t_misc: /proc/net/route lists the default route
 t_misc: /proc/net/tcp lists a listening socket
 t_misc: /proc/net/udp lists a bound socket
 t_misc: /proc/net/unix lists a bound socket
+t_misc: /proc/partitions lists the disk that /proc/diskstats counts, with its size in 1 KiB blocks
 t_misc: /proc/self/exe
 t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/self/mountinfo lists the root and /proc
+t_misc: /proc/self/smaps_rollup sums the resident pages, as psutil's uss reads them
 t_misc: /proc/self/statm counts the pages and io has its counters
 t_misc: core_pattern and nr_open read, drop_caches takes 3 and refuses 9
 t_misc: /proc/stat has cpu lines
@@ -747,6 +749,10 @@ t_misc: prctl PR_SET_NAME
 t_misc: printf %f
 t_misc: qsort
 t_misc: sched_getaffinity
+t_misc: sched_getaffinity names every processor /proc/stat lists, as sysconf counts them
+t_misc: sched_setaffinity to a processor that is not there is EINVAL
+t_misc: sched_getaffinity returns the mask sched_setaffinity set
+t_misc: getcpu names a processor the affinity mask allows
 t_misc: seccomp filter denies getpid
 t_misc: forty stacked seccomp filters
 t_misc: statfs
@@ -1032,7 +1038,9 @@ t_perm: setgroups and getgroups keep supplementary groups
 t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
+t_proc: /proc/PID/cwd and root are links: the working directory, and /
 t_proc: /proc/PID/stat of an ended process is ESRCH
+t_proc: /proc/self/environ holds the environment execve passed
 t_proc: sixteen forks after a process ended do not reuse its id
 t_proc: #! naming a missing interpreter is ENOENT
 t_proc: #! naming no interpreter is ENOEXEC
@@ -1558,6 +1566,7 @@ python: pytest: the whole test suite of a second real project (Click's, without 
 python: pytest: the whole test suite of a third real project (Flask's, without two tests that fail on Linux too)
 python: python: the test suite of a fourth real project (Tornado's socket tests: event loop, TCP client and server, child processes, HTTP server and client, WebSockets)
 python: pytest: pytest's own tests for capture, temporary directories, paths and conftest files (without one test of a 250-byte name)
+python: pytest: psutil's own tests for processes, the system and the utilities (without the ones that need affinity, I/O counters, context switches, utmp or disk statistics)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes

@@ -1033,6 +1033,34 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # c and v on a directory copy it with what is in it.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/pg/d /tmp/pg/s; echo pc > /tmp/pg/s/c.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/pg\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/pg", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down", "sendkey down", "sendkey c")           # s
+            good = until(b"bfiles: copy /tmp/pg/s", mark)
+            monitor("sendkey up", "sendkey ret")                            # into d
+            good = good and until(b"bfiles: dir /tmp/pg/d", mark)
+            monitor("sendkey v")
+            good = good and until(b"bfiles: copied /tmp/pg/s to /tmp/pg/d/s", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) c and v on a directory in the bfiles list copy it into the directory shown")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/pg/d/s/c.txt; ls /tmp/pg/s\r"); q.stdin.flush()
+        good = good and (until(b"pc\r\nc.txt", mark) or until(b"pc\nc.txt", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) the copied directory holds the file and the original stays")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # n in the list of bfiles makes a new empty file and edits it.
         mark = len(out)
         q.stdin.write(b"mkdir /tmp/nf\r"); q.stdin.flush()

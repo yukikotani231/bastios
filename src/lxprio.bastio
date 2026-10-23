@@ -297,8 +297,24 @@ fn sched_interval(k: &mut Kernel, pid: u64, who: u64, ts: u64) -> u64
   return lx_put_out(&mut k, pid, ts, 16);
 }
 
-/// sched_setaffinity: any mask that names the one processor Linux
-/// programs are told about (sched_getaffinity) is accepted.
+/// The processors Linux programs are told about: every one that runs (up
+/// to the 64 one mask word holds), as a bit mask.
+fn cpu_mask(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let c = smaller(k.cpus, 64);
+  if c >= 64 {
+    return 0xFFFFFFFFFFFFFFFF;
+  }
+  if c == 0 {
+    return 1;
+  }
+  return (1 << c) - 1;
+}
+
+/// sched_setaffinity: any mask that names a processor Linux programs are
+/// told about (sched_getaffinity) is accepted and kept for sched_getaffinity;
+/// where a process runs is not restricted.
 fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -310,23 +326,47 @@ fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u
   if size == 0 {
     return EINVAL;
   }
-  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, mask, &mut k.fs.xfer, 1) != 1 {
+  let want = smaller(size, 8);
+  xfer_u64(&mut k.fs.xfer, 0, 0);
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, mask, &mut k.fs.xfer, want) != want {
     return EFAULT;
   }
   if t > NPROC {
     return ESRCH;
   }
-  if get_u64(k.fs.xfer, 0) % 2 == 0 {
+  if get_u64(k.fs.xfer, 0) & cpu_mask(k) == 0 {
     return EINVAL;                          // no processor it may run on
   }
   if !may_sched(k.procs, pid, t) {
     return EPERM;
   }
+  let m = get_u64(k.fs.xfer, 0) & cpu_mask(k);
+  k.sys = set(k.sys, SYS_AFF + t, m);
   return 0;
 }
 
-/// sched_getaffinity: the one processor Linux programs are told about;
-/// the size must be a whole number of 8-byte words.
+/// The processor getcpu names for thread p: the first one its mask allows
+/// (programs that pin themselves to a processor check that they run there),
+/// 0 when no mask was set.
+fn aff_cpu(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < 64
+{
+  let m = get(k.sys, SYS_AFF + p) & cpu_mask(k);
+  let mut i = 0;
+  while i < 63 && (m >> i) % 2 == 0
+    invariant i <= 63
+  {
+    i = i + 1;
+  }
+  if m == 0 {
+    return 0;
+  }
+  return i;
+}
+
+/// sched_getaffinity: the processors the process was last confined to (sched_setaffinity), else every one that runs; the size must be a whole
+/// number of 8-byte words, and the words past the first are zero.
 fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -338,7 +378,11 @@ fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
   if t >= NPROC {
     return ESRCH;                           // none by that id; a negative id too, unlike the other sched calls
   }
-  xfer_u64(&mut k.fs.xfer, 0, 1);
+  let mut m = get(k.sys, SYS_AFF + t) & cpu_mask(k);
+  if m == 0 {
+    m = cpu_mask(k);
+  }
+  xfer_u64(&mut k.fs.xfer, 0, m);
   let r = lx_put_out(&mut k, pid, mask, 8);
   if r != 0 {
     return r;
