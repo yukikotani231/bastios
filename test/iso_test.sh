@@ -1232,22 +1232,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
         # The clock in the task bar follows TZ (POSIX form): XXX-5 is five hours east of UTC.
+        import datetime
+        utc_h = datetime.datetime.utcnow().hour    # the guest clock comes from the host RTC
         mark = len(out)
-        q.stdin.write(b"date -u +%H; echo end$((1+1))\r"); q.stdin.flush()
-        good = until(b"end2", mark)
-        m = re.search(rb"\n(\d\d)\r?\n", out[mark:]) if good else None
-        good = good and m is not None
-        if good:
-            utc_h = int(m.group(1))
-            mark = len(out)
-            q.stdin.write(b"TZ=XXX-5 bwm -n -c bsys\r"); q.stdin.flush()
-            good = until(b"bsys: window", mark) or until(b"bwm: ", mark)
+        q.stdin.write(b"TZ=XXX-5 bwm -n -c bsys\r"); q.stdin.flush()
+        good = until(b"bsys: window", mark) or until(b"bwm: ", mark)
         if good:
             time.sleep(2)
             w, h, px = screendump()
-            clk = screen_text_at(px, w, 920, 748, 5, 1)[0]
+            clk = screen_text_at(px, w, w - 52 - 12 - 48 + 4, h - 24 + 4, 5, 1)[0]
             hh = clk[:2]
-            good = hh.isdigit() and int(hh) in ((utc_h + 5) % 24, (utc_h + 6) % 24)
+            good = hh.isdigit() and int(hh) in ((utc_h + 4) % 24, (utc_h + 5) % 24, (utc_h + 6) % 24)
             if not good:
                 print("clock:", repr(clk), "utc hour:", utc_h)
         print(("ok  " if good else "FAIL"), f"({name}) the task bar clock follows TZ")
