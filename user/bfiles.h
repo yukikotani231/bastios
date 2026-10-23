@@ -1102,6 +1102,8 @@ static void be_key(int c)
         else if (c == 'B') be_move_rows(1);
         else if (c == 'C') { if (ctrl) be_word_move(1); else if (bf_cur < bf_vlen) bf_cur++; }
         else if (c == 'D') { if (ctrl) be_word_move(-1); else if (bf_cur > 0) bf_cur--; }
+        else if (c == 'H' && ctrl) bf_cur = 0;
+        else if (c == 'F' && ctrl) bf_cur = bf_vlen;
         else if (c == 'H' || (c == '~' && (num == 1 || num == 7))) bf_cur = bf_erow[be_row_of(bf_cur)];
         else if (c == 'F' || (c == '~' && (num == 4 || num == 8))) {
             int r = be_row_of(bf_cur);

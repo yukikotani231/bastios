@@ -1231,6 +1231,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-End and Ctrl-Home in the editor go to the end and the start of the text.
+        mark = len(out)
+        q.stdin.write(b"printf 'ab\\ncd\\n' > /tmp/ce.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ce.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ce.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ce.txt", mark)
+        if good:
+            monitor("sendkey ctrl-end", "sendkey x", "sendkey ctrl-home", "sendkey y", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ce.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ce.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"yab\r\ncd\r\nxend2", mark) or until(b"yab\ncd\nxend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Home and Ctrl-End in the editor go to the start and the end of the text")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Shift-arrows select in the editor; typing replaces the selection, Ctrl-C copies it and Ctrl-W cuts it.
         mark = len(out)
         q.stdin.write(b"printf 'hello world\\n' > /tmp/ds.txt\r"); q.stdin.flush()
