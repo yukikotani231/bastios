@@ -1100,6 +1100,10 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
   if k.pdir && flags & LO_CREAT != 0 {
     return EISDIR;                          // "new/": a file is not made there, as on Linux
   }
+  let ne = ns_file_at(k, ns_of(k, pid));
+  if ne < MT_N && flags & LO_CREAT == 0 {
+    return lx_open_nsfile(&mut k, pid, ne, flags);   // a file bound to a namespace (src/lxns.bastio)
+  }
   let pf = proc_node(k, n);
   if is_exe_file(pf) && flags & LO_PATH == 0 && flags % 4 == 0 {
     // /proc/PID/exe is a link to the program: open that (src/lxopen2.bastio).
@@ -1237,6 +1241,46 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       }
     }
     return ENOENT;
+  }
+  if d.kind == K_DEV && d.x == DEV_PTSDIR {
+    // The devpts directory (a mount point runc re-opens after mounting
+    // it): another handle on it, with the name the first was opened by.
+    let h = fd_ofd(k, t, tfd);
+    if h >= OFD_N {
+      return ENOENT;
+    }
+    let hd = ofd_new(&mut k, OF_DEV, DEV_PTSDIR);
+    if hd >= OFD_N {
+      return ENFILE;
+    }
+    let l = base_len(k, t, h);
+    let mut i = 0;
+    while i < l
+      invariant i <= l && l <= FNAME_MAX && h < OFD_N && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, base_byte(k, t, h, i));
+      i = i + 1;
+    }
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.fs.xfer, l);
+    ofd_access(&mut k, hd, flags);
+    return fd_install(&mut k, pid, hd);
+  }
+  if d.kind == K_DEV && d.x >= PROC_DEV && !is_ns_file(d.x) {
+    // A /proc file (runc opens /proc/self/setgroups and opens its descriptor
+    // again to write): the same file, with lx_open_tail's checks.
+    let pf = d.x;
+    if (flags % 4 != 0 && (!proc_writable(pf) || (fs_id(k.procs, pid, false) != 0 && !um_owner(k, pid, pf)))) || is_exe_file(pf) {
+      return EACCES;
+    }
+    if proc_secret(k.procs, pid, pf) {
+      return EACCES;
+    }
+    let hp = ofd_new(&mut k, OF_DEV, pf);
+    if hp >= OFD_N {
+      return ENFILE;
+    }
+    ofd_access(&mut k, hp, flags);
+    return fd_install(&mut k, pid, hp);
   }
   return ENXIO;
 }
