@@ -47,6 +47,46 @@ fn l2_unmap(m: &mut Mem, l2: &mut PageTable, p: u64)
   }
 }
 
+/// Window pages i .. i + n of l1 (one level-1 table) go back to m, those that
+/// are mapped. Returns how many were.
+fn l1_unmap_run(m: &mut Mem, l1: &mut PageTable, i0: u64, n: u64) -> u64
+  requires mem_ok(m) && pt_level(l1) == 1 && pt_leases(l1) == 0 && i0 + n <= 512
+  ensures mem_ok(m) && pt_level(l1) == 1 && pt_leases(l1) == 0 && result <= n
+{
+  let mut i = i0;
+  let mut hits = 0;
+  while i < i0 + n
+    invariant i0 <= i && i <= i0 + n && i0 + n <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_leases(l1) == 0 && hits <= i - i0
+  {
+    if pt_has(l1, i) {
+      if pt_shared(l1, i) {
+        drop_shared(&mut m, pt_take_shared(&mut l1, i));
+      } else {
+        give_page(&mut m, pt_take_frame(&mut l1, i));
+      }
+      hits = hits + 1;
+    }
+    i = i + 1;
+  }
+  return hits;
+}
+
+/// l2_unmap for the n pages from p, which all lie under one level-1 table;
+/// how many were mapped.
+fn l2_unmap_run(m: &mut Mem, l2: &mut PageTable, p: u64, n: u64) -> u64
+  requires mem_ok(m) && pt_level(l2) == 2 && p < L2_PAGES && p % 512 + n <= 512 && pt_leases(l2) == 0
+  ensures mem_ok(m) && pt_level(l2) == 2 && pt_leases(l2) == 0 && result <= n
+{
+  let t = p / 512;
+  let mut hits = 0;
+  if pt_has(l2, t) {
+    let mut l1 = pt_take(&mut l2, t);
+    hits = l1_unmap_run(&mut m, &mut l1, p % 512, n);
+    pt_put(&mut l2, t, l1);
+  }
+  return hits;
+}
+
 /// Sets what the program may do with window page p, if it is mapped:
 /// 0 nothing (PROT_NONE), 1 read, 2 read and write; and, if x, run code from
 /// it. False if not mapped. A
@@ -313,6 +353,22 @@ fn w_unmap(m: &mut Mem, l3: &mut PageTable, p: u64)
   }
 }
 
+/// w_unmap for the n pages from p, which all lie under one level-1 table;
+/// how many were mapped.
+fn w_unmap_run(m: &mut Mem, l3: &mut PageTable, p: u64, n: u64) -> u64
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && p % 512 + n <= 512 && pt_leases(l3) == 0
+  ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0 && result <= n
+{
+  let t = p / L2_PAGES;
+  let mut hits = 0;
+  if pt_has(l3, t) {
+    let mut l2 = pt_take(&mut l3, t);
+    hits = l2_unmap_run(&mut m, &mut l2, p % L2_PAGES, n);
+    pt_put(&mut l3, t, l2);
+  }
+  return hits;
+}
+
 fn w_protect(m: &mut Mem, l3: &mut PageTable, p: u64, a: u64, x: bool) -> bool
   requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && pt_leases(l3) == 0 && a <= 2
   ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
@@ -445,9 +501,19 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
               p = to;
             } else {
               let mut hit = false;
+              let mut run = 1;
               if op == WOP_UNMAP {
-                hit = w_has(&mut l3, q);
-                w_unmap(&mut m, &mut l3, q);
+                // The rest of the level-1 table (or of the range) in one walk.
+                run = 512 - q % 512;
+                if run > to - q {
+                  run = to - q;
+                }
+                let h = w_unmap_run(&mut m, &mut l3, q, run);
+                if r + h <= WPAGES {
+                  r = r + h;
+                } else {
+                  r = WPAGES;
+                }
               } else if op == WOP_COUNT {
                 hit = w_has(&mut l3, q);
               } else if op == WOP_ZERO {
@@ -458,7 +524,7 @@ fn win_op(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, op: u64, from: u64, to
               if hit && r < WPAGES {
                 r = r + 1;
               }
-              p = q + 1;
+              p = q + run;
             }
           }
         }
