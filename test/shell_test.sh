@@ -433,6 +433,10 @@ steps = [
     # user without a mount namespace of its own (or without any) mounts nothing.
     ("su alice -c 'mkdir -p /tmp/ur; unshare -U -r -m sh -c \"mount -t tmpfs t /tmp/ur && echo own > /tmp/ur/f && cat /tmp/ur/f; ls -ln /tmp/ur/f\"; ls -A /tmp/ur | wc -l; unshare -U -r sh -c \"mount -t tmpfs t /tmp/ur || echo nons\"; mount -t tmpfs t /tmp/ur || echo plain; rmdir /tmp/ur'",
      [b"\r\nown\r\n", b"0        0", b"\r\n0\r\n", b"nons", b"plain"], b"\n# "),
+    # /sys/class/power_supply exists and is empty (a machine without a battery;
+    # psutil.sensors_battery lists it).
+    ("ls -A /sys/class/power_supply | wc -l; echo ps=$?",
+     [b"\r\n0\r\n", b"ps=0"], b"\n# "),
     # Control groups (src/lxcgroup.bastio): a group is made with mkdir, a
     # shell moves into it, and pids.max stops the fork that would pass it;
     # cgroup.kill empties a group so that rmdir works, and non-root users may
@@ -543,8 +547,8 @@ steps = [
     ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
-    # Names of 250 bytes, the longest that fits a path of FNAME_MAX (255) bytes written as disk/NAME (past 200 the disk keeps the rest of a name in the entry after it): create, read back, list, stat, rename between short and long names, and refuse 256.
-    ("n=a; i=0; while [ $i -lt 8 ]; do n=$n$n; i=$((i+1)); done; l=${n#??????}; m=${l%?}; echo hi > disk/$l; cat disk/$l; for f in disk/*; do [ \"${f#disk/}\" = \"$l\" ] && echo listed; done; stat -c %s disk/$l; (echo no > disk/${l}aa) 2>/dev/null; echo r=$?; mv disk/$l disk/s; cat disk/s; mv disk/s disk/$m; cat disk/$m; [ -e disk/$l ] || echo gone; rm disk/$m; mkdir disk/$l; [ -d disk/$l ] && echo isdir; rmdir disk/$l; [ -e disk/$l ] || echo gone2",
+    # Names of 255 bytes, the longest NAME_MAX allows (past 200 the disk keeps the rest of a name in the entry after it): create, read back, list, stat, rename between short and long names, and refuse 256.
+    ("n=a; i=0; while [ $i -lt 8 ]; do n=$n$n; i=$((i+1)); done; l=${n%?}; m=${l%?}; echo hi > disk/$l; cat disk/$l; for f in disk/*; do [ \"${f#disk/}\" = \"$l\" ] && echo listed; done; stat -c %s disk/$l; (echo no > disk/$n) 2>/dev/null; echo r=$?; mv disk/$l disk/s; cat disk/s; mv disk/s disk/$m; cat disk/$m; [ -e disk/$l ] || echo gone; rm disk/$m; mkdir disk/$l; [ -d disk/$l ] && echo isdir; rmdir disk/$l; [ -e disk/$l ] || echo gone2",
      b"hi\r\nlisted\r\n3\r\nr=1\r\nhi\r\nhi\r\ngone\r\nisdir\r\ngone2\r\n", b"\n# "),
     # The disk finds names through a hash index once it holds more than IX_MIN entries (src/diskfs.bastio), built when the
     # directory first grows past it and kept up by each create, rename and removal: every name stays findable across the crossing.

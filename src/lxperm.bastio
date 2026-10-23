@@ -125,7 +125,17 @@ fn kept_meta(k: &mut Kernel, n: u64) -> bool
   requires kok(k) && n <= FNAME_MAX
   ensures kok(k)
 {
-  if vfs_lookup(&mut k.fs, n) != NO_FILE {
+  let f = vfs_lookup(&mut k.fs, n);
+  return kept_meta_f(&mut k, n, f);
+}
+
+/// kept_meta, for a caller that has looked the name up (f is what
+/// vfs_lookup gave).
+fn kept_meta_f(k: &mut Kernel, n: u64, f: u64) -> bool
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if f != NO_FILE {
     return true;
   }
   let d = dir_at(&mut k, n);
