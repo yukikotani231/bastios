@@ -365,6 +365,63 @@ fn aff_cpu(k: &Kernel, p: u64) -> u64
   return i;
 }
 
+/// Thread p left the processor: by itself (a call that blocked or yielded,
+/// involuntary false) or because the tick took it away (true). Counted for
+/// /proc/PID/status, getrusage and /proc/stat.
+fn csw_count(k: &mut Kernel, p: u64, involuntary: bool)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let mut i = 2 * p;
+  if involuntary {
+    i = i + 1;
+  }
+  k.sys = set(k.sys, SYS_CSW + i, sat_add(get(k.sys, SYS_CSW + i), 1));
+  k.sys = set(k.sys, SYS_CSWT, sat_add(get(k.sys, SYS_CSWT), 1));
+}
+
+/// Thread p's call n that just finished (its result in the return register) moved bytes with read or write: add
+/// them to the characters it read or wrote and count the call
+/// (/proc/PID/io). Calls that failed or blocked count nothing.
+fn io_account(k: &mut Kernel, p: u64, n: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let r = pget(k.procs, p, reg_word(R_RET));
+  if r >= 0x4000000000000000 {
+    return;
+  }
+  let mut w = 4;
+  if n == LX_READ || n == LX_PREAD64 || n == LX_READV || n == LX_PREADV || n == LX_PREADV2 {
+    w = 0;
+  } else if n == LX_WRITE || n == LX_PWRITE64 || n == LX_WRITEV || n == LX_PWRITEV || n == LX_PWRITEV2 {
+    w = 1;
+  }
+  if w < 4 {
+    k.sys = set(k.sys, SYS_IO + 4 * p + w, sat_add(get(k.sys, SYS_IO + 4 * p + w), r));
+    k.sys = set(k.sys, SYS_IO + 4 * p + w + 2, sat_add(get(k.sys, SYS_IO + 4 * p + w + 2), 1));
+  }
+}
+
+/// Thread p's i-th word of /proc/PID/io: 0 characters read, 1 written,
+/// 2 read calls, 3 write calls.
+fn io_get(k: &Kernel, p: u64, i: u64) -> u64
+  requires kok(k) && p < NPROC && i < 4
+{
+  return get(k.sys, SYS_IO + 4 * p + i);
+}
+
+/// Thread p's count of voluntary (involuntary false) or involuntary switches.
+fn csw_get(k: &Kernel, p: u64, involuntary: bool) -> u64
+  requires kok(k) && p < NPROC
+{
+  let mut i = 2 * p;
+  if involuntary {
+    i = i + 1;
+  }
+  return get(k.sys, SYS_CSW + i);
+}
+
 /// sched_getaffinity: the processors the process was last confined to (sched_setaffinity), else every one that runs; the size must be a whole
 /// number of 8-byte words, and the words past the first are zero.
 fn get_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u64
