@@ -300,17 +300,28 @@ static void be_move_rows(int by)
 #define BE_UNDO_MAX 16
 static struct { char *text; size_t len, cur; } be_undo[BE_UNDO_MAX];
 static int be_nundo, be_ulast;
+/* Redo (Ctrl-Y): what Ctrl-Z took off is kept here until the next edit. */
+static struct { char *text; size_t len, cur; } be_redo[BE_UNDO_MAX];
+static int be_nredo;
+
+static void be_redo_clear(void)
+{
+    while (be_nredo > 0)
+        free(be_redo[--be_nredo].text);
+}
 
 static void be_undo_clear(void)
 {
     while (be_nundo > 0)
         free(be_undo[--be_nundo].text);
+    be_redo_clear();
     be_ulast = 0;
 }
 
 /* Called before an edit of KIND (1 typing, 2 backspace, 3 anything else, which is always kept). */
 static void be_undo_push(int kind)
 {
+    be_redo_clear();
     if (kind == be_ulast && kind != 3)
         return;
     be_ulast = kind;
@@ -338,6 +349,16 @@ static void be_undo_pop(void)
         fflush(stdout);
         return;
     }
+    char *t = malloc(bf_vlen + 1);
+    if (t && be_nredo < BE_UNDO_MAX) {
+        memcpy(t, bf_vtext, bf_vlen + 1);
+        be_redo[be_nredo].text = t;
+        be_redo[be_nredo].len = bf_vlen;
+        be_redo[be_nredo].cur = bf_cur;
+        be_nredo++;
+    } else {
+        free(t);
+    }
     be_nundo--;
     memcpy(bf_vtext, be_undo[be_nundo].text, be_undo[be_nundo].len + 1);
     bf_vlen = be_undo[be_nundo].len;
@@ -345,6 +366,35 @@ static void be_undo_pop(void)
     free(be_undo[be_nundo].text);
     bf_modified = 1;
     puts("bfiles: undo");
+    fflush(stdout);
+}
+
+/* Ctrl-Y: puts back what the last Ctrl-Z took off. */
+static void be_redo_pop(void)
+{
+    be_ulast = 0;
+    if (be_nredo == 0) {
+        puts("bfiles: nothing to redo");
+        fflush(stdout);
+        return;
+    }
+    char *t = malloc(bf_vlen + 1);
+    if (t && be_nundo < BE_UNDO_MAX) {
+        memcpy(t, bf_vtext, bf_vlen + 1);
+        be_undo[be_nundo].text = t;
+        be_undo[be_nundo].len = bf_vlen;
+        be_undo[be_nundo].cur = bf_cur;
+        be_nundo++;
+    } else {
+        free(t);
+    }
+    be_nredo--;
+    memcpy(bf_vtext, be_redo[be_nredo].text, be_redo[be_nredo].len + 1);
+    bf_vlen = be_redo[be_nredo].len;
+    bf_cur = be_redo[be_nredo].cur;
+    free(be_redo[be_nredo].text);
+    bf_modified = 1;
+    puts("bfiles: redo");
     fflush(stdout);
 }
 
@@ -907,6 +957,8 @@ static void be_key(int c)
         bf_eprompt = c == 6 ? 'f' : 'g';
         bf_ebuf[0] = 0;
         bf_ebn = 0;
+    } else if (c == 25) {
+        be_redo_pop();
     } else if (c == 26) {
         be_undo_pop();
     } else if (c == 22) {
