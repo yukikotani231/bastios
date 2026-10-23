@@ -1573,6 +1573,7 @@ python: pytest: pytest's own tests for capture, temporary directories, paths and
 python: pytest: psutil's own tests for processes, the system and the utilities (without the ones that need affinity, utmp or disk statistics)
 python: pytest: numpy's own tests for memmap, .npy and .npz files, text files and the file formats (the big-array tests, which need more memory than the guest has, are left out)
 python: pytest: numpy's own tests for array arithmetic, indexing, stacking and record arrays (the big-array tests are left out)
+python: pytest: the whole test suite of a fifth real project (attrs's)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
