@@ -38,6 +38,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bterm` selects and copies the word under the pointer on a double click and the whole row on a triple click.
 - `bterm` scrolls back and forward a page on Shift-Page Up and Shift-Page Down (`bwm` sends the keys `BWM_KEY_SCROLL_UP` and `BWM_KEY_SCROLL_DOWN`, 0x101 and 0x102, to the focused client).
 - `bterm` draws the 256-colour palette (`38;5;N`, `48;5;N`), the bright backgrounds (`100`-`107`) and 24-bit colours (`38;2;R;G;B`, as the nearest of the 256).
+- `bterm` brackets a paste in `ESC [ 200 ~` and `ESC [ 201 ~` for a program that asked for it with `ESC [ ? 2004 h`, as shells and editors do to tell typed text from pasted text.
 - `bterm` reports the mouse to programs that ask for it (xterm modes 1000, 1002, 1003 and 1006), for example `mouse=a` in vim.
 - `bterm` draws italic (`ESC [ 3 m`, leaning glyphs) and strike-through (`9`) text.
 - `bterm` underlines text after `ESC [ 4 m` (until `24` or `0`).
