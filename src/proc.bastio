@@ -539,9 +539,9 @@ const DISK_GID: u64 = 6;               // group disk (files/group): the loop dev
 
 // File locks (src/lxlock.bastio): LK_N entries of LK_W words, then for
 // each process the record lock it waits for in F_SETLKW, LK_WW words.
-const LK_N: u64 = 128;
+const LK_N: u64 = 256;
 const LK_W: u64 = 6;
-const LK_WAITS: u64 = 768;            // LK_N * LK_W
+const LK_WAITS: u64 = 1536;            // LK_N * LK_W
 const LK_WW: u64 = 4;
 const LK_HI: u64 = LK_WAITS + NPROC * LK_WW;   // after them: every held lock is in an entry below this
 const LK_LEN: u64 = LK_HI + 1;

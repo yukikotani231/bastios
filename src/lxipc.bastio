@@ -1725,6 +1725,26 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
     return EACCES;
   }
   let g = tgid(k.procs, pid);
+  let pages = shm_pages(k, slot);
+  if pages == 0 {
+    return EINVAL;
+  }
+  if want >= USER_BASE && (want - USER_BASE) / 4096 <= STACK_FIRST && pages <= STACK_FIRST - (want - USER_BASE) / 4096 {
+    // Attaching over an earlier attachment (SHM_REMAP) replaces it: its
+    // record ends here, else repeated remaps used up the table.
+    let lo = (want - USER_BASE) / 4096;
+    let mut d = 0;
+    while d < SA_N
+      invariant d <= SA_N && kok(k) && g < NPROC
+    {
+      let f0 = get(k.ipc, sa_at(g, d) + 1);
+      let n0 = get(k.ipc, sa_at(g, d) + 2);
+      if get(k.ipc, sa_at(g, d)) != 0 && f0 >= lo && f0 <= WPAGES && n0 <= WPAGES - f0 && f0 + n0 <= lo + pages {
+        shm_detach(&mut k, g, d, false);
+      }
+      d = d + 1;
+    }
+  }
   let mut rec = SA_N;
   let mut a = 0;
   while a < SA_N
@@ -1737,10 +1757,6 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
   }
   if rec >= SA_N {
     return EMFILE;
-  }
-  let pages = shm_pages(k, slot);
-  if pages == 0 {
-    return EINVAL;
   }
   let mut at = 0;
   let mut from_hole = false;

@@ -1231,6 +1231,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-End and Ctrl-Home in the editor go to the end and the start of the text.
+        mark = len(out)
+        q.stdin.write(b"printf 'ab\\ncd\\n' > /tmp/ce.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ce.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ce.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ce.txt", mark)
+        if good:
+            monitor("sendkey ctrl-end", "sendkey x", "sendkey ctrl-home", "sendkey y", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ce.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ce.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"yab\r\ncd\r\nxend2", mark) or until(b"yab\ncd\nxend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Home and Ctrl-End in the editor go to the start and the end of the text")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # c, x and v in the list of bfiles copy and move a file into another directory.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/pf/d; echo pa > /tmp/pf/a.txt; echo pb > /tmp/pf/b.txt\r"); q.stdin.flush()
@@ -1625,6 +1650,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             lines = screen_text_at(px, w, 72, 90, 80, 24)
             good = any(l.strip() == "term" for l in lines) and not any(l.startswith("alt") for l in lines)
             print(("ok  " if good else "FAIL"), f"({name}) leaving the alternate screen brings the shell's screen back")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # UTF-8: box drawing and other characters outside the font each take one cell, drawn as a look-alike or '?'.
+            typed("printf 'u\\342\\224\\200\\343\\201\\202v\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "u-?v" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal draws a UTF-8 character as one cell")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
