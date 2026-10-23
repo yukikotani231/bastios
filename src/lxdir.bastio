@@ -342,6 +342,16 @@ fn dir_look(k: &mut Kernel, n: u64) -> DirLook
   ensures kok(k)
   ensures result.f < HFILES || result.f == NO_FILE
 {
+  return dir_look_with(&mut k, n, false, NO_FILE);
+}
+
+/// dir_look, for a caller that has looked the name up already (see
+/// vfs_dir_look_with).
+fn dir_look_with(k: &mut Kernel, n: u64, known: bool, f0: u64) -> DirLook
+  requires kok(k) && n <= FNAME_MAX && (f0 < HFILES || f0 == NO_FILE)
+  ensures kok(k)
+  ensures result.f < HFILES || result.f == NO_FILE
+{
   if n == 0 {
     return DirLook { d: DIR_ROOT, f: NO_FILE, looked: false };
   }
@@ -356,7 +366,7 @@ fn dir_look(k: &mut Kernel, n: u64) -> DirLook
   if cd != NO_FILE {
     return DirLook { d: cd, f: NO_FILE, looked: false };
   }
-  let dl = vfs_dir_look(&mut k.fs, n);
+  let dl = vfs_dir_look_with(&mut k.fs, n, known, f0);
   if dl.d == NO_FILE {
     return DirLook { d: NO_FILE, f: dl.f, looked: dl.looked };
   }
