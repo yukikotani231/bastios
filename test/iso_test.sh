@@ -996,6 +996,37 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # r and D in the list of bfiles rename and delete the entry under the cursor.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/rn/e; echo ra > /tmp/rn/a.txt; echo rb > /tmp/rn/b.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/rn\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/rn", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down", "sendkey down", "sendkey r", "sendkey x", "sendkey ret")   # a.txt
+            good = until(b"bfiles: renamed /tmp/rn/a.txt to /tmp/rn/a.txtx", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) r in the bfiles list renames the entry under the cursor")
+        fails += not good
+        if good:
+            monitor("sendkey home", "sendkey down", "sendkey shift-d")                        # the empty directory e
+            time.sleep(0.5)
+            monitor("sendkey shift-d")
+            good = until(b"bfiles: deleted /tmp/rn/e", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) D twice in the bfiles list deletes the entry under the cursor")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"[ ! -e /tmp/rn/e ] && [ -f /tmp/rn/a.txtx ] && [ ! -e /tmp/rn/a.txt ] && [ -f /tmp/rn/b.txt ] && echo ok$((1+1))\r"); q.stdin.flush()
+        good = good and until(b"ok2", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the renamed file is under its new name and the directory is gone")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Ctrl-Z in the editor undoes a run of typing.
         mark = len(out)
         q.stdin.write(b"printf 'abc\\n' > /tmp/z.txt\r"); q.stdin.flush()
