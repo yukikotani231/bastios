@@ -1982,7 +1982,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
         let at = me_key(oe) + MS_ROW;
         let mut oi = 0;
         while oi < sl
-          invariant oi <= sl && sl <= FNAME_MAX && blen(src) == MS_ROW && at + FNAME_MAX <= MSTR_LEN && kok(k)
+          invariant oi <= sl && sl <= MNT_MAX && blen(src) == PBUF && at + MNT_MAX <= MSTR_LEN && kok(k)
         {
           bset(&mut src, oi, bget(k.mstr, at + oi));
           oi = oi + 1;

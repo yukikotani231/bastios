@@ -1261,7 +1261,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       bset(&mut k.fs.xfer, i, base_byte(k, t, h, i));
       i = i + 1;
     }
-    dpath_keep(&mut k.dpath, hd, k.fs.xfer, l);
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.fs.xfer, l);
     ofd_access(&mut k, hd, flags);
     return fd_install(&mut k, pid, hd);
   }
