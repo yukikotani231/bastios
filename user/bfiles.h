@@ -54,7 +54,8 @@ static int bf_nent, bf_top;                     /* the entries (".." is the firs
 static char bf_cwd[PATH_MAX] = "/";
 static int bf_viewing;
 static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
-static int bf_renaming;                   /* r was pressed in the viewer: the new name is being typed */
+static int bf_renaming;                   /* r was pressed: the new name is being typed */
+static char bf_tpath[PATH_MAX];           /* what r and D act on: the file in the viewer, or the entry under the cursor in the list */
 static char bf_rname[NAME_MAX + 1];
 static int bf_rlen;
 static int bf_hidden = 1;                 /* names starting with a dot are left out of the list (h toggles) */
@@ -202,7 +203,7 @@ static void bf_paint(void)
         if (bf_renaming)
             snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
         else if (bf_confirm)
-            snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_vpath);
+            snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
         else
             snprintf(h, sizeof h, "%s", bf_vpath);
         bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
@@ -222,8 +223,13 @@ static void bf_paint(void)
         return;
     }
     char h[BF_COLS + 1];
-    snprintf(h, sizeof h, "%s", bf_cwd);
-    bf_put_row(0, h, strlen(h), 0x00FFFFFF, hd);
+    if (bf_renaming)
+        snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
+    else if (bf_confirm)
+        snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
+    else
+        snprintf(h, sizeof h, "%s", bf_cwd);
+    bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
     for (int r = 1; r < BF_ROWS; r++) {
         int i = bf_top + r - 1;
         if (i >= bf_nent) {
@@ -535,23 +541,42 @@ static void bf_new_dir(void)
     }
 }
 
-/* r in the viewer: type a new name (in the same directory), Enter renames,
- * Escape cancels. */
+/* Sets bf_tpath to what r and D act on: the file shown in the viewer, or in the list the entry under the
+ * cursor (never ".."). Returns whether there is one. */
+static int bf_target(void)
+{
+    if (bf_viewing) {
+        snprintf(bf_tpath, sizeof bf_tpath, "%s", bf_vpath);
+        return 1;
+    }
+    if (bf_sel <= 0 || bf_sel >= bf_nent)
+        return 0;
+    bf_path_of(bf_ents[bf_sel].name, bf_tpath, sizeof bf_tpath);
+    return 1;
+}
+
+/* r in the viewer or the list: type a new name (in the same directory), Enter renames,
+ * Escape cancels (a name that is taken is refused). */
 static void bf_rename_key(int c)
 {
     if (c == 27) {
         bf_renaming = 0;
     } else if (c == '\r' || c == '\n') {
-        char *sl = strrchr(bf_vpath, '/');
+        char *sl = strrchr(bf_tpath, '/');
         char to[PATH_MAX];
-        snprintf(to, sizeof to, "%.*s%s", (int)(sl - bf_vpath + 1), bf_vpath, bf_rname);
+        snprintf(to, sizeof to, "%.*s%s", (int)(sl - bf_tpath + 1), bf_tpath, bf_rname);
         bf_renaming = 0;
-        if (bf_rlen > 0 && strchr(bf_rname, '/') == NULL && rename(bf_vpath, to) == 0) {
-            printf("bfiles: renamed %s to %s\n", bf_vpath, to);
-            snprintf(bf_vpath, sizeof bf_vpath, "%s", to);
-            bf_stale = 1;
+        struct stat st;
+        if (bf_rlen > 0 && strchr(bf_rname, '/') == NULL && lstat(to, &st) != 0 && rename(bf_tpath, to) == 0) {
+            printf("bfiles: renamed %s to %s\n", bf_tpath, to);
+            if (bf_viewing) {
+                snprintf(bf_vpath, sizeof bf_vpath, "%s", to);
+                bf_stale = 1;
+            } else {
+                bf_load_dir();
+            }
         } else {
-            printf("bfiles: cannot rename %s\n", bf_vpath);
+            printf("bfiles: cannot rename %s\n", bf_tpath);
         }
         fflush(stdout);
     } else if (c == 127 || c == 8) {
@@ -1074,14 +1099,18 @@ static int bfiles_main(int argc, char **argv)
             }
             int was_confirm = bf_confirm;
             bf_confirm = 0;
-            if (c == 'D' && bf_viewing && !bf_editing) {
-                if (was_confirm) {
-                    if (unlink(bf_vpath) == 0) {
-                        printf("bfiles: deleted %s\n", bf_vpath);
+            char was_tpath[PATH_MAX];
+            snprintf(was_tpath, sizeof was_tpath, "%s", bf_tpath);
+            if (c == 'D' && !bf_editing && bf_target()) {
+                if (was_confirm && strcmp(was_tpath, bf_tpath) == 0) {   /* the same entry as the first D */
+                    struct stat st;
+                    int gone = lstat(bf_tpath, &st) == 0 && S_ISDIR(st.st_mode) ? rmdir(bf_tpath) : unlink(bf_tpath);
+                    if (gone == 0) {
+                        printf("bfiles: deleted %s\n", bf_tpath);
                         bf_viewing = 0;
                         bf_load_dir();
                     } else {
-                        printf("bfiles: cannot delete %s\n", bf_vpath);
+                        printf("bfiles: cannot delete %s\n", bf_tpath);
                     }
                     fflush(stdout);
                 } else {
@@ -1089,9 +1118,9 @@ static int bfiles_main(int argc, char **argv)
                 }
             } else if (bf_editing)
                 be_key(c);
-            else if (c == 'r' && bf_viewing) {
-                const char *b = strrchr(bf_vpath, '/');
-                snprintf(bf_rname, sizeof bf_rname, "%s", b ? b + 1 : bf_vpath);
+            else if (c == 'r' && bf_target()) {
+                const char *b = strrchr(bf_tpath, '/');
+                snprintf(bf_rname, sizeof bf_rname, "%s", b ? b + 1 : bf_tpath);
                 bf_rlen = strlen(bf_rname);
                 bf_renaming = 1;
             } else if (c == 'c' && bf_viewing)
