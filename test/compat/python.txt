@@ -73,6 +73,11 @@ ok
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q numpy pytest hypothesis 2>&1 | tail -n 3; cd /root; SP=/root/v/lib/python3.14/site-packages; T=$SP/numpy/_core/tests; L=$SP/numpy/lib/tests; timeout -s KILL 1300 python -m pytest -q -p no:cacheprovider $T/test_memmap.py $L/test_io.py $L/test_format.py $L/test__datasource.py $L/test_loadtxt.py -k "not (big or large)" > /root/np.log 2>&1; tail -n 1 /root/np.log | grep -qE "[0-9]+ passed" && ! tail -n 1 /root/np.log | grep -qE "[0-9]+ (failed|error)" && echo ok; grep -E "^FAILED|^ERROR" /root/np.log | cut -c1-140 | head -n 6'
 ok
 
+== pytest: numpy's own tests for array arithmetic, indexing, stacking and record arrays (the big-array tests are left out)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q numpy pytest hypothesis 2>&1 | tail -n 3; cd /root; SP=/root/v/lib/python3.14/site-packages; T=$SP/numpy/_core/tests; L=$SP/numpy/lib/tests; timeout -s KILL 700 python -m pytest -q -p no:cacheprovider $T/test_numeric.py $T/test_indexing.py $T/test_records.py $L/test_shape_base.py -k "not (big or large)" > /root/np2.log 2>&1; tail -n 1 /root/np2.log | grep -qE "[0-9]+ passed" && ! tail -n 1 /root/np2.log | grep -qE "[0-9]+ (failed|error)" && echo ok; grep -E "^FAILED|^ERROR" /root/np2.log | cut -c1-140 | head -n 6'
+ok
+
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0
