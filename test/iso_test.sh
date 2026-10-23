@@ -1287,6 +1287,45 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Dragging over text in the editor selects it.
+        mark = len(out)
+        q.stdin.write(b"printf 'alpha beta\\n' > /tmp/dm.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/dm.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/dm.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/dm.txt", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            row = next((i for i, l in enumerate(lines) if l.strip() == "alpha beta"), None)
+            good = row is not None
+            if not good:
+                print("\n".join(l for l in lines if l))
+        if good:
+            def movep(dx, dy):
+                n = max(1, (max(abs(dx), abs(dy)) + 199) // 200)
+                monitor(*[f"mouse_move {dx * (i + 1) // n - dx * i // n} {dy * (i + 1) // n - dy * i // n}" for i in range(n)])
+            ty = 90 + row * 16 + 8
+            movep(72 + 2 * 8 + 4 - 512, ty - 384)
+            monitor("mouse_button 1")
+            movep(5 * 8, 0)
+            monitor("mouse_button 0")
+            time.sleep(0.5)
+            monitor("sendkey ctrl-c")
+            good = until(b"bfiles: copied 5", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        print(("ok  " if good else "FAIL"), f"({name}) dragging over text in the editor selects it")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # The clock in the task bar follows TZ (POSIX form): XXX-5 is five hours east of UTC.
         import datetime
         utc_h = datetime.datetime.utcnow().hour    # the guest clock comes from the host RTC
