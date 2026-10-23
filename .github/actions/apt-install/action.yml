@@ -49,8 +49,11 @@ runs:
         # `apt-get update` from time to time; nothing here is installed from it.
         sudo grep -rlE 'packages\.microsoft\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null \
           | xargs -r sudo rm -f
-        sudo apt-get update
-        sudo apt-get install -y --download-only $PACKAGES
+        # A stalled mirror has held a job for the whole 30 minutes of its
+        # limit, so each network step gets a time limit and three tries.
+        try() { for n in 1 2 3; do timeout 300 "$@" && return 0; echo "try $n of $*: failed"; done; return 1; }
+        try sudo apt-get update
+        try sudo apt-get install -y --download-only $PACKAGES
         mkdir -p "$DEBS"
         rm -f "$DEBS"/*.deb
         cp /var/cache/apt/archives/*.deb "$DEBS"/
