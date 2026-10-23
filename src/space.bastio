@@ -60,6 +60,12 @@ fn free_l1(m: &mut Mem, t: PageTable)
       }
     }
     i = i + 1;
+    while i < 512 && !pt_has(t1, i)
+      invariant i <= 512 && mem_ok(m) && pt_level(t1) == 1
+      invariant forall j: u64 :: j < i ==> !pt_used(t1, j)
+    {
+      i = i + 1;
+    }
   }
   give_page(&mut m, pt_free(t1));
 }
@@ -78,6 +84,12 @@ fn free_l2(m: &mut Mem, t: PageTable)
       free_l1(&mut m, pt_take(&mut t2, i));
     }
     i = i + 1;
+    while i < 512 && !pt_has(t2, i)
+      invariant i <= 512 && mem_ok(m) && pt_level(t2) == 2
+      invariant forall j: u64 :: j < i ==> !pt_used(t2, j)
+    {
+      i = i + 1;
+    }
   }
   give_page(&mut m, pt_free(t2));
 }
@@ -96,6 +108,12 @@ fn free_l3(m: &mut Mem, t: PageTable)
       free_l2(&mut m, pt_take(&mut t3, i));
     }
     i = i + 1;
+    while i < 512 && !pt_has(t3, i)
+      invariant i <= 512 && mem_ok(m) && pt_level(t3) == 3
+      invariant forall j: u64 :: j < i ==> !pt_used(t3, j)
+    {
+      i = i + 1;
+    }
   }
   give_page(&mut m, pt_free(t3));
 }
@@ -713,6 +731,13 @@ fn clone_l3(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
     }
     if ok {
       t = t + 1;
+      // Most slots are empty: a tight loop skips them (see clone_l1).
+      while t < WIN_L2S && !pt_has(src, t)
+        invariant t <= WIN_L2S && mem_ok(m) && pt_level(l3) == 3 && pt_level(src) == 3 && (cow ==> pt_leases(src) == 0)
+        invariant forall j: u64 :: t <= j && j < 512 ==> !pt_used(l3, j)
+      {
+        t = t + 1;
+      }
     }
   }
   if !ok {
@@ -747,6 +772,12 @@ fn clone_l2(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
     }
     if ok {
       t = t + 1;
+      while t < WIN_L1S && !pt_has(src, t)
+        invariant t <= WIN_L1S && mem_ok(m) && pt_level(l2) == 2 && pt_level(src) == 2 && (cow ==> pt_leases(src) == 0)
+        invariant forall j: u64 :: t <= j && j < 512 ==> !pt_used(l2, j)
+      {
+        t = t + 1;
+      }
     }
   }
   if !ok {
@@ -850,6 +881,15 @@ fn clone_l1(src: &mut PageTable, m: &mut Mem, cow: bool) -> Space
     }
     if ok {
       p = p + 1;
+      // Most slots of a table are empty: skipping them in a loop of their own
+      // costs a few instructions a slot, where the native backend spends
+      // about 20 on a trip round the big loop above.
+      while p < 512 && !pt_has(src, p)
+        invariant p <= 512 && mem_ok(m) && pt_level(l1) == 1 && pt_level(src) == 1 && (cow ==> pt_leases(src) == 0)
+        invariant forall j: u64 :: p <= j && j < 512 ==> !pt_used(l1, j)
+      {
+        p = p + 1;
+      }
     }
   }
   if !ok {
