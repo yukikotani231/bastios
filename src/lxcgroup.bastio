@@ -15,7 +15,7 @@
 // +memory +pids and - to hand them down), cgroup.events (populated),
 // cgroup.kill (write 1: SIGKILL every process in the group and below),
 // cgroup.type, cgroup.stat, cgroup.max.descendants, pids.max and
-// pids.current, memory.max, memory.current and memory.events, memory.stat,
+// pids.current, pids.events (forks refused by pids.max), memory.max, memory.current and memory.events, memory.stat,
 // memory.high, memory.low, memory.min and memory.swap.max (kept as written,
 // not enforced), the cpuset controller's cpuset.cpus and cpuset.mems (a list
 // of processors, kept as written, not enforced, and their .effective files), memory.swap.current (the pages swapped out), cpu.max and cpu.weight. Only root writes. pids.max is enforced: fork, vfork and clone
@@ -459,16 +459,32 @@ fn cg_descendants(k: &Kernel, s: u64) -> u64
 
 /// Whether process pid may make one more task: no cgroup from its own up
 /// to the root is at its pids.max.
-fn cg_fork_ok(k: &Kernel, pid: u64) -> bool
+fn cg_fork_ok(k: &mut Kernel, pid: u64) -> bool
   requires kok(k) && pid < NPROC
+  ensures kok(k)
 {
-  return cg_room(k, cg_of(k, pid));
+  let full = cg_full(k, cg_of(k, pid));
+  if full < CG_N {
+    // pids.events counts the forks the limit refused, in the group at its limit.
+    cg_put(&mut k, full, CGW_PEV, sat_add(cg_get(k, full, CGW_PEV), 1));
+    return false;
+  }
+  return true;
 }
 
 /// Whether cgroup s could take one more task: neither it nor a group
 /// above it is at its pids.max.
 fn cg_room(k: &Kernel, s: u64) -> bool
   requires kok(k) && s < CG_N
+{
+  return cg_full(k, s) == CG_N;
+}
+
+/// The group, from s up to the root, that is at its pids.max, or CG_N if
+/// there is none.
+fn cg_full(k: &Kernel, s: u64) -> u64
+  requires kok(k) && s < CG_N
+  ensures result <= CG_N
 {
   let mut c = s;
   let mut i = 0;
@@ -477,15 +493,15 @@ fn cg_room(k: &Kernel, s: u64) -> bool
   {
     let lim = cg_get(k, c, CGW_PIDS);
     if lim != 0 && cg_tasks(k, c) + 1 > lim - 1 {
-      return false;
+      return c;
     }
     if c == 0 {
-      return true;
+      return CG_N;
     }
     c = cg_parent(k, c);
     i = i + 1;
   }
-  return true;
+  return CG_N;
 }
 
 // ---------------------------------------------------------------- names
@@ -573,7 +589,10 @@ fn cgf_name(f: u64) -> Str {
   if f == 26 {
     return "cpuset.cpus.effective";
   }
-  return "cpuset.mems.effective";
+  if f == 27 {
+    return "cpuset.mems.effective";
+  }
+  return "pids.events";
 }
 
 /// Which control file x[a..b] names, or CGF_N.
@@ -1005,6 +1024,10 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
   if f == 22 {
     let a = put_n(&mut o, 0, cg_swap_current(k, s));
     return put_c(&mut o, a, 10);
+  }
+  if f == 28 {
+    let a = put_s(&mut o, 0, "max ");
+    return put_s(&mut o, put_n(&mut o, a, cg_get(k, s, CGW_PEV)), "\n");
   }
   if f == 24 || f == 26 {
     return cg_cpuset_text(k, s, f == 26, &mut o);
@@ -1948,6 +1971,7 @@ fn cg_mkdir(k: &mut Kernel, pid: u64, n: u64) -> u64
   cg_put(&mut k, free, CGW_VRUN, 0);
   cg_put(&mut k, free, CGW_WST, 0);
   cg_put(&mut k, free, CGW_OOMK, 0);
+  cg_put(&mut k, free, CGW_PEV, 0);
   cg_put(&mut k, free, CGW_DEV0, 0);
   cg_put(&mut k, free, CGW_DEV1, 0);
   cg_put(&mut k, free, CGW_USED, 1);
@@ -2102,6 +2126,10 @@ fn lx_clone3_cg(k: &mut Kernel, mmu: &Mmu, pid: u64, va: u64, size: u64) -> Clon
       return Clone3Cg { r: EACCES, wait: false };
     }
     if !cg_room(k, dest) {
+      let full = cg_full(k, dest);
+      if full < CG_N {
+        cg_put(&mut k, full, CGW_PEV, sat_add(cg_get(k, full, CGW_PEV), 1));
+      }
       return Clone3Cg { r: EAGAIN, wait: false };
     }
   }
