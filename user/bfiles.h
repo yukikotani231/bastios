@@ -416,6 +416,17 @@ static void be_redo_pop(void)
     fflush(stdout);
 }
 
+static long be_anchor = -1;                     /* where a Shift-arrow selection started (-1: nothing is selected); the selection is between it and the cursor */
+
+static int be_sel(size_t *lo, size_t *hi)
+{
+    if (be_anchor < 0 || (size_t)be_anchor == bf_cur || (size_t)be_anchor > bf_vlen)
+        return 0;
+    *lo = (size_t)be_anchor < bf_cur ? (size_t)be_anchor : bf_cur;
+    *hi = (size_t)be_anchor < bf_cur ? bf_cur : (size_t)be_anchor;
+    return 1;
+}
+
 static void be_insert(unsigned char c)
 {
     if (bf_vlen + 1 >= BF_VIEWMAX)
@@ -435,6 +446,54 @@ static void be_delete(size_t at)
     bf_vlen--;
     bf_vtext[bf_vlen] = 0;
     bf_modified = 1;
+}
+
+/* Writes bytes to the clipboard file that any window can paste. */
+static void be_clip_write(const char *p, size_t n)
+{
+    int cf = open(BF_CLIP_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (cf >= 0) {
+        if (write(cf, p, n) < 0)
+            puts("bfiles: cannot write the clipboard");
+        close(cf);
+    }
+}
+
+/* Ctrl-C: copies the selection to the clipboard. */
+static void be_copy_sel(void)
+{
+    size_t lo, hi;
+    if (!be_sel(&lo, &hi))
+        return;
+    be_clip_write(bf_vtext + lo, hi - lo);
+    printf("bfiles: copied %zu\n", hi - lo);
+    fflush(stdout);
+}
+
+/* Deletes the selection (when there is one) and puts the cursor where it began; the caller has pushed undo. */
+static int be_drop_sel(void)
+{
+    size_t lo, hi;
+    int had = be_sel(&lo, &hi);
+    be_anchor = -1;
+    if (!had)
+        return 0;
+    bf_cur = lo;
+    for (size_t n = hi - lo; n > 0; n--)
+        be_delete(lo);
+    return 1;
+}
+
+/* The same, as one step for Ctrl-Z. */
+static int be_drop_sel_undoable(void)
+{
+    size_t lo, hi;
+    if (!be_sel(&lo, &hi)) {
+        be_anchor = -1;
+        return 0;
+    }
+    be_undo_push(3);
+    return be_drop_sel();
 }
 
 /* Ctrl-K: cuts the rest of the line (the whole newline if the line is empty) into the kill buffer. */
@@ -653,6 +712,7 @@ static void be_start(void)
         return;
     }
     bf_editing = 1;
+    be_anchor = -1;
     bf_modified = 0;
     be_undo_clear();
     bf_eprompt = 0;
@@ -1022,9 +1082,22 @@ static void be_key(int c)
         }
         int num = bf_esc >= 3 ? bf_escnum : 0;
         int ctrl = bf_esc == 4 && bf_escmod >= 5 && ((bf_escmod - 1) & 4);
+        int shift = bf_esc == 4 && bf_escmod >= 2 && ((bf_escmod - 1) & 1);
         bf_esc = 0;
         be_ulast = 0;
-        if (c == '~' && num == 3) be_undo_push(3);
+        if (c == '~' && num == 3) {
+            if (be_drop_sel_undoable())
+                return;
+            be_undo_push(3);
+        }
+        if (strchr("ABCDHF", c) || (c == '~' && (num == 1 || num == 4 || num == 7 || num == 8))) {
+            if (!shift)
+                be_anchor = -1;
+            else if (be_anchor < 0)
+                be_anchor = (long)bf_cur;
+        } else {
+            be_anchor = -1;
+        }
         if (c == 'A') be_move_rows(-1);
         else if (c == 'B') be_move_rows(1);
         else if (c == 'C') { if (ctrl) be_word_move(1); else if (bf_cur < bf_vlen) bf_cur++; }
@@ -1038,8 +1111,13 @@ static void be_key(int c)
         else if (c == '~' && num == 6) be_move_rows(page);
         return;
     }
+    if (c != 27 && c != 3 && c != 22 && c != 23 && c != 127 && c != 8 && c != '\n' && c != '\r' &&
+        c != '\t' && !(c >= 32 && c < 127))
+        be_anchor = -1;
     if (c == 27) {
         bf_esc = 1;
+    } else if (c == 3) {
+        be_copy_sel();
     } else if (c == 19) {
         be_save();
     } else if (c == 24) {
@@ -1059,6 +1137,15 @@ static void be_key(int c)
     } else if (c == 26) {
         be_undo_pop();
     } else if (c == 23) {
+        size_t lo, hi;
+        if (be_sel(&lo, &hi)) {
+            be_clip_write(bf_vtext + lo, hi - lo);
+            printf("bfiles: cut %zu\n", hi - lo);
+            fflush(stdout);
+            be_drop_sel_undoable();
+            return;
+        }
+        be_anchor = -1;
         size_t end = bf_cur;
         be_word_move(-1);
         if (bf_cur < end) {
@@ -1075,6 +1162,7 @@ static void be_key(int c)
         int r = be_row_of(bf_cur);
         bf_cur = bf_erow[r] + be_row_len(r);
     } else if (c == 22) {
+        be_drop_sel_undoable();
         be_paste_clip();
     } else if (c == 11) {
         be_undo_push(3);
@@ -1083,11 +1171,13 @@ static void be_key(int c)
         be_undo_push(3);
         be_paste_kill();
     } else if (c == 127 || c == 8) {
-        if (bf_cur > 0) {
+        if (be_drop_sel_undoable()) {
+        } else if (bf_cur > 0) {
             be_undo_push(2);
             be_delete(--bf_cur);
         }
     } else if (c == '\n' || c == '\r') {
+        be_drop_sel_undoable();
         be_undo_push(3);
         /* The new line starts with the blanks the one being left starts with (up to the cursor). */
         size_t ls = bf_cur, ind = 0;
@@ -1103,10 +1193,13 @@ static void be_key(int c)
         for (size_t i = 0; i < ind; i++)
             be_insert((unsigned char)blanks[i]);
     } else if (c == '\t') {
+        be_drop_sel_undoable();
         be_undo_push(3);
         for (int i = 0; i < 4; i++)
             be_insert(' ');
     } else if (c >= 32 && c < 127) {
+        if (be_drop_sel_undoable())
+            be_ulast = 0;
         be_undo_push(1);
         be_insert(c);
     }
@@ -1151,6 +1244,13 @@ static void be_paint(void)
             }
         }
         bf_put_row(r, t, n, fg, bg);
+        size_t lo, hi;
+        if (i < bf_nerow && be_sel(&lo, &hi))
+            for (size_t k = 0; k < n; k++) {
+                size_t off = bf_erow[i] + k;
+                if (off >= lo && off < hi)
+                    bf_glyph(r, (int)k, (unsigned char)t[k], fg, 0x00406090);
+            }
     }
     int row = cr - bf_etop + 1, col = (int)(bf_cur - bf_erow[cr]);
     if (col >= BF_COLS) col = BF_COLS - 1;
