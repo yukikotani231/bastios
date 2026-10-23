@@ -1799,10 +1799,26 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 if not good:
                     print("\n".join(l for l in lines4 if l))
                 fails += not good
-            time.sleep(1)
+            bracket = good
+            if good:
+                # A program that asked for bracketed paste (mode 2004) gets the paste between 200~ and 201~.
+                monitor("sendkey ctrl-u")
+                typed("printf '\\033[?2004h'; cat > /tmp/bp.txt")
+                time.sleep(1)
+                monitor("sendkey shift-insert", "sendkey ret", "sendkey ctrl-d")
+                time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
+            if bracket:
+                mark = len(out)
+                q.stdin.write(b"\r"); q.stdin.flush()
+                until(b"# ", mark)
+                mark = len(out)
+                q.stdin.write(b"cat /tmp/bp.txt; echo end$((1+1))\r"); q.stdin.flush()
+                good = until(b"\x1b[200~echo\x1b[201~", mark)
+                print(("ok  " if good else "FAIL"), f"({name}) a paste is bracketed after the program asked for mode 2004")
+                fails += not good
         mark = len(out)
         q.stdin.write(b"exit\r"); q.stdin.flush()
         until(b"bastios> ", mark)
