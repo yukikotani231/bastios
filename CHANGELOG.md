@@ -17,8 +17,16 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 ### Added
 
 - `bwm` opens its launcher menu at the pointer on a right click on the empty desktop.
+- The `bsys` System window lists the processes (`p`), moves along the list (`j`, `k` or the arrow keys) and ends the selected one (`x`).
 - The `bfiles` editor cuts and pastes a line (Ctrl-K, Ctrl-U), finds text (Ctrl-F) and goes to a line (Ctrl-G), and shows the cursor's line number.
 - `bfiles` copies and moves files between directories: `c` or `x` marks the entry under the cursor and `v` puts it into the directory shown.
+- The `bfiles` editor pastes the clipboard (Ctrl-V, the text a `bterm` window selected), and what Ctrl-K cuts goes to the clipboard too.
+- `bfiles` renames (`r`) and deletes (`D` twice) the entry under the cursor in the list, as it did for the file in the viewer; an empty directory can be deleted too.
+- The `bfiles` editor undoes edits with Ctrl-Z (a run of typing is one edit; the last 16 are kept) and puts them back with Ctrl-Y.
+- The `bfiles` editor replaces text: Ctrl-R asks for the text to find and the text to put in its place, replaces every occurrence and says how many; one Ctrl-Z undoes it.
+- The `bfiles` editor keeps the indentation of a line when Enter starts a new one.
+- The `bfiles` editor goes to the start and the end of the line with Ctrl-A and Ctrl-E.
+- `bfiles` copies a directory with everything in it (down to 8 levels), not only a file.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
 - `bterm` sets the window title when a program prints `ESC ] 0 ; TEXT` or `ESC ] 2 ; TEXT` ended by BEL or `ESC \`.
@@ -31,6 +39,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bterm` selects and copies the word under the pointer on a double click and the whole row on a triple click.
 - `bterm` scrolls back and forward a page on Shift-Page Up and Shift-Page Down (`bwm` sends the keys `BWM_KEY_SCROLL_UP` and `BWM_KEY_SCROLL_DOWN`, 0x101 and 0x102, to the focused client).
 - `bterm` draws the 256-colour palette (`38;5;N`, `48;5;N`), the bright backgrounds (`100`-`107`) and 24-bit colours (`38;2;R;G;B`, as the nearest of the 256).
+- `bterm` brackets a paste in `ESC [ 200 ~` and `ESC [ 201 ~` for a program that asked for it with `ESC [ ? 2004 h`, as shells and editors do to tell typed text from pasted text.
 - `bterm` reports the mouse to programs that ask for it (xterm modes 1000, 1002, 1003 and 1006), for example `mouse=a` in vim.
 - `bterm` draws italic (`ESC [ 3 m`, leaning glyphs) and strike-through (`9`) text.
 - `bterm` underlines text after `ESC [ 4 m` (until `24` or `0`).
