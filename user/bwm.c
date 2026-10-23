@@ -1040,6 +1040,13 @@ static int key_bytes(unsigned code, char *out)
         { 103, 'A' }, { 108, 'B' }, { 106, 'C' }, { 105, 'D' }, { 102, 'H' }, { 107, 'F' } };
     for (unsigned i = 0; i < sizeof nav / sizeof nav[0]; i++)
         if (nav[i].code == code) {
+            int mod = 1 + k_shift + 2 * k_alt + 4 * k_ctrl;      /* xterm's modifier number; sent with Ctrl only, as Shift and Alt keep the plain key */
+            if (k_ctrl) {
+                memcpy(out, "\033[1;", 4);
+                out[4] = '0' + mod;
+                out[5] = nav[i].final;
+                return 6;
+            }
             out[0] = 27; out[1] = '['; out[2] = nav[i].final;
             return 3;
         }
