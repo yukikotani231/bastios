@@ -49,11 +49,26 @@ runs:
         # `apt-get update` from time to time; nothing here is installed from it.
         sudo grep -rlE 'packages\.microsoft\.com' /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null \
           | xargs -r sudo rm -f
-        # A stalled mirror has held a job for the whole 30 minutes of its
-        # limit, so each network step gets a time limit and three tries.
-        try() { for n in 1 2 3; do timeout 300 "$@" && return 0; echo "try $n of $*: failed"; done; return 1; }
-        try sudo apt-get update
-        try sudo apt-get install -y --download-only $PACKAGES
+        # The Azure mirror that the runner image lists has stalled for the
+        # whole 30 minutes of a job's limit on a package archive. apt gives up
+        # on a connection that sends nothing for 30 s and tries each file
+        # three times; if that still fails, the second round reads
+        # archive.ubuntu.com instead of the mirror list.
+        APT="-o Acquire::http::Timeout=30 -o Acquire::Retries=3"
+        try() {
+          for n in 1 2 3; do
+            if [ "$n" = 2 ]; then
+              sudo sed -i -E 's#^URIs: .*#URIs: http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
+              sudo sed -i -E 's#mirror\+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list 2>/dev/null || true
+              sudo apt-get $APT update || true
+            fi
+            timeout 480 "$@" && return 0
+            echo "try $n of $*: failed"
+          done
+          return 1
+        }
+        try sudo apt-get $APT update
+        try sudo apt-get $APT install -y --download-only $PACKAGES
         mkdir -p "$DEBS"
         rm -f "$DEBS"/*.deb
         cp /var/cache/apt/archives/*.deb "$DEBS"/
