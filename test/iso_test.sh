@@ -1131,6 +1131,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-A and Ctrl-E in the editor go to the start and the end of the line.
+        mark = len(out)
+        q.stdin.write(b"printf 'bc\\n' > /tmp/ae.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ae.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ae.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ae.txt", mark)
+        if good:
+            monitor("sendkey ctrl-e", "sendkey d", "sendkey ctrl-a", "sendkey a", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ae.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ae.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"abcd\r\nend2", mark) or until(b"abcd\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-A and Ctrl-E in the editor go to the start and the end of the line")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Enter in the editor keeps the indentation of the line.
         mark = len(out)
         q.stdin.write(b": > /tmp/ai.txt\r"); q.stdin.flush()
