@@ -244,6 +244,22 @@ static void draw_cell(int r, int c, int cursor)
     }
 }
 
+/* After cells of a row were erased, inserted or deleted, a wide character may be left with one half: blank it. */
+static void fix_wide(int r)
+{
+    for (int c = 0; c < cols; c++) {
+        struct cell *e = &grid[r][c];
+        int right = e->attr & 8;
+        int left = !right && e->ch >= 0x1100 && cp_width(e->ch) == 2;
+        if ((right && (c == 0 || grid[r][c - 1].attr & 8 || cp_width(grid[r][c - 1].ch) != 2)) ||
+            (left && (c + 1 >= cols || !(grid[r][c + 1].attr & 8)))) {
+            e->ch = ' ';
+            e->attr = 0;
+            dirty[r] = 1;
+        }
+    }
+}
+
 static int param(int i, int dflt)
 {
     return i < nparam && params[i] > 0 ? params[i] : dflt;
@@ -376,6 +392,8 @@ static void csi(int final)
     default:
         break;                                    /* a sequence this terminal does not know */
     }
+    if (final == 'X' || final == '@' || final == 'P' || final == 'K' || final == 'J')
+        fix_wide(cy);
 }
 
 static char osc[64];                       /* the text of an ESC ] ... string being read (state 4; 5 after an ESC in it) */
