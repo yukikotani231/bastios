@@ -248,6 +248,7 @@ t_dir: stat /tmp
 t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
+t_dir: statvfs names up to 255 bytes, as NAME_MAX says
 t_dir: unlink file in directory
 t_dns: connect to a looked-up name
 t_dns: getaddrinfo AF_INET

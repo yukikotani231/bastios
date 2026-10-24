@@ -114,6 +114,7 @@ int main(void) {
     {
         struct statvfs v;
         EXPECT("statvfs", statvfs("/", &v) == 0);
+        EXPECT("statvfs names up to 255 bytes, as NAME_MAX says", statvfs("/tmp", &v) == 0 && v.f_namemax == 255);
     }
     return done();
 }

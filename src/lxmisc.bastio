@@ -225,7 +225,7 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
 }
 
 /// statfs / fstatfs: one file system of 4 KiB blocks, sized by the free
-/// memory (files live in memory), with names up to FNAME_MAX bytes. Its
+/// memory (files live in memory), with names up to COMP_MAX bytes. Its
 /// type is tmpfs for a path in a tmpfs mount (src/lxmount.bastio), ramfs
 /// otherwise (`magic`).
 fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64, mflags: u64) -> u64
@@ -241,7 +241,7 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64, mflags: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 32, nfree);            // f_bavail
   xfer_u64(&mut k.fs.xfer, 40, NFILES + DSLOTS);  // f_files
   xfer_u64(&mut k.fs.xfer, 48, NFILES);           // f_ffree (a guess: the table is not counted)
-  xfer_u64(&mut k.fs.xfer, 64, FNAME_MAX);        // f_namelen
+  xfer_u64(&mut k.fs.xfer, 64, COMP_MAX);         // f_namelen
   xfer_u64(&mut k.fs.xfer, 72, 4096);             // f_frsize
   xfer_u64(&mut k.fs.xfer, 80, smaller(mflags, 65535) + 32);   // f_flags: ST_RDONLY, ST_NOSUID, ST_NODEV, ST_NOEXEC, .., and ST_VALID
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, STATFS_SIZE) != STATFS_SIZE {

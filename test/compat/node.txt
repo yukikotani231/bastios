@@ -80,3 +80,15 @@ $ bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/express.tar.gz | bb tar 
 # timeout 900
 $ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/ws.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/ws"); process.argv = [process.argv[0], "mocha", "--exit", "--throw-deprecation", "--timeout", "30000", "-i", "-g", "Upgrade header field value cannot be read", "test/buffer-util.test.js", "test/create-websocket-stream.test.js", "test/event-target.test.js", "test/extension.test.js", "test/limiter.test.js", "test/permessage-deflate.test.js", "test/receiver.test.js", "test/sender.test.js", "test/subprotocol.test.js", "test/validation.test.js", "test/websocket-server.test.js", "test/websocket.test.js"]; require("/work/ws/node_modules/mocha/bin/mocha.js")' 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
 426 passing
+
+== node: a small option parser (minimist) tested with tape
+# timeout 600
+$ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/minimist.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/minimist"); process.argv = [process.argv[0], "tape", "test/**/*.js"]; require("/work/minimist/node_modules/tape/bin/tape")' 2>&1 | bb grep -E '^# (tests|pass|fail)'
+# tests 153
+# pass  153
+
+== node: a query string library (qs) with its installed dependencies, tested with tape
+# timeout 600
+$ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/qs.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/qs"); process.argv = [process.argv[0], "tape", "test/**/*.js"]; require("/work/qs/node_modules/tape/bin/tape")' 2>&1 | bb grep -E '^# (tests|pass|fail)'
+# tests 740
+# pass  740
