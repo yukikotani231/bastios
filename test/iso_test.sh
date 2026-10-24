@@ -1436,20 +1436,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("mouse_button 1")
             monitor(*["mouse_move 0 8"] * 70)
             monitor("mouse_button 0")
-            time.sleep(0.5)
-            monitor("sendkey ctrl-c")
-            n = 0
-            for _ in range(50):
-                mt = re.search(rb"bfiles: copied (\d+)", out[mark:])
-                if mt:
-                    n = int(mt.group(1))
-                    break
-                until(b"bfiles: copied", mark)
-            good = n >= 200                     # the visible rows hold at most 184 bytes
-            if not good:
-                print("copied", n)
+            # The header of the editor shows the number of the cursor's row: the visible rows are 23, so a row past 40
+            # is there only if the motion outside the window reached the editor and scrolled it. A slow guest is still
+            # working through the motion when the button is let go, so look until the number settles or 40 s pass.
+            good = False
+            for _ in range(40):
+                time.sleep(1)
                 w, h, px = screendump()
-                print("\n".join(l for l in screen_text_at(px, w, 72, 90, 60, 26) if l))
+                lines = screen_text_at(px, w, 72, 90, 60, 26)
+                mt = re.search(r"\^U (\d+)", lines[0])
+                good = mt is not None and int(mt.group(1)) >= 40
+                if good:
+                    break
+            if not good:
+                print("\n".join(l for l in lines if l))
         print(("ok  " if good else "FAIL"), f"({name}) a drag that leaves the editor window scrolls it")
         fails += not good
         monitor("sendkey ctrl-q")
@@ -1884,6 +1884,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             lines = screen_text_at(px, w, 72, 90, 80, 24)
             good = any(l.strip() == "u\u2500\u3042v" for l in lines)
             print(("ok  " if good else "FAIL"), f"({name}) the terminal draws UTF-8 characters from the font, wide ones in two cells")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # Deleting the right half of a wide character leaves no half of it behind: "x", a hiragana, "y", then the cursor
+            # on the hiragana's second cell and one character deleted gives "x" and "y" with a blank between.
+            typed("printf 'x\\343\\201\\202y\\r\\033[2\\103\\033[1\\120\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "x y" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) deleting half of a wide character in the terminal blanks the other half")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
