@@ -352,12 +352,58 @@ static int mice_wheel(int fd)
     return got[0] == 0xFA && got[1] == 3 ? 4 : 3;
 }
 
-/* The time of day (UTC, as the system keeps it) for the clock in the task bar. */
+/* Minutes east of UTC for the clock: the TZ variable, or the first line of /etc/TZ, in the POSIX form NAME[+-]H[:MM]
+ * ("JST-9" is nine hours east; "EST5" five west). No zone database: a name or no variable means UTC. */
+static int tz_minutes(void)
+{
+    char buf[64];
+    const char *tz = getenv("TZ");
+    if (!tz || !*tz) {
+        FILE *f = fopen("/etc/TZ", "r");
+        if (!f)
+            return 0;
+        char *got = fgets(buf, sizeof buf, f);
+        fclose(f);
+        if (!got)
+            return 0;
+        buf[strcspn(buf, "\r\n")] = 0;
+        tz = buf;
+    }
+    if (*tz == '<') {
+        while (*tz && *tz != '>')
+            tz++;
+        if (*tz)
+            tz++;
+    } else {
+        while ((*tz >= 'A' && *tz <= 'Z') || (*tz >= 'a' && *tz <= 'z'))
+            tz++;
+    }
+    int sign = 1;
+    if (*tz == '-' || *tz == '+')
+        sign = *tz++ == '-' ? -1 : 1;
+    int h = 0, m = 0;
+    while (*tz >= '0' && *tz <= '9' && h < 100)
+        h = h * 10 + *tz++ - '0';
+    if (*tz == ':') {
+        tz++;
+        while (*tz >= '0' && *tz <= '9' && m < 100)
+            m = m * 10 + *tz++ - '0';
+    }
+    int east = -sign * (h * 60 + m);
+    return east > 14 * 60 || east < -12 * 60 ? 0 : east;
+}
+
+/* The time of day (UTC, as the system keeps it, moved by tz_minutes) for the clock in the task bar. */
 static void clock_hm(int *h, int *m)
 {
-    time_t t = time(NULL);
-    *h = (int)(t / 3600 % 24);
-    *m = (int)(t / 60 % 60);
+    static int off = 1 << 20;
+    if (off == 1 << 20)
+        off = tz_minutes();
+    long min = ((long)(time(NULL) / 60) + off) % 1440;
+    if (min < 0)
+        min += 1440;
+    *h = (int)(min / 60);
+    *m = (int)(min % 60);
 }
 
 /* The task bar: a button that starts a terminal, then one for each window
@@ -1040,8 +1086,8 @@ static int key_bytes(unsigned code, char *out)
         { 103, 'A' }, { 108, 'B' }, { 106, 'C' }, { 105, 'D' }, { 102, 'H' }, { 107, 'F' } };
     for (unsigned i = 0; i < sizeof nav / sizeof nav[0]; i++)
         if (nav[i].code == code) {
-            int mod = 1 + k_shift + 2 * k_alt + 4 * k_ctrl;      /* xterm's modifier number; sent with Ctrl only, as Shift and Alt keep the plain key */
-            if (k_ctrl) {
+            int mod = 1 + k_shift + 2 * k_alt + 4 * k_ctrl;      /* xterm's modifier number; sent with Ctrl or Shift, as Alt alone keeps the plain key */
+            if (k_ctrl || k_shift) {
                 memcpy(out, "\033[1;", 4);
                 out[4] = '0' + mod;
                 out[5] = nav[i].final;
