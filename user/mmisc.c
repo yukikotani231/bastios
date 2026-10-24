@@ -295,10 +295,11 @@ static int file_times(void)
         return fail("file times: create");
     struct stat st;
     int fine = 0;
-    for (int i = 0; i < 4 && !fine; i++) {
+    for (int i = 0; i < 100 && !fine; i++) {
         if (write(fd, "x", 1) != 1 || fstat(fd, &st) != 0)
             return fail("file times: write");
         fine = st.st_mtim.tv_nsec != 0;
+        usleep(20000);                              /* times are ticks of 10 ms */
     }
     close(fd);
     if (!fine)
