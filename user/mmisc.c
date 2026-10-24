@@ -320,6 +320,47 @@ static int file_times(void)
     return 0;
 }
 
+/* A process id that still names a group (its leader gone, a member left) is
+ * not given to a new process: its setsid would fail with EPERM. Podman's
+ * crun hit that now and then. */
+static int setsid_reuse(void)
+{
+    int hold[2];
+    if (pipe(hold) != 0)
+        return fail("setsid reuse: pipe");
+    pid_t leader = fork();
+    if (leader == 0) {
+        close(hold[1]);
+        setsid();
+        pid_t member = fork();
+        if (member == 0) {
+            char c;
+            (void)!read(hold[0], &c, 1);            /* stays in the leader's group */
+            _exit(0);
+        }
+        _exit(0);                                   /* the leader leaves first */
+    }
+    close(hold[0]);
+    if (leader < 0 || waitpid(leader, NULL, 0) != leader)
+        return fail("setsid reuse: leader");
+    for (int i = 0; i < 700; i++) {
+        pid_t c = fork();
+        if (c < 0)
+            return fail("setsid reuse: fork");
+        if (c == 0)
+            _exit(setsid() > 0 ? 0 : 1);
+        if (c == leader)
+            return fail("setsid reuse: the group's id went to a new process");
+        int st;
+        if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+            return fail("setsid reuse: setsid of a new process");
+    }
+    close(hold[1]);
+    while (waitpid(-1, NULL, 0) > 0)
+        ;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && unlink(argv[1]) != 0)
@@ -385,7 +426,7 @@ int main(int argc, char **argv)
         return fail("ttyname and tcgetpgrp");
     if (groups() != 0)
         return fail("process groups");
-    if (file_times() != 0)
+    if (file_times() != 0 || setsid_reuse() != 0)
         return 1;
     if (signals() != 0)
         return 1;
