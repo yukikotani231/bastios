@@ -1585,6 +1585,12 @@ python: pytest: lxml's own tests for HTML, objectify, XSLT, schemas, SAX and cla
 python: pytest: Pillow's own tests for images, resizing, filters, drawing, PNG and JPEG (module by module)
 python: pytest: orjson's own tests for dumps, loads, datetimes, dataclasses, enums, UUIDs and errors (module by module)
 python: pytest: Pillow's own tests for pixel access, conversion, transforms, palettes and more image file formats (module by module)
+python: pytest: Jinja2's own tests: templates, filters, loaders, the compiler and the sandbox (file by file)
+python: pytest: Click's own tests: arguments, options, commands, the shell completion and the terminal helpers (file by file)
+python: pytest: Werkzeug's own tests: routing, the request and response objects, datastructures, the test client and the debugger (file by file)
+python: pytest: MarkupSafe's own tests (file by file)
+python: pytest: itsdangerous' own tests: signing, serializers and encodings (file by file)
+python: pytest: Blinker's own tests: signals and their receivers (file by file)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
