@@ -406,7 +406,7 @@ static void clock_hm(int *h, int *m)
     *m = (int)(min % 60);
 }
 
-static int ime_on;                        /* Alt-Space: romaji typed on the keyboard becomes hiragana */
+static int ime_on;                        /* Alt-Space: 0 off, 1 romaji typed becomes hiragana, 2 katakana */
 #define IME_W 44
 
 /* The task bar: a button that starts a terminal, then one for each window
@@ -433,7 +433,7 @@ static void draw_bar(void)
     if (ime_on) {
         int ix = (int)W - MENU_W - 12 - CLOCK_W - IME_W;
         fill(scene, ix, y0 + 3, ix + IME_W - 4, H - 3, rgb(150, 90, 30));
-        text(scene, ix + 4, y0 + 4, "Kana", rgb(255, 255, 255));
+        text(scene, ix + 4, y0 + 4, ime_on == 2 ? "Kata" : "Kana", rgb(255, 255, 255));
     }
     int hh, mm;
     clock_hm(&hh, &mm);
@@ -1294,7 +1294,7 @@ static int type_byte(struct win *top, char c)
     return 0;
 }
 
-/* Romaji to hiragana (no conversion to kanji). Typed letters collect in
+/* Romaji to hiragana or katakana (no conversion to kanji). Typed letters collect in
  * ime_buf until they spell a kana; no entry is the start of another. */
 static const struct { const char *r, *k; } ime_tab[] = {
     { ",", "、" },
@@ -1454,8 +1454,19 @@ static int ime_n;
 static int ime_put(struct win *top, const char *s)
 {
     int q = 0;
-    for (; *s; s++)
-        q |= type_byte(top, *s);
+    for (; *s; s++) {
+        unsigned char b2 = (unsigned char)s[0] == 0xe3 && s[1] && s[2] ? (unsigned char)s[1] : 0;
+        unsigned cp = b2 ? 0x3000 | (unsigned)(b2 & 3) << 6 | ((unsigned char)s[2] & 0x3f) : 0;
+        if (ime_on == 2 && cp >= 0x3041 && cp <= 0x3096) {     /* katakana is hiragana + 0x60 */
+            cp += 0x60;
+            q |= type_byte(top, (char)0xe3);
+            q |= type_byte(top, (char)(0x80 | (cp >> 6 & 0x3f)));
+            q |= type_byte(top, (char)(0x80 | (cp & 0x3f)));
+            s += 2;
+        } else {
+            q |= type_byte(top, *s);
+        }
+    }
     return q;
 }
 
@@ -1695,8 +1706,8 @@ int main(int argc, char **argv)
                         struct win *t = focus();
                         if (t)
                             close_win(t);
-                    } else if (code == 57 && down && k_alt) {      /* Alt-Space: romaji to hiragana on or off */
-                        ime_on = !ime_on;
+                    } else if (code == 57 && down && k_alt) {      /* Alt-Space: off, romaji to hiragana, romaji to katakana */
+                        ime_on = (ime_on + 1) % 3;                 /* off, hiragana, katakana */
                         ime_n = 0;
                         touch_bar();
                     } else if (code == 58 && down) {
