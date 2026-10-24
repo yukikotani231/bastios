@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bview` zooms: `+` and `-` double and halve the scale about the middle of the window, `h j k l` or the arrow keys move about a zoomed image, `0` goes back.
 - The `bfiles` editor marks the text of the last Ctrl-F wherever it shows in the window.
 - A drag in a `bfiles` editor that rests above or below the window goes on scrolling: `bwm` repeats the motion every 60 ms while the button is held.
 - `bwm` types Japanese: Alt-Space turns on a romaji to hiragana mode, again a romaji to katakana mode, and a third time turns it off (a "Kana" or "Kata" mark shows in the task bar). There is no conversion to kanji.
