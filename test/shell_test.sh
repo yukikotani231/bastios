@@ -1097,10 +1097,13 @@ else:
     else:
         print("FAIL udpsend port 0"); fails += 1
     # Every page the finished processes and removed files used must be
-    # back in the pool.
+    # back in the pool. What the boot's commands leave behind is a few
+    # hundred pages (144 alone, 583 and 608 on loaded CI runners: tables
+    # and buffers that grow with the work done meanwhile); a leak shows
+    # as free[1] != free[2], or as growth past 1024 pages (4 MiB).
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
     free = [int(m.split()[0]) for m in mem]
-    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 512:
+    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 1024:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
