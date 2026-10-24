@@ -185,7 +185,7 @@ failing:
 
 == pytest: packaging's own tests: versions, specifiers, markers, requirements, tags and metadata (file by file)
 # timeout 1500
-$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" hypothesis pretend tomli_w 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/packaging-26.3.tar.gz | tar xz && cd packaging-26.3 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|")"; done'
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" hypothesis pretend tomli_w 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/packaging-26.3.tar.gz | tar xz && cd packaging-26.3 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|") $(tail -n 3 /root/$(echo $f | tr / _).log | cut -c1-120 | tr "\n" "|")"; done'
 failing:
 
 == pytest: toolz' own tests: the iterator, function and dictionary tools (file by file)
