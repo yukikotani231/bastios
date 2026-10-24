@@ -1318,11 +1318,19 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             time.sleep(0.5)
             monitor("sendkey ctrl-c")
             good = until(b"bfiles: copied 5", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) dragging over text in the editor selects it")
+        fails += not good
+        if good:
+            # The pointer is over "beta" now: a double click selects the word.
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+            time.sleep(0.5)
+            monitor("sendkey ctrl-c")
+            good = until(b"bfiles: copied 4", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a double click in the editor selects the word")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
-        print(("ok  " if good else "FAIL"), f"({name}) dragging over text in the editor selects it")
-        fails += not good
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
