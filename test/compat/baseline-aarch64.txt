@@ -965,6 +965,7 @@ t_proc: an eventfd shows its count
 t_proc: an inotify instance lists its watches
 t_proc: a pidfd shows the process
 t_proc: fdinfo lists the open descriptors
+t_proc: fdinfo of a closed descriptor does not open
 t_proc: /proc/self lists fdinfo
 t_proc: maps lists an anonymous mapping
 t_proc: maps lists a shared mapping with s

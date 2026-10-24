@@ -717,6 +717,15 @@ fn proc_node(k: &Kernel, n: u64) -> u64
   requires kok(k) && n <= FNAME_MAX
 {
   let p = proc_file(k.procs, k.fs.xfer, n);
+  if p >= PROC_DEV + PSYS + SY_FI && p < PROC_DEV + PSYS + SY_FI + NPROC * LXNFD {
+    // /proc/P/fdinfo/FD is there only while FD is open
+    let w = p - PROC_DEV - PSYS - SY_FI;
+    let d = fd_look(k, fd_home(k, w / LXNFD), w % LXNFD);
+    if d.kind == K_BAD {
+      return 0;
+    }
+    return p;
+  }
   if p != 0 {
     return p;
   }
