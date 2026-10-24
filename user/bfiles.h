@@ -104,10 +104,99 @@ static void bf_glyph(int r, int c, unsigned char ch, uint32_t f, uint32_t b)
     }
 }
 
+/* One cell of a glyph from the big font (HALF is 1 for the right cell of a wide one). */
+static void bf_glyph16(int r, int c, const unsigned char *g, int wide, int half, uint32_t f, uint32_t b)
+{
+    for (int y = 0; y < BF_CH; y++) {
+        unsigned bits = wide ? g[y * 2 + half] : g[y];
+        for (int x = 0; x < BF_CW; x++, bits >>= 1)
+            bf_pix[(r * BF_CH + y) * BF_WIDTH + c * BF_CW + x] = bits & 1 ? f : b;
+    }
+}
+
+/* Reads the UTF-8 character at S (N bytes are left): its code point in *CP and its length, or 0 if it is cut short
+ * or not UTF-8 (a lead byte beyond ASCII with bad continuation bytes). */
+static size_t bf_utf8(const char *s, size_t n, unsigned *cp)
+{
+    unsigned char ch = (unsigned char)s[0];
+    size_t len = ch < 0xE0 ? 2 : ch < 0xF0 ? 3 : 4;
+    if (ch < 0xC2 || ch >= 0xF8 || n < len)
+        return 0;
+    unsigned v = ch & (len == 2 ? 0x1F : len == 3 ? 0x0F : 0x07);
+    for (size_t k = 1; k < len; k++) {
+        if (((unsigned char)s[k] & 0xC0) != 0x80)
+            return 0;
+        v = v << 6 | ((unsigned char)s[k] & 0x3F);
+    }
+    *cp = v;
+    return len;
+}
+
+/* A row of text: ASCII, and UTF-8 drawn with the big font (a wide character takes two cells; one the font lacks is a '?'). */
 static void bf_put_row(int r, const char *s, size_t n, uint32_t f, uint32_t b)
 {
-    for (int c = 0; c < BF_COLS; c++)
-        bf_glyph(r, c, (size_t)c < n ? (unsigned char)s[c] : ' ', f, b);
+    size_t i = 0;
+    int c = 0;
+    while (c < BF_COLS) {
+        if (i >= n) {
+            bf_glyph(r, c++, ' ', f, b);
+            continue;
+        }
+        unsigned char ch = (unsigned char)s[i];
+        unsigned cp = 0;
+        if (ch < 0xC2) {
+            bf_glyph(r, c++, ch, f, b);
+            i++;
+            continue;
+        }
+        size_t len = bf_utf8(s + i, n - i, &cp);
+        if (!len) {
+            bf_glyph(r, c++, '?', f, b);
+            i++;
+            continue;
+        }
+        i += len;
+        int w = cp_width(cp), wide = 0;
+        if (w == 0)
+            continue;
+        const unsigned char *g = cp < 0x10000 ? glyph16(cp, &wide) : 0;
+        if (!g || wide != (w == 2)) {
+            bf_glyph(r, c++, '?', f, b);
+        } else if (wide && c + 1 >= BF_COLS) {
+            bf_glyph(r, c++, ' ', f, b);
+        } else if (wide) {
+            bf_glyph16(r, c, g, 1, 0, f, b);
+            bf_glyph16(r, c + 1, g, 1, 1, f, b);
+            c += 2;
+        } else {
+            bf_glyph16(r, c++, g, 0, 0, f, b);
+        }
+    }
+}
+
+/* NAME cut or padded with blanks to W cells, in OUT (UTF-8 kept whole). */
+static void bf_fit(const char *name, int w, char *out, size_t outsz)
+{
+    size_t i = 0, o = 0, n = strlen(name);
+    int cells = 0;
+    while (i < n && cells < w) {
+        unsigned cp = 0;
+        size_t len = (unsigned char)name[i] < 0xC2 ? 1 : bf_utf8(name + i, n - i, &cp);
+        int cw = len > 1 ? cp_width(cp) : 1;
+        if (!len)
+            len = 1;
+        if (cells + cw > w || o + len + 1 >= outsz)
+            break;
+        memcpy(out + o, name + i, len);
+        o += len;
+        i += len;
+        cells += cw;
+    }
+    while (cells < w && o + 1 < outsz) {
+        out[o++] = ' ';
+        cells++;
+    }
+    out[o] = 0;
 }
 
 static void bf_load_dir(void)
@@ -174,9 +263,12 @@ static void bf_load_file(const char *path)
         bf_vline[bf_nvline++] = bf_vtext + i;
         size_t k = 0;
         while (i < n && bf_vtext[i] != '\n') {
-            if (++k > BF_COLS) {                    /* a long line goes on in the next row */
-                bf_vline[bf_nvline++] = bf_vtext + i;
-                k = 1;
+            if (++k > BF_COLS) {                    /* a long line goes on in the next row (a UTF-8 character is not cut) */
+                size_t j = i;
+                while (j > 0 && ((unsigned char)bf_vtext[j] & 0xC0) == 0x80 && i - j < 3)
+                    j--;
+                bf_vline[bf_nvline++] = bf_vtext + j;
+                k = i - j + 1;
                 if (bf_nvline >= BF_MAXLINES)
                     break;
             }
@@ -217,7 +309,7 @@ static void bf_paint(void)
             if (i < bf_nvline) {
                 const char *s = bf_vline[i];
                 while (n < BF_COLS && *s && *s != '\n') {
-                    t[n++] = (unsigned char)*s >= 32 && (unsigned char)*s < 127 ? *s : (*s == '\t' ? ' ' : '.');
+                    t[n++] = (unsigned char)*s >= 128 || ((unsigned char)*s >= 32 && (unsigned char)*s < 127) ? *s : (*s == '\t' ? ' ' : '.');
                     s++;
                 }
             }
@@ -239,11 +331,13 @@ static void bf_paint(void)
             bf_put_row(r, "", 0, fg, bg);
             continue;
         }
-        char t[BF_COLS + 32];
-        if (bf_ents[i].dir)
+        char t[NAME_MAX * 3 + 40], nm[NAME_MAX * 3];
+        if (bf_ents[i].dir) {
             snprintf(t, sizeof t, "%s/", bf_ents[i].name);
-        else
-            snprintf(t, sizeof t, "%-44.44s %10lld", bf_ents[i].name, (long long)bf_ents[i].size);
+        } else {
+            bf_fit(bf_ents[i].name, 44, nm, sizeof nm);
+            snprintf(t, sizeof t, "%s %10lld", nm, (long long)bf_ents[i].size);
+        }
         bf_put_row(r, t, strlen(t), bf_ents[i].dir ? 0x0080C0FF : fg, bf_sel == i ? 0x00203050 : bg);
     }
 }
