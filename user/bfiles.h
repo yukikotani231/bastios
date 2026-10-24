@@ -1388,12 +1388,15 @@ static void be_key(int c)
 static void be_click(int y, int x, int drag)
 {
     /* A drag that began in the window goes on when the pointer leaves it (Y or X negative, or beyond the window):
-     * above or below the text it moves a row beyond the visible ones, which scrolls. */
-    int row = y < 0 ? 0 : y / BF_CH;
+     * the farther it is above or below the text, the more rows beyond the visible ones the cursor goes (up to 8),
+     * which scrolls. */
+    int row = y < 0 ? -((-y + BF_CH - 1) / BF_CH) : y / BF_CH;
     if (row < 1 && !drag)
         return;
-    if (row > BF_ROWS)
-        row = BF_ROWS;
+    if (row > BF_ROWS + 8)
+        row = BF_ROWS + 8;
+    if (row < -8)
+        row = -8;
     int r = bf_etop + row - 1;
     be_ulast = 0;
     if (r < 0) r = 0;

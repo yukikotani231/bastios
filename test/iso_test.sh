@@ -1445,9 +1445,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     n = int(mt.group(1))
                     break
                 until(b"bfiles: copied", mark)
-            good = n >= 300
+            good = n >= 200                     # the visible rows hold at most 184 bytes
             if not good:
                 print("copied", n)
+                w, h, px = screendump()
+                print("\n".join(l for l in screen_text_at(px, w, 72, 90, 60, 26) if l))
         print(("ok  " if good else "FAIL"), f"({name}) a drag that leaves the editor window scrolls it")
         fails += not good
         monitor("sendkey ctrl-q")
