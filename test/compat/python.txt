@@ -93,6 +93,11 @@ $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q pyyaml 
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q greenlet psutil objgraph 2>&1 | tail -n 3; cd /root; T=/root/v/lib/python3.14/site-packages/greenlet/tests; timeout -s KILL 700 python -m pytest -q -p no:cacheprovider $T/test_extension_interface.py $T/test_generator.py $T/test_gc.py $T/test_throw.py $T/test_tracing.py $T/test_weakref.py $T/test_stack_saved.py $T/test_cpp.py $T/test_contextvars.py $T/test_greenlet_trash.py $T/test_version.py $T/test_generator_nested.py -k "not untracked_memory" > /root/g.log 2>&1; tail -n 1 /root/g.log | grep -qE "[0-9]+ passed" && ! tail -n 1 /root/g.log | grep -qE "[0-9]+ (failed|error)" && echo ok; grep -E "^FAILED|^ERROR" /root/g.log | cut -c1-140 | head -n 6'
 ok
 
+== pytest: lxml's own tests for the tree, the ElementTree interface, XPath and input and output (without the abstract base classes pytest collects by mistake)
+# timeout 1200
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q lxml pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/lxml-6.1.3.tar.gz | tar xz && SP=/root/v/lib/python3.14/site-packages && mkdir -p $SP/lxml/tests && cp -r lxml-6.1.3/src/lxml/tests/. $SP/lxml/tests/ && cd $SP && timeout -s KILL 1000 python -m pytest -q -p no:cacheprovider lxml/tests/test_etree.py lxml/tests/test_elementtree.py lxml/tests/test_xpathevaluator.py lxml/tests/test_io.py -k "not (_ETreeTestCaseBase or _IOTestCaseBase or _XMLPullParserTest or _ElementSlicingTest or _XIncludeTestCase or _C14NTest or test_suite)" > /root/l.log 2>&1; tail -n 1 /root/l.log | grep -qE "[0-9]+ passed" && ! tail -n 1 /root/l.log | grep -qE "[0-9]+ (failed|error)" && echo ok; grep -E "^FAILED|^ERROR" /root/l.log | cut -c1-140 | head -n 6'
+ok
+
 == python: the standard library on top of the system calls (pyprogs/stdlib.py)
 $ bb chroot /disk/a /bin/sh -c 'cd /root && wget -q -O stdlib.py HOSTURL/pyprogs/stdlib.py && wget -q -O cert.pem HOSTURL/cert.pem && python3 stdlib.py HOSTSURL /root/cert.pem 2>&1 | grep -v "^ok "'
 failed: 0

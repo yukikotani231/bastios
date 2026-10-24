@@ -1579,6 +1579,7 @@ python: pytest: numpy's own tests for array arithmetic, indexing, stacking and r
 python: pytest: the whole test suite of a fifth real project (attrs's)
 python: pytest: the whole test suite of a sixth real project (PyYAML's)
 python: pytest: greenlet's own tests (the quick modules; the memory-measuring leak tests take minutes and are left out)
+python: pytest: lxml's own tests for the tree, the ElementTree interface, XPath and input and output (without the abstract base classes pytest collects by mistake)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
