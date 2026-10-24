@@ -1711,6 +1711,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
+        # + doubles the scale about the middle: a red middle pixel of 3 x 3 is 120 x 120 cells, then 240 x 240.
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        pix = "".join("\\000\\000\\377" if i != 4 else "\\377\\000\\000" for i in range(9))
+        q.stdin.write(f"printf 'P6 3 3 255\\n{pix}' > /tmp/nf/z.ppm; bwm -n -c bview /tmp/nf/z.ppm\r".encode()); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        r0 = r1 = 0
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            r0 = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            monitor("sendkey equal")
+            time.sleep(2)
+            w, h, px = screendump()
+            r1 = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = 10000 < r0 < 20000 and r1 > 3 * r0
+        print(("ok  " if good else "FAIL"), f"({name}) + zooms the image in bview ({r0} then {r1} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
