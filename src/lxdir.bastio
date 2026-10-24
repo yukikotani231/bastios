@@ -674,6 +674,17 @@ fn lx_getcwd(k: &mut Kernel, pid: u64, va: u64, size: u64) -> u64
   ensures kok(k)
 {
   let n = smaller(wget(k.cwd, pid * CWD_STRIDE), FNAME_MAX);
+  // A working directory that has been removed has no name any more.
+  let mut c = 0;
+  while c < n
+    invariant c <= n && n <= FNAME_MAX && kok(k) && pid < NPROC
+  {
+    bset(&mut k.fs.xfer, c, cast[u8](rbyte(k.cwd, k.cwdx, pid, c)));
+    c = c + 1;
+  }
+  if n > 0 && dir_at(&mut k, n) == NO_FILE {
+    return ENOENT;
+  }
   let rl = root_len(k, pid);
   let mut s = 0;                            // where the part shown starts
   if rl > 0 && cwd_in_root(k, pid) {
