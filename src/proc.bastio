@@ -1545,8 +1545,37 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   return pid;
 }
 
+/// Whether a process still in the table has `id` as its group or session:
+/// a process id that is no longer a process may still name a group whose
+/// leader left, and a new process must not take it (setsid would find the
+/// old group and fail with EPERM, as podman's crun saw).
+fn id_names_group(procs: &Buf, id: u64) -> bool
+  requires ptab_ok(procs)
+{
+  let cap = len(procs) / STRIDE;
+  let mut p = 1;
+  while p < cap && p < NPROC
+    invariant 1 <= p && p <= NPROC
+  {
+    if state(procs, p) != FREE && (pgid_of(procs, p) == id || sid_of(procs, p) == id) {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// Whether process id pid cannot go to a new process: it is a process, or
+/// names the group or session of one.
+fn pid_taken(procs: &Buf, pid: u64) -> bool
+  requires ptab_ok(procs) && pid < NPROC
+{
+  return state(procs, pid) != FREE || id_names_group(procs, pid);
+}
+
 /// A FREE process id the table has a row for, searching from `from` on and
-/// then from 1, or 0 if there is none.
+/// then from 1, or 0 if there is none. An id that still names a process
+/// group or session is not free.
 fn free_pid(procs: &Buf, from: u64) -> u64
   requires ptab_ok(procs)
   ensures result < NPROC
@@ -1556,14 +1585,14 @@ fn free_pid(procs: &Buf, from: u64) -> u64
   if pid < 1 || pid >= cap {
     pid = 1;
   }
-  while pid < cap && state(procs, pid) != FREE
+  while pid < cap && pid_taken(procs, pid)
     invariant 1 <= pid && cap <= NPROC
   {
     pid = pid + 1;
   }
   if pid >= cap {
     pid = 1;
-    while pid < from && pid < cap && state(procs, pid) != FREE
+    while pid < from && pid < cap && pid_taken(procs, pid)
       invariant 1 <= pid && cap <= NPROC
     {
       pid = pid + 1;
