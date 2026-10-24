@@ -1581,6 +1581,8 @@ python: pytest: the whole test suite of a sixth real project (PyYAML's)
 python: pytest: greenlet's own tests (the quick modules; the memory-measuring leak tests take minutes and are left out)
 python: pytest: lxml's own tests for the tree, the ElementTree interface, XPath and input and output (without the abstract base classes pytest collects by mistake)
 python: pytest: cffi's own tests for the C declarations, dlopen, the out-of-line modules and the generated sources (module by module, without the C++ and the slowest ones)
+python: pytest: lxml's own tests for HTML, objectify, XSLT, schemas, SAX and class lookup (module by module)
+python: pytest: Pillow's own tests for images, resizing, filters, drawing, PNG and JPEG (module by module)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
