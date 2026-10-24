@@ -295,16 +295,17 @@ static int file_times(void)
     if (fd < 0)
         return fail("file times: create");
     struct stat st;
-    int fine = 0;
-    for (int i = 0; i < 100 && !fine; i++) {
+    long long last = -1;
+    for (int i = 0; i < 4; i++) {                   /* writes 0.2 s apart get four times */
         if (write(fd, "x", 1) != 1 || fstat(fd, &st) != 0)
             return fail("file times: write");
-        fine = st.st_mtim.tv_nsec != 0;
-        usleep(20000);                              /* times are ticks of 250 ms */
+        long long t = st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+        if (t == last)
+            return fail("file times: two writes 0.2 s apart share a time");
+        last = t;
+        usleep(200000);
     }
     close(fd);
-    if (!fine)
-        return fail("file times: nanoseconds of a write");
     struct timespec ts[2] = { { 1234567890, 123456789 }, { 1700000000, 987654321 } };
     if (utimensat(AT_FDCWD, name, ts, 0) != 0 || stat(name, &st) != 0)
         return fail("file times: utimensat");
