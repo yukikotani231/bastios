@@ -289,7 +289,8 @@ static int late_code(void)
  * reports them, and a fresh file does not read as whole seconds. */
 static int file_times(void)
 {
-    const char *name = "/mmisc_times";
+    char name[40];
+    snprintf(name, sizeof name, "/mmisc_times.%d", (int)getpid());   /* two mmisc may run at once */
     int fd = open(name, O_CREAT | O_WRONLY | O_TRUNC, 0644);
     if (fd < 0)
         return fail("file times: create");
