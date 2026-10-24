@@ -1858,3 +1858,5 @@ python: pytest: toolz' own tests: the iterator, function and dictionary tools (f
 python: pytest: h11's own tests: the HTTP/1.1 state machine, events, headers and the buffer (file by file)
 python: pytest: Markdown's own tests: the syntax test files, the extensions and the API (file by file)
 python: pytest: idna's own tests: the codec, UTS 46 mapping, errors and the command line (file by file)
+node: node: a small option parser (minimist) tested with tape
+node: node: a query string library (qs) with its installed dependencies, tested with tape

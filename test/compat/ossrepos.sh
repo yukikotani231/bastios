@@ -128,5 +128,7 @@ nm mri https://github.com/lukeed/mri v1.2.0 tape@4.13.3
 nm debug https://github.com/debug-js/debug 4.3.7 "mocha@10.8.2 sinon@14.0.2"
 nm express https://github.com/expressjs/express 4.21.1 "mocha@10.2.0 supertest@6.3.0 after@0.8.2 connect-redis@3.4.2 cookie-parser@1.4.6 cookie-session@2.0.0 ejs@3.1.9 express-session@1.17.2 hbs@4.2.0 marked@0.7.0 method-override@3.0.0 morgan@1.10.0 pbkdf2-password@1.2.1 vhost@3.0.2"
 nm ws https://github.com/websockets/ws 8.18.0 "mocha@10.2.0"
+nm minimist https://github.com/minimistjs/minimist v1.2.8 tape@5.9.0
+nm qs https://github.com/ljharb/qs v6.13.1 "tape@5.9.0 es-value-fixtures@1.5.0 for-each@0.3.3 has-bigints@1.0.2 has-override-mistake@1.0.1 has-property-descriptors@1.0.2 has-proto@1.0.3 has-symbols@1.0.3 iconv-lite@0.5.1 mock-property@1.1.0 object-inspect@1.13.3 qs-iconv@1.0.4 safer-buffer@2.1.2 mkdirp@0.5.5 glob@10.3.7"
 
 tb nanoid https://github.com/ai/nanoid 5.0.7
