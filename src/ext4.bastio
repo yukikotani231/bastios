@@ -160,14 +160,14 @@ struct Ino {
   uid: u64,
   gid: u64,
   size: u64,
-  mtime: u64,
+  mtime: u64,     // nanoseconds since the epoch
   links: u64,
   flags: u64,
   blocks: u64,    // i_blocks: 512-byte units, low 32 bits
 }
 
 spec fn ino_ok(i: Ino) -> bool {
-  i.ok ==> (i.mode < 65536 && i.uid < 4294967296 && i.gid < 4294967296 && i.size < EX_BLK_MAX && i.mtime < 4294967296
+  i.ok ==> (i.mode < 65536 && i.uid < 4294967296 && i.gid < 4294967296 && i.size < EX_BLK_MAX && i.mtime < 4294967296 * 1000000000 + 1000000000
     && i.links < 65536 && i.flags < 4294967296 && i.blocks < 4294967296)
 }
 
@@ -208,8 +208,19 @@ fn ex_inode(v: &mut Vfs, e: Ext, ino: u64, ib: &mut Bytes, ibo: u64) -> Ino
   if itable == 0 || itable >= e.blocks {
     return ex_no_ino();
   }
-  if !ex_rd(&mut v, e, itable * e.bs + idx * e.isz, 128) {
+  let mut inb = 128;
+  if e.isz >= 144 {
+    inb = 144;                         // with the extra fields: the nanoseconds
+  }
+  if !ex_rd(&mut v, e, itable * e.bs + idx * e.isz, inb) {
     return ex_no_ino();
+  }
+  let mut nsec = 0;
+  if inb == 144 && rd16(v.xfer, 128) >= 12 {
+    nsec = rd32(v.xfer, 136) / 4;      // i_mtime_extra: nanoseconds above two epoch bits
+    if nsec > 999999999 {
+      nsec = 0;
+    }
   }
   let size_hi = rd32(v.xfer, 108);
   if size_hi >= 65536 {
@@ -218,7 +229,7 @@ fn ex_inode(v: &mut Vfs, e: Ext, ino: u64, ib: &mut Bytes, ibo: u64) -> Ino
   bcopy(&mut ib, ibo, v.xfer, 40, 60);
   return Ino { ok: true, mode: rd16(v.xfer, 0), uid: rd16(v.xfer, 2) + rd16(v.xfer, 120) * 65536,
     gid: rd16(v.xfer, 24) + rd16(v.xfer, 122) * 65536, size: rd32(v.xfer, 4) + size_hi * EX_U32,
-    mtime: rd32(v.xfer, 16), links: rd16(v.xfer, 26), flags: rd32(v.xfer, 32), blocks: rd32(v.xfer, 28) };
+    mtime: rd32(v.xfer, 16) * 1000000000 + nsec, links: rd16(v.xfer, 26), flags: rd32(v.xfer, 32), blocks: rd32(v.xfer, 28) };
 }
 
 // ---------------------------------------------------------------- block maps
