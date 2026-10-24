@@ -132,3 +132,8 @@ failing:
 # timeout 1500
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q pillow pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pillow-12.3.0.tar.gz | tar xz && cd pillow-12.3.0 && bad=; for m in image image_resize image_filter imagedraw file_png file_jpeg; do timeout -s KILL 200 python -m pytest -q -p no:cacheprovider Tests/test_$m.py > /root/p_$m.log 2>&1 || bad="$bad $m"; done; echo "failing:$bad"; for m in $bad; do echo "== $m"; grep -m4 -E "^E  " /root/p_$m.log; tail -n 1 /root/p_$m.log; done'
 failing:
+
+== pytest: orjson's own tests for dumps, loads, datetimes, dataclasses, enums, UUIDs and errors (module by module)
+# timeout 1500
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q orjson pytest numpy 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/orjson-3.13.0.tar.gz | tar xz && cd orjson-3.13.0 && bad=; for m in api append_newline buffer canonical circular dataclass datetime default dict enum error escape fake fixture fragment indent issue221 issue331 jsonchecker non_str_keys parsing recursion reentrant roundtrip sort_keys subclass transform type typeddict uuid; do timeout -s KILL 200 python -m pytest -q -p no:cacheprovider test/test_$m.py > /root/o_$m.log 2>&1 || bad="$bad $m"; done; echo "failing:$bad"; for m in $bad; do echo "== $m"; grep -m4 -E "^E  " /root/o_$m.log; tail -n 1 /root/o_$m.log; done'
+failing:
