@@ -132,26 +132,45 @@ static size_t bf_utf8(const char *s, size_t n, unsigned *cp)
     return len;
 }
 
+/* The editor marks a range of bytes of the next row drawn (the selection, in HL_BG) and the byte the cursor is on (CURI,
+ * drawn with the colours swapped); bf_put_row clears both. */
+static size_t bf_hl_lo, bf_hl_hi;
+static uint32_t bf_hl_bg;
+static long bf_curi = -1;
+
 /* A row of text: ASCII, and UTF-8 drawn with the big font (a wide character takes two cells; one the font lacks is a '?'). */
 static void bf_put_row(int r, const char *s, size_t n, uint32_t f, uint32_t b)
 {
     size_t i = 0;
-    int c = 0;
+    int c = 0, cursor_drawn = 0;
     while (c < BF_COLS) {
+        uint32_t cf = f, cb = b;
         if (i >= n) {
-            bf_glyph(r, c++, ' ', f, b);
+            if (bf_curi == (long)n && !cursor_drawn) {
+                cf = b;
+                cb = f;
+                cursor_drawn = 1;
+            }
+            bf_glyph(r, c++, ' ', cf, cb);
             continue;
+        }
+        if (i >= bf_hl_lo && i < bf_hl_hi)
+            cb = bf_hl_bg;
+        if ((long)i == bf_curi) {
+            cf = cb;
+            cb = f;
+            cursor_drawn = 1;
         }
         unsigned char ch = (unsigned char)s[i];
         unsigned cp = 0;
         if (ch < 0xC2) {
-            bf_glyph(r, c++, ch, f, b);
+            bf_glyph(r, c++, ch, cf, cb);
             i++;
             continue;
         }
         size_t len = bf_utf8(s + i, n - i, &cp);
         if (!len) {
-            bf_glyph(r, c++, '?', f, b);
+            bf_glyph(r, c++, '?', cf, cb);
             i++;
             continue;
         }
@@ -161,17 +180,21 @@ static void bf_put_row(int r, const char *s, size_t n, uint32_t f, uint32_t b)
             continue;
         const unsigned char *g = cp < 0x10000 ? glyph16(cp, &wide) : 0;
         if (!g || wide != (w == 2)) {
-            bf_glyph(r, c++, '?', f, b);
+            bf_glyph(r, c++, '?', cf, cb);
         } else if (wide && c + 1 >= BF_COLS) {
-            bf_glyph(r, c++, ' ', f, b);
+            bf_glyph(r, c++, ' ', cf, cb);
         } else if (wide) {
-            bf_glyph16(r, c, g, 1, 0, f, b);
-            bf_glyph16(r, c + 1, g, 1, 1, f, b);
+            bf_glyph16(r, c, g, 1, 0, cf, cb);
+            bf_glyph16(r, c + 1, g, 1, 1, cf, cb);
             c += 2;
         } else {
-            bf_glyph16(r, c++, g, 0, 0, f, b);
+            bf_glyph16(r, c++, g, 0, 0, cf, cb);
         }
     }
+    if (bf_curi == (long)n && !cursor_drawn)            /* at the end of a full row */
+        bf_glyph(r, BF_COLS - 1, ' ', b, f);
+    bf_hl_lo = bf_hl_hi = 0;
+    bf_curi = -1;
 }
 
 /* NAME cut or padded with blanks to W cells, in OUT (UTF-8 kept whole). */
@@ -342,23 +365,57 @@ static void bf_paint(void)
     }
 }
 
-/* The editor. Display rows are cut at COLS characters, like the viewer's. */
+/* The editor keeps bytes but shows characters. The character at OFF takes be_clen bytes and be_cells cells (0 for a
+ * combining one, 2 for a wide one, 1 for the rest, a byte that is not UTF-8 included), as bf_put_row draws it; be_prev
+ * is the start of the character before OFF. */
+static size_t be_clen(size_t off)
+{
+    unsigned cp;
+    size_t n = bf_utf8(bf_vtext + off, bf_vlen - off, &cp);
+    return n ? n : 1;
+}
+
+static int be_cells(size_t off)
+{
+    unsigned cp;
+    if ((unsigned char)bf_vtext[off] < 0xC2 || !bf_utf8(bf_vtext + off, bf_vlen - off, &cp))
+        return 1;
+    int w = cp_width(cp), wd = 0;
+    if (w == 0)
+        return 0;
+    if (cp >= 0x10000 || !glyph16(cp, &wd) || wd != (w == 2))
+        return 1;
+    return wd ? 2 : 1;
+}
+
+static size_t be_prev(size_t off)
+{
+    size_t s = off - 1;
+    while (s > 0 && off - s < 4 && ((unsigned char)bf_vtext[s] & 0xC0) == 0x80)
+        s--;
+    return s + be_clen(s) == off ? s : off - 1;
+}
+
+/* The editor. Display rows are cut at COLS cells, like the viewer's. */
 static void be_layout(void)
 {
     size_t col = 0;
     bf_nerow = 0;
     bf_erow[bf_nerow++] = 0;
-    for (size_t i = 0; i < bf_vlen && bf_nerow < BF_MAXLINES; i++) {
+    for (size_t i = 0; i < bf_vlen && bf_nerow < BF_MAXLINES;) {
         if (bf_vtext[i] == '\n') {
             bf_erow[bf_nerow++] = i + 1;
             col = 0;
-        } else {
-            if (col == BF_COLS) {
-                bf_erow[bf_nerow++] = i;
-                col = 0;
-            }
-            col++;
+            i++;
+            continue;
         }
+        int w = be_cells(i);
+        if (col + w > BF_COLS) {
+            bf_erow[bf_nerow++] = i;
+            col = 0;
+        }
+        col += w;
+        i += be_clen(i);
     }
 }
 
@@ -377,6 +434,29 @@ static size_t be_row_len(int r)                 /* characters on a row, without 
     if (n > 0 && bf_vtext[end - 1] == '\n')
         n--;
     return n;
+}
+
+static size_t be_row_len(int r);
+
+static int be_col_of(int r, size_t off)         /* the cell column of a byte offset on a row */
+{
+    int c = 0;
+    for (size_t k = bf_erow[r]; k < off; k += be_clen(k))
+        c += be_cells(k);
+    return c;
+}
+
+static size_t be_off_at(int r, size_t col)      /* the byte offset on a row for a cell column */
+{
+    size_t k = bf_erow[r], end = k + be_row_len(r), c = 0;
+    while (k < end) {
+        int w = be_cells(k);
+        if (c + w > col)
+            break;
+        c += w;
+        k += be_clen(k);
+    }
+    return k;
 }
 
 static int be_isword(char ch)
@@ -399,12 +479,11 @@ static void be_word_move(int dir)
 static void be_move_rows(int by)
 {
     int r = be_row_of(bf_cur);
-    size_t col = bf_cur - bf_erow[r];
+    int col = be_col_of(r, bf_cur);
     r += by;
     if (r < 0) r = 0;
     if (r >= bf_nerow) r = bf_nerow - 1;
-    size_t n = be_row_len(r);
-    bf_cur = bf_erow[r] + (col < n ? col : n);
+    bf_cur = be_off_at(r, col);
 }
 
 /* Undo (Ctrl-Z): before an edit the text and cursor are kept, but a run of the same kind of edit (typing,
@@ -1195,15 +1274,15 @@ static void be_key(int c)
         }
         if (c == 'A') be_move_rows(-1);
         else if (c == 'B') be_move_rows(1);
-        else if (c == 'C') { if (ctrl) be_word_move(1); else if (bf_cur < bf_vlen) bf_cur++; }
-        else if (c == 'D') { if (ctrl) be_word_move(-1); else if (bf_cur > 0) bf_cur--; }
+        else if (c == 'C') { if (ctrl) be_word_move(1); else if (bf_cur < bf_vlen) bf_cur += be_clen(bf_cur); }
+        else if (c == 'D') { if (ctrl) be_word_move(-1); else if (bf_cur > 0) bf_cur = be_prev(bf_cur); }
         else if (c == 'H' && ctrl) bf_cur = 0;
         else if (c == 'F' && ctrl) bf_cur = bf_vlen;
         else if (c == 'H' || (c == '~' && (num == 1 || num == 7))) bf_cur = bf_erow[be_row_of(bf_cur)];
         else if (c == 'F' || (c == '~' && (num == 4 || num == 8))) {
             int r = be_row_of(bf_cur);
             bf_cur = bf_erow[r] + be_row_len(r);
-        } else if (c == '~' && num == 3) be_delete(bf_cur);
+        } else if (c == '~' && num == 3) { for (size_t n = be_clen(bf_cur); n > 0; n--) be_delete(bf_cur); }
         else if (c == '~' && num == 5) be_move_rows(-page);
         else if (c == '~' && num == 6) be_move_rows(page);
         return;
@@ -1271,7 +1350,10 @@ static void be_key(int c)
         if (be_drop_sel_undoable()) {
         } else if (bf_cur > 0) {
             be_undo_push(2);
-            be_delete(--bf_cur);
+            size_t at = be_prev(bf_cur);
+            for (size_t n = bf_cur - at; n > 0; n--)
+                be_delete(at);
+            bf_cur = at;
         }
     } else if (c == '\n' || c == '\r') {
         be_drop_sel_undoable();
@@ -1310,8 +1392,8 @@ static void be_click(int row, int x, int drag)
         return;
     be_ulast = 0;
     if (r >= bf_nerow) r = bf_nerow - 1;
-    size_t col = x / BF_CW, n = be_row_len(r);
-    bf_cur = bf_erow[r] + (col < n ? col : n);
+    size_t n = be_row_len(r);
+    bf_cur = be_off_at(r, x / BF_CW);
     if (drag)
         return;
     be_anchor = (long)bf_cur;
@@ -1361,30 +1443,28 @@ static void be_paint(void)
     bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_eprompt ? 0x00A03030 : hd);
     for (int r = 1; r < BF_ROWS; r++) {
         int i = bf_etop + r - 1;
-        char t[BF_COLS + 1];
+        char t[BF_COLS * 4 + 1];
         size_t n = 0;
         if (i < bf_nerow) {
             n = be_row_len(i);
             for (size_t k = 0; k < n; k++) {
                 unsigned char ch = bf_vtext[bf_erow[i] + k];
-                t[k] = ch >= 32 && ch < 127 ? ch : '.';
+                t[k] = ch < 32 || ch == 127 ? '.' : ch;
             }
+            size_t lo, hi;
+            if (be_sel(&lo, &hi)) {
+                size_t rs = bf_erow[i];
+                bf_hl_lo = lo > rs ? lo - rs : 0;
+                bf_hl_hi = hi > rs ? hi - rs : 0;
+                bf_hl_bg = 0x00406090;
+                if (bf_hl_lo > n) bf_hl_lo = n;
+                if (bf_hl_hi > n) bf_hl_hi = n;
+            }
+            if (i == cr)
+                bf_curi = (long)(bf_cur - bf_erow[cr]);
         }
         bf_put_row(r, t, n, fg, bg);
-        size_t lo, hi;
-        if (i < bf_nerow && be_sel(&lo, &hi))
-            for (size_t k = 0; k < n; k++) {
-                size_t off = bf_erow[i] + k;
-                if (off >= lo && off < hi)
-                    bf_glyph(r, (int)k, (unsigned char)t[k], fg, 0x00406090);
-            }
     }
-    int row = cr - bf_etop + 1, col = (int)(bf_cur - bf_erow[cr]);
-    if (col >= BF_COLS) col = BF_COLS - 1;
-    unsigned char under = ' ';
-    if (bf_cur < bf_vlen && bf_vtext[bf_cur] != '\n')
-        under = (unsigned char)bf_vtext[bf_cur];
-    bf_glyph(row, col, under, bg, fg);                /* the cursor: the cell with its colours swapped */
 }
 
 static void bf_scroll(int by)

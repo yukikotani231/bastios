@@ -1241,6 +1241,40 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The editor shows UTF-8 and moves, deletes by character: Right then Backspace takes off one hiragana (3 bytes).
+        mark = len(out)
+        q.stdin.write(b"printf '\\343\\201\\202\\343\\201\\204\\343\\201\\206\\n' > /tmp/ju.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ju.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ju.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ju.txt", mark)
+        if good:
+            monitor("sendkey ctrl-e")                   # the cursor is off the text, which is drawn plain
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            shown = any(l.startswith("あいう") for l in lines)
+            if not shown:
+                print("\n".join(l for l in lines if l))
+            print(("ok  " if shown else "FAIL"), f"({name}) the editor draws Japanese text")
+            fails += not shown
+            monitor("sendkey ctrl-a", "sendkey right", "sendkey backspace", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ju.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"echo size $(wc -c < /tmp/ju.txt) end\r"); q.stdin.flush()
+        good = good and until(b"size 7 end", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the editor moves and deletes by character")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Ctrl-End and Ctrl-Home in the editor go to the end and the start of the text.
         mark = len(out)
         q.stdin.write(b"printf 'ab\\ncd\\n' > /tmp/ce.txt\r"); q.stdin.flush()
