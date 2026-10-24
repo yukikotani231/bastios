@@ -137,6 +137,9 @@ static size_t bf_utf8(const char *s, size_t n, unsigned *cp)
 static size_t bf_hl_lo, bf_hl_hi;
 static uint32_t bf_hl_bg;
 static long bf_curi = -1;
+static const char *bf_fmark;                     /* text to show wherever it is in a row drawn (the last Ctrl-F), or NULL */
+static size_t bf_fmarkn, bf_fmark_end;
+#define BF_MARK_BG 0x00806020
 
 /* A row of text: ASCII, and UTF-8 drawn with the big font (a wide character takes two cells; one the font lacks is a '?'). */
 static void bf_put_row(int r, const char *s, size_t n, uint32_t f, uint32_t b)
@@ -154,6 +157,10 @@ static void bf_put_row(int r, const char *s, size_t n, uint32_t f, uint32_t b)
             bf_glyph(r, c++, ' ', cf, cb);
             continue;
         }
+        if (bf_fmark && i + bf_fmarkn <= n && memcmp(s + i, bf_fmark, bf_fmarkn) == 0)
+            bf_fmark_end = i + bf_fmarkn;
+        if (bf_fmark && i < bf_fmark_end)
+            cb = BF_MARK_BG;
         if (i >= bf_hl_lo && i < bf_hl_hi)
             cb = bf_hl_bg;
         if ((long)i == bf_curi) {
@@ -195,6 +202,7 @@ static void bf_put_row(int r, const char *s, size_t n, uint32_t f, uint32_t b)
         bf_glyph(r, BF_COLS - 1, ' ', b, f);
     bf_hl_lo = bf_hl_hi = 0;
     bf_curi = -1;
+    bf_fmark_end = 0;
 }
 
 /* NAME cut or padded with blanks to W cells, in OUT (UTF-8 kept whole). */
@@ -1472,7 +1480,10 @@ static void be_paint(void)
             if (i == cr)
                 bf_curi = (long)(bf_cur - bf_erow[cr]);
         }
+        bf_fmark = bf_efind[0] && n ? bf_efind : NULL;
+        bf_fmarkn = strlen(bf_efind);
         bf_put_row(r, t, n, fg, bg);
+        bf_fmark = NULL;
     }
 }
 

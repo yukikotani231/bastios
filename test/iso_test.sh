@@ -993,6 +993,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         print(("ok  " if good else "FAIL"), f"({name}) Ctrl-F finds text")
         fails += not good
         if good:
+            # The text found is drawn on a different background wherever it shows in the window.
+            time.sleep(1.5)
+            w, h, px = screendump()
+            hl = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (0x80, 0x60, 0x20))
+            good = hl >= 100
+            print(("ok  " if good else "FAIL"), f"({name}) the editor marks the text Ctrl-F looked for ({hl} pixels)")
+            fails += not good
+        if good:
             monitor("sendkey ctrl-s")
             good = until(b"bfiles: saved /tmp/g.txt", mark)
         monitor("sendkey ctrl-q")
