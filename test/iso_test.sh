@@ -1328,6 +1328,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bfiles: copied 4", mark)
             print(("ok  " if good else "FAIL"), f"({name}) a double click in the editor selects the word")
             fails += not good
+        if good:
+            # And three presses in a row select the line with its newline.
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+            time.sleep(0.5)
+            monitor("sendkey ctrl-c")
+            good = until(b"bfiles: copied 11", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a triple click in the editor selects the line")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
