@@ -130,5 +130,8 @@ nm express https://github.com/expressjs/express 4.21.1 "mocha@10.2.0 supertest@6
 nm ws https://github.com/websockets/ws 8.18.0 "mocha@10.2.0"
 nm minimist https://github.com/minimistjs/minimist v1.2.8 tape@5.9.0
 nm qs https://github.com/ljharb/qs v6.13.1 "tape@5.9.0 es-value-fixtures@1.5.0 for-each@0.3.3 has-bigints@1.0.2 has-override-mistake@1.0.1 has-property-descriptors@1.0.2 has-proto@1.0.3 has-symbols@1.0.3 iconv-lite@0.5.1 mock-property@1.1.0 object-inspect@1.13.3 qs-iconv@1.0.4 safer-buffer@2.1.2 mkdirp@0.5.5 glob@10.3.7"
+nm cookie https://github.com/jshttp/cookie v0.7.2 "mocha@10.2.0 safe-buffer@5.2.1"
+nm send https://github.com/pillarjs/send 0.19.0 "mocha@9.2.2 supertest@6.2.2 after@0.8.2"
+nm body-parser https://github.com/expressjs/body-parser 1.20.3 "mocha@10.2.0 supertest@6.3.3 methods@1.1.2 safe-buffer@5.2.1"
 
 tb nanoid https://github.com/ai/nanoid 5.0.7
