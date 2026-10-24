@@ -1901,12 +1901,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             # Alt-Space turns romaji into hiragana: "konnnichiha" is the greeting and "kitte" has a small tsu in it.
             monitor(*[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-spc")
             typed("konnnichihakitte")
-            monitor("sendkey alt-spc")
             time.sleep(1.5)
             w, h, px = screendump()
             lines = screen_text_at(px, w, 72, 90, 80, 24)
             good = any(l.strip() == "\u3053\u3093\u306b\u3061\u306f\u304d\u3063\u3066" for l in lines)
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Space types romaji as hiragana")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # A second Alt-Space gives katakana, a third turns the mode off.
+            monitor("sendkey alt-spc", "sendkey alt-spc", *[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-spc", "sendkey alt-spc")
+            typed("kitte")
+            monitor("sendkey alt-spc")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "\u30ad\u30c3\u30c6" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) a second Alt-Space types katakana")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
