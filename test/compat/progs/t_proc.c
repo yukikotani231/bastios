@@ -271,6 +271,7 @@ int main(int argc, char **argv) {
                && ({ int wd = 0; unsigned ino, sdev, mask; char *q = strstr(b, "inotify wd:"); q && sscanf(q, "inotify wd:%d ino:%x sdev:%x mask:%x", &wd, &ino, &sdev, &mask) == 4 && wd == w && mask == (IN_MODIFY | IN_ONESHOT); }));
         EXPECT("a pidfd shows the process", ({ int pf = syscall(434, getpid(), 0), r = 0; char want[32]; if (pf >= 0) { snprintf(path, sizeof path, "/proc/self/fdinfo/%d", pf); snprintf(want, sizeof want, "Pid:\t%d\n", (int)getpid()); r = slurp(path, b, sizeof b) > 0 && strstr(b, want) != NULL; close(pf); } r; }));
         EXPECT("fdinfo lists the open descriptors", ({ DIR *d = opendir("/proc/self/fdinfo"); struct dirent *de; int seen = 0; char nm[16]; snprintf(nm, sizeof nm, "%d", f); while (d && (de = readdir(d))) if (!strcmp(de->d_name, nm)) seen = 1; if (d) closedir(d); seen; }));
+        EXPECT("fdinfo of a closed descriptor does not open", ({ int g = open("/proc/self/stat", O_RDONLY), r = 0; if (g >= 0) { close(g); snprintf(path, sizeof path, "/proc/self/fdinfo/%d", g); r = open(path, O_RDONLY) < 0 && errno == ENOENT; } r; }));
         EXPECT("/proc/self lists fdinfo", ({ DIR *d = opendir("/proc/self"); struct dirent *de; int seen = 0; while (d && (de = readdir(d))) if (!strcmp(de->d_name, "fdinfo")) seen = 1; if (d) closedir(d); seen; }));
         if (f >= 0) close(f);
         if (e >= 0) close(e);
