@@ -818,6 +818,16 @@ static struct win *by_id(int cli, uint32_t id)
     return NULL;
 }
 
+/* The window that has the mouse grabbed (a press in its contents with button 1, still held), as a client and an id. */
+static int grab_cli = -1;
+static uint32_t grab_id;
+
+/* Whether button 1 was already down (OLD) and the window that grabbed the mouse is still there. */
+static int grab_active(int old)
+{
+    return grab_cli >= 0 && (old & 1) && by_id(grab_cli, grab_id) != NULL;
+}
+
 /* One whole message from client i, `n` bytes at c->rx. */
 static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
 {
@@ -1640,12 +1650,21 @@ int main(int argc, char **argv)
                     else if (size_edges & 4)
                         sizing->want_ch = sizing->keep_b - (my - soy) - TITLE_H - BORDER;
                     request_size(sizing);
-                } else if (under && under->cli >= 0 && my >= under->y + TITLE_H && (dx || dy || wheel || (m[0] & 7) != (buttons & 7))) {
-                    /* the wheel (negative is up) goes in bits 8 to 15 of the buttons, as a signed byte */
-                    struct bwm_mouse ev = { (uint32_t)under->id, (uint32_t)(mx - under->x - BORDER), (uint32_t)(my - under->y - TITLE_H), (m[0] & 7u) | ((uint32_t)(wheel & 0xFF) << 8) };
-                    if (under == focus() || wheel)
-                        to_client(under->cli, BWM_MOUSE, &ev, sizeof ev);
+                } else if (grab_active(buttons) || (under && under->cli >= 0 && my >= under->y + TITLE_H)) {
+                    /* While button 1 is held after a press in a window's contents, that window gets the motion
+                     * wherever the pointer is, as signed coordinates (the editor scrolls when a drag leaves it). */
+                    struct win *tgt = grab_active(buttons) ? by_id(grab_cli, grab_id) : under;
+                    if (tgt && (dx || dy || wheel || (m[0] & 7) != (buttons & 7))) {
+                        /* the wheel (negative is up) goes in bits 8 to 15 of the buttons, as a signed byte */
+                        struct bwm_mouse ev = { (uint32_t)tgt->id, (uint32_t)(mx - tgt->x - BORDER), (uint32_t)(my - tgt->y - TITLE_H), (m[0] & 7u) | ((uint32_t)(wheel & 0xFF) << 8) };
+                        if (tgt == focus() || wheel)
+                            to_client(tgt->cli, BWM_MOUSE, &ev, sizeof ev);
+                    }
                 }
+                if (!(m[0] & 1))
+                    grab_cli = -1;
+                else if (!(buttons & 1) && under && under->cli >= 0 && my >= under->y + TITLE_H && !drag && !sizing)
+                    grab_cli = under->cli, grab_id = (uint32_t)under->id;
                 buttons = m[0];
             }
         }

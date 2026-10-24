@@ -37,7 +37,7 @@ struct bwm_key { uint32_t id, ch; };                            /* ch is a byte,
 #define BWM_KEY_PASTE 0x100
 #define BWM_KEY_SCROLL_UP 0x101
 #define BWM_KEY_SCROLL_DOWN 0x102
-struct bwm_mouse { uint32_t id, x, y, buttons; };              /* x, y inside the contents */
+struct bwm_mouse { uint32_t id, x, y, buttons; };              /* x, y inside the contents; signed, and outside it while a drag that began in it goes on */
 struct bwm_close { uint32_t id; };
 struct bwm_resizable { uint32_t id; };
 struct bwm_resize { uint32_t id, w, h; };                       /* the size of the contents asked for */
