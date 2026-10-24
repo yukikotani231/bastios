@@ -462,7 +462,7 @@ fn time_field(k: &mut Kernel, off: u64, kind: u64) -> u64
       return NO_FILE;
     }
     if ns == UTIME_NOW {
-      return k.fs.now;
+      return sat_add(k.epoch, k.ns);          // asked for now: exact, not the file layer's tick
     }
     frac = ns;
   } else if kind == TIMES_TIMEVAL {
@@ -490,8 +490,8 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
   if f == NO_RESULT {
     return k.perr;
   }
-  let mut a = k.fs.now;
-  let mut t = k.fs.now;
+  let mut a = sat_add(k.epoch, k.ns);
+  let mut t = a;
   let mut now = va == 0;
   if va != 0 {
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 32) != 32 {
