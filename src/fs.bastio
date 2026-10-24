@@ -71,11 +71,13 @@ const VFS_MISS: u64 = 18446744073709551614;     // the disk has not caught up: s
 // File handles: in-memory nodes, then the disk's entries, then those of
 // the loop mount. Directory handles besides the nodes (vfs_dir_lookup,
 // vfs_readdir) come after them.
-/// File times are the wall clock rounded down to this many nanoseconds, the
-/// way Linux stamps files with its coarse clock: files made one after the
-/// other within a tick share a time, so make does not take a checkout's
-/// generated files (written a moment after their sources) for stale.
-const FS_TICK_NS: u64 = 10000000;
+/// File times are the wall clock rounded down to this many nanoseconds (a
+/// quarter of a second), the way Linux stamps files with its coarse clock:
+/// files made one after the other within a tick share a time, so make does
+/// not take a checkout's generated files (written a moment after their
+/// sources, slower here than on Linux) for stale. Finer than the whole
+/// seconds before, which a reloader's two edits in one second shared.
+const FS_TICK_NS: u64 = 250000000;
 
 const LO0: u64 = NFILES + DSLOTS;     // the loop mount's entry e is LO0 + e
 const HFILES: u64 = NFILES + 2 * DSLOTS;   // every file handle is below this

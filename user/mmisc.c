@@ -299,7 +299,7 @@ static int file_times(void)
         if (write(fd, "x", 1) != 1 || fstat(fd, &st) != 0)
             return fail("file times: write");
         fine = st.st_mtim.tv_nsec != 0;
-        usleep(20000);                              /* times are ticks of 10 ms */
+        usleep(20000);                              /* times are ticks of 250 ms */
     }
     close(fd);
     if (!fine)
