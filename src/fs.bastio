@@ -97,7 +97,7 @@ struct Vfs {
   name: Bytes,          // a directory's name, while vfs_readdir lists it
   mnt_hi: u64,          // one past the highest mount slot ever used (vfs_mount): the slots from here on are free
   mnt: Buf,             // tmpfs mounts on in-memory directories (src/lxmount.bastio)
-  now: u64,             // the time, in seconds, for modification times
+  now: u64,             // the wall-clock time, in nanoseconds, for modification times
   lo: DiskFs,           // the file system on a loop device's image (no blocks: none mounted)
   lname: Bytes,         // the loop mount's directory name, while a call routes a path
   lo_at: u64,           // the in-memory directory the loop mount is on, + 1 (0: none)

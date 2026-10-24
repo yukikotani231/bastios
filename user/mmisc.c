@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <sys/uio.h>
+#include <sys/time.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -284,6 +285,38 @@ static int late_code(void)
     return 0;
 }
 
+/* File times keep their nanoseconds: utimensat and utimes set them, stat
+ * reports them, and a fresh file does not read as whole seconds. */
+static int file_times(void)
+{
+    const char *name = "/mmisc_times";
+    int fd = open(name, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0)
+        return fail("file times: create");
+    struct stat st;
+    int fine = 0;
+    for (int i = 0; i < 4 && !fine; i++) {
+        if (write(fd, "x", 1) != 1 || fstat(fd, &st) != 0)
+            return fail("file times: write");
+        fine = st.st_mtim.tv_nsec != 0;
+    }
+    close(fd);
+    if (!fine)
+        return fail("file times: nanoseconds of a write");
+    struct timespec ts[2] = { { 1234567890, 123456789 }, { 1700000000, 987654321 } };
+    if (utimensat(AT_FDCWD, name, ts, 0) != 0 || stat(name, &st) != 0)
+        return fail("file times: utimensat");
+    if (st.st_atim.tv_sec != 1234567890 || st.st_atim.tv_nsec != 123456789
+        || st.st_mtim.tv_sec != 1700000000 || st.st_mtim.tv_nsec != 987654321)
+        return fail("file times: nanoseconds read back");
+    struct timeval tv[2] = { { 1500000000, 250000 }, { 1600000000, 500001 } };
+    if (utimes(name, tv) != 0 || stat(name, &st) != 0
+        || st.st_atim.tv_nsec != 250000000 || st.st_mtim.tv_sec != 1600000000 || st.st_mtim.tv_nsec != 500001000)
+        return fail("file times: utimes");
+    unlink(name);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && unlink(argv[1]) != 0)
@@ -349,6 +382,8 @@ int main(int argc, char **argv)
         return fail("ttyname and tcgetpgrp");
     if (groups() != 0)
         return fail("process groups");
+    if (file_times() != 0)
+        return 1;
     if (signals() != 0)
         return 1;
     int held = pipes();

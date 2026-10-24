@@ -454,7 +454,8 @@ fn time_field(k: &mut Kernel, off: u64, kind: u64) -> u64
   requires kok(k) && off <= 16
   ensures kok(k)
 {
-  let mut t = get_u64(k.fs.xfer, off);
+  let sec = get_u64(k.fs.xfer, off);
+  let mut frac = 0;
   if kind == TIMES_TIMESPEC {
     let ns = get_u64(k.fs.xfer, off + 8);
     if ns == UTIME_OMIT {
@@ -463,11 +464,21 @@ fn time_field(k: &mut Kernel, off: u64, kind: u64) -> u64
     if ns == UTIME_NOW {
       return k.fs.now;
     }
+    frac = ns;
+  } else if kind == TIMES_TIMEVAL {
+    frac = get_u64(k.fs.xfer, off + 8);      // microseconds
+    if frac > 999999 {
+      frac = 999999;
+    }
+    frac = frac * 1000;
   }
-  if t == NO_FILE {
-    t = NO_FILE - 1;                        // NO_FILE would mean "leave it"
+  if sec >= 18000000000 {
+    return NO_FILE - 1;                     // NO_FILE would mean "leave it"
   }
-  return t;
+  if frac > 999999999 {
+    frac = 999999999;
+  }
+  return sec * 1000000000 + frac;
 }
 
 /// Sets f's access and modification times from the times at user address

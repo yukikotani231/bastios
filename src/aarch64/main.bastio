@@ -188,7 +188,7 @@ fn set_clock(s: &mut Sys, cpu: &Cpu)
   } else {
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
   }
-  s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / 1000000000;
+  s.k.fs.now = sat_add(s.k.epoch, s.k.ns);   // wall-clock nanoseconds, as stat reports them
 }
 
 /// What the processor does next. Starting at `from` (round robin), takes

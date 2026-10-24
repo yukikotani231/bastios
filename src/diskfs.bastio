@@ -3359,11 +3359,23 @@ fn disk_set_owner(d: &mut DiskFs, i: u64, uid: u64, gid: u64) -> bool
   return ent_lazy(&mut d, i);
 }
 
-/// Entry i's modification time, in seconds.
+/// Times below this are seconds, as disks written before nanosecond times
+/// hold them (10^10 s is the year 2286; 10^10 ns is ten seconds after 1970).
+const MTIME_SECS_MAX: u64 = 10000000000;
+
+/// The modification time word of a directory entry, in nanoseconds.
+fn mtime_ns(raw: u64) -> u64 {
+  if raw < MTIME_SECS_MAX {
+    return raw * 1000000000;
+  }
+  return raw;
+}
+
+/// Entry i's modification time, in nanoseconds since the epoch.
 fn disk_mtime(d: &DiskFs, i: u64) -> u64
   requires disk_ok(d) && i < DSLOTS
 {
-  return dent_get(d, i, E_MTIME);
+  return mtime_ns(dent_get(d, i, E_MTIME));
 }
 
 /// Sets entry i's mode (when `mode` is below 65536) and modification time
@@ -3376,7 +3388,7 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
     return false;
   }
   let m0 = dent_get(d, i, E_MODE);
-  let t0 = dent_get(d, i, E_MTIME);
+  let t0 = mtime_ns(dent_get(d, i, E_MTIME));
   let mut m1 = m0;
   let mut t1 = t0;
   if mode < 65536 {
@@ -3384,6 +3396,9 @@ fn disk_set_meta(d: &mut DiskFs, i: u64, mode: u64, mtime: u64) -> bool
   }
   if mtime != NO_DISK_FILE {
     t1 = mtime;
+    if t1 != 0 && t1 < MTIME_SECS_MAX {
+      t1 = MTIME_SECS_MAX;            // a time in the first ten seconds of 1970 must not read back as seconds
+    }
   }
   if m1 == m0 && t1 == t0 {
     return true;                      // as they are already: nothing to write
