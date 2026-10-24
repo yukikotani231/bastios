@@ -1419,6 +1419,43 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # A drag that leaves the window goes on: below the text it scrolls the editor and stretches the selection.
+        mark = len(out)
+        q.stdin.write(b"i=10; while [ $i -le 69 ]; do echo line-$i; i=$((i+1)); done > /tmp/ds.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ds.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1.5)
+            monitor("mouse_move -216 -135", "mouse_move -216 -135")     # from the screen centre to the first text row
+            monitor("mouse_button 1")
+            monitor(*["mouse_move 0 8"] * 70)
+            monitor("mouse_button 0")
+            time.sleep(0.5)
+            monitor("sendkey ctrl-c")
+            n = 0
+            for _ in range(50):
+                mt = re.search(rb"bfiles: copied (\d+)", out[mark:])
+                if mt:
+                    n = int(mt.group(1))
+                    break
+                until(b"bfiles: copied", mark)
+            good = n >= 300
+            if not good:
+                print("copied", n)
+        print(("ok  " if good else "FAIL"), f"({name}) a drag that leaves the editor window scrolls it")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # The clock in the task bar follows TZ (POSIX form): XXX-5 is five hours east of UTC.
         import datetime
         utc_h = datetime.datetime.utcnow().hour    # the guest clock comes from the host RTC

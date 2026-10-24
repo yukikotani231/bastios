@@ -867,7 +867,7 @@ int main(int argc, char **argv)
             } else if (t == BWM_MOUSE) {
                 struct bwm_mouse *e = (struct bwm_mouse *)buf;
                 if (mouse_mode) {                /* the program asked for the pointer: no selection, no scrolling back */
-                    int mr = e->y / CH, mc = e->x / CW;
+                    int mr = (int)e->y < 0 ? 0 : e->y / CH, mc = (int)e->x < 0 ? 0 : e->x / CW;
                     mouse_report(m, e->buttons, mr >= rows ? rows - 1 : mr, mc >= cols ? cols - 1 : mc);
                     continue;
                 }
@@ -889,7 +889,7 @@ int main(int argc, char **argv)
                     back = 0;                    /* a click works on the live screen */
                     memset(dirty, 1, sizeof dirty);
                 }
-                int er = e->y / CH, ec = e->x / CW;
+                int er = (int)e->y < 0 ? 0 : e->y / CH, ec = (int)e->x < 0 ? 0 : e->x / CW;
                 if (er >= rows) er = rows - 1;
                 if (ec >= cols) ec = cols - 1;
                 if ((e->buttons & 1) && !selecting) {
