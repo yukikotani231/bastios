@@ -406,6 +406,9 @@ static void clock_hm(int *h, int *m)
     *m = (int)(min % 60);
 }
 
+static int ime_on;                        /* Alt-Space: 0 off, 1 romaji typed becomes hiragana, 2 katakana */
+#define IME_W 44
+
 /* The task bar: a button that starts a terminal, then one for each window
  * in the order they were opened, the top one lit. */
 static void draw_bar(void)
@@ -419,13 +422,18 @@ static void draw_bar(void)
         if (!pool[i].used)
             continue;
         int x = BTN_X0 + n * (BTN_W + BTN_GAP);
-        if (x + BTN_W > (int)W - MENU_W - 12 - CLOCK_W)
+        if (x + BTN_W > (int)W - MENU_W - 12 - CLOCK_W - (ime_on ? IME_W : 0))
             break;
         fill(scene, x, y0 + 3, x + BTN_W, H - 3, &pool[i] == focus() ? rgb(40, 90, 200) : pool[i].hidden ? rgb(45, 45, 60) : rgb(70, 70, 85));
         char t[16];
         snprintf(t, sizeof t, "%.14s", pool[i].title);
         text(scene, x + 6, y0 + 4, t, rgb(255, 255, 255));
         n++;
+    }
+    if (ime_on) {
+        int ix = (int)W - MENU_W - 12 - CLOCK_W - IME_W;
+        fill(scene, ix, y0 + 3, ix + IME_W - 4, H - 3, rgb(150, 90, 30));
+        text(scene, ix + 4, y0 + 4, ime_on == 2 ? "Kata" : "Kana", rgb(255, 255, 255));
     }
     int hh, mm;
     clock_hm(&hh, &mm);
@@ -1286,6 +1294,227 @@ static int type_byte(struct win *top, char c)
     return 0;
 }
 
+/* Romaji to hiragana or katakana (no conversion to kanji). Typed letters collect in
+ * ime_buf until they spell a kana; no entry is the start of another. */
+static const struct { const char *r, *k; } ime_tab[] = {
+    { ",", "、" },
+    { "-", "ー" },
+    { ".", "。" },
+    { "a", "あ" },
+    { "ba", "ば" },
+    { "be", "べ" },
+    { "bi", "び" },
+    { "bo", "ぼ" },
+    { "bu", "ぶ" },
+    { "bya", "びゃ" },
+    { "byo", "びょ" },
+    { "byu", "びゅ" },
+    { "cha", "ちゃ" },
+    { "che", "ちぇ" },
+    { "chi", "ち" },
+    { "cho", "ちょ" },
+    { "chu", "ちゅ" },
+    { "da", "だ" },
+    { "de", "で" },
+    { "di", "ぢ" },
+    { "do", "ど" },
+    { "du", "づ" },
+    { "e", "え" },
+    { "fa", "ふぁ" },
+    { "fe", "ふぇ" },
+    { "fi", "ふぃ" },
+    { "fo", "ふぉ" },
+    { "fu", "ふ" },
+    { "ga", "が" },
+    { "ge", "げ" },
+    { "gi", "ぎ" },
+    { "go", "ご" },
+    { "gu", "ぐ" },
+    { "gya", "ぎゃ" },
+    { "gyo", "ぎょ" },
+    { "gyu", "ぎゅ" },
+    { "ha", "は" },
+    { "he", "へ" },
+    { "hi", "ひ" },
+    { "ho", "ほ" },
+    { "hu", "ふ" },
+    { "hya", "ひゃ" },
+    { "hyo", "ひょ" },
+    { "hyu", "ひゅ" },
+    { "i", "い" },
+    { "ja", "じゃ" },
+    { "je", "じぇ" },
+    { "ji", "じ" },
+    { "jo", "じょ" },
+    { "ju", "じゅ" },
+    { "ka", "か" },
+    { "ke", "け" },
+    { "ki", "き" },
+    { "ko", "こ" },
+    { "ku", "く" },
+    { "kya", "きゃ" },
+    { "kyo", "きょ" },
+    { "kyu", "きゅ" },
+    { "la", "ぁ" },
+    { "le", "ぇ" },
+    { "li", "ぃ" },
+    { "lo", "ぉ" },
+    { "ltu", "っ" },
+    { "lu", "ぅ" },
+    { "lya", "ゃ" },
+    { "lyo", "ょ" },
+    { "lyu", "ゅ" },
+    { "ma", "ま" },
+    { "me", "め" },
+    { "mi", "み" },
+    { "mo", "も" },
+    { "mu", "む" },
+    { "mya", "みゃ" },
+    { "myo", "みょ" },
+    { "myu", "みゅ" },
+    { "n'", "ん" },
+    { "na", "な" },
+    { "ne", "ね" },
+    { "ni", "に" },
+    { "nn", "ん" },
+    { "no", "の" },
+    { "nu", "ぬ" },
+    { "nya", "にゃ" },
+    { "nyo", "にょ" },
+    { "nyu", "にゅ" },
+    { "o", "お" },
+    { "pa", "ぱ" },
+    { "pe", "ぺ" },
+    { "pi", "ぴ" },
+    { "po", "ぽ" },
+    { "pu", "ぷ" },
+    { "pya", "ぴゃ" },
+    { "pyo", "ぴょ" },
+    { "pyu", "ぴゅ" },
+    { "ra", "ら" },
+    { "re", "れ" },
+    { "ri", "り" },
+    { "ro", "ろ" },
+    { "ru", "る" },
+    { "rya", "りゃ" },
+    { "ryo", "りょ" },
+    { "ryu", "りゅ" },
+    { "sa", "さ" },
+    { "se", "せ" },
+    { "sha", "しゃ" },
+    { "she", "しぇ" },
+    { "shi", "し" },
+    { "sho", "しょ" },
+    { "shu", "しゅ" },
+    { "si", "し" },
+    { "so", "そ" },
+    { "su", "す" },
+    { "sya", "しゃ" },
+    { "syo", "しょ" },
+    { "syu", "しゅ" },
+    { "ta", "た" },
+    { "te", "て" },
+    { "ti", "ち" },
+    { "to", "と" },
+    { "tsu", "つ" },
+    { "tu", "つ" },
+    { "tya", "ちゃ" },
+    { "tyo", "ちょ" },
+    { "tyu", "ちゅ" },
+    { "u", "う" },
+    { "wa", "わ" },
+    { "wo", "を" },
+    { "xa", "ぁ" },
+    { "xe", "ぇ" },
+    { "xi", "ぃ" },
+    { "xo", "ぉ" },
+    { "xtsu", "っ" },
+    { "xtu", "っ" },
+    { "xu", "ぅ" },
+    { "xwa", "ゎ" },
+    { "xya", "ゃ" },
+    { "xyo", "ょ" },
+    { "xyu", "ゅ" },
+    { "ya", "や" },
+    { "yo", "よ" },
+    { "yu", "ゆ" },
+    { "za", "ざ" },
+    { "ze", "ぜ" },
+    { "zi", "じ" },
+    { "zo", "ぞ" },
+    { "zu", "ず" },
+    { "zya", "じゃ" },
+    { "zyo", "じょ" },
+    { "zyu", "じゅ" },
+};
+
+static char ime_buf[4];
+static int ime_n;
+
+static int ime_put(struct win *top, const char *s)
+{
+    int q = 0;
+    for (; *s; s++) {
+        unsigned char b2 = (unsigned char)s[0] == 0xe3 && s[1] && s[2] ? (unsigned char)s[1] : 0;
+        unsigned cp = b2 ? 0x3000 | (unsigned)(b2 & 3) << 6 | ((unsigned char)s[2] & 0x3f) : 0;
+        if (ime_on == 2 && cp >= 0x3041 && cp <= 0x3096) {     /* katakana is hiragana + 0x60 */
+            cp += 0x60;
+            q |= type_byte(top, (char)0xe3);
+            q |= type_byte(top, (char)(0x80 | (cp >> 6 & 0x3f)));
+            q |= type_byte(top, (char)(0x80 | (cp & 0x3f)));
+            s += 2;
+        } else {
+            q |= type_byte(top, *s);
+        }
+    }
+    return q;
+}
+
+/* 1 when ime_buf is a whole entry (emitted and cleared) or the start of one. */
+static int ime_step(struct win *top, int *quit)
+{
+    for (size_t i = 0; i < sizeof ime_tab / sizeof ime_tab[0]; i++)
+        if (strlen(ime_tab[i].r) == (size_t)ime_n && !memcmp(ime_tab[i].r, ime_buf, ime_n)) {
+            *quit |= ime_put(top, ime_tab[i].k);
+            ime_n = 0;
+            return 1;
+        }
+    for (size_t i = 0; i < sizeof ime_tab / sizeof ime_tab[0]; i++)
+        if (strlen(ime_tab[i].r) > (size_t)ime_n && !memcmp(ime_tab[i].r, ime_buf, ime_n))
+            return 1;
+    return 0;
+}
+
+/* Like type_byte, but through the romaji table while the mode is on; returns 1 for Ctrl-Q. */
+static int ime_type(struct win *top, char c)
+{
+    int quit = 0;
+    if (!ime_on)
+        return type_byte(top, c);
+    if ((c == 127 || c == 8) && ime_n > 0) {          /* Backspace takes back a pending letter */
+        ime_n--;
+        return 0;
+    }
+    int ours = (c >= 'a' && c <= 'z') || c == '-' || c == ',' || c == '.' || c == '\'';
+    if (!ours) {
+        if (ime_n == 1 && ime_buf[0] == 'n')
+            quit |= ime_put(top, "\xe3\x82\x93");   /* ん */
+        ime_n = 0;
+        return quit | type_byte(top, c);
+    }
+    ime_buf[ime_n++] = c;
+    while (ime_n > 0 && !ime_step(top, &quit)) {
+        if (ime_n >= 2 && ime_buf[0] == ime_buf[1] && ime_buf[0] != 'n' && !strchr("aiueo", ime_buf[0]))
+            quit |= ime_put(top, "\xe3\x81\xa3");   /* っ */
+        else if (ime_buf[0] == 'n')
+            quit |= ime_put(top, "\xe3\x82\x93");   /* ん */
+        else
+            quit |= type_byte(top, ime_buf[0]);
+        memmove(ime_buf, ime_buf + 1, --ime_n);
+    }
+    return quit;
+}
+
 int main(int argc, char **argv)
 {
     int builtin = 1;
@@ -1477,13 +1706,17 @@ int main(int argc, char **argv)
                         struct win *t = focus();
                         if (t)
                             close_win(t);
+                    } else if (code == 57 && down && k_alt) {      /* Alt-Space: off, romaji to hiragana, romaji to katakana */
+                        ime_on = (ime_on + 1) % 3;                 /* off, hiragana, katakana */
+                        ime_n = 0;
+                        touch_bar();
                     } else if (code == 58 && down) {
                         k_caps = !k_caps;
                     } else if (down) {
                         char out[8];
                         int m = key_bytes(code, out);
                         for (int j = 0; j < m; j++)
-                            if (type_byte(top, out[j]))
+                            if (ime_type(top, out[j]))
                                 quit_due = now_ms() + QUIT_WAIT_MS;
                         if (m > 0 && ev[i].value == 1 && out[0] != 17 && out[0] != 20) {
                             rep_code = code;
@@ -1501,7 +1734,7 @@ int main(int argc, char **argv)
             char out[8];
             int m = key_bytes(rep_code, out);
             for (int j = 0; j < m; j++)
-                if (type_byte(top, out[j]))
+                if (ime_type(top, out[j]))
                     quit_due = now_ms() + QUIT_WAIT_MS;
             rep_due += REPEAT_NEXT_MS;
         }
