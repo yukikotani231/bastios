@@ -1385,15 +1385,24 @@ static void be_key(int c)
 }
 
 /* Puts the cursor under the pointer; a press starts a selection there, a drag (DRAG set) stretches it. */
-static void be_click(int row, int x, int drag)
+static void be_click(int y, int x, int drag)
 {
-    int r = bf_etop + row - 1;
-    if (row < 1)
+    /* A drag that began in the window goes on when the pointer leaves it (Y or X negative, or beyond the window):
+     * the farther it is above or below the text, the more rows beyond the visible ones the cursor goes (up to 8),
+     * which scrolls. */
+    int row = y < 0 ? -((-y + BF_CH - 1) / BF_CH) : y / BF_CH;
+    if (row < 1 && !drag)
         return;
+    if (row > BF_ROWS + 8)
+        row = BF_ROWS + 8;
+    if (row < -8)
+        row = -8;
+    int r = bf_etop + row - 1;
     be_ulast = 0;
+    if (r < 0) r = 0;
     if (r >= bf_nerow) r = bf_nerow - 1;
     size_t n = be_row_len(r);
-    bf_cur = be_off_at(r, x / BF_CW);
+    bf_cur = be_off_at(r, x < 0 ? 0 : x / BF_CW);
     if (drag)
         return;
     be_anchor = (long)bf_cur;
@@ -1730,11 +1739,11 @@ static int bfiles_main(int argc, char **argv)
             int dragging = (m->buttons & 1) && (prev & 1);
             prev = m->buttons & 0xFF;
             if (dragging && bf_editing)
-                be_click(m->y / BF_CH, m->x, 1);
+                be_click((int)m->y, (int)m->x, 1);
             else if (!pressed)
                 continue;
             else if (bf_editing)
-                be_click(m->y / BF_CH, m->x, 0);
+                be_click((int)m->y, (int)m->x, 0);
             else
                 bf_click(m->y / BF_CH);
         } else {
