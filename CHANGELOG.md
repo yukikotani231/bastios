@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` types Japanese: Alt-Space turns on a romaji to hiragana mode (a "Kana" mark shows in the task bar) and Alt-Space again turns it off. There is no conversion to kanji.
 - `bwm` opens its launcher menu at the pointer on a right click on the empty desktop.
 - The `bsys` System window lists the processes (`p`), moves along the list (`j`, `k` or the arrow keys) and ends the selected one (`x`).
 - The `bfiles` editor cuts and pastes a line (Ctrl-K, Ctrl-U), finds text (Ctrl-F) and goes to a line (Ctrl-G), and shows the cursor's line number.
