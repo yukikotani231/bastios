@@ -160,13 +160,17 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
     if bad {
       // the name is too long where the mount namespace maps it
     } else if mt != NO_RESULT || (f != NO_FILE && vfs_is_link(&mut k.fs, f)) {
+      let mut nsf = false;                  // a link under a mount made with MS_NOSYMFOLLOW (before the read below takes the transfer buffer)
+      if mt == NO_RESULT && tn <= XBUF && vfs_path_mflags(&mut k.fs, tn) / 8192 % 2 == 1 {
+        nsf = true;
+      }
       let mut t = mt;
       if mt == NO_RESULT {
         t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
       }
-      if hops >= LINK_HOPS || (mt == NO_RESULT && tn <= XBUF && vfs_path_mflags(&mut k.fs, tn) / 8192 % 2 == 1) {
+      if hops >= LINK_HOPS || nsf {
         bad = true;
-        k.perr = ELOOP;                     // too many links, or a link under a mount made with MS_NOSYMFOLLOW
+        k.perr = ELOOP;                     // too many links, or MS_NOSYMFOLLOW
       } else if t == NO_FD || t == 0 || t > FNAME_MAX {
         bad = true;
         k.perr = ENOENT;
