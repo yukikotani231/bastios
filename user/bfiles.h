@@ -1207,7 +1207,8 @@ static void be_key(int c)
     }
 }
 
-static void be_click(int row, int x)
+/* Puts the cursor under the pointer; a press starts a selection there, a drag (DRAG set) stretches it. */
+static void be_click(int row, int x, int drag)
 {
     int r = bf_etop + row - 1;
     if (row < 1)
@@ -1216,6 +1217,8 @@ static void be_click(int row, int x)
     if (r >= bf_nerow) r = bf_nerow - 1;
     size_t col = x / BF_CW, n = be_row_len(r);
     bf_cur = bf_erow[r] + (col < n ? col : n);
+    if (!drag)
+        be_anchor = (long)bf_cur;
 }
 
 static void be_paint(void)
@@ -1522,11 +1525,14 @@ static int bfiles_main(int argc, char **argv)
                 continue;
             }
             int pressed = (m->buttons & 1) && !(prev & 1);
+            int dragging = (m->buttons & 1) && (prev & 1);
             prev = m->buttons & 0xFF;
-            if (!pressed)
+            if (dragging && bf_editing)
+                be_click(m->y / BF_CH, m->x, 1);
+            else if (!pressed)
                 continue;
-            if (bf_editing)
-                be_click(m->y / BF_CH, m->x);
+            else if (bf_editing)
+                be_click(m->y / BF_CH, m->x, 0);
             else
                 bf_click(m->y / BF_CH);
         } else {
