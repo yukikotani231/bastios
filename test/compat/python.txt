@@ -153,9 +153,9 @@ failing:
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q click "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/click-8.3.0.tar.gz | tar xz && cd click-8.3.0 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider -k "not pager" $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED|ERROR)" /root/$(echo $f | tr / _).log | cut -c1-200; tail -n 2 /root/$(echo $f | tr / _).log | cut -c1-200; done'
 failing:
 
-== pytest: Werkzeug's own tests: routing, the request and response objects, datastructures, the test client and the debugger (file by file)
+== pytest: Werkzeug's own tests: routing, the request and response objects, datastructures, the test client, the debugger and the reloader (file by file)
 # timeout 900
-$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q werkzeug "pytest<9" ephemeral-port-reserve pytest-timeout 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/werkzeug-3.1.9.tar.gz | tar xz && cd werkzeug-3.1.9 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -v -p no:cacheprovider -k "not reloader" $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED|ERROR)" /root/$(echo $f | tr / _).log | cut -c1-200; tail -n 2 /root/$(echo $f | tr / _).log | cut -c1-200; done'
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q werkzeug "pytest<9" ephemeral-port-reserve pytest-timeout 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/werkzeug-3.1.9.tar.gz | tar xz && cd werkzeug-3.1.9 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED|ERROR)" /root/$(echo $f | tr / _).log | cut -c1-200; tail -n 2 /root/$(echo $f | tr / _).log | cut -c1-200; done'
 failing:
 
 == pytest: MarkupSafe's own tests (file by file)
