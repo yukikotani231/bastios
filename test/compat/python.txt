@@ -117,3 +117,8 @@ greenlet 5
 orjson b'{"a":[1,2]}'
 cffi 3
 psutil True True True True
+
+== pytest: cffi's own tests for the C declarations, dlopen, the out-of-line modules and the generated sources (module by module, without the C++ and the slowest ones)
+# timeout 1500
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q cffi pytest setuptools 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/cffi-2.1.1.tar.gz | tar xz && cd cffi-2.1.1 && bad=; for m in cffi_binary cffi_gen_src commontypes dlopen dlopen_unicode_literals ffi_obj parse_c_type pkgconfig re_python realize_c_type unicode_literals; do timeout -s KILL 200 python -m pytest -q -p no:cacheprovider testing/cffi1/test_$m.py > /root/c.log 2>&1 || bad="$bad $m"; done; echo "failing:$bad"'
+failing:
