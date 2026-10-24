@@ -1849,3 +1849,6 @@ gitsuite: t7812
 gitsuite: t7815
 gitsuite: t7816
 gitsuite: t8007
+python: pytest: more-itertools' own tests: the recipes and the more module (file by file)
+python: pytest: packaging's own tests: versions, specifiers, markers, requirements, tags and metadata (file by file)
+python: pytest: toolz' own tests: the iterator, function and dictionary tools (file by file)
