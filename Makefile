@@ -182,7 +182,7 @@ build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
 build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
 	$(MUSLCC) -static-pie -O2 $(GUILD) -s -o $@ $<
 
-build/user/bterm.elf: user/bterm.c user/bfiles.h user/bsys.h user/bview.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
+build/user/bterm.elf: user/bterm.c user/bfiles.h user/bsys.h user/bview.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h src/font16.bin | build/user
 	$(MUSLCC) -static-pie -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections $(GUILD) -s -Ibuild/user -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is

@@ -74,12 +74,22 @@ def screen_text_at(px, w, ox, oy, cols, rows):
     lines = []
     for cy in range(rows):
         line = ""
+        cells = []
         for cx in range(cols):
             cell = []
             for r in range(16):
                 i = ((oy + cy * 16 + r) * w + ox + cx * 8) * 3
                 cell.append(sum(1 << p for p in range(8) if px[i + p * 3] > 0x60))
-            line += glyphs.get(tuple(cell), "?")
+            cells.append(tuple(cell))
+        cx = 0
+        while cx < len(cells):
+            pair = tuple(b for r in range(16) for b in (cells[cx][r], cells[cx + 1][r])) if cx + 1 < len(cells) else None
+            if cells[cx] not in glyphs and pair in wide:      # a wide character takes two cells
+                line += wide[pair]
+                cx += 1
+            else:
+                line += glyphs.get(cells[cx], "?")
+            cx += 1
         lines.append(line.rstrip())
     return lines
 
@@ -1761,13 +1771,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
-            # UTF-8: box drawing and other characters outside the font each take one cell, drawn as a look-alike or '?'.
+            # UTF-8: box drawing takes one cell and Japanese two, both drawn from the console's font.
             typed("printf 'u\\342\\224\\200\\343\\201\\202v\\n'")
             time.sleep(1.5)
             w, h, px = screendump()
             lines = screen_text_at(px, w, 72, 90, 80, 24)
-            good = any(l.strip() == "u-?v" for l in lines)
-            print(("ok  " if good else "FAIL"), f"({name}) the terminal draws a UTF-8 character as one cell")
+            good = any(l.strip() == "u\u2500\u3042v" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal draws UTF-8 characters from the font, wide ones in two cells")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
