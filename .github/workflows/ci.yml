@@ -123,9 +123,13 @@ jobs:
   # The same suite with the kernel and the Bastio user programs built by the
   # native x86-64 backend, so no C compiler sees any proved code (the C
   # compiler still builds boot/, the C library and the musl test programs).
-  # Two runners: the x86-64 tests with the native backend, and the AArch64
-  # port built by the native AArch64 backend (they share nothing but the
-  # proof cache, which each restores).
+  # Three runners: the x86-64 tests with the native backend in two halves
+  # (the shell test and the network tests; the rest), and the AArch64 port
+  # built by the native AArch64 backend (they share nothing but the proof
+  # cache, which each restores). One runner for all of the x86-64 lanes ran
+  # the shell test beside the 12-minute soak and the other long tests on four
+  # cores, and its timer checks and the 255-processor boot failed under that
+  # load; the halves give each long test the cores it has in the test jobs.
   native:
     name: native (${{ matrix.part }})
     needs: changes
@@ -134,7 +138,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [x86-64, aarch64]
+        include:
+          - part: x86-64
+            lanes: a b
+          - part: x86-64 rest
+            lanes: cef
+          - part: aarch64
     # It takes 18 to 29 minutes on main (proving and building the kernel
     # natively is 8 of them), so 30 cut off runs that were only slow.
     timeout-minutes: 45
@@ -159,8 +168,8 @@ jobs:
           path: build/proof-cache.tar
       - name: Unpack the proof cache
         run: if [ -f build/proof-cache.tar ]; then tar -xf build/proof-cache.tar -C build && rm build/proof-cache.tar; fi
-      - if: matrix.part == 'x86-64'
-        run: make test NATIVE=1 LANES='a b cef' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
+      - if: matrix.lanes
+        run: make test NATIVE=1 LANES='${{ matrix.lanes }}' BASTIOC0=bastiolang/stage0/target/release/bastioc0 BASTIOLIB=bastiolang
       # The AArch64 port's kernel and Bastio user programs (shell, hello, spin,
       # true) built by the native AArch64 backend, booted once on QEMU virt.
       - if: matrix.part == 'aarch64'

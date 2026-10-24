@@ -160,7 +160,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
-    deadline = time.time() + 900
+    # One deadline for the whole boot, windows and all. It was 360 s until the
+    # window manager's checks outgrew it: the last check of the BIOS boot then
+    # waited for nothing, and every step after it failed at once.
+    t_start = time.time()
+    deadline = t_start + 900
     def until(marker, start):
         nonlocal out
         while marker not in out[start:]:
@@ -2173,6 +2177,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         print(("ok  " if good else "FAIL"), f"({name}) the virtio disk is untouched")
         fails += not good
     q.kill(); q.wait()
+    print(f"     ({name}) took {time.time() - t_start:.0f} s of the {deadline - t_start:.0f} s allowed")
     print(f"---- {name} transcript ----")
     print(out.decode(errors="replace").replace("\r", "")[-1500:])
 
