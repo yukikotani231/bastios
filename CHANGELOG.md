@@ -28,7 +28,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The `bfiles` editor goes to the start and the end of the line with Ctrl-A and Ctrl-E.
 - The `bfiles` editor moves by words with Ctrl-Left and Ctrl-Right, and `bwm` sends `ESC [ 1 ; 5 A` to `D` (and `H`, `F`) for an arrow key held with Ctrl, as xterm does; `bfiles` also skips such modifier numbers in a key sequence instead of typing them.
 - The `bfiles` editor deletes the word before the cursor with Ctrl-W (one Ctrl-Z puts it back).
-- The `bfiles` file list and viewer draw UTF-8 (a Japanese file name, text in a file) with the same font, a wide character in two cells; the editor still shows a byte outside ASCII as a dot.
+- The `bfiles` file list and viewer draw UTF-8 (a Japanese file name, text in a file) with the same font, a wide character in two cells.
+- The `bfiles` editor draws UTF-8 too, and the cursor, Left and Right, Up and Down, Backspace, Delete and the mouse move by character and by cell column, not by byte; a byte that is not UTF-8 is a `?`.
 - `bterm` draws UTF-8 text from the console's font (`src/font16.bin`): Latin and Greek letters, box drawing, blocks, kana, the kanji of JIS X 0208 and half-width katakana, a wide character in two cells; copying a selection writes UTF-8. Any other character is still a look-alike or `?`.
 - `bterm` reads UTF-8: a character takes one cell, drawn as a look-alike for box drawing, blocks, arrows, bullets and quotes (`-`, `|`, `+`, `#`, `*` and so on) and as `?` for anything else the 128-glyph font lacks; combining and zero-width characters take none. Before, every byte of such a character was dropped, so tmux borders and non-ASCII file names vanished or shifted the line.
 - The `bfiles` editor goes to the start and the end of the text with Ctrl-Home and Ctrl-End.
