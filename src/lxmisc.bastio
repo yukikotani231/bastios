@@ -454,20 +454,31 @@ fn time_field(k: &mut Kernel, off: u64, kind: u64) -> u64
   requires kok(k) && off <= 16
   ensures kok(k)
 {
-  let mut t = get_u64(k.fs.xfer, off);
+  let sec = get_u64(k.fs.xfer, off);
+  let mut frac = 0;
   if kind == TIMES_TIMESPEC {
     let ns = get_u64(k.fs.xfer, off + 8);
     if ns == UTIME_OMIT {
       return NO_FILE;
     }
     if ns == UTIME_NOW {
-      return k.fs.now;
+      return sat_add(k.epoch, k.ns);          // asked for now: exact, not the file layer's tick
     }
+    frac = ns;
+  } else if kind == TIMES_TIMEVAL {
+    frac = get_u64(k.fs.xfer, off + 8);      // microseconds
+    if frac > 999999 {
+      frac = 999999;
+    }
+    frac = frac * 1000;
   }
-  if t == NO_FILE {
-    t = NO_FILE - 1;                        // NO_FILE would mean "leave it"
+  if sec >= 18000000000 {
+    return NO_FILE - 1;                     // NO_FILE would mean "leave it"
   }
-  return t;
+  if frac > 999999999 {
+    frac = 999999999;
+  }
+  return sec * 1000000000 + frac;
 }
 
 /// Sets f's access and modification times from the times at user address
@@ -479,8 +490,8 @@ fn set_times(k: &mut Kernel, pid: u64, f: u64, va: u64, kind: u64) -> u64
   if f == NO_RESULT {
     return k.perr;
   }
-  let mut a = k.fs.now;
-  let mut t = k.fs.now;
+  let mut a = sat_add(k.epoch, k.ns);
+  let mut t = a;
   let mut now = va == 0;
   if va != 0 {
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 32) != 32 {
