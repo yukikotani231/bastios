@@ -192,3 +192,18 @@ failing:
 # timeout 1500
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/toolz-1.2.0.tar.gz | tar xz && cd toolz-1.2.0 && bad=; for f in $(find toolz -path "*tests/test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|")"; done'
 failing:
+
+== pytest: h11's own tests: the HTTP/1.1 state machine, events, headers and the buffer (file by file)
+# timeout 1200
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/h11-0.16.0.tar.gz | tar xz && cd h11-0.16.0 && bad=; for f in $(find h11/tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|") $(tail -n 3 /root/$(echo $f | tr / _).log | cut -c1-120 | tr "\n" "|")"; done'
+failing:
+
+== pytest: Markdown's own tests: the syntax test files, the extensions and the API (file by file)
+# timeout 1200
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" pyyaml 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/markdown-3.11.2.tar.gz | tar xz && cd markdown-3.11.2 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|") $(tail -n 3 /root/$(echo $f | tr / _).log | cut -c1-120 | tr "\n" "|")"; done'
+failing:
+
+== pytest: idna's own tests: the codec, UTS 46 mapping, errors and the command line (file by file)
+# timeout 1200
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" hypothesis 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/idna-3.20.tar.gz | tar xz && cd idna-3.20 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|") $(tail -n 3 /root/$(echo $f | tr / _).log | cut -c1-120 | tr "\n" "|")"; done'
+failing:

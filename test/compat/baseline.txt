@@ -1853,3 +1853,6 @@ gitsuite: t8007
 python: pytest: more-itertools' own tests: the recipes and the more module (file by file)
 python: pytest: packaging's own tests: versions, specifiers, markers, requirements, tags and metadata (file by file)
 python: pytest: toolz' own tests: the iterator, function and dictionary tools (file by file)
+python: pytest: h11's own tests: the HTTP/1.1 state machine, events, headers and the buffer (file by file)
+python: pytest: Markdown's own tests: the syntax test files, the extensions and the API (file by file)
+python: pytest: idna's own tests: the codec, UTS 46 mapping, errors and the command line (file by file)
