@@ -164,9 +164,9 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
       if mt == NO_RESULT {
         t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
       }
-      if hops >= LINK_HOPS {
+      if hops >= LINK_HOPS || (mt == NO_RESULT && tn <= XBUF && vfs_path_mflags(&mut k.fs, tn) / 8192 % 2 == 1) {
         bad = true;
-        k.perr = ELOOP;
+        k.perr = ELOOP;                     // too many links, or a link under a mount made with MS_NOSYMFOLLOW
       } else if t == NO_FD || t == 0 || t > FNAME_MAX {
         bad = true;
         k.perr = ENOENT;
