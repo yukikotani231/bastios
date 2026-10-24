@@ -1591,6 +1591,7 @@ python: pytest: Werkzeug's own tests: routing, the request and response objects,
 python: pytest: MarkupSafe's own tests (file by file)
 python: pytest: itsdangerous' own tests: signing, serializers and encodings (file by file)
 python: pytest: Blinker's own tests: signals and their receivers (file by file)
+python: pytest: pytest's own test suite, which starts pytest inside pytest (file by file)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes

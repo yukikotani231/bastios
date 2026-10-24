@@ -172,3 +172,8 @@ failing:
 # timeout 900
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q blinker "pytest<9" pytest-asyncio 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/blinker-1.9.0.tar.gz | tar xz && cd blinker-1.9.0 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED|ERROR)" /root/$(echo $f | tr / _).log | cut -c1-200; tail -n 2 /root/$(echo $f | tr / _).log | cut -c1-200; done'
 failing:
+
+== pytest: pytest's own test suite, which starts pytest inside pytest (file by file)
+# timeout 3000
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pytest-8.4.2.tar.gz | tar xz && cd pytest-8.4.2 && bad=; for f in $(find testing -maxdepth 2 \( -name "test_*.py" -o -name "*_test.py" -o -path "testing/python/*.py" \) ! -name conftest.py ! -name "__init__.py" ! -path "*example_scripts*" | sort); do timeout -s KILL 240 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED|ERROR)" /root/$(echo $f | tr / _).log | cut -c1-200; tail -n 2 /root/$(echo $f | tr / _).log | cut -c1-200; done'
+failing:
