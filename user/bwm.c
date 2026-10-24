@@ -836,6 +836,20 @@ static int grab_active(int old)
     return grab_cli >= 0 && (old & 1) && by_id(grab_cli, grab_id) != NULL;
 }
 
+/* The window a drag holds while the pointer rests above or below its contents, else NULL: the
+ * window then gets the motion again every SCROLL_MS, so the editor goes on scrolling. */
+#define SCROLL_MS 60
+static long long scroll_due;
+static struct win *grab_outside(int old, int my)
+{
+    if (!grab_active(old))
+        return NULL;
+    struct win *t = by_id(grab_cli, grab_id);
+    if (my >= t->y + TITLE_H && my < t->y + t->h - BORDER)
+        return NULL;
+    return t;
+}
+
 /* One whole message from client i, `n` bytes at c->rx. */
 static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
 {
@@ -1627,11 +1641,24 @@ int main(int argc, char **argv)
             if (wait < 0 || d < wait)
                 wait = d < 0 ? 0 : (int)d;
         }
+        if (grab_outside(buttons, my)) {
+            long long d = scroll_due - now_ms();
+            if (wait < 0 || d < wait)
+                wait = d < 0 ? 0 : (int)d;
+        }
         int until_min = (int)(60 - time(NULL) % 60) * 1000;      /* the clock changes at the next minute */
         if (wait < 0 || until_min < wait)
             wait = until_min;
         if (poll(p, np, wait) < 0 && errno != EINTR)
             break;
+        {
+            struct win *g = grab_outside(buttons, my);
+            if (g && g == focus() && now_ms() >= scroll_due) {
+                struct bwm_mouse ev = { (uint32_t)g->id, (uint32_t)(mx - g->x - BORDER), (uint32_t)(my - g->y - TITLE_H), (uint32_t)buttons & 7u };
+                to_client(g->cli, BWM_MOUSE, &ev, sizeof ev);
+                scroll_due = now_ms() + SCROLL_MS;
+            }
+        }
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
         int clock_h, clock_m;

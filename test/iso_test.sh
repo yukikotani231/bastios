@@ -1453,6 +1453,35 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         print(("ok  " if good else "FAIL"), f"({name}) a drag that leaves the editor window scrolls it")
         fails += not good
         monitor("sendkey ctrl-q")
+        # With the pointer resting below the window and the button still held, the editor goes on scrolling.
+        time.sleep(4)                                       # bwm waits for the ^Q byte before it ends
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ds.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1.5)
+            monitor("mouse_move -216 -135", "mouse_move -216 -135")
+            monitor("mouse_button 1")
+            monitor(*["mouse_move 0 60"] * 7)
+            good = False
+            for _ in range(40):
+                time.sleep(1)
+                w, h, px = screendump()
+                lines = screen_text_at(px, w, 72, 90, 60, 26)
+                mt = re.search(r"\^U (\d+)", lines[0])
+                good = mt is not None and int(mt.group(1)) >= 60
+                if good:
+                    break
+            monitor("mouse_button 0")
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) a drag held below the editor window keeps scrolling it")
+        fails += not good
+        monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
         mark = len(out)
