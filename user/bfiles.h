@@ -1221,13 +1221,18 @@ static void be_click(int row, int x, int drag)
     if (drag)
         return;
     be_anchor = (long)bf_cur;
-    /* A second press on the same spot within 400 ms selects the word under the pointer. */
+    /* Presses on the same spot within 400 ms in a row: the second selects the word under the pointer,
+     * the third the line (with its newline). */
     static struct timespec last;
     static size_t last_at = (size_t)-1;
+    static int clicks;
     struct timespec now;
     clock_gettime(CLOCK_MONOTONIC, &now);
     long ms = (now.tv_sec - last.tv_sec) * 1000 + (now.tv_nsec - last.tv_nsec) / 1000000;
-    if (last_at == bf_cur && ms >= 0 && ms < 400 && bf_cur < bf_vlen && be_isword(bf_vtext[bf_cur])) {
+    clicks = last_at == bf_cur && ms >= 0 && ms < 400 && clicks < 3 ? clicks + 1 : 1;
+    last = now;
+    last_at = bf_cur;
+    if (clicks == 2 && bf_cur < bf_vlen && be_isword(bf_vtext[bf_cur])) {
         size_t lo = bf_cur, hi = bf_cur;
         while (lo > 0 && be_isword(bf_vtext[lo - 1]))
             lo--;
@@ -1235,11 +1240,13 @@ static void be_click(int row, int x, int drag)
             hi++;
         be_anchor = (long)lo;
         bf_cur = hi;
-        last_at = (size_t)-1;
-        return;
+    } else if (clicks == 3) {
+        size_t lo = bf_erow[r], hi = lo + n;
+        if (hi < bf_vlen)
+            hi++;
+        be_anchor = (long)lo;
+        bf_cur = hi;
     }
-    last = now;
-    last_at = bf_cur;
 }
 
 static void be_paint(void)
