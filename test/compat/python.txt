@@ -142,3 +142,33 @@ failing:
 # timeout 2400
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q pillow pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pillow-12.3.0.tar.gz | tar xz && cd pillow-12.3.0 && bad=; for m in image_access image_convert image_copy image_crop image_entropy image_frombytes image_getbands image_getbbox image_getcolors image_getdata image_getextrema image_getim image_getpalette image_getprojection image_histogram image_load image_mode image_paste image_point image_putalpha image_putdata image_putpalette image_quantize image_reduce image_resample image_rotate image_split image_thumbnail image_tobitmap image_tobytes image_transform image_transpose imagechops imagecolor imageenhance imagefile imagemorph imageops imageops_usm imagepalette imagepath imagesequence imagestat color_lut box_blur format_hsv format_lab lib_image lib_pack mode_i16 file_bmp file_gif file_ico file_ppm file_tga file_tiff file_webp file_pcx file_xbm file_xpm file_sgi file_sun file_dds file_psd file_qoi file_apng file_cur file_icns file_im file_fli file_msp file_palm file_spider file_jpeg2k imagedraw2 core_resources features; do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider -k "not test_write_encoding_error" Tests/test_$m.py > /root/p_$m.log 2>&1 || bad="$bad $m"; done; echo "failing:$bad"; for m in $bad; do echo "== $m"; grep -m4 -E "^(E  |FAILED)" /root/p_$m.log | cut -c1-200; tail -n 1 /root/p_$m.log; done'
 failing:
+
+== pytest: Jinja2's own tests: templates, filters, loaders, the compiler and the sandbox (file by file)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q jinja2 pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/jinja2-3.1.6.tar.gz | tar xz && cd jinja2-3.1.6 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED)" /root/$(echo $f | tr / _).log | cut -c1-200; done'
+failing:
+
+== pytest: Click's own tests: arguments, options, commands, the shell completion and the terminal helpers (file by file)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q click pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/click-8.3.0.tar.gz | tar xz && cd click-8.3.0 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED)" /root/$(echo $f | tr / _).log | cut -c1-200; done'
+failing:
+
+== pytest: Werkzeug's own tests: routing, the request and response objects, datastructures, the test client and the debugger (file by file)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q werkzeug pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/werkzeug-3.1.9.tar.gz | tar xz && cd werkzeug-3.1.9 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED)" /root/$(echo $f | tr / _).log | cut -c1-200; done'
+failing:
+
+== pytest: MarkupSafe's own tests (file by file)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q markupsafe pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/markupsafe-3.0.3.tar.gz | tar xz && cd markupsafe-3.0.3 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED)" /root/$(echo $f | tr / _).log | cut -c1-200; done'
+failing:
+
+== pytest: itsdangerous' own tests: signing, serializers and encodings (file by file)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q itsdangerous pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/itsdangerous-2.2.0.tar.gz | tar xz && cd itsdangerous-2.2.0 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED)" /root/$(echo $f | tr / _).log | cut -c1-200; done'
+failing:
+
+== pytest: Blinker's own tests: signals and their receivers (file by file)
+# timeout 900
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q blinker pytest 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/blinker-1.9.0.tar.gz | tar xz && cd blinker-1.9.0 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 150 python -X faulthandler -m pytest -q -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f"; grep -m4 -E "^(E  |FAILED)" /root/$(echo $f | tr / _).log | cut -c1-200; done'
+failing:
