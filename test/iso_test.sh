@@ -1297,6 +1297,39 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The file list and the viewer of bfiles draw UTF-8 with the big font: a file named with a hiragana, and its text.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/jp; printf '\\343\\201\\202 \\343\\201\\204\\n' > \"/tmp/jp/$(printf '\\343\\201\\202').txt\"\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/jp\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/jp", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = any(l.startswith("あ.txt") for l in lines)
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) the file list of bfiles draws a Japanese file name")
+        fails += not good
+        if good:
+            monitor("sendkey down", "sendkey down", "sendkey ret")
+            good = until(b"bfiles: view /tmp/jp/", mark)
+            time.sleep(1)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = good and any(l.strip() == "あ い" for l in lines)
+            if not good:
+                print("\n".join(l for l in lines if l))
+            print(("ok  " if good else "FAIL"), f"({name}) the viewer of bfiles draws Japanese text")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Dragging over text in the editor selects it.
         mark = len(out)
         q.stdin.write(b"printf 'alpha beta\\n' > /tmp/dm.txt\r"); q.stdin.flush()
