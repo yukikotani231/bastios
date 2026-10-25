@@ -110,6 +110,9 @@ gv uuid https://github.com/google/uuid v1.6.0
 gv pflag https://github.com/spf13/pflag v1.0.5
 gv mux https://github.com/gorilla/mux v1.8.1
 gv gjson https://github.com/tidwall/gjson v1.18.0
+gv semver https://github.com/Masterminds/semver v3.3.1
+gv mapstructure https://github.com/mitchellh/mapstructure v1.5.0
+gv cast https://github.com/spf13/cast v1.7.1
 
 # An npm package built on the host and shipped with its dependencies and one
 # test runner (or several, separated by spaces) installed beside it (node_modules), nothing else of its tooling.
