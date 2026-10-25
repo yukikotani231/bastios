@@ -406,8 +406,10 @@ static void clock_hm(int *h, int *m)
     *m = (int)(min % 60);
 }
 
+static char ime_buf[6];                   /* the romaji letters typed that do not make a kana yet, shown in the task bar */
+static int ime_n;
 static int ime_on;                        /* Alt-Space: 0 off, 1 romaji typed becomes hiragana, 2 katakana */
-#define IME_W 44
+#define IME_W 76
 
 /* The task bar: a button that starts a terminal, then one for each window
  * in the order they were opened, the top one lit. */
@@ -433,7 +435,9 @@ static void draw_bar(void)
     if (ime_on) {
         int ix = (int)W - MENU_W - 12 - CLOCK_W - IME_W;
         fill(scene, ix, y0 + 3, ix + IME_W - 4, H - 3, rgb(150, 90, 30));
-        text(scene, ix + 4, y0 + 4, ime_on == 2 ? "Kata" : "Kana", rgb(255, 255, 255));
+        char im[16];
+        snprintf(im, sizeof im, "%s %.3s", ime_on == 2 ? "Kata" : "Kana", ime_buf);
+        text(scene, ix + 4, y0 + 4, im, rgb(255, 255, 255));
     }
     int hh, mm;
     clock_hm(&hh, &mm);
@@ -1462,9 +1466,6 @@ static const struct { const char *r, *k; } ime_tab[] = {
     { "zyu", "じゅ" },
 };
 
-static char ime_buf[4];
-static int ime_n;
-
 static int ime_put(struct win *top, const char *s)
 {
     int q = 0;
@@ -1499,8 +1500,21 @@ static int ime_step(struct win *top, int *quit)
     return 0;
 }
 
+static int ime_type1(struct win *top, char c);
+
 /* Like type_byte, but through the romaji table while the mode is on; returns 1 for Ctrl-Q. */
 static int ime_type(struct win *top, char c)
+{
+    int before = ime_n;
+    int quit = ime_type1(top, c);
+    if (ime_on && (before || ime_n)) {                 /* the pending letters in the task bar changed */
+        ime_buf[ime_n] = 0;
+        touch_bar();
+    }
+    return quit;
+}
+
+static int ime_type1(struct win *top, char c)
 {
     int quit = 0;
     if (!ime_on)

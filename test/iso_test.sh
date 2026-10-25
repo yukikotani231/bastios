@@ -1969,6 +1969,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # The letters typed that make no kana yet show in the task bar next to the mark; Backspace takes them back.
+            def bar_white():
+                w, h, px = screendump()
+                return sum(1 for y in range(744, 768) for x in range(836, 912) if tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255))
+            time.sleep(1)
+            n0 = bar_white()
+            monitor("sendkey k")
+            time.sleep(1.5)
+            n1 = bar_white()
+            monitor("sendkey backspace")
+            time.sleep(1.5)
+            n2 = bar_white()
+            good = n1 > n0 and n2 == n0
+            print(("ok  " if good else "FAIL"), f"({name}) the task bar shows the romaji letters waiting for a kana ({n0}, {n1}, {n2})")
+            fails += not good
             # A second Alt-Space gives katakana, a third turns the mode off.
             monitor("sendkey alt-spc", "sendkey alt-spc", *[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-spc", "sendkey alt-spc")
             typed("kitte")
