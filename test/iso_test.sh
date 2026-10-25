@@ -833,6 +833,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and last != first and len(first) > 2 and len(last) > 2
             print(("ok  " if good else "FAIL"), f"({name}) G and g in the process list go to the last and the first ({last!r} {first!r})")
             fails += not good
+            # n sorts the list by name: the first name is not after the last, and n again goes back to newest first.
+            mark3 = len(out)
+            monitor("sendkey n")
+            good = until(b"bsys: sorted by name", mark3)
+            names = []
+            for key in ("g", "shift-g"):
+                mark3 = len(out)
+                monitor("sendkey " + key)
+                good = good and until(b"bsys: select", mark3)
+                sel = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0].split() if good else []
+                names.append(sel[1] if len(sel) > 1 else b"")
+            mark3 = len(out)
+            monitor("sendkey n")
+            good = good and until(b"bsys: sorted by pid", mark3) and names[0] and names[0] <= names[1]
+            print(("ok  " if good else "FAIL"), f"({name}) n sorts the process list by name ({names!r})")
+            fails += not good
             monitor("sendkey p")
             good = until(b"bsys: system", mark)
             print(("ok  " if good else "FAIL"), f"({name}) p goes back to the figures")
