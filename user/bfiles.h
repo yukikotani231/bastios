@@ -1363,6 +1363,21 @@ static void be_key(int c)
     } else if (c == 22) {
         be_drop_sel_undoable();
         be_paste_clip();
+    } else if (c == 4) {                        /* Ctrl-D: a copy of the line under it, the cursor in the copy */
+        size_t s = bf_cur, e = bf_cur;
+        while (s > 0 && bf_vtext[s - 1] != '\n')
+            s--;
+        while (e < bf_vlen && bf_vtext[e] != '\n')
+            e++;
+        if (bf_vlen + (e - s) + 1 < BF_VIEWMAX) {
+            size_t col = bf_cur - s;
+            be_undo_push(3);
+            bf_cur = e;
+            be_insert('\n');
+            for (size_t i = s; i < e; i++)
+                be_insert(bf_vtext[i]);
+            bf_cur = e + 1 + col;
+        }
     } else if (c == 11) {
         be_undo_push(3);
         be_cut_line();
