@@ -1734,6 +1734,13 @@ int main(int argc, char **argv)
                             snap_win(t, code == 103 ? 0 : code == 106 ? 1 : -1);
                             touch_all();
                         }
+                    } else if (code == 108 && down && k_alt) {     /* Alt-Down: a snapped or maximized window goes back, any other is minimized */
+                        struct win *t = focus();
+                        if (t && t->maxed)
+                            toggle_max(t);
+                        else if (t)
+                            minimize(t);
+                        touch_all();
                     } else if (down && k_shift && (code == 110 || (code == 47 && k_ctrl))) {
                         if (top && top->cli >= 0) {                /* Shift-Insert, Ctrl-Shift-V: paste (key 0x100, for bterm) */
                             struct bwm_key pk = { (uint32_t)top->id, BWM_KEY_PASTE };
