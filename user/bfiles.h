@@ -1378,6 +1378,15 @@ static void be_key(int c)
                 be_insert(bf_vtext[i]);
             bf_cur = e + 1 + col;
         }
+    } else if (c == 15) {                       /* Ctrl-O: an empty line below the one under the cursor */
+        size_t e = bf_cur;
+        while (e < bf_vlen && bf_vtext[e] != '\n')
+            e++;
+        if (bf_vlen + 1 < BF_VIEWMAX) {
+            be_undo_push(3);
+            bf_cur = e;
+            be_insert('\n');
+        }
     } else if (c == 11) {
         be_undo_push(3);
         be_cut_line();
