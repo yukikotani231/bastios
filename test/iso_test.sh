@@ -821,6 +821,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = False
             print(("ok  " if good else "FAIL"), f"({name}) x ends the selected process")
             fails += not good
+            # G goes to the last process and g to the first.
+            mark3 = len(out)
+            monitor("sendkey shift-g")
+            good = until(b"bsys: select", mark3)
+            last = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey g")
+            good = good and until(b"bsys: select", mark3)
+            first = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            good = good and last != first and len(first) > 2 and len(last) > 2
+            print(("ok  " if good else "FAIL"), f"({name}) G and g in the process list go to the last and the first ({last!r} {first!r})")
+            fails += not good
             monitor("sendkey p")
             good = until(b"bsys: system", mark)
             print(("ok  " if good else "FAIL"), f"({name}) p goes back to the figures")
