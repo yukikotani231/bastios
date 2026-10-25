@@ -1365,6 +1365,9 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
     if is_ns_file(pf) {
       nsf_open(&mut k, hp, pf);             // it keeps the namespace (src/lxnsk.bastio)
     }
+    if is_mounts_dev(pf) {
+      mnt_catch_up(&mut k, hp);             // a poll reports changes from now on
+    }
     ofd_access(&mut k, hp, flags);
     return fd_install(&mut k, pid, hp);
   }
