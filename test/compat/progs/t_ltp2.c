@@ -1125,6 +1125,38 @@ int main(void) {
            umount("/tmp/mnsf");
            rmdir("/tmp/mnsf");
            ok; }));
+    EXPECT("poll and epoll report POLLPRI|POLLERR on /proc/self/mounts and mountinfo after a mount or umount, until the file is read", ({
+           int ok = mkdir("/tmp/mpoll", 0755) == 0 || errno == EEXIST;
+           int fd = open("/proc/self/mounts", O_RDONLY);
+           int fi = open("/proc/self/mountinfo", O_RDONLY);
+           int ep = epoll_create1(0);
+           ok = ok && fd >= 0 && fi >= 0 && ep >= 0;
+           struct epoll_event ev = { .events = EPOLLPRI, .data.fd = fd };
+           ok = ok && epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev) == 0;
+           ev.data.fd = fi;
+           ok = ok && epoll_ctl(ep, EPOLL_CTL_ADD, fi, &ev) == 0;
+           struct pollfd pf = { .fd = fd, .events = POLLPRI };
+           ok = ok && poll(&pf, 1, 0) == 0 && epoll_wait(ep, &ev, 1, 0) == 0;
+           ok = ok && mount("none", "/tmp/mpoll", "tmpfs", 0, 0) == 0;
+           pf.revents = 0;
+           ok = ok && poll(&pf, 1, 0) == 1 && (pf.revents & (POLLPRI | POLLERR)) == (POLLPRI | POLLERR);
+           struct epoll_event out[2];
+           ok = ok && epoll_wait(ep, out, 2, 0) == 2 && (out[0].events & EPOLLPRI) && (out[1].events & EPOLLPRI);
+           char b[4096];
+           ok = ok && lseek(fd, 0, SEEK_SET) == 0;
+           while (read(fd, b, sizeof b) > 0) {}
+           pf.revents = 0;
+           ok = ok && poll(&pf, 1, 0) == 0;            // mountinfo has not been read yet
+           ok = ok && epoll_wait(ep, out, 2, 0) == 1 && out[0].data.fd == fi;
+           while (read(fi, b, sizeof b) > 0) {}
+           ok = ok && epoll_wait(ep, out, 2, 0) == 0;
+           ok = ok && umount("/tmp/mpoll") == 0;
+           ok = ok && epoll_wait(ep, out, 2, 0) == 2;
+           close(ep);
+           close(fi);
+           close(fd);
+           rmdir("/tmp/mpoll");
+           ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;
            int fd = open("/bin/cat", O_RDONLY);
