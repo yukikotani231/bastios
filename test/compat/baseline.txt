@@ -284,6 +284,7 @@ t_dir: stat /tmp
 t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
+t_dir: statvfs names up to 255 bytes, as NAME_MAX says
 t_dir: unlink file in directory
 t_dns: connect to a looked-up name
 t_dns: getaddrinfo AF_INET
@@ -322,6 +323,8 @@ t_fanotify: remove the mark
 t_fanotify: the event says who did it
 t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC
+t_fdlock: 200 separate byte-range locks on one file
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
@@ -1117,6 +1120,7 @@ t_proc: an eventfd shows its count
 t_proc: an inotify instance lists its watches
 t_proc: a pidfd shows the process
 t_proc: fdinfo lists the open descriptors
+t_proc: fdinfo of a closed descriptor does not open
 t_proc: /proc/self lists fdinfo
 t_proc: maps lists an anonymous mapping
 t_proc: maps lists a shared mapping with s
@@ -1412,6 +1416,7 @@ t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
+t_sysv: shmat over its own address with SHM_REMAP replaces the attachment
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
@@ -1576,6 +1581,20 @@ python: pytest: numpy's own tests for memmap, .npy and .npz files, text files an
 python: pytest: numpy's own tests for array arithmetic, indexing, stacking and record arrays (the big-array tests are left out)
 python: pytest: the whole test suite of a fifth real project (attrs's)
 python: pytest: the whole test suite of a sixth real project (PyYAML's)
+python: pytest: greenlet's own tests (the quick modules; the memory-measuring leak tests take minutes and are left out)
+python: pytest: lxml's own tests for the tree, the ElementTree interface, XPath and input and output (without the abstract base classes pytest collects by mistake)
+python: pytest: cffi's own tests for the C declarations, dlopen, the out-of-line modules and the generated sources (module by module, without the C++ and the slowest ones)
+python: pytest: lxml's own tests for HTML, objectify, XSLT, schemas, SAX and class lookup (module by module)
+python: pytest: Pillow's own tests for images, resizing, filters, drawing, PNG and JPEG (module by module)
+python: pytest: orjson's own tests for dumps, loads, datetimes, dataclasses, enums, UUIDs and errors (module by module)
+python: pytest: Pillow's own tests for pixel access, conversion, transforms, palettes and more image file formats (module by module)
+python: pytest: Jinja2's own tests: templates, filters, loaders, the compiler and the sandbox (file by file)
+python: pytest: Click's own tests: arguments, options, commands, the shell completion and the terminal helpers (file by file)
+python: pytest: Werkzeug's own tests: routing, the request and response objects, datastructures, the test client, the debugger and the reloader (file by file)
+python: pytest: MarkupSafe's own tests (file by file)
+python: pytest: itsdangerous' own tests: signing, serializers and encodings (file by file)
+python: pytest: Blinker's own tests: signals and their receivers (file by file)
+python: pytest: pytest's own test suite, which starts pytest inside pytest (file by file, without the tests that need xdist, bash, xmlschema or a plugin-free venv)
 python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
 python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
@@ -1600,6 +1619,7 @@ rust: rust: a real crate (semver) fetched from the host, built and tested with c
 rust: rust: a second real crate (fastrand) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a third real crate (itoa) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a fourth real crate (either) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a fifth real crate (smallvec) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a compile error is reported
 rust: rust: rust-analyzer reports its version
 rust: rust: rust-analyzer finds a type error in a crate
@@ -1732,6 +1752,7 @@ alpine: nvim: the LSP client talks to the JSON language server under node and ge
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
 t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them
+t_ltp2: a tmpfs mounted nosymfollow reports it, refuses to follow a link under it (ELOOP) but reads the link, and remount clears it
 alpine: nvim: the LSP client talks to the YAML language server under node and gets a diagnostic and the file's symbols
 t_ltp2: a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT
 t_ltp2: a unix stream socket that is bound to a name can still connect, and the connection carries data
@@ -1833,3 +1854,25 @@ gitsuite: t7812
 gitsuite: t7815
 gitsuite: t7816
 gitsuite: t8007
+python: pytest: pluggy's own tests: the plugin manager, hook calls and tracing (file by file)
+python: pytest: sqlparse's own tests: the lexer, the parser, formatting and splitting (file by file)
+python: pytest: tabulate's own tests: the output formats, alignment and number handling (file by file)
+python: pytest: pathspec's own tests: gitignore patterns and path matching (file by file)
+python: pytest: more-itertools' own tests: the recipes and the more module (file by file)
+python: pytest: packaging's own tests: versions, specifiers, markers, requirements, tags and metadata (file by file)
+python: pytest: toolz' own tests: the iterator, function and dictionary tools (file by file)
+python: pytest: h11's own tests: the HTTP/1.1 state machine, events, headers and the buffer (file by file)
+python: pytest: Markdown's own tests: the syntax test files, the extensions and the API (file by file)
+python: pytest: idna's own tests: the codec, UTS 46 mapping, errors and the command line (file by file)
+node: node: a small option parser (minimist) tested with tape
+node: node: a query string library (qs) with its installed dependencies, tested with tape
+node: node: the cookie parser (cookie) tested with mocha
+node: node: a static file sender (send) with its installed dependencies, tested with mocha and supertest over the loopback
+node: node: the request body parsers (body-parser) with their installed dependencies, tested with mocha and supertest over the loopback
+node: node: the control-flow helpers (async) with babel-register and their installed dependencies, tested with mocha
+node: node: the media type matcher (type-is) with its installed dependencies, tested with mocha
+node: node: the time string converter (ms) tested with mocha and expect.js
+go: go: UUIDs (google/uuid), tested with go test
+go: go: command-line flags (spf13/pflag), tested with go test
+go: go: an HTTP router (gorilla/mux), tested with go test over httptest
+go: go: a JSON path library (tidwall/gjson) with a vendored dependency, tested with go test -mod=vendor

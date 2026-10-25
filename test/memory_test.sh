@@ -185,15 +185,19 @@ def group_swap(g):
     return int(run(f"cat /sys/fs/cgroup/{g}/memory.swap.current").split()[-2])
 run("/disk/mhog swapon /disk/swap")
 # A holder that mlocked its pages is never swapped out: with a second, ordinary
-# holder beside it (smaller than the locked one, big enough to give what is
-# needed), the pages that go to the swap file are the ordinary one's.
+# holder beside it (smaller than the locked one), the pages that go to the swap
+# file are the ordinary one's. The kernel swaps out the process with the most
+# unlocked memory in RAM, the program that is growing included, so the holder
+# must be bigger than what is left for that program when memory runs short
+# (F - LOCKED - holder); a holder at F / 4 was only picked for a batch or two
+# by luck of the timing.
 LOCKED, MORE = max(F * 2 // 5, 4), F * 11 // 20
 run("mkdir /sys/fs/cgroup/sk /sys/fs/cgroup/sa")
 mark = len(out)
 run(f"ash -c 'echo $$ > /sys/fs/cgroup/sk/cgroup.procs; exec /disk/mhog holdlock {LOCKED}' & lk=$!")
 read_until(b"locked", mark)
 check("the holder's mlock is counted", re.search(rf"VmLck:\s+{LOCKED * 1024} kB", run("cat /proc/$lk/status")) is not None)
-hold("sa", mib=max(F // 4, 2))
+hold("sa", mib=max(F * 7 // 20, 2))
 t = run(f"/disk/mhog touch {MORE}; echo rc=$?")
 check("a program runs beside a locked holder", f"touched {MORE} MiB" in t and "rc=0" in t and vm("oom_kill") == kills, t)
 check("the ordinary holder's pages went to the swap file", group_swap("sa") > 0, str(group_swap("sa")))

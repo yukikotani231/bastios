@@ -1402,9 +1402,12 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
   } else if m.ino > DIR_VFS && m.ino - 1 - DIR_VFS < HFILES {
     atime = atime_of(&mut k, m.ino - 1 - DIR_VFS, m.mtime);   // a directory of the file layer is a handle too
   }
-  xfer_u64(&mut k.fs.xfer, 72, atime);        // st_atime
-  xfer_u64(&mut k.fs.xfer, 88, m.mtime);      // st_mtime
-  xfer_u64(&mut k.fs.xfer, 104, m.mtime);     // st_ctime
+  xfer_u64(&mut k.fs.xfer, 72, atime / 1000000000);          // st_atime
+  xfer_u64(&mut k.fs.xfer, 80, atime % 1000000000);          // st_atime_nsec
+  xfer_u64(&mut k.fs.xfer, 88, m.mtime / 1000000000);        // st_mtime
+  xfer_u64(&mut k.fs.xfer, 96, m.mtime % 1000000000);        // st_mtime_nsec
+  xfer_u64(&mut k.fs.xfer, 104, m.mtime / 1000000000);       // st_ctime
+  xfer_u64(&mut k.fs.xfer, 112, m.mtime % 1000000000);       // st_ctime_nsec
   return lx_put_out(&mut k, pid, buf, STAT_SIZE);
 }
 

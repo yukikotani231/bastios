@@ -1103,6 +1103,28 @@ int main(void) {
            umount("/tmp/mflags");
            rmdir("/tmp/mflags");
            ok; }));
+    EXPECT("a tmpfs mounted nosymfollow reports it, refuses to follow a link under it (ELOOP) but reads the link, and remount clears it", ({
+           int ok = mkdir("/tmp/mnsf", 0755) == 0 || errno == EEXIST;
+           ok = ok && mount("none", "/tmp/mnsf", "tmpfs", 256, 0) == 0;   // MS_NOSYMFOLLOW
+           struct statfs sf;
+           ok = ok && statfs("/tmp/mnsf", &sf) == 0 && (sf.f_flags & 0x2000) != 0;
+           int fd = open("/tmp/mnsf/t", O_CREAT | O_WRONLY, 0644);
+           ok = ok && fd >= 0;
+           if (fd >= 0) close(fd);
+           ok = ok && symlink("/tmp/mnsf/t", "/tmp/mnsf/l") == 0;
+           ok = ok && open("/tmp/mnsf/l", O_RDONLY) < 0 && errno == ELOOP;
+           char b[64];
+           ok = ok && readlink("/tmp/mnsf/l", b, sizeof b) == 11;
+           ok = ok && mount("none", "/tmp/mnsf", "tmpfs", MS_REMOUNT, 0) == 0;
+           ok = ok && statfs("/tmp/mnsf", &sf) == 0 && (sf.f_flags & 0x2000) == 0;
+           fd = open("/tmp/mnsf/l", O_RDONLY);
+           ok = ok && fd >= 0;
+           if (fd >= 0) close(fd);
+           unlink("/tmp/mnsf/l");
+           unlink("/tmp/mnsf/t");
+           umount("/tmp/mnsf");
+           rmdir("/tmp/mnsf");
+           ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;
            int fd = open("/bin/cat", O_RDONLY);

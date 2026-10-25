@@ -23,6 +23,7 @@
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
 #include <sys/uio.h>
+#include <sys/time.h>
 #include <sys/utsname.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -284,6 +285,82 @@ static int late_code(void)
     return 0;
 }
 
+/* File times keep their nanoseconds: utimensat and utimes set them, stat
+ * reports them, and a fresh file does not read as whole seconds. */
+static int file_times(void)
+{
+    char name[40];
+    snprintf(name, sizeof name, "/mmisc_times.%d", (int)getpid());   /* two mmisc may run at once */
+    int fd = open(name, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+    if (fd < 0)
+        return fail("file times: create");
+    struct stat st;
+    long long last = -1;
+    for (int i = 0; i < 4; i++) {                   /* writes 0.2 s apart get four times */
+        if (write(fd, "x", 1) != 1 || fstat(fd, &st) != 0)
+            return fail("file times: write");
+        long long t = st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+        if (t == last)
+            return fail("file times: two writes 0.2 s apart share a time");
+        last = t;
+        usleep(200000);
+    }
+    close(fd);
+    struct timespec ts[2] = { { 1234567890, 123456789 }, { 1700000000, 987654321 } };
+    if (utimensat(AT_FDCWD, name, ts, 0) != 0 || stat(name, &st) != 0)
+        return fail("file times: utimensat");
+    if (st.st_atim.tv_sec != 1234567890 || st.st_atim.tv_nsec != 123456789
+        || st.st_mtim.tv_sec != 1700000000 || st.st_mtim.tv_nsec != 987654321)
+        return fail("file times: nanoseconds read back");
+    struct timeval tv[2] = { { 1500000000, 250000 }, { 1600000000, 500001 } };
+    if (utimes(name, tv) != 0 || stat(name, &st) != 0
+        || st.st_atim.tv_nsec != 250000000 || st.st_mtim.tv_sec != 1600000000 || st.st_mtim.tv_nsec != 500001000)
+        return fail("file times: utimes");
+    unlink(name);
+    return 0;
+}
+
+/* A process id that still names a group (its leader gone, a member left) is
+ * not given to a new process: its setsid would fail with EPERM. Podman's
+ * crun hit that now and then. */
+static int setsid_reuse(void)
+{
+    int hold[2];
+    if (pipe(hold) != 0)
+        return fail("setsid reuse: pipe");
+    pid_t leader = fork();
+    if (leader == 0) {
+        close(hold[1]);
+        setsid();
+        pid_t member = fork();
+        if (member == 0) {
+            char c;
+            (void)!read(hold[0], &c, 1);            /* stays in the leader's group */
+            _exit(0);
+        }
+        _exit(0);                                   /* the leader leaves first */
+    }
+    close(hold[0]);
+    if (leader < 0 || waitpid(leader, NULL, 0) != leader)
+        return fail("setsid reuse: leader");
+    for (int i = 0; i < 700; i++) {
+        pid_t c = fork();
+        if (c < 0)
+            return fail("setsid reuse: fork");
+        if (c == 0)
+            _exit(setsid() > 0 ? 0 : 1);
+        if (c == leader)
+            return fail("setsid reuse: the group's id went to a new process");
+        int st;
+        if (waitpid(c, &st, 0) != c || !WIFEXITED(st) || WEXITSTATUS(st) != 0)
+            return fail("setsid reuse: setsid of a new process");
+    }
+    close(hold[1]);
+    while (waitpid(-1, NULL, 0) > 0)
+        ;
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     if (argc > 1 && unlink(argv[1]) != 0)
@@ -349,6 +426,8 @@ int main(int argc, char **argv)
         return fail("ttyname and tcgetpgrp");
     if (groups() != 0)
         return fail("process groups");
+    if (file_times() != 0 || setsid_reuse() != 0)
+        return 1;
     if (signals() != 0)
         return 1;
     int held = pipes();

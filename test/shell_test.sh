@@ -331,6 +331,8 @@ steps = [
     ("mkdir gl1 gl2; echo 1 > gl1/a; echo 2 > gl2/b; echo 3 > gl1/c; echo 4 > gl2/d; mkdir gl1/s; echo 5 > gl1/s/e; echo 6 > gl2/f; echo gl1/*; echo gl2/*; echo gl1/s/*; rm gl2/d; echo gl2/*", b"\r\ngl1/a gl1/c gl1/s\r\ngl2/b gl2/d gl2/f\r\ngl1/s/e\r\ngl2/b gl2/f\r\n", b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
+    # getcwd of a working directory that has been removed fails with ENOENT, as on Linux.
+    ("mkdir gd; cd gd; rmdir ../gd; /bin/pwd >/dev/null 2>&1; echo p=$?; cd /", b"\r\np=1\r\n", b"\n# "),
     # rename through BusyBox's mv: over a file, into a directory, and a
     # directory with its contents.
     ("echo one > m1; echo two > m2; mv m1 m2; cat m2; test -e m1 || echo moved$((1+1))", b"\r\none\r\nmoved2\r\n", b"\n# "),
@@ -1095,10 +1097,13 @@ else:
     else:
         print("FAIL udpsend port 0"); fails += 1
     # Every page the finished processes and removed files used must be
-    # back in the pool.
+    # back in the pool. What the boot's commands leave behind is a few
+    # hundred pages (144 alone, 583 and 608 on loaded CI runners: tables
+    # and buffers that grow with the work done meanwhile); a leak shows
+    # as free[1] != free[2], or as growth past 1024 pages (4 MiB).
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
     free = [int(m.split()[0]) for m in mem]
-    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 512:
+    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 1024:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1

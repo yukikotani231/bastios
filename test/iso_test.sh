@@ -74,12 +74,22 @@ def screen_text_at(px, w, ox, oy, cols, rows):
     lines = []
     for cy in range(rows):
         line = ""
+        cells = []
         for cx in range(cols):
             cell = []
             for r in range(16):
                 i = ((oy + cy * 16 + r) * w + ox + cx * 8) * 3
                 cell.append(sum(1 << p for p in range(8) if px[i + p * 3] > 0x60))
-            line += glyphs.get(tuple(cell), "?")
+            cells.append(tuple(cell))
+        cx = 0
+        while cx < len(cells):
+            pair = tuple(b for r in range(16) for b in (cells[cx][r], cells[cx + 1][r])) if cx + 1 < len(cells) else None
+            if cells[cx] not in glyphs and pair in wide:      # a wide character takes two cells
+                line += wide[pair]
+                cx += 1
+            else:
+                line += glyphs.get(cells[cx], "?")
+            cx += 1
         lines.append(line.rstrip())
     return lines
 
@@ -983,6 +993,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         print(("ok  " if good else "FAIL"), f"({name}) Ctrl-F finds text")
         fails += not good
         if good:
+            # The text found is drawn on a different background wherever it shows in the window.
+            time.sleep(1.5)
+            w, h, px = screendump()
+            hl = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (0x80, 0x60, 0x20))
+            good = hl >= 100
+            print(("ok  " if good else "FAIL"), f"({name}) the editor marks the text Ctrl-F looked for ({hl} pixels)")
+            fails += not good
+        if good:
             monitor("sendkey ctrl-s")
             good = until(b"bfiles: saved /tmp/g.txt", mark)
         monitor("sendkey ctrl-q")
@@ -1206,6 +1224,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-D in the editor copies the line under the cursor below it.
+        mark = len(out)
+        q.stdin.write(b"printf 'foo\\nbar\\n' > /tmp/dd.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/dd.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/dd.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/dd.txt", mark)
+        if good:
+            monitor("sendkey ctrl-d", "sendkey x", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/dd.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/dd.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"foo\r\nxfoo\r\nbar\r\nend2", mark) or until(b"foo\nxfoo\nbar\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-D in the editor copies the line below it")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Ctrl-W in the editor deletes the word before the cursor.
         mark = len(out)
         q.stdin.write(b"printf 'foo bar baz\\n' > /tmp/dw.txt\r"); q.stdin.flush()
@@ -1228,6 +1271,274 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         good = good and (until(b"foo x\r\nend2", mark) or until(b"foo x\nend2", mark))
         print(("ok  " if good else "FAIL"), f"({name}) Ctrl-W in the editor deletes the word before the cursor")
         fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The editor shows UTF-8 and moves, deletes by character: Right then Backspace takes off one hiragana (3 bytes).
+        mark = len(out)
+        q.stdin.write(b"printf '\\343\\201\\202\\343\\201\\204\\343\\201\\206\\n' > /tmp/ju.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ju.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ju.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ju.txt", mark)
+        if good:
+            monitor("sendkey ctrl-e")                   # the cursor is off the text, which is drawn plain
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            shown = any(l.startswith("あいう") for l in lines)
+            if not shown:
+                print("\n".join(l for l in lines if l))
+            print(("ok  " if shown else "FAIL"), f"({name}) the editor draws Japanese text")
+            fails += not shown
+            monitor("sendkey ctrl-a", "sendkey right", "sendkey backspace", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ju.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"echo size $(wc -c < /tmp/ju.txt) end\r"); q.stdin.flush()
+        good = good and until(b"size 7 end", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the editor moves and deletes by character")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Ctrl-End and Ctrl-Home in the editor go to the end and the start of the text.
+        mark = len(out)
+        q.stdin.write(b"printf 'ab\\ncd\\n' > /tmp/ce.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ce.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ce.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ce.txt", mark)
+        if good:
+            monitor("sendkey ctrl-end", "sendkey x", "sendkey ctrl-home", "sendkey y", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/ce.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ce.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"yab\r\ncd\r\nxend2", mark) or until(b"yab\ncd\nxend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Home and Ctrl-End in the editor go to the start and the end of the text")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Shift-arrows select in the editor; typing replaces the selection, Ctrl-C copies it and Ctrl-W cuts it.
+        mark = len(out)
+        q.stdin.write(b"printf 'hello world\\n' > /tmp/ds.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ds.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ds.txt", mark)
+        if good:
+            monitor("sendkey ctrl-a", *["sendkey shift-right"] * 5, "sendkey ctrl-c")
+            good = until(b"bfiles: copied 5", mark)
+            monitor("sendkey x", "sendkey ctrl-e", "sendkey ctrl-v")
+            good = good and until(b"bfiles: pasted 5", mark)
+            monitor("sendkey ctrl-a", "sendkey shift-right", "sendkey ctrl-w")
+            good = good and until(b"bfiles: cut 1", mark)
+            monitor("sendkey ctrl-s")
+            good = good and until(b"bfiles: saved /tmp/ds.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/ds.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b" worldhello\r\nend2", mark) or until(b" worldhello\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Shift-arrows select in the editor and typing, Ctrl-C and Ctrl-W work on the selection")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The file list and the viewer of bfiles draw UTF-8 with the big font: a file named with a hiragana, and its text.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/jp; printf '\\343\\201\\202 \\343\\201\\204\\n' > \"/tmp/jp/$(printf '\\343\\201\\202').txt\"\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/jp\r"); q.stdin.flush()
+        good = until(b"bfiles: dir /tmp/jp", mark) and until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = any(l.startswith("あ.txt") for l in lines)
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) the file list of bfiles draws a Japanese file name")
+        fails += not good
+        if good:
+            monitor("sendkey down", "sendkey down", "sendkey ret")
+            good = until(b"bfiles: view /tmp/jp/", mark)
+            time.sleep(1)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = good and any(l.strip() == "あ い" for l in lines)
+            if not good:
+                print("\n".join(l for l in lines if l))
+            print(("ok  " if good else "FAIL"), f"({name}) the viewer of bfiles draws Japanese text")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Dragging over text in the editor selects it.
+        mark = len(out)
+        q.stdin.write(b"printf 'alpha beta\\n' > /tmp/dm.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/dm.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/dm.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/dm.txt", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            row = next((i for i, l in enumerate(lines) if l.strip() == "alpha beta"), None)
+            good = row is not None
+            if not good:
+                print("\n".join(l for l in lines if l))
+        if good:
+            def movep(dx, dy):
+                n = max(1, (max(abs(dx), abs(dy)) + 199) // 200)
+                monitor(*[f"mouse_move {dx * (i + 1) // n - dx * i // n} {dy * (i + 1) // n - dy * i // n}" for i in range(n)])
+            ty = 90 + row * 16 + 8
+            movep(72 + 2 * 8 + 4 - 512, ty - 384)
+            monitor("mouse_button 1")
+            movep(5 * 8, 0)
+            monitor("mouse_button 0")
+            time.sleep(0.5)
+            monitor("sendkey ctrl-c")
+            good = until(b"bfiles: copied 5", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) dragging over text in the editor selects it")
+        fails += not good
+        if good:
+            # The pointer is over "beta" now: a double click selects the word.
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+            time.sleep(0.5)
+            monitor("sendkey ctrl-c")
+            good = until(b"bfiles: copied 4", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a double click in the editor selects the word")
+            fails += not good
+        if good:
+            # And three presses in a row select the line with its newline.
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+            time.sleep(0.5)
+            monitor("sendkey ctrl-c")
+            good = until(b"bfiles: copied 11", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a triple click in the editor selects the line")
+            fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # A drag that leaves the window goes on: below the text it scrolls the editor and stretches the selection.
+        mark = len(out)
+        q.stdin.write(b"i=10; while [ $i -le 69 ]; do echo line-$i; i=$((i+1)); done > /tmp/ds.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ds.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1.5)
+            monitor("mouse_move -216 -135", "mouse_move -216 -135")     # from the screen centre to the first text row
+            monitor("mouse_button 1")
+            monitor(*["mouse_move 0 8"] * 70)
+            monitor("mouse_button 0")
+            # The header of the editor shows the number of the cursor's row: the visible rows are 23, so a row past 40
+            # is there only if the motion outside the window reached the editor and scrolled it. A slow guest is still
+            # working through the motion when the button is let go, so look until the number settles or 40 s pass.
+            good = False
+            for _ in range(40):
+                time.sleep(1)
+                w, h, px = screendump()
+                lines = screen_text_at(px, w, 72, 90, 60, 26)
+                mt = re.search(r"\^U (\d+)", lines[0])
+                good = mt is not None and int(mt.group(1)) >= 40
+                if good:
+                    break
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) a drag that leaves the editor window scrolls it")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        # With the pointer resting below the window and the button still held, the editor goes on scrolling.
+        time.sleep(4)                                       # bwm waits for the ^Q byte before it ends
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/ds.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/ds.txt", mark)
+        if good:
+            time.sleep(1.5)
+            monitor("mouse_move -216 -135", "mouse_move -216 -135")
+            monitor("mouse_button 1")
+            monitor(*["mouse_move 0 60"] * 7)
+            good = False
+            for _ in range(40):
+                time.sleep(1)
+                w, h, px = screendump()
+                lines = screen_text_at(px, w, 72, 90, 60, 26)
+                mt = re.search(r"\^U (\d+)", lines[0])
+                good = mt is not None and int(mt.group(1)) >= 60
+                if good:
+                    break
+            monitor("mouse_button 0")
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) a drag held below the editor window keeps scrolling it")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The clock in the task bar follows TZ (POSIX form): XXX-5 is five hours east of UTC.
+        import datetime
+        utc_h = datetime.datetime.utcnow().hour    # the guest clock comes from the host RTC
+        mark = len(out)
+        q.stdin.write(b"TZ=XXX-5 bwm -n -c bsys\r"); q.stdin.flush()
+        good = until(b"bsys: window", mark) or until(b"bwm: ", mark)
+        if good:
+            time.sleep(2)
+            w, h, px = screendump()
+            clk = screen_text_at(px, w, w - 52 - 12 - 48 + 4, h - 24 + 4, 5, 1)[0]
+            hh = clk[:2]
+            good = hh.isdigit() and int(hh) in ((utc_h + 4) % 24, (utc_h + 5) % 24, (utc_h + 6) % 24)
+            if not good:
+                print("clock:", repr(clk), "utc hour:", utc_h)
+        print(("ok  " if good else "FAIL"), f"({name}) the task bar clock follows TZ")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
@@ -1334,13 +1645,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bfiles: dotfiles hidden", mark)
         print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
         fails += not good
-        # s in the list sorts the files by size (largest first) or back by name.
+        # s in the list sorts the files by size (largest first), then by time (newest first), then back by name.
         if good:
             monitor("sendkey s")
             good = until(b"bfiles: sorted by size", mark)
             monitor("sendkey s")
+            good = good and until(b"bfiles: sorted by time", mark)
+            monitor("sendkey s")
             good = good and until(b"bfiles: sorted by name", mark)
-        print(("ok  " if good else "FAIL"), f"({name}) s in bfiles toggles the sort order")
+        print(("ok  " if good else "FAIL"), f"({name}) s in bfiles cycles the sort order")
         fails += not good
         # R in the list reads the directory again (so a file made elsewhere shows).
         if good:
@@ -1357,6 +1670,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey g")
             good = good and until(b"bfiles: top 0", mark2)
         print(("ok  " if good else "FAIL"), f"({name}) g and G in bfiles jump to the top and the end")
+        fails += not good
+        # The time order puts the file written last first.
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ts; echo a > /tmp/ts/aa; sleep 2; echo z > /tmp/ts/zz; bwm -n -c bfiles /tmp/ts\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey s", "sendkey s")
+            good = until(b"bfiles: sorted by time", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 24)
+            good = lines[2].startswith("zz") and lines[3].startswith("aa")
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) s twice in bfiles puts the newest file first")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -1425,6 +1761,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
+        # + doubles the scale about the middle: a red middle pixel of 3 x 3 is 120 x 120 cells, then 240 x 240.
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        pix = "".join("\\000\\000\\377" if i != 4 else "\\377\\000\\000" for i in range(9))
+        q.stdin.write(f"printf 'P6 3 3 255\\n{pix}' > /tmp/nf/z.ppm; bwm -n -c bview /tmp/nf/z.ppm\r".encode()); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        r0 = r1 = 0
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            r0 = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            monitor("sendkey equal")
+            time.sleep(2)
+            w, h, px = screendump()
+            r1 = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            good = 10000 < r0 < 20000 and r1 > 3 * r0
+        print(("ok  " if good else "FAIL"), f"({name}) + zooms the image in bview ({r0} then {r1} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
@@ -1462,6 +1821,131 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey ret")
             good = until(b"bfiles: image /tmp/ni/p.ppm", mark) and until(b"bview: window", mark)
         print(("ok  " if good else "FAIL"), f"({name}) the arrow, Home and End keys and Enter work on the bfiles list")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Delete twice in the bfiles list deletes the entry under the cursor, as D does.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/dk; echo x > /tmp/dk/a.txt; bwm -n -c bfiles /tmp/dk\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down", "sendkey delete")
+            time.sleep(0.5)
+            monitor("sendkey delete")
+            good = until(b"bfiles: deleted /tmp/dk/a.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Delete twice in the bfiles list deletes the entry under the cursor")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # e in the bfiles list edits the file under the cursor without opening the viewer first.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/el; echo hi > /tmp/el/a.txt; bwm -n -c bfiles /tmp/el\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down", "sendkey e")
+            good = until(b"bfiles: edit /tmp/el/a.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) e in the bfiles list edits the file under the cursor")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The title row of bfiles says when the list is not sorted by name.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ff; bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        t0 = t1 = 0
+        if good:
+            time.sleep(1.5)
+            def white():
+                w, h, px = screendump()
+                return sum(1 for y in range(90, 106) for x in range(72, 72 + 480) if tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255))
+            t0 = white()
+            mark2 = len(out)
+            monitor("sendkey s")
+            good = until(b"bfiles: sorted by size", mark2)
+            time.sleep(1)
+            t1 = white()
+            good = good and t0 > 20 and t1 > t0 + 40
+        print(("ok  " if good else "FAIL"), f"({name}) the bfiles title row names a sort order ({t0} then {t1} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # - in the bfiles list goes back to the directory shown before.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ff; HOME=/tmp bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            mark2 = len(out)
+            monitor("sendkey minus")
+            good = until(b"bfiles: no earlier directory", mark2)
+        if good:
+            mark2 = len(out)
+            monitor("sendkey shift-grave_accent")
+            good = until(b"bfiles: dir /tmp\r\n", mark2)
+        if good:
+            mark2 = len(out)
+            monitor("sendkey minus")
+            good = until(b"bfiles: dir /tmp/ff\r\n", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) - in the bfiles list goes back to the earlier directory")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # ~ in the bfiles list goes to the home directory.
+        mark = len(out)
+        q.stdin.write(b"HOME=/tmp bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            mark2 = len(out)
+            monitor("sendkey shift-grave_accent")
+            good = until(b"bfiles: dir /tmp\r\n", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) ~ in the bfiles list goes to the home directory")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # / and the start of a name moves the cursor of the bfiles list to the first entry that begins with it.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ff; echo a > /tmp/ff/alpha; echo b > /tmp/ff/beta; echo g > /tmp/ff/gamma; bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey slash", "sendkey g")
+            good = until(b"bfiles: cursor 3", mark)
+        if good:
+            mark2 = len(out)
+            monitor("sendkey backspace", "sendkey b")
+            good = until(b"bfiles: cursor 2", mark2)
+        if good:
+            mark2 = len(out)
+            monitor("sendkey z")
+            good = until(b"bfiles: no name starts with bz", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) / and the start of a name moves the bfiles cursor")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -1625,6 +2109,65 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             lines = screen_text_at(px, w, 72, 90, 80, 24)
             good = any(l.strip() == "term" for l in lines) and not any(l.startswith("alt") for l in lines)
             print(("ok  " if good else "FAIL"), f"({name}) leaving the alternate screen brings the shell's screen back")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # UTF-8: box drawing takes one cell and Japanese two, both drawn from the console's font.
+            typed("printf 'u\\342\\224\\200\\343\\201\\202v\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "u\u2500\u3042v" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) the terminal draws UTF-8 characters from the font, wide ones in two cells")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # Deleting the right half of a wide character leaves no half of it behind: "x", a hiragana, "y", then the cursor
+            # on the hiragana's second cell and one character deleted gives "x" and "y" with a blank between.
+            typed("printf 'x\\343\\201\\202y\\r\\033[2\\103\\033[1\\120\\n'")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "x y" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) deleting half of a wide character in the terminal blanks the other half")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # Alt-Space turns romaji into hiragana: "konnnichiha" is the greeting and "kitte" has a small tsu in it.
+            monitor(*[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-spc")
+            typed("konnnichihakitte")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "\u3053\u3093\u306b\u3061\u306f\u304d\u3063\u3066" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Space types romaji as hiragana")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # The letters typed that make no kana yet show in the task bar next to the mark; Backspace takes them back.
+            def bar_white():
+                w, h, px = screendump()
+                return sum(1 for y in range(744, 768) for x in range(836, 912) if tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255))
+            time.sleep(1)
+            n0 = bar_white()
+            monitor("sendkey k")
+            time.sleep(1.5)
+            n1 = bar_white()
+            monitor("sendkey backspace")
+            time.sleep(1.5)
+            n2 = bar_white()
+            good = n1 > n0 and n2 == n0
+            print(("ok  " if good else "FAIL"), f"({name}) the task bar shows the romaji letters waiting for a kana ({n0}, {n1}, {n2})")
+            fails += not good
+            # A second Alt-Space gives katakana, a third turns the mode off.
+            monitor("sendkey alt-spc", "sendkey alt-spc", *[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-spc", "sendkey alt-spc")
+            typed("kitte")
+            monitor("sendkey alt-spc")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any(l.strip() == "\u30ad\u30c3\u30c6" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) a second Alt-Space types katakana")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
