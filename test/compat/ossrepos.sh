@@ -88,6 +88,8 @@ rs fastrand https://github.com/smol-rs/fastrand v2.3.0
 rs itoa https://github.com/dtolnay/itoa 1.0.11
 rs either https://github.com/rayon-rs/either 1.13.0
 rs smallvec https://github.com/servo/rust-smallvec v1.13.2
+rs arrayvec https://github.com/bluss/arrayvec 0.7.6
+rs fnv https://github.com/servo/rust-fnv v1.0.7
 
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
