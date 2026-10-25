@@ -91,6 +91,29 @@ rs smallvec https://github.com/servo/rust-smallvec v1.13.2
 rs arrayvec https://github.com/bluss/arrayvec 0.7.6
 rs fnv https://github.com/servo/rust-fnv v1.0.7
 
+# A Java project built with Maven on the host: its classes, test classes, test
+# resources (the tests open them by their path in the source tree) and the
+# libraries of its tests, and the JUnit console launcher that runs them.
+jm() {  # NAME URL TAG
+  [ -f "$out/$1.tar.gz" ] && return 0
+  mkdir "$work/jm-$1"
+  git -C "$work/jm-$1" init -q
+  git -C "$work/jm-$1" fetch -q --depth 1 "$2" "$3"
+  git -C "$work/jm-$1" checkout -q FETCH_HEAD
+  rm -rf "$work/jm-$1/.git"
+  mkdir -p "$work/jm-top-$1/$1/libs"
+  (cd "$work/jm-$1" && mvn -q -B test-compile dependency:copy-dependencies -DincludeScope=test \
+      -DoutputDirectory="$work/jm-top-$1/$1/libs" >/dev/null \
+    && mvn -q -B dependency:copy -Dartifact=org.junit.platform:junit-platform-console-standalone:1.11.0 \
+      -DoutputDirectory="$work/jm-top-$1/$1" >/dev/null \
+    && cp -r target/classes target/test-classes "$work/jm-top-$1/$1/" \
+    && { [ ! -d src/test/resources ] || { mkdir -p "$work/jm-top-$1/$1/src/test" && cp -r src/test/resources "$work/jm-top-$1/$1/src/test/"; }; })
+  mv "$work/jm-top-$1/$1"/junit-platform-console-standalone-*.jar "$work/jm-top-$1/$1/junit-console.jar"
+  tar -C "$work/jm-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
+}
+
+jm commons-codec https://github.com/apache/commons-codec rel/commons-codec-1.17.1
+
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
   [ -f "$out/$1.tar.gz" ] && return 0
