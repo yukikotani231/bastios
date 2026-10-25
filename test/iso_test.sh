@@ -1787,6 +1787,36 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The mouse wheel zooms the image in bview: up in, down out.
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bview /tmp/nf/z.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        r0 = r1 = r2 = 0
+        if good:
+            time.sleep(1.5)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 140 150")
+            time.sleep(0.5)
+            def red():
+                w, h, px = screendump()
+                return sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            r0 = red()
+            monitor("mouse_move 0 0 1")
+            time.sleep(2)
+            r1 = red()
+            monitor("mouse_move 0 0 -1", "mouse_move 0 0 -1")
+            time.sleep(2)
+            r2 = red()
+            good = r0 > 10000 and r1 > 3 * r0 and r2 < r0
+        print(("ok  " if good else "FAIL"), f"({name}) the wheel zooms the image in bview ({r0}, {r1}, {r2} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # A click on a .ppm in the bfiles list opens it in the image viewer.
         mark = len(out)
         q.stdin.write(b"mkdir /tmp/ni; cp /tmp/nf/t.ppm /tmp/ni/p.ppm; bwm -n -c bfiles /tmp/ni\r"); q.stdin.flush()
