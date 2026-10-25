@@ -1824,7 +1824,7 @@ dispatch:;
                 printf("bfiles: sorted by %s\n", bf_sort == 1 ? "size" : bf_sort == 2 ? "time" : "name");
                 fflush(stdout);
                 bf_load_dir();
-            } else if (c == 'h' && !bf_viewing) {
+            } else if ((c == 'h' || c == '.') && !bf_viewing) {
                 bf_hidden = !bf_hidden;
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);

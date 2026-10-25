@@ -833,6 +833,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and last != first and len(first) > 2 and len(last) > 2
             print(("ok  " if good else "FAIL"), f"({name}) G and g in the process list go to the last and the first ({last!r} {first!r})")
             fails += not good
+            # Page Down moves a page along the list and Page Up back to where it was.
+            mark3 = len(out)
+            monitor("sendkey pgdn")
+            good = until(b"bsys: select", mark3)
+            down = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey pgup")
+            good = good and until(b"bsys: select", mark3)
+            up = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            good = good and down != first and up == first
+            print(("ok  " if good else "FAIL"), f"({name}) Page Down and Page Up move along the process list ({first!r} {down!r} {up!r})")
+            fails += not good
             # n sorts the list by name: the first name is not after the last, and n again goes back to newest first.
             mark3 = len(out)
             monitor("sendkey n")
@@ -1768,6 +1780,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey h")
             good = good and until(b"bfiles: dotfiles hidden", mark)
         print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
+        fails += not good
+        # . does what h does.
+        if good:
+            mark2 = len(out)
+            monitor("sendkey dot")
+            good = until(b"bfiles: dotfiles shown", mark2)
+            mark2 = len(out)
+            monitor("sendkey dot")
+            good = good and until(b"bfiles: dotfiles hidden", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) . in bfiles toggles the dotfiles too")
         fails += not good
         # s in the list sorts the files by size (largest first), then by time (newest first), then back by name.
         if good:

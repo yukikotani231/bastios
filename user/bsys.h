@@ -21,6 +21,8 @@
 
 #define BS_ROWS 12
 #define BS_MAXPROC 64
+#define BS_PGUP 0x100                             /* keys that are not characters */
+#define BS_PGDN 0x101
 #define BS_LIST 8                                 /* process rows shown, rows 2 .. 9 */
 
 struct bs_proc { int pid; char state; char name[24]; };
@@ -221,7 +223,14 @@ static int bsys_main(void)
             bs_esc = c == '[' ? 2 : 0;
             continue;
         }
-        if (bs_esc == 2) {
+        if (bs_esc == 2 && (c == '5' || c == '6')) {          /* Page Up and Page Down are ESC [ 5 ~ and ESC [ 6 ~ */
+            bs_esc = c;
+            continue;
+        }
+        if (bs_esc == '5' || bs_esc == '6') {
+            c = c == '~' ? (bs_esc == '5' ? BS_PGUP : BS_PGDN) : 0;
+            bs_esc = 0;
+        } else if (bs_esc == 2) {
             bs_esc = 0;
             c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'H' ? 'g' : c == 'F' ? 'G' : 0;
         }
@@ -238,6 +247,9 @@ static int bsys_main(void)
             }
         } else if (bs_tasks && (c == 'j' || c == 'k')) {
             bs_move(c == 'j' ? 1 : -1);
+            bs_paint_tasks();
+        } else if (bs_tasks && (c == BS_PGUP || c == BS_PGDN)) {            /* a page up and a page down */
+            bs_move(c == BS_PGUP ? -BS_LIST : BS_LIST);
             bs_paint_tasks();
         } else if (bs_tasks && (c == 'g' || c == 'G')) {            /* the first and the last of the list */
             bs_move(c == 'g' ? -bs_nproc : bs_nproc);
