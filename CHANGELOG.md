@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- The `bfiles` editor copies the line under the cursor below it with Ctrl-D.
 - The title row of `bfiles` adds `[by size]` or `[by time]` when the list is not sorted by name.
 - In the `bfiles` list `-` goes back to the directory shown before the last change.
 - In the `bfiles` list `~` goes to the home directory (`$HOME`, or `/` when it is not set).

@@ -1224,6 +1224,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-D in the editor copies the line under the cursor below it.
+        mark = len(out)
+        q.stdin.write(b"printf 'foo\\nbar\\n' > /tmp/dd.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/dd.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/dd.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/dd.txt", mark)
+        if good:
+            monitor("sendkey ctrl-d", "sendkey x", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/dd.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/dd.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"foo\r\nxfoo\r\nbar\r\nend2", mark) or until(b"foo\nxfoo\nbar\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-D in the editor copies the line below it")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Ctrl-W in the editor deletes the word before the cursor.
         mark = len(out)
         q.stdin.write(b"printf 'foo bar baz\\n' > /tmp/dw.txt\r"); q.stdin.flush()
