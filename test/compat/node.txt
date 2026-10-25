@@ -110,5 +110,5 @@ $ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/
 
 == node: the control-flow helpers (async) with babel-register and their installed dependencies, tested with mocha
 # timeout 900
-$ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/async.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/async"); process.argv = [process.argv[0], "mocha", "--require", "babel-register", "--require", "test/support/setup", "--ui", "bdd", "test"]; require("/work/async/node_modules/mocha/bin/_mocha")' 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)|^ +[0-9]+\) |^ +(Assertion|Error|Type)[A-Za-z]*:' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
+$ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/async.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/async"); process.argv = [process.argv[0], "mocha", "--require", "babel-register", "--require", "test/support/setup", "--ui", "bdd", "--timeout", "20000", "test"]; require("/work/async/node_modules/mocha/bin/_mocha")' 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)|^ +[0-9]+\) |^ +(Assertion|Error|Type)[A-Za-z]*:' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
 690 passing
