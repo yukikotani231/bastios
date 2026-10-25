@@ -92,3 +92,18 @@ $ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/
 $ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/qs.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/qs"); process.argv = [process.argv[0], "tape", "test/**/*.js"]; require("/work/qs/node_modules/tape/bin/tape")' 2>&1 | bb grep -E '^# (tests|pass|fail)'
 # tests 740
 # pass  740
+
+== node: the cookie parser (cookie) tested with mocha
+# timeout 900
+$ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/cookie.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/cookie"); process.argv = [process.argv[0], "mocha", "--check-leaks", "test/"]; require("/work/cookie/node_modules/mocha/bin/mocha.js")' 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
+52 passing
+
+== node: a static file sender (send) with its installed dependencies, tested with mocha and supertest over the loopback
+# timeout 900
+$ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/send.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/send"); process.argv = [process.argv[0], "mocha", "--check-leaks", "test/"]; require("/work/send/node_modules/mocha/bin/_mocha")' 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
+154 passing
+
+== node: the request body parsers (body-parser) with their installed dependencies, tested with mocha and supertest over the loopback
+# timeout 900
+$ bb rm -rf /disk/n/work; bb mkdir -p /disk/n/work; bb wget -q -O - HOSTURL/oss/body-parser.tar.gz | bb tar -xz -C /disk/n/work && bb chroot /disk/n /usr/local/bin/node -e 'process.chdir("/work/body-parser"); process.argv = [process.argv[0], "mocha", "--require", "test/support/env", "--check-leaks", "test/"]; require("/work/body-parser/node_modules/mocha/bin/mocha.js")' 2>&1 | bb grep -E '^ +[0-9]+ (passing|failing)' | bb sed 's/ ([0-9a-z]*)//; s/^ *//'
+262 passing
