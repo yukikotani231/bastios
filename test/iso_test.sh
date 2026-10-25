@@ -725,6 +725,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     break
             print(("ok  " if good else "FAIL"), f"({name}) a double click on the title bar restores a maximized window")
             fails += not good
+            blue = snapped("alt-up")
+            blue = snapped("alt-down")
+            good = not blue(1000)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Down puts a maximized window back")
+            fails += not good
+            blue = snapped("alt-down")
+            good = not any(blue(x) for x in range(0, 1000, 8))
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Down minimizes a window that is not maximized")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
