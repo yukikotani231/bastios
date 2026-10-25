@@ -102,7 +102,7 @@ static void bs_paint_tasks(void)
         bf_put_row(2 + i, t, strlen(t), 0x00D8D8D8, k == bs_sel ? 0x00305090 : 0x00101018);
     }
     bf_put_row(10, "", 0, 0x00D8D8D8, 0x00101018);
-    bf_put_row(11, "  j/k: move  x: end the process  p: back", 41, 0x00808090, 0x00101018);
+    bf_put_row(11, "  j/k g/G: move  x: end  p: back", 32, 0x00808090, 0x00101018);
 }
 
 static void bs_row(int r, const char *k, const char *v)
@@ -205,7 +205,7 @@ static int bsys_main(void)
         }
         if (bs_esc == 2) {
             bs_esc = 0;
-            c = c == 'A' ? 'k' : c == 'B' ? 'j' : 0;
+            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'H' ? 'g' : c == 'F' ? 'G' : 0;
         }
         if (c == 'p') {
             bs_tasks = !bs_tasks;
@@ -220,6 +220,9 @@ static int bsys_main(void)
             }
         } else if (bs_tasks && (c == 'j' || c == 'k')) {
             bs_move(c == 'j' ? 1 : -1);
+            bs_paint_tasks();
+        } else if (bs_tasks && (c == 'g' || c == 'G')) {            /* the first and the last of the list */
+            bs_move(c == 'g' ? -bs_nproc : bs_nproc);
             bs_paint_tasks();
         } else if (bs_tasks && c == 'x' && bs_nproc) {
             int pid = bs_procs[bs_sel].pid;

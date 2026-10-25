@@ -821,6 +821,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = False
             print(("ok  " if good else "FAIL"), f"({name}) x ends the selected process")
             fails += not good
+            # G goes to the last process and g to the first.
+            mark3 = len(out)
+            monitor("sendkey shift-g")
+            good = until(b"bsys: select", mark3)
+            last = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey g")
+            good = good and until(b"bsys: select", mark3)
+            first = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            good = good and last != first and len(first) > 2 and len(last) > 2
+            print(("ok  " if good else "FAIL"), f"({name}) G and g in the process list go to the last and the first ({last!r} {first!r})")
+            fails += not good
             monitor("sendkey p")
             good = until(b"bsys: system", mark)
             print(("ok  " if good else "FAIL"), f"({name}) p goes back to the figures")
@@ -1780,6 +1792,36 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             r1 = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
             good = 10000 < r0 < 20000 and r1 > 3 * r0
         print(("ok  " if good else "FAIL"), f"({name}) + zooms the image in bview ({r0} then {r1} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The mouse wheel zooms the image in bview: up in, down out.
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bview /tmp/nf/z.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        r0 = r1 = r2 = 0
+        if good:
+            time.sleep(1.5)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 140 150")
+            time.sleep(0.5)
+            def red():
+                w, h, px = screendump()
+                return sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            r0 = red()
+            monitor("mouse_move 0 0 1")
+            time.sleep(2)
+            r1 = red()
+            monitor("mouse_move 0 0 -1", "mouse_move 0 0 -1")
+            time.sleep(2)
+            r2 = red()
+            good = r0 > 10000 and r1 > 3 * r0 and r2 < r0
+        print(("ok  " if good else "FAIL"), f"({name}) the wheel zooms the image in bview ({r0}, {r1}, {r2} pixels)")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
