@@ -1803,6 +1803,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # ~ in the bfiles list goes to the home directory.
+        mark = len(out)
+        q.stdin.write(b"HOME=/tmp bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            mark2 = len(out)
+            monitor("sendkey shift-grave_accent")
+            good = until(b"bfiles: dir /tmp\r\n", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) ~ in the bfiles list goes to the home directory")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # / and the start of a name moves the cursor of the bfiles list to the first entry that begins with it.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/ff; echo a > /tmp/ff/alpha; echo b > /tmp/ff/beta; echo g > /tmp/ff/gamma; bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()

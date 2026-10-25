@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- In the `bfiles` list `~` goes to the home directory (`$HOME`, or `/` when it is not set).
 - In the `bfiles` list `/` and the start of a name move the cursor to the first entry that begins with it (Backspace takes a letter back, Enter or Esc ends it).
 - `bview` zooms: `+` and `-` double and halve the scale about the middle of the window, `h j k l` or the arrow keys move about a zoomed image, `0` goes back.
 - The `bfiles` editor marks the text of the last Ctrl-F wherever it shows in the window.
