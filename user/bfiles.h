@@ -55,6 +55,8 @@ static uint32_t bf_pix[BF_WIDTH * BF_MAXROWS * BF_CH];
 static struct bf_ent bf_ents[BF_MAXENT];
 static int bf_nent, bf_top;                     /* the entries (".." is the first) and the first one shown */
 static char bf_cwd[PATH_MAX] = "/";
+static char bf_last[PATH_MAX];      /* the directory the list showed before the last change of directory */
+static char bf_shown[PATH_MAX];
 static int bf_viewing;
 static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
 static int bf_finding;                    /* / was pressed in the list: the start of a name is being typed, and the cursor follows it */
@@ -238,6 +240,10 @@ static void bf_fit(const char *name, int w, char *out, size_t outsz)
 
 static void bf_load_dir(void)
 {
+    if (strcmp(bf_shown, bf_cwd) != 0) {
+        snprintf(bf_last, sizeof bf_last, "%s", bf_shown);
+        snprintf(bf_shown, sizeof bf_shown, "%s", bf_cwd);
+    }
     bf_nent = 0;
     bf_top = 0;
     bf_sel = 0;
@@ -1754,6 +1760,14 @@ static int bfiles_main(int argc, char **argv)
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);
                 bf_load_dir();
+            } else if (c == '-' && !bf_viewing) {
+                if (bf_last[0] == '/') {
+                    snprintf(bf_cwd, sizeof bf_cwd, "%s", bf_last);
+                    bf_load_dir();
+                } else {
+                    printf("bfiles: no earlier directory\n");
+                    fflush(stdout);
+                }
             } else if (c == '~' && !bf_viewing) {
                 const char *home = getenv("HOME");
                 snprintf(bf_cwd, sizeof bf_cwd, "%s", home && home[0] == '/' ? home : "/");
