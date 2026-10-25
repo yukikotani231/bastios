@@ -1863,3 +1863,7 @@ node: node: a query string library (qs) with its installed dependencies, tested 
 node: node: the cookie parser (cookie) tested with mocha
 node: node: a static file sender (send) with its installed dependencies, tested with mocha and supertest over the loopback
 node: node: the request body parsers (body-parser) with their installed dependencies, tested with mocha and supertest over the loopback
+go: go: UUIDs (google/uuid), tested with go test
+go: go: command-line flags (spf13/pflag), tested with go test
+go: go: an HTTP router (gorilla/mux), tested with go test over httptest
+go: go: a JSON path library (tidwall/gjson) with a vendored dependency, tested with go test -mod=vendor
