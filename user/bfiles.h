@@ -1717,7 +1717,10 @@ static int bfiles_main(int argc, char **argv)
                     else if (c == 'F' || (c == '~' && (num == 4 || num == 8))) bf_move_sel(bf_nent);
                     else if (c == '~' && num == 5) bf_move_sel(-page);
                     else if (c == '~' && num == 6) bf_move_sel(page);
-                    else
+                    else if (c == '~' && num == 3) {            /* Delete acts as D */
+                        c = 'D';
+                        goto dispatch;
+                    } else
                         continue;
                     bf_paint();
                     if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
@@ -1732,6 +1735,7 @@ static int bfiles_main(int argc, char **argv)
                     continue;
                 }
             }
+dispatch:;
             int was_confirm = bf_confirm;
             bf_confirm = 0;
             char was_tpath[PATH_MAX];

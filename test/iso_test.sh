@@ -1828,6 +1828,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Delete twice in the bfiles list deletes the entry under the cursor, as D does.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/dk; echo x > /tmp/dk/a.txt; bwm -n -c bfiles /tmp/dk\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down", "sendkey delete")
+            time.sleep(0.5)
+            monitor("sendkey delete")
+            good = until(b"bfiles: deleted /tmp/dk/a.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Delete twice in the bfiles list deletes the entry under the cursor")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # e in the bfiles list edits the file under the cursor without opening the viewer first.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/el; echo hi > /tmp/el/a.txt; bwm -n -c bfiles /tmp/el\r"); q.stdin.flush()
