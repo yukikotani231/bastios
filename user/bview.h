@@ -182,7 +182,7 @@ static int bview_main(int argc, char **argv)
         if (esc == 1 && c == '[') { esc = 2; continue; }
         if (esc == 2) {
             esc = 0;
-            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : 0;
+            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : c == 'H' ? '0' : 0;   /* Home resets the zoom */
         } else if (esc == 1) {
             break;
         }

@@ -1894,6 +1894,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = r0 > 10000 and r1 > 3 * r0 and r2 < r0
         print(("ok  " if good else "FAIL"), f"({name}) the wheel zooms the image in bview ({r0}, {r1}, {r2} pixels)")
         fails += not good
+        # Home puts the zoom back to the first size.
+        if good:
+            monitor("mouse_move 0 0 1")
+            time.sleep(1.5)
+            monitor("sendkey home")
+            time.sleep(2)
+            r3 = red()
+            good = abs(r3 - r0) < r0 // 20
+        else:
+            r3 = 0
+        print(("ok  " if good else "FAIL"), f"({name}) Home resets the zoom in bview ({r3} against {r0} pixels)")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
