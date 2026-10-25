@@ -1555,6 +1555,17 @@ static void bf_open(int i)
     }
 }
 
+/* e in the list: opens the file under the cursor straight in the editor. */
+static void bf_edit_selected(void)
+{
+    if (bf_sel <= 0 || bf_sel >= bf_nent || bf_ents[bf_sel].dir)
+        return;
+    char p[PATH_MAX];
+    bf_path_of(bf_ents[bf_sel].name, p, sizeof p);
+    bf_load_file(p);
+    be_start();
+}
+
 static void bf_click(int row)
 {
     if (bf_viewing) {
@@ -1759,6 +1770,8 @@ static int bfiles_main(int argc, char **argv)
                 bf_spawn("bview", bf_vpath, "image");
             else if (c == 'e' && bf_viewing)
                 be_start();
+            else if (c == 'e' && !bf_viewing)
+                bf_edit_selected();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
             else if (c == 'R' && !bf_viewing) {

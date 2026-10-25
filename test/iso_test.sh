@@ -1828,6 +1828,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # e in the bfiles list edits the file under the cursor without opening the viewer first.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/el; echo hi > /tmp/el/a.txt; bwm -n -c bfiles /tmp/el\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey down", "sendkey e")
+            good = until(b"bfiles: edit /tmp/el/a.txt", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) e in the bfiles list edits the file under the cursor")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # The title row of bfiles says when the list is not sorted by name.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/ff; bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
