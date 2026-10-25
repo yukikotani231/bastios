@@ -1866,6 +1866,8 @@ node: node: the cookie parser (cookie) tested with mocha
 node: node: a static file sender (send) with its installed dependencies, tested with mocha and supertest over the loopback
 node: node: the request body parsers (body-parser) with their installed dependencies, tested with mocha and supertest over the loopback
 node: node: the control-flow helpers (async) with babel-register and their installed dependencies, tested with mocha
+node: node: the media type matcher (type-is) with its installed dependencies, tested with mocha
+node: node: the time string converter (ms) tested with mocha and expect.js
 go: go: UUIDs (google/uuid), tested with go test
 go: go: command-line flags (spf13/pflag), tested with go test
 go: go: an HTTP router (gorilla/mux), tested with go test over httptest
