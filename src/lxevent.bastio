@@ -913,7 +913,11 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     return KEEP;
   }
   let e = ep.x;
-  let ready = ep_ready(k, pid);
+  // Which instances are ready only matters to an entry that watches another
+  // instance, and working it out looks at every entry of every instance
+  // (an epoll_wait with a timeout of 0 must come back in a millisecond), so
+  // it waits until the scan meets such an entry.
+  let mut ready = EP_MASK;
   let most = smaller(maxevents, EP_FDS);
   // Scanning starts where the last call stopped, so a few events per call
   // still reach every ready entry in turn, as Linux's ready list does.
@@ -926,7 +930,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
   let mut t = 0;
   let mut last = EP_FDS;
   while t < EP_FDS && got < most
-    invariant t <= EP_FDS && got <= t && got <= most && most <= EP_FDS && e < EP_N && start < EP_FDS && last <= EP_FDS && kok(k)
+    invariant t <= EP_FDS && got <= t && got <= most && most <= EP_FDS && e < EP_N && ready <= EP_MASK && start < EP_FDS && last <= EP_FDS && kok(k)
   {
     let j = (start + t) % EP_FDS;
     let mut w = evg(k, ep_at(e, j, 0));
@@ -936,6 +940,9 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     }
     let mut bits = 0;
     if w != 0 {
+      if ready == EP_MASK && ep_target(k, pid, e, j) < EP_N {
+        ready = ep_ready(k, pid);
+      }
       bits = ep_entry_ready(k, pid, e, j, ready);
     }
     if bits != 0 {
