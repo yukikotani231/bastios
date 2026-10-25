@@ -1748,6 +1748,7 @@ t_time: TZ naming a zone file reads it
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
 t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
 java: java: Eclipse JDT LS, the language server, finds a type error and answers a hover
+java: java: a real library (Apache Commons Codec) with its test libraries, tested with the JUnit console launcher
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
@@ -1881,3 +1882,4 @@ go: go: a JSON path library (tidwall/gjson) with a vendored dependency, tested w
 go: go: a semantic version library (Masterminds/semver) tested with go test -mod=vendor
 go: go: a map-to-struct decoder (mitchellh/mapstructure) tested with go test -mod=vendor
 go: go: a type conversion library (spf13/cast) tested with go test -mod=vendor
+busybox: dd one large read of a file
