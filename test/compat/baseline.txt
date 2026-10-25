@@ -1619,6 +1619,8 @@ rust: rust: a second real crate (fastrand) fetched from the host, built and test
 rust: rust: a third real crate (itoa) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a fourth real crate (either) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a fifth real crate (smallvec) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a sixth real crate (arrayvec) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a seventh real crate (fnv) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a compile error is reported
 rust: rust: rust-analyzer reports its version
 rust: rust: rust-analyzer finds a type error in a crate
