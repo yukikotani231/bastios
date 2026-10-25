@@ -89,7 +89,7 @@ const LO_APPEND: u64 = 0x400;
 const LO_NONBLOCK: u64 = 0x800;
 const LO_ASYNC: u64 = 0x2000;
 
-const READ_MAX: u64 = 262144;          // the most one read of a file returns
+const READ_MAX: u64 = 4194304;         // the most one read of a file returns
 const MAP_SHARED: u64 = 1;
 const MAP_FIXED: u64 = 0x10;
 const MAP_ANONYMOUS: u64 = 0x20;
