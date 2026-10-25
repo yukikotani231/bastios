@@ -183,6 +183,21 @@ failing:
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pluggy-1.7.0.tar.gz | tar xz && cd pluggy-1.7.0 && bad=; for f in $(find testing -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|")"; done; cd /root; rm -rf pluggy-1.7.0 /root/*.log'
 failing:
 
+== pytest: sqlparse's own tests: the lexer, the parser, formatting and splitting (file by file)
+# timeout 600
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/sqlparse-0.6.0.tar.gz | tar xz && cd sqlparse-0.6.0 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|")"; done; cd /root; rm -rf sqlparse-0.6.0 /root/*.log'
+failing:
+
+== pytest: tabulate's own tests: the output formats, alignment and number handling (file by file)
+# timeout 600
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/tabulate-0.10.0.tar.gz | tar xz && cd tabulate-0.10.0 && bad=; for f in $(find test -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|")"; done; cd /root; rm -rf tabulate-0.10.0 /root/*.log'
+failing:
+
+== pytest: pathspec's own tests: gitignore patterns and path matching (file by file)
+# timeout 600
+$ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/pathspec-1.1.1.tar.gz | tar xz && cd pathspec-1.1.1 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|")"; done; cd /root; rm -rf pathspec-1.1.1 /root/*.log'
+failing:
+
 == pytest: more-itertools' own tests: the recipes and the more module (file by file)
 # timeout 1500
 $ bb chroot /disk/a /bin/sh -c '. /root/v/bin/activate && pip install -q "pytest<9" hypothesis 2>&1 | tail -n 3; cd /root && wget -q -O - HOSTURL/wheels/more_itertools-11.2.1.tar.gz | tar xz && cd more_itertools-11.2.1 && bad=; for f in $(find tests -name "test_*.py" | sort); do timeout -s KILL 200 python -X faulthandler -m pytest -v -p no:cacheprovider $f > /root/$(echo $f | tr / _).log 2>&1 || bad="$bad $f"; done; echo "failing:$bad"; for f in $bad; do echo "== $f $(grep -E "^(FAILED|ERROR)" /root/$(echo $f | tr / _).log | sed "s/ - .*//;s/.*:://" | head -6 | tr "\n" " ") $(grep -E "^E  " /root/$(echo $f | tr / _).log | head -4 | cut -c1-110 | tr "\n" "|")"; done; cd /root; rm -rf more_itertools-11.2.1 /root/*.log'

@@ -65,3 +65,6 @@ h11-0.16.0.tar.gz https://files.pythonhosted.org/packages/01/ee/02a2c011bdab74c6
 markdown-3.11.2.tar.gz https://files.pythonhosted.org/packages/f4/32/0b4d0297064244f04af4331b65de16237cc3cce07474171ee14222a28981/markdown-3.11.2.tar.gz 87bf5d90f2d2882e2c02fcda182c2800456b985bff38913867c49706481514b0
 idna-3.20.tar.gz https://files.pythonhosted.org/packages/f5/08/8eea9d4b8302028f3abb2c0813953f7aec26d33b7a8960ed760e65ff29fa/idna-3.20.tar.gz a7db850025b95ded1eae8a46181a1a6c56c92c96f0e2b005d9ff8dc0210cab44
 pluggy-1.7.0.tar.gz https://files.pythonhosted.org/packages/bf/db/7fc19e6f2dc92a966727031389fc2e08b558f0f25eb7403c1119ad4713cd/pluggy-1.7.0.tar.gz d1eaa46ebb595891b860ab086b4d09c8588af65ebd4361b8e8f4bb8920b90ba8
+sqlparse-0.6.0.tar.gz https://files.pythonhosted.org/packages/5f/d3/3f06a1006f2261d1342aefb3c71eed02f5d4ca5bdbecd86ebc12ad38306e/sqlparse-0.6.0.tar.gz 113c35c75365ab9cc9c7231d68c6428fb11c085fc8e9eb1ad659b7ddbf6cd2b9
+tabulate-0.10.0.tar.gz https://files.pythonhosted.org/packages/46/58/8c37dea7bbf769b20d58e7ace7e5edfe65b849442b00ffcdd56be88697c6/tabulate-0.10.0.tar.gz e2cfde8f79420f6deeffdeda9aaec3b6bc5abce947655d17ac662b126e48a60d
+pathspec-1.1.1.tar.gz https://files.pythonhosted.org/packages/5a/82/42f767fc1c1143d6fd36efb827202a2d997a375e160a71eb2888a925aac1/pathspec-1.1.1.tar.gz 17db5ecd524104a120e173814c90367a96a98d07c45b2e10c2f3919fff91bf5a
