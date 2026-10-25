@@ -18,7 +18,8 @@
  * In the list n makes an empty file (untitled, untitled2, ...) and opens it
  * in the editor; c or x marks the entry under the cursor to copy (a file) or move (a file or
  * directory) and v puts it into the directory shown ("bfiles: copy PATH", "bfiles: move PATH",
- * then "bfiles: copied SRC to DST" or "bfiles: moved SRC to DST"). The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
+ * then "bfiles: copied SRC to DST" or "bfiles: moved SRC to DST"). / then the start of a name moves the cursor to the first
+ * entry that begins with it ("bfiles: cursor N"; Enter or Esc ends it). The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
  * window is open and "bfiles: dir PATH" or "bfiles: view PATH" as it
  * moves.
  * It is part of the bterm program, which runs it when started as "bfiles"
@@ -56,6 +57,9 @@ static int bf_nent, bf_top;                     /* the entries (".." is the firs
 static char bf_cwd[PATH_MAX] = "/";
 static int bf_viewing;
 static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
+static int bf_finding;                    /* / was pressed in the list: the start of a name is being typed, and the cursor follows it */
+static char bf_fbuf[40];
+static int bf_flen;
 static int bf_renaming;                   /* r was pressed: the new name is being typed */
 static char bf_tpath[PATH_MAX];           /* what r and D act on: the file in the viewer, or the entry under the cursor in the list */
 static char bf_rname[NAME_MAX + 1];
@@ -332,7 +336,7 @@ static void bf_paint(void)
             snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
         else
             snprintf(h, sizeof h, "%s", bf_vpath);
-        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
+        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming || bf_finding ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
             char t[BF_COLS + 1];
@@ -351,6 +355,8 @@ static void bf_paint(void)
     char h[BF_COLS + 1];
     if (bf_renaming)
         snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
+    else if (bf_finding)
+        snprintf(h, sizeof h, "Find: %.40s_", bf_fbuf);
     else if (bf_confirm)
         snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
     else
@@ -1553,6 +1559,34 @@ static void bf_move_sel(int by)
     fflush(stdout);
 }
 
+/* A key typed after / in the list: the cursor goes to the first entry whose name starts with what was typed (case ignored);
+ * Backspace takes a letter back, Enter or Esc ends it. */
+static void bf_find_key(int c)
+{
+    if (c == '\r' || c == '\n' || c == 27) {
+        bf_finding = 0;
+        return;
+    }
+    if (c == 127 || c == 8) {
+        if (bf_flen > 0)
+            bf_fbuf[--bf_flen] = 0;
+    } else if (c >= 32 && c < 127 && bf_flen < (int)sizeof bf_fbuf - 1) {
+        bf_fbuf[bf_flen++] = c;
+        bf_fbuf[bf_flen] = 0;
+    } else {
+        return;
+    }
+    for (int i = 1; i < bf_nent && bf_flen > 0; i++)
+        if (strncasecmp(bf_ents[i].name, bf_fbuf, bf_flen) == 0) {
+            bf_move_sel(i - bf_sel);
+            return;
+        }
+    if (bf_flen > 0) {
+        printf("bfiles: no name starts with %s\n", bf_fbuf);
+        fflush(stdout);
+    }
+}
+
 static int bfiles_main(int argc, char **argv)
 {
     char first[PATH_MAX] = "";                         /* a file given: show it (e edits it) */
@@ -1596,6 +1630,22 @@ static int bfiles_main(int argc, char **argv)
             int c = ((struct bwm_key *)buf)->ch;
             if (bf_renaming) {
                 bf_rename_key(c);
+                bf_paint();
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    break;
+                continue;
+            }
+            if (bf_finding) {
+                bf_find_key(c);
+                bf_paint();
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    break;
+                continue;
+            }
+            if (c == '/' && !bf_editing && !bf_viewing) {
+                bf_finding = 1;
+                bf_flen = 0;
+                bf_fbuf[0] = 0;
                 bf_paint();
                 if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
                     break;
