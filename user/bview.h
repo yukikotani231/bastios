@@ -164,9 +164,18 @@ static int bview_main(int argc, char **argv)
         int t = bwm_event(fd, buf);
         if (t < 0 || t == BWM_CLOSE)
             break;
-        if (t != BWM_KEY)
+        unsigned c;
+        if (t == BWM_KEY) {
+            c = ((struct bwm_key *)buf)->ch;
+        } else if (t == BWM_MOUSE) {                         /* the wheel zooms: up in, down out */
+            int wheel = (signed char)((((struct bwm_mouse *)buf)->buttons >> 8) & 0xFF);
+            if (!wheel)
+                continue;
+            c = wheel < 0 ? '+' : '-';
+            esc = 0;
+        } else {
             continue;
-        unsigned c = ((struct bwm_key *)buf)->ch;
+        }
         long dx = 0, dy = 0;
         int dz = 0, reset = 0;
         if (esc == 0 && c == 27) { esc = 1; continue; }
