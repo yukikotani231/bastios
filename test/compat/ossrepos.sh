@@ -87,6 +87,7 @@ rs semver https://github.com/dtolnay/semver 1.0.23
 rs fastrand https://github.com/smol-rs/fastrand v2.3.0
 rs itoa https://github.com/dtolnay/itoa 1.0.11
 rs either https://github.com/rayon-rs/either 1.13.0
+rs smallvec https://github.com/servo/rust-smallvec v1.13.2
 
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
@@ -105,6 +106,10 @@ gv() {  # NAME URL TAG
 gv testify https://github.com/stretchr/testify v1.9.0
 gv fzf https://github.com/junegunn/fzf v0.58.0
 gv websocket https://github.com/gorilla/websocket v1.5.3
+gv uuid https://github.com/google/uuid v1.6.0
+gv pflag https://github.com/spf13/pflag v1.0.5
+gv mux https://github.com/gorilla/mux v1.8.1
+gv gjson https://github.com/tidwall/gjson v1.18.0
 
 # An npm package built on the host and shipped with its dependencies and one
 # test runner (or several, separated by spaces) installed beside it (node_modules), nothing else of its tooling.
@@ -128,5 +133,13 @@ nm mri https://github.com/lukeed/mri v1.2.0 tape@4.13.3
 nm debug https://github.com/debug-js/debug 4.3.7 "mocha@10.8.2 sinon@14.0.2"
 nm express https://github.com/expressjs/express 4.21.1 "mocha@10.2.0 supertest@6.3.0 after@0.8.2 connect-redis@3.4.2 cookie-parser@1.4.6 cookie-session@2.0.0 ejs@3.1.9 express-session@1.17.2 hbs@4.2.0 marked@0.7.0 method-override@3.0.0 morgan@1.10.0 pbkdf2-password@1.2.1 vhost@3.0.2"
 nm ws https://github.com/websockets/ws 8.18.0 "mocha@10.2.0"
+nm minimist https://github.com/minimistjs/minimist v1.2.8 tape@5.9.0
+nm qs https://github.com/ljharb/qs v6.13.1 "tape@5.9.0 es-value-fixtures@1.5.0 for-each@0.3.3 has-bigints@1.0.2 has-override-mistake@1.0.1 has-property-descriptors@1.0.2 has-proto@1.0.3 has-symbols@1.0.3 iconv-lite@0.5.1 mock-property@1.1.0 object-inspect@1.13.3 qs-iconv@1.0.4 safer-buffer@2.1.2 mkdirp@0.5.5 glob@10.3.7"
+nm cookie https://github.com/jshttp/cookie v0.7.2 "mocha@10.2.0 safe-buffer@5.2.1"
+nm send https://github.com/pillarjs/send 0.19.0 "mocha@9.2.2 supertest@6.2.2 after@0.8.2"
+nm body-parser https://github.com/expressjs/body-parser 1.20.3 "mocha@10.2.0 supertest@6.3.3 methods@1.1.2 safe-buffer@5.2.1"
+nm async https://github.com/caolan/async v3.2.6 "mocha@6.2.3 babel-register@6.26.0 babel-plugin-transform-es2015-modules-commonjs@6.26.2 babel-plugin-syntax-async-generators@6.13.0 chai@4.3.10 bluebird@3.7.2 es6-promise@4.2.8 lodash@4.17.21 rsvp@4.8.5 native-promise-only@0.8.1"
+nm type-is https://github.com/jshttp/type-is 1.6.18 "mocha@6.1.4"
+nm ms https://github.com/vercel/ms 2.1.3 "mocha@4.0.1 expect.js@0.3.1"
 
 tb nanoid https://github.com/ai/nanoid 5.0.7

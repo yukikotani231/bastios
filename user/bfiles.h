@@ -18,7 +18,8 @@
  * In the list n makes an empty file (untitled, untitled2, ...) and opens it
  * in the editor; c or x marks the entry under the cursor to copy (a file) or move (a file or
  * directory) and v puts it into the directory shown ("bfiles: copy PATH", "bfiles: move PATH",
- * then "bfiles: copied SRC to DST" or "bfiles: moved SRC to DST"). The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
+ * then "bfiles: copied SRC to DST" or "bfiles: moved SRC to DST"). / then the start of a name moves the cursor to the first
+ * entry that begins with it ("bfiles: cursor N"; Enter or Esc ends it). The mouse wheel scrolls three lines a step (and says "bfiles: top N"). Says "bfiles: window ID" when the
  * window is open and "bfiles: dir PATH" or "bfiles: view PATH" as it
  * moves.
  * It is part of the bterm program, which runs it when started as "bfiles"
@@ -32,6 +33,7 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 
 
@@ -47,14 +49,19 @@ static int bf_rows = 24;
 #define BF_VIEWMAX 65536
 #define BF_MAXLINES 8192
 
-struct bf_ent { char name[NAME_MAX + 1]; int dir; off_t size; };
+struct bf_ent { char name[NAME_MAX + 1]; int dir; off_t size; time_t mtime; };
 
 static uint32_t bf_pix[BF_WIDTH * BF_MAXROWS * BF_CH];
 static struct bf_ent bf_ents[BF_MAXENT];
 static int bf_nent, bf_top;                     /* the entries (".." is the first) and the first one shown */
 static char bf_cwd[PATH_MAX] = "/";
+static char bf_last[PATH_MAX];      /* the directory the list showed before the last change of directory */
+static char bf_shown[PATH_MAX];
 static int bf_viewing;
 static int bf_confirm;                    /* D was pressed once in the viewer: a second D deletes the file */
+static int bf_finding;                    /* / was pressed in the list: the start of a name is being typed, and the cursor follows it */
+static char bf_fbuf[40];
+static int bf_flen;
 static int bf_renaming;                   /* r was pressed: the new name is being typed */
 static char bf_tpath[PATH_MAX];           /* what r and D act on: the file in the viewer, or the entry under the cursor in the list */
 static char bf_rname[NAME_MAX + 1];
@@ -80,15 +87,17 @@ static char bf_ebuf[40], bf_efind[40];          /* what was typed, and what was 
 static size_t bf_ebn;
 
 static int bf_sel;                              /* the entry the keyboard cursor is on (arrows move it, Enter opens it) */
-static int bf_by_size;                          /* 1: files largest first, 0: by name */
+static int bf_sort;                             /* 0: by name, 1: files largest first, 2: newest first */
 
 static int bf_cmp(const void *a, const void *b)
 {
     const struct bf_ent *x = a, *y = b;
     if (x->dir != y->dir)
         return y->dir - x->dir;
-    if (bf_by_size && x->size != y->size)
+    if (bf_sort == 1 && x->size != y->size)
         return x->size < y->size ? 1 : -1;
+    if (bf_sort == 2 && x->mtime != y->mtime)
+        return x->mtime < y->mtime ? 1 : -1;
     return strcmp(x->name, y->name);
 }
 
@@ -103,14 +112,138 @@ static void bf_glyph(int r, int c, unsigned char ch, uint32_t f, uint32_t b)
     }
 }
 
+/* One cell of a glyph from the big font (HALF is 1 for the right cell of a wide one). */
+static void bf_glyph16(int r, int c, const unsigned char *g, int wide, int half, uint32_t f, uint32_t b)
+{
+    for (int y = 0; y < BF_CH; y++) {
+        unsigned bits = wide ? g[y * 2 + half] : g[y];
+        for (int x = 0; x < BF_CW; x++, bits >>= 1)
+            bf_pix[(r * BF_CH + y) * BF_WIDTH + c * BF_CW + x] = bits & 1 ? f : b;
+    }
+}
+
+/* Reads the UTF-8 character at S (N bytes are left): its code point in *CP and its length, or 0 if it is cut short
+ * or not UTF-8 (a lead byte beyond ASCII with bad continuation bytes). */
+static size_t bf_utf8(const char *s, size_t n, unsigned *cp)
+{
+    unsigned char ch = (unsigned char)s[0];
+    size_t len = ch < 0xE0 ? 2 : ch < 0xF0 ? 3 : 4;
+    if (ch < 0xC2 || ch >= 0xF8 || n < len)
+        return 0;
+    unsigned v = ch & (len == 2 ? 0x1F : len == 3 ? 0x0F : 0x07);
+    for (size_t k = 1; k < len; k++) {
+        if (((unsigned char)s[k] & 0xC0) != 0x80)
+            return 0;
+        v = v << 6 | ((unsigned char)s[k] & 0x3F);
+    }
+    *cp = v;
+    return len;
+}
+
+/* The editor marks a range of bytes of the next row drawn (the selection, in HL_BG) and the byte the cursor is on (CURI,
+ * drawn with the colours swapped); bf_put_row clears both. */
+static size_t bf_hl_lo, bf_hl_hi;
+static uint32_t bf_hl_bg;
+static long bf_curi = -1;
+static const char *bf_fmark;                     /* text to show wherever it is in a row drawn (the last Ctrl-F), or NULL */
+static size_t bf_fmarkn, bf_fmark_end;
+#define BF_MARK_BG 0x00806020
+
+/* A row of text: ASCII, and UTF-8 drawn with the big font (a wide character takes two cells; one the font lacks is a '?'). */
 static void bf_put_row(int r, const char *s, size_t n, uint32_t f, uint32_t b)
 {
-    for (int c = 0; c < BF_COLS; c++)
-        bf_glyph(r, c, (size_t)c < n ? (unsigned char)s[c] : ' ', f, b);
+    size_t i = 0;
+    int c = 0, cursor_drawn = 0;
+    while (c < BF_COLS) {
+        uint32_t cf = f, cb = b;
+        if (i >= n) {
+            if (bf_curi == (long)n && !cursor_drawn) {
+                cf = b;
+                cb = f;
+                cursor_drawn = 1;
+            }
+            bf_glyph(r, c++, ' ', cf, cb);
+            continue;
+        }
+        if (bf_fmark && i + bf_fmarkn <= n && memcmp(s + i, bf_fmark, bf_fmarkn) == 0)
+            bf_fmark_end = i + bf_fmarkn;
+        if (bf_fmark && i < bf_fmark_end)
+            cb = BF_MARK_BG;
+        if (i >= bf_hl_lo && i < bf_hl_hi)
+            cb = bf_hl_bg;
+        if ((long)i == bf_curi) {
+            cf = cb;
+            cb = f;
+            cursor_drawn = 1;
+        }
+        unsigned char ch = (unsigned char)s[i];
+        unsigned cp = 0;
+        if (ch < 0xC2) {
+            bf_glyph(r, c++, ch, cf, cb);
+            i++;
+            continue;
+        }
+        size_t len = bf_utf8(s + i, n - i, &cp);
+        if (!len) {
+            bf_glyph(r, c++, '?', cf, cb);
+            i++;
+            continue;
+        }
+        i += len;
+        int w = cp_width(cp), wide = 0;
+        if (w == 0)
+            continue;
+        const unsigned char *g = cp < 0x10000 ? glyph16(cp, &wide) : 0;
+        if (!g || wide != (w == 2)) {
+            bf_glyph(r, c++, '?', cf, cb);
+        } else if (wide && c + 1 >= BF_COLS) {
+            bf_glyph(r, c++, ' ', cf, cb);
+        } else if (wide) {
+            bf_glyph16(r, c, g, 1, 0, cf, cb);
+            bf_glyph16(r, c + 1, g, 1, 1, cf, cb);
+            c += 2;
+        } else {
+            bf_glyph16(r, c++, g, 0, 0, cf, cb);
+        }
+    }
+    if (bf_curi == (long)n && !cursor_drawn)            /* at the end of a full row */
+        bf_glyph(r, BF_COLS - 1, ' ', b, f);
+    bf_hl_lo = bf_hl_hi = 0;
+    bf_curi = -1;
+    bf_fmark_end = 0;
+}
+
+/* NAME cut or padded with blanks to W cells, in OUT (UTF-8 kept whole). */
+static void bf_fit(const char *name, int w, char *out, size_t outsz)
+{
+    size_t i = 0, o = 0, n = strlen(name);
+    int cells = 0;
+    while (i < n && cells < w) {
+        unsigned cp = 0;
+        size_t len = (unsigned char)name[i] < 0xC2 ? 1 : bf_utf8(name + i, n - i, &cp);
+        int cw = len > 1 ? cp_width(cp) : 1;
+        if (!len)
+            len = 1;
+        if (cells + cw > w || o + len + 1 >= outsz)
+            break;
+        memcpy(out + o, name + i, len);
+        o += len;
+        i += len;
+        cells += cw;
+    }
+    while (cells < w && o + 1 < outsz) {
+        out[o++] = ' ';
+        cells++;
+    }
+    out[o] = 0;
 }
 
 static void bf_load_dir(void)
 {
+    if (strcmp(bf_shown, bf_cwd) != 0) {
+        snprintf(bf_last, sizeof bf_last, "%s", bf_shown);
+        snprintf(bf_shown, sizeof bf_shown, "%s", bf_cwd);
+    }
     bf_nent = 0;
     bf_top = 0;
     bf_sel = 0;
@@ -132,6 +265,7 @@ static void bf_load_dir(void)
         snprintf(bf_ents[bf_nent].name, sizeof bf_ents[bf_nent].name, "%s", e->d_name);
         bf_ents[bf_nent].dir = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
         bf_ents[bf_nent].size = stat(p, &st) == 0 ? st.st_size : 0;
+        bf_ents[bf_nent].mtime = stat(p, &st) == 0 ? st.st_mtime : 0;
         bf_nent++;
     }
     closedir(d);
@@ -173,9 +307,12 @@ static void bf_load_file(const char *path)
         bf_vline[bf_nvline++] = bf_vtext + i;
         size_t k = 0;
         while (i < n && bf_vtext[i] != '\n') {
-            if (++k > BF_COLS) {                    /* a long line goes on in the next row */
-                bf_vline[bf_nvline++] = bf_vtext + i;
-                k = 1;
+            if (++k > BF_COLS) {                    /* a long line goes on in the next row (a UTF-8 character is not cut) */
+                size_t j = i;
+                while (j > 0 && ((unsigned char)bf_vtext[j] & 0xC0) == 0x80 && i - j < 3)
+                    j--;
+                bf_vline[bf_nvline++] = bf_vtext + j;
+                k = i - j + 1;
                 if (bf_nvline >= BF_MAXLINES)
                     break;
             }
@@ -208,7 +345,7 @@ static void bf_paint(void)
             snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
         else
             snprintf(h, sizeof h, "%s", bf_vpath);
-        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
+        bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming || bf_finding ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
             char t[BF_COLS + 1];
@@ -216,7 +353,7 @@ static void bf_paint(void)
             if (i < bf_nvline) {
                 const char *s = bf_vline[i];
                 while (n < BF_COLS && *s && *s != '\n') {
-                    t[n++] = (unsigned char)*s >= 32 && (unsigned char)*s < 127 ? *s : (*s == '\t' ? ' ' : '.');
+                    t[n++] = (unsigned char)*s >= 128 || ((unsigned char)*s >= 32 && (unsigned char)*s < 127) ? *s : (*s == '\t' ? ' ' : '.');
                     s++;
                 }
             }
@@ -227,10 +364,12 @@ static void bf_paint(void)
     char h[BF_COLS + 1];
     if (bf_renaming)
         snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
+    else if (bf_finding)
+        snprintf(h, sizeof h, "Find: %.40s_", bf_fbuf);
     else if (bf_confirm)
         snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
     else
-        snprintf(h, sizeof h, "%s", bf_cwd);
+        snprintf(h, sizeof h, "%s%s", bf_cwd, bf_sort == 1 ? "  [by size]" : bf_sort == 2 ? "  [by time]" : "");
     bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
     for (int r = 1; r < BF_ROWS; r++) {
         int i = bf_top + r - 1;
@@ -238,32 +377,68 @@ static void bf_paint(void)
             bf_put_row(r, "", 0, fg, bg);
             continue;
         }
-        char t[BF_COLS + 32];
-        if (bf_ents[i].dir)
+        char t[NAME_MAX * 3 + 40], nm[NAME_MAX * 3];
+        if (bf_ents[i].dir) {
             snprintf(t, sizeof t, "%s/", bf_ents[i].name);
-        else
-            snprintf(t, sizeof t, "%-44.44s %10lld", bf_ents[i].name, (long long)bf_ents[i].size);
+        } else {
+            bf_fit(bf_ents[i].name, 44, nm, sizeof nm);
+            snprintf(t, sizeof t, "%s %10lld", nm, (long long)bf_ents[i].size);
+        }
         bf_put_row(r, t, strlen(t), bf_ents[i].dir ? 0x0080C0FF : fg, bf_sel == i ? 0x00203050 : bg);
     }
 }
 
-/* The editor. Display rows are cut at COLS characters, like the viewer's. */
+/* The editor keeps bytes but shows characters. The character at OFF takes be_clen bytes and be_cells cells (0 for a
+ * combining one, 2 for a wide one, 1 for the rest, a byte that is not UTF-8 included), as bf_put_row draws it; be_prev
+ * is the start of the character before OFF. */
+static size_t be_clen(size_t off)
+{
+    unsigned cp;
+    size_t n = bf_utf8(bf_vtext + off, bf_vlen - off, &cp);
+    return n ? n : 1;
+}
+
+static int be_cells(size_t off)
+{
+    unsigned cp;
+    if ((unsigned char)bf_vtext[off] < 0xC2 || !bf_utf8(bf_vtext + off, bf_vlen - off, &cp))
+        return 1;
+    int w = cp_width(cp), wd = 0;
+    if (w == 0)
+        return 0;
+    if (cp >= 0x10000 || !glyph16(cp, &wd) || wd != (w == 2))
+        return 1;
+    return wd ? 2 : 1;
+}
+
+static size_t be_prev(size_t off)
+{
+    size_t s = off - 1;
+    while (s > 0 && off - s < 4 && ((unsigned char)bf_vtext[s] & 0xC0) == 0x80)
+        s--;
+    return s + be_clen(s) == off ? s : off - 1;
+}
+
+/* The editor. Display rows are cut at COLS cells, like the viewer's. */
 static void be_layout(void)
 {
     size_t col = 0;
     bf_nerow = 0;
     bf_erow[bf_nerow++] = 0;
-    for (size_t i = 0; i < bf_vlen && bf_nerow < BF_MAXLINES; i++) {
+    for (size_t i = 0; i < bf_vlen && bf_nerow < BF_MAXLINES;) {
         if (bf_vtext[i] == '\n') {
             bf_erow[bf_nerow++] = i + 1;
             col = 0;
-        } else {
-            if (col == BF_COLS) {
-                bf_erow[bf_nerow++] = i;
-                col = 0;
-            }
-            col++;
+            i++;
+            continue;
         }
+        int w = be_cells(i);
+        if (col + w > BF_COLS) {
+            bf_erow[bf_nerow++] = i;
+            col = 0;
+        }
+        col += w;
+        i += be_clen(i);
     }
 }
 
@@ -282,6 +457,29 @@ static size_t be_row_len(int r)                 /* characters on a row, without 
     if (n > 0 && bf_vtext[end - 1] == '\n')
         n--;
     return n;
+}
+
+static size_t be_row_len(int r);
+
+static int be_col_of(int r, size_t off)         /* the cell column of a byte offset on a row */
+{
+    int c = 0;
+    for (size_t k = bf_erow[r]; k < off; k += be_clen(k))
+        c += be_cells(k);
+    return c;
+}
+
+static size_t be_off_at(int r, size_t col)      /* the byte offset on a row for a cell column */
+{
+    size_t k = bf_erow[r], end = k + be_row_len(r), c = 0;
+    while (k < end) {
+        int w = be_cells(k);
+        if (c + w > col)
+            break;
+        c += w;
+        k += be_clen(k);
+    }
+    return k;
 }
 
 static int be_isword(char ch)
@@ -304,12 +502,11 @@ static void be_word_move(int dir)
 static void be_move_rows(int by)
 {
     int r = be_row_of(bf_cur);
-    size_t col = bf_cur - bf_erow[r];
+    int col = be_col_of(r, bf_cur);
     r += by;
     if (r < 0) r = 0;
     if (r >= bf_nerow) r = bf_nerow - 1;
-    size_t n = be_row_len(r);
-    bf_cur = bf_erow[r] + (col < n ? col : n);
+    bf_cur = be_off_at(r, col);
 }
 
 /* Undo (Ctrl-Z): before an edit the text and cursor are kept, but a run of the same kind of edit (typing,
@@ -416,6 +613,17 @@ static void be_redo_pop(void)
     fflush(stdout);
 }
 
+static long be_anchor = -1;                     /* where a Shift-arrow selection started (-1: nothing is selected); the selection is between it and the cursor */
+
+static int be_sel(size_t *lo, size_t *hi)
+{
+    if (be_anchor < 0 || (size_t)be_anchor == bf_cur || (size_t)be_anchor > bf_vlen)
+        return 0;
+    *lo = (size_t)be_anchor < bf_cur ? (size_t)be_anchor : bf_cur;
+    *hi = (size_t)be_anchor < bf_cur ? bf_cur : (size_t)be_anchor;
+    return 1;
+}
+
 static void be_insert(unsigned char c)
 {
     if (bf_vlen + 1 >= BF_VIEWMAX)
@@ -435,6 +643,54 @@ static void be_delete(size_t at)
     bf_vlen--;
     bf_vtext[bf_vlen] = 0;
     bf_modified = 1;
+}
+
+/* Writes bytes to the clipboard file that any window can paste. */
+static void be_clip_write(const char *p, size_t n)
+{
+    int cf = open(BF_CLIP_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (cf >= 0) {
+        if (write(cf, p, n) < 0)
+            puts("bfiles: cannot write the clipboard");
+        close(cf);
+    }
+}
+
+/* Ctrl-C: copies the selection to the clipboard. */
+static void be_copy_sel(void)
+{
+    size_t lo, hi;
+    if (!be_sel(&lo, &hi))
+        return;
+    be_clip_write(bf_vtext + lo, hi - lo);
+    printf("bfiles: copied %zu\n", hi - lo);
+    fflush(stdout);
+}
+
+/* Deletes the selection (when there is one) and puts the cursor where it began; the caller has pushed undo. */
+static int be_drop_sel(void)
+{
+    size_t lo, hi;
+    int had = be_sel(&lo, &hi);
+    be_anchor = -1;
+    if (!had)
+        return 0;
+    bf_cur = lo;
+    for (size_t n = hi - lo; n > 0; n--)
+        be_delete(lo);
+    return 1;
+}
+
+/* The same, as one step for Ctrl-Z. */
+static int be_drop_sel_undoable(void)
+{
+    size_t lo, hi;
+    if (!be_sel(&lo, &hi)) {
+        be_anchor = -1;
+        return 0;
+    }
+    be_undo_push(3);
+    return be_drop_sel();
 }
 
 /* Ctrl-K: cuts the rest of the line (the whole newline if the line is empty) into the kill buffer. */
@@ -653,6 +909,7 @@ static void be_start(void)
         return;
     }
     bf_editing = 1;
+    be_anchor = -1;
     bf_modified = 0;
     be_undo_clear();
     bf_eprompt = 0;
@@ -1022,24 +1279,44 @@ static void be_key(int c)
         }
         int num = bf_esc >= 3 ? bf_escnum : 0;
         int ctrl = bf_esc == 4 && bf_escmod >= 5 && ((bf_escmod - 1) & 4);
+        int shift = bf_esc == 4 && bf_escmod >= 2 && ((bf_escmod - 1) & 1);
         bf_esc = 0;
         be_ulast = 0;
-        if (c == '~' && num == 3) be_undo_push(3);
+        if (c == '~' && num == 3) {
+            if (be_drop_sel_undoable())
+                return;
+            be_undo_push(3);
+        }
+        if (strchr("ABCDHF", c) || (c == '~' && (num == 1 || num == 4 || num == 7 || num == 8))) {
+            if (!shift)
+                be_anchor = -1;
+            else if (be_anchor < 0)
+                be_anchor = (long)bf_cur;
+        } else {
+            be_anchor = -1;
+        }
         if (c == 'A') be_move_rows(-1);
         else if (c == 'B') be_move_rows(1);
-        else if (c == 'C') { if (ctrl) be_word_move(1); else if (bf_cur < bf_vlen) bf_cur++; }
-        else if (c == 'D') { if (ctrl) be_word_move(-1); else if (bf_cur > 0) bf_cur--; }
+        else if (c == 'C') { if (ctrl) be_word_move(1); else if (bf_cur < bf_vlen) bf_cur += be_clen(bf_cur); }
+        else if (c == 'D') { if (ctrl) be_word_move(-1); else if (bf_cur > 0) bf_cur = be_prev(bf_cur); }
+        else if (c == 'H' && ctrl) bf_cur = 0;
+        else if (c == 'F' && ctrl) bf_cur = bf_vlen;
         else if (c == 'H' || (c == '~' && (num == 1 || num == 7))) bf_cur = bf_erow[be_row_of(bf_cur)];
         else if (c == 'F' || (c == '~' && (num == 4 || num == 8))) {
             int r = be_row_of(bf_cur);
             bf_cur = bf_erow[r] + be_row_len(r);
-        } else if (c == '~' && num == 3) be_delete(bf_cur);
+        } else if (c == '~' && num == 3) { for (size_t n = be_clen(bf_cur); n > 0; n--) be_delete(bf_cur); }
         else if (c == '~' && num == 5) be_move_rows(-page);
         else if (c == '~' && num == 6) be_move_rows(page);
         return;
     }
+    if (c != 27 && c != 3 && c != 22 && c != 23 && c != 127 && c != 8 && c != '\n' && c != '\r' &&
+        c != '\t' && !(c >= 32 && c < 127))
+        be_anchor = -1;
     if (c == 27) {
         bf_esc = 1;
+    } else if (c == 3) {
+        be_copy_sel();
     } else if (c == 19) {
         be_save();
     } else if (c == 24) {
@@ -1059,6 +1336,15 @@ static void be_key(int c)
     } else if (c == 26) {
         be_undo_pop();
     } else if (c == 23) {
+        size_t lo, hi;
+        if (be_sel(&lo, &hi)) {
+            be_clip_write(bf_vtext + lo, hi - lo);
+            printf("bfiles: cut %zu\n", hi - lo);
+            fflush(stdout);
+            be_drop_sel_undoable();
+            return;
+        }
+        be_anchor = -1;
         size_t end = bf_cur;
         be_word_move(-1);
         if (bf_cur < end) {
@@ -1075,7 +1361,23 @@ static void be_key(int c)
         int r = be_row_of(bf_cur);
         bf_cur = bf_erow[r] + be_row_len(r);
     } else if (c == 22) {
+        be_drop_sel_undoable();
         be_paste_clip();
+    } else if (c == 4) {                        /* Ctrl-D: a copy of the line under it, the cursor in the copy */
+        size_t s = bf_cur, e = bf_cur;
+        while (s > 0 && bf_vtext[s - 1] != '\n')
+            s--;
+        while (e < bf_vlen && bf_vtext[e] != '\n')
+            e++;
+        if (bf_vlen + (e - s) + 1 < BF_VIEWMAX) {
+            size_t col = bf_cur - s;
+            be_undo_push(3);
+            bf_cur = e;
+            be_insert('\n');
+            for (size_t i = s; i < e; i++)
+                be_insert(bf_vtext[i]);
+            bf_cur = e + 1 + col;
+        }
     } else if (c == 11) {
         be_undo_push(3);
         be_cut_line();
@@ -1083,11 +1385,16 @@ static void be_key(int c)
         be_undo_push(3);
         be_paste_kill();
     } else if (c == 127 || c == 8) {
-        if (bf_cur > 0) {
+        if (be_drop_sel_undoable()) {
+        } else if (bf_cur > 0) {
             be_undo_push(2);
-            be_delete(--bf_cur);
+            size_t at = be_prev(bf_cur);
+            for (size_t n = bf_cur - at; n > 0; n--)
+                be_delete(at);
+            bf_cur = at;
         }
     } else if (c == '\n' || c == '\r') {
+        be_drop_sel_undoable();
         be_undo_push(3);
         /* The new line starts with the blanks the one being left starts with (up to the cursor). */
         size_t ls = bf_cur, ind = 0;
@@ -1103,24 +1410,66 @@ static void be_key(int c)
         for (size_t i = 0; i < ind; i++)
             be_insert((unsigned char)blanks[i]);
     } else if (c == '\t') {
+        be_drop_sel_undoable();
         be_undo_push(3);
         for (int i = 0; i < 4; i++)
             be_insert(' ');
     } else if (c >= 32 && c < 127) {
+        if (be_drop_sel_undoable())
+            be_ulast = 0;
         be_undo_push(1);
         be_insert(c);
     }
 }
 
-static void be_click(int row, int x)
+/* Puts the cursor under the pointer; a press starts a selection there, a drag (DRAG set) stretches it. */
+static void be_click(int y, int x, int drag)
 {
-    int r = bf_etop + row - 1;
-    if (row < 1)
+    /* A drag that began in the window goes on when the pointer leaves it (Y or X negative, or beyond the window):
+     * the farther it is above or below the text, the more rows beyond the visible ones the cursor goes (up to 8),
+     * which scrolls. */
+    int row = y < 0 ? -((-y + BF_CH - 1) / BF_CH) : y / BF_CH;
+    if (row < 1 && !drag)
         return;
+    if (row > BF_ROWS + 8)
+        row = BF_ROWS + 8;
+    if (row < -8)
+        row = -8;
+    int r = bf_etop + row - 1;
     be_ulast = 0;
+    if (r < 0) r = 0;
     if (r >= bf_nerow) r = bf_nerow - 1;
-    size_t col = x / BF_CW, n = be_row_len(r);
-    bf_cur = bf_erow[r] + (col < n ? col : n);
+    size_t n = be_row_len(r);
+    bf_cur = be_off_at(r, x < 0 ? 0 : x / BF_CW);
+    if (drag)
+        return;
+    be_anchor = (long)bf_cur;
+    /* Presses on the same spot within 400 ms in a row: the second selects the word under the pointer,
+     * the third the line (with its newline). */
+    static struct timespec last;
+    static size_t last_at = (size_t)-1;
+    static int clicks;
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    long ms = (now.tv_sec - last.tv_sec) * 1000 + (now.tv_nsec - last.tv_nsec) / 1000000;
+    clicks = last_at == bf_cur && ms >= 0 && ms < 400 && clicks < 3 ? clicks + 1 : 1;
+    last = now;
+    last_at = bf_cur;
+    if (clicks == 2 && bf_cur < bf_vlen && be_isword(bf_vtext[bf_cur])) {
+        size_t lo = bf_cur, hi = bf_cur;
+        while (lo > 0 && be_isword(bf_vtext[lo - 1]))
+            lo--;
+        while (hi < bf_vlen && be_isword(bf_vtext[hi]))
+            hi++;
+        be_anchor = (long)lo;
+        bf_cur = hi;
+    } else if (clicks == 3) {
+        size_t lo = bf_erow[r], hi = lo + n;
+        if (hi < bf_vlen)
+            hi++;
+        be_anchor = (long)lo;
+        bf_cur = hi;
+    }
 }
 
 static void be_paint(void)
@@ -1141,23 +1490,31 @@ static void be_paint(void)
     bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_eprompt ? 0x00A03030 : hd);
     for (int r = 1; r < BF_ROWS; r++) {
         int i = bf_etop + r - 1;
-        char t[BF_COLS + 1];
+        char t[BF_COLS * 4 + 1];
         size_t n = 0;
         if (i < bf_nerow) {
             n = be_row_len(i);
             for (size_t k = 0; k < n; k++) {
                 unsigned char ch = bf_vtext[bf_erow[i] + k];
-                t[k] = ch >= 32 && ch < 127 ? ch : '.';
+                t[k] = ch < 32 || ch == 127 ? '.' : ch;
             }
+            size_t lo, hi;
+            if (be_sel(&lo, &hi)) {
+                size_t rs = bf_erow[i];
+                bf_hl_lo = lo > rs ? lo - rs : 0;
+                bf_hl_hi = hi > rs ? hi - rs : 0;
+                bf_hl_bg = 0x00406090;
+                if (bf_hl_lo > n) bf_hl_lo = n;
+                if (bf_hl_hi > n) bf_hl_hi = n;
+            }
+            if (i == cr)
+                bf_curi = (long)(bf_cur - bf_erow[cr]);
         }
+        bf_fmark = bf_efind[0] && n ? bf_efind : NULL;
+        bf_fmarkn = strlen(bf_efind);
         bf_put_row(r, t, n, fg, bg);
+        bf_fmark = NULL;
     }
-    int row = cr - bf_etop + 1, col = (int)(bf_cur - bf_erow[cr]);
-    if (col >= BF_COLS) col = BF_COLS - 1;
-    unsigned char under = ' ';
-    if (bf_cur < bf_vlen && bf_vtext[bf_cur] != '\n')
-        under = (unsigned char)bf_vtext[bf_cur];
-    bf_glyph(row, col, under, bg, fg);                /* the cursor: the cell with its colours swapped */
 }
 
 static void bf_scroll(int by)
@@ -1198,6 +1555,17 @@ static void bf_open(int i)
     }
 }
 
+/* e in the list: opens the file under the cursor straight in the editor. */
+static void bf_edit_selected(void)
+{
+    if (bf_sel <= 0 || bf_sel >= bf_nent || bf_ents[bf_sel].dir)
+        return;
+    char p[PATH_MAX];
+    bf_path_of(bf_ents[bf_sel].name, p, sizeof p);
+    bf_load_file(p);
+    be_start();
+}
+
 static void bf_click(int row)
 {
     if (bf_viewing) {
@@ -1224,6 +1592,34 @@ static void bf_move_sel(int by)
     if (bf_sel > bf_top + BF_ROWS - 2) bf_top = bf_sel - (BF_ROWS - 2);
     printf("bfiles: cursor %d\n", bf_sel);
     fflush(stdout);
+}
+
+/* A key typed after / in the list: the cursor goes to the first entry whose name starts with what was typed (case ignored);
+ * Backspace takes a letter back, Enter or Esc ends it. */
+static void bf_find_key(int c)
+{
+    if (c == '\r' || c == '\n' || c == 27) {
+        bf_finding = 0;
+        return;
+    }
+    if (c == 127 || c == 8) {
+        if (bf_flen > 0)
+            bf_fbuf[--bf_flen] = 0;
+    } else if (c >= 32 && c < 127 && bf_flen < (int)sizeof bf_fbuf - 1) {
+        bf_fbuf[bf_flen++] = c;
+        bf_fbuf[bf_flen] = 0;
+    } else {
+        return;
+    }
+    for (int i = 1; i < bf_nent && bf_flen > 0; i++)
+        if (strncasecmp(bf_ents[i].name, bf_fbuf, bf_flen) == 0) {
+            bf_move_sel(i - bf_sel);
+            return;
+        }
+    if (bf_flen > 0) {
+        printf("bfiles: no name starts with %s\n", bf_fbuf);
+        fflush(stdout);
+    }
 }
 
 static int bfiles_main(int argc, char **argv)
@@ -1274,6 +1670,22 @@ static int bfiles_main(int argc, char **argv)
                     break;
                 continue;
             }
+            if (bf_finding) {
+                bf_find_key(c);
+                bf_paint();
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    break;
+                continue;
+            }
+            if (c == '/' && !bf_editing && !bf_viewing) {
+                bf_finding = 1;
+                bf_flen = 0;
+                bf_fbuf[0] = 0;
+                bf_paint();
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    break;
+                continue;
+            }
             if (!bf_editing && !bf_viewing) {          /* arrow keys and Enter in the list */
                 if (bf_esc == 0 && c == 27) {
                     bf_esc = 1;
@@ -1305,7 +1717,10 @@ static int bfiles_main(int argc, char **argv)
                     else if (c == 'F' || (c == '~' && (num == 4 || num == 8))) bf_move_sel(bf_nent);
                     else if (c == '~' && num == 5) bf_move_sel(-page);
                     else if (c == '~' && num == 6) bf_move_sel(page);
-                    else
+                    else if (c == '~' && num == 3) {            /* Delete acts as D */
+                        c = 'D';
+                        goto dispatch;
+                    } else
                         continue;
                     bf_paint();
                     if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
@@ -1320,6 +1735,7 @@ static int bfiles_main(int argc, char **argv)
                     continue;
                 }
             }
+dispatch:;
             int was_confirm = bf_confirm;
             bf_confirm = 0;
             char was_tpath[PATH_MAX];
@@ -1358,6 +1774,8 @@ static int bfiles_main(int argc, char **argv)
                 bf_spawn("bview", bf_vpath, "image");
             else if (c == 'e' && bf_viewing)
                 be_start();
+            else if (c == 'e' && !bf_viewing)
+                bf_edit_selected();
             else if (c == 'n' && !bf_viewing)
                 bf_new_file();
             else if (c == 'R' && !bf_viewing) {
@@ -1365,14 +1783,26 @@ static int bfiles_main(int argc, char **argv)
                 printf("bfiles: reloaded %d entries\n", bf_nent);
                 fflush(stdout);
             } else if (c == 's' && !bf_viewing) {
-                bf_by_size = !bf_by_size;
-                printf("bfiles: sorted by %s\n", bf_by_size ? "size" : "name");
+                bf_sort = (bf_sort + 1) % 3;
+                printf("bfiles: sorted by %s\n", bf_sort == 1 ? "size" : bf_sort == 2 ? "time" : "name");
                 fflush(stdout);
                 bf_load_dir();
             } else if (c == 'h' && !bf_viewing) {
                 bf_hidden = !bf_hidden;
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);
+                bf_load_dir();
+            } else if (c == '-' && !bf_viewing) {
+                if (bf_last[0] == '/') {
+                    snprintf(bf_cwd, sizeof bf_cwd, "%s", bf_last);
+                    bf_load_dir();
+                } else {
+                    printf("bfiles: no earlier directory\n");
+                    fflush(stdout);
+                }
+            } else if (c == '~' && !bf_viewing) {
+                const char *home = getenv("HOME");
+                snprintf(bf_cwd, sizeof bf_cwd, "%s", home && home[0] == '/' ? home : "/");
                 bf_load_dir();
             } else if (c == 't' && !bf_viewing) {
                 bf_spawn("bterm", NULL, "terminal in");
@@ -1420,11 +1850,14 @@ static int bfiles_main(int argc, char **argv)
                 continue;
             }
             int pressed = (m->buttons & 1) && !(prev & 1);
+            int dragging = (m->buttons & 1) && (prev & 1);
             prev = m->buttons & 0xFF;
-            if (!pressed)
+            if (dragging && bf_editing)
+                be_click((int)m->y, (int)m->x, 1);
+            else if (!pressed)
                 continue;
-            if (bf_editing)
-                be_click(m->y / BF_CH, m->x);
+            else if (bf_editing)
+                be_click((int)m->y, (int)m->x, 0);
             else
                 bf_click(m->y / BF_CH);
         } else {

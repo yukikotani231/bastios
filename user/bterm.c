@@ -19,6 +19,7 @@
 
 #include "bwmlib.h"
 #include "font8x8.h"
+#include "font16.h"
 #include "bfiles.h"
 #include "bsys.h"
 #include "bview.h"
@@ -62,7 +63,7 @@ static int nearest256(int r, int g, int b)
     return 16 + 36 * q[0] + 6 * q[1] + q[2];
 }
 
-struct cell { unsigned char ch, fg, bg, attr;      /* attr: 1 underline, 2 italic, 4 strike-through */ };
+struct cell { unsigned short ch; unsigned char fg, bg, attr;      /* ch: a code point (0 in the right half of a wide character); attr: 1 underline, 2 italic, 4 strike-through, 8 right half of a wide character */ };
 static struct cell grid[MAXR][MAXC];
 static uint32_t *pix;            /* the window's pixels: bwm's shared memory when it gave some */
 static int shared;
@@ -88,8 +89,16 @@ static int sel_on, selecting;             /* a selection is lit; the button is s
 static int sel_ar, sel_ac, sel_br, sel_bc;   /* where it began and where the pointer is, as cells */
 #define CLIP_FILE "/tmp/bwm.clip"         /* what is selected, for any terminal to paste */
 
-static void put_cell(int r, int c, unsigned char ch)
+static void put_cell(int r, int c, unsigned ch)
 {
+    if (grid[r][c].attr & 8 && c > 0) {          /* writing over half of a wide character blanks the other half */
+        grid[r][c - 1].ch = ' ';
+        grid[r][c - 1].attr = 0;
+    }
+    if (c + 1 < cols && grid[r][c + 1].attr & 8) {
+        grid[r][c + 1].ch = ' ';
+        grid[r][c + 1].attr = 0;
+    }
     grid[r][c].ch = ch;
     grid[r][c].fg = cur_fg + (bold && cur_fg < 8 ? 8 : 0);
     grid[r][c].bg = cur_bg;
@@ -214,9 +223,16 @@ static void draw_cell(int r, int c, int cursor)
         if (f == b)
             f = 0xFFFFFF;
     }
-    int ch = e->ch < 128 ? e->ch : ' ';
+    unsigned cp = e->ch;
+    int half = 0, wide = 0;
+    if ((e->attr & 8) && c > 0) {                       /* the right half of a wide character */
+        cp = view_row(r)[c - 1].ch;
+        half = 1;
+    }
+    const unsigned char *g = cp >= 128 ? glyph16(cp, &wide) : 0;
+    int ch = cp < 128 ? cp : ' ';
     for (int y = 0; y < CH; y++) {
-        unsigned bits = font8x8[ch * 8 + y / 2];
+        unsigned bits = g ? (wide ? g[y * 2 + half] : g[y]) : font8x8[ch * 8 + y / 2];
         int lean = !(e->attr & 2) ? 0 : y < 5 ? 1 : y >= 11 ? -1 : 0;        /* italic: the top leans right, the bottom left */
         for (int x = 0; x < CW; x++) {
             int sx = x - lean;
@@ -224,6 +240,22 @@ static void draw_cell(int r, int c, int cursor)
             if (((e->attr & 1) && y >= CH - 2) || ((e->attr & 4) && (y == CH / 2 - 1 || y == CH / 2)))
                 on = 1;
             pix[(r * CH + y) * WIDTH + c * CW + x] = on ? f : b;
+        }
+    }
+}
+
+/* After cells of a row were erased, inserted or deleted, a wide character may be left with one half: blank it. */
+static void fix_wide(int r)
+{
+    for (int c = 0; c < cols; c++) {
+        struct cell *e = &grid[r][c];
+        int right = e->attr & 8;
+        int left = !right && e->ch >= 0x1100 && cp_width(e->ch) == 2;
+        if ((right && (c == 0 || grid[r][c - 1].attr & 8 || cp_width(grid[r][c - 1].ch) != 2)) ||
+            (left && (c + 1 >= cols || !(grid[r][c + 1].attr & 8)))) {
+            e->ch = ' ';
+            e->attr = 0;
+            dirty[r] = 1;
         }
     }
 }
@@ -360,6 +392,8 @@ static void csi(int final)
     default:
         break;                                    /* a sequence this terminal does not know */
     }
+    if (final == 'X' || final == '@' || final == 'P' || final == 'K' || final == 'J')
+        fix_wide(cy);
 }
 
 static char osc[64];                       /* the text of an ESC ] ... string being read (state 4; 5 after an ESC in it) */
@@ -376,8 +410,100 @@ static void osc_end(void)
     }
 }
 
+static unsigned utf_cp;                    /* the code point being read from a UTF-8 sequence */
+static int utf_left;                       /* continuation bytes still to come */
+
+/* The font has the 128 ASCII glyphs only, so a character outside it is drawn as a look-alike (box drawing as
+ * - | +, a bullet as *) or as '?'; a character that takes no room (a combining mark, a zero-width one) as 0. */
+static int utf_glyph(unsigned cp)
+{
+    if (cp >= 0x300 && cp <= 0x36F)
+        return 0;
+    if ((cp >= 0x200B && cp <= 0x200F) || (cp >= 0xFE00 && cp <= 0xFE0F) || cp == 0xFEFF)
+        return 0;
+    if (cp >= 0x2500 && cp <= 0x257F) {
+        if (cp == 0x2500 || cp == 0x2501 || (cp >= 0x2504 && cp <= 0x2509) || cp == 0x254C || cp == 0x254D || cp == 0x2550)
+            return '-';
+        if (cp == 0x2502 || cp == 0x2503 || (cp >= 0x250A && cp <= 0x250B) || cp == 0x254E || cp == 0x254F || cp == 0x2551)
+            return '|';
+        return '+';
+    }
+    if (cp >= 0x2580 && cp <= 0x259F)
+        return '#';
+    switch (cp) {
+    case 0xA0: return ' ';
+    case 0xB7: case 0x2024: case 0x2026: return '.';
+    case 0x2018: case 0x2019: return '\'';
+    case 0x201C: case 0x201D: return '"';
+    case 0x2010: case 0x2011: case 0x2012: case 0x2013: case 0x2014: case 0x2212: return '-';
+    case 0x2022: case 0x25CF: case 0x25CB: return '*';
+    case 0x2190: case 0x25C0: return '<';
+    case 0x2192: case 0x25B6: return '>';
+    case 0x2191: case 0x25B2: return '^';
+    case 0x2193: case 0x25BC: return 'v';
+    default: return '?';
+    }
+}
+
+static void put_char(unsigned b)
+{
+    if (cx >= cols) {
+        cx = 0;
+        linefeed();
+    }
+    put_cell(cy, cx, b);
+    cx++;
+    if (cx >= cols)
+        cx = cols;                            /* wraps when the next character comes */
+}
+
+/* A character that takes two cells: the left one holds the code point, the right one is marked as its other half. */
+static void put_wide(unsigned cp)
+{
+    if (cx >= cols - 1) {                       /* it does not fit on this row */
+        if (cx == cols - 1)
+            put_cell(cy, cx, ' ');
+        cx = 0;
+        linefeed();
+    }
+    put_cell(cy, cx, cp);
+    put_cell(cy, cx + 1, 0);
+    grid[cy][cx + 1].attr |= 8;
+    cx += 2;
+    if (cx >= cols)
+        cx = cols;
+}
+
 static void feed(unsigned char b)
 {
+    if (utf_left > 0) {                                 /* inside a UTF-8 sequence */
+        if ((b & 0xC0) == 0x80) {
+            utf_cp = utf_cp << 6 | (b & 0x3F);
+            if (--utf_left == 0) {
+                int w = cp_width(utf_cp), wide = 0;
+                if (w == 0) {
+                    /* a combining or zero-width character takes no room */
+                } else if (utf_cp < 0x10000 && glyph16(utf_cp, &wide) && wide == (w == 2)) {
+                    if (wide)
+                        put_wide(utf_cp);
+                    else
+                        put_char(utf_cp);
+                } else {
+                    int g = utf_glyph(utf_cp);
+                    if (g)
+                        put_char(g);
+                }
+            }
+            return;
+        }
+        utf_left = 0;                                   /* cut short: this byte starts something else */
+        put_char('?');
+    }
+    if (b >= 0xC2 && b < 0xF8 && state == 0) {
+        utf_left = b < 0xE0 ? 1 : b < 0xF0 ? 2 : 3;
+        utf_cp = b & (b < 0xE0 ? 0x1F : b < 0xF0 ? 0x0F : 0x07);
+        return;
+    }
     if (state == 4 || state == 5) {                     /* ends at BEL or ESC \ */
         if (b == 7 || (state == 5 && b == '\\')) {
             osc_end();
@@ -451,14 +577,7 @@ static void feed(unsigned char b)
         if (cx >= cols)
             cx = cols - 1;
     } else if (b >= 32 && b < 127) {
-        if (cx >= cols) {
-            cx = 0;
-            linefeed();
-        }
-        put_cell(cy, cx, b);
-        cx++;
-        if (cx >= cols)
-            cx = cols;                            /* wraps when the next character comes */
+        put_char(b);
     }
 }
 
@@ -515,14 +634,27 @@ static void copy_selection(void)
         int t = ar; ar = br; br = t;
         t = ac; ac = bc; bc = t;
     }
-    static char text[MAXR * (MAXC + 1) + 1];
+    static char text[MAXR * (MAXC * 3 + 1) + 1];
     size_t n = 0;
     for (int r = ar; r <= br && r < rows; r++) {
         int c0 = r == ar ? ac : 0, c1 = r == br ? bc : cols - 1;
         if (c1 >= cols) c1 = cols - 1;
         size_t start = n;
-        for (int c = c0; c <= c1; c++)
-            text[n++] = grid[r][c].ch >= 32 && grid[r][c].ch < 127 ? grid[r][c].ch : ' ';
+        for (int c = c0; c <= c1; c++) {
+            unsigned ch = grid[r][c].ch;
+            if (grid[r][c].attr & 8)
+                continue;                               /* the right half of a wide character: the left half wrote it */
+            if (ch >= 0x800) {
+                text[n++] = 0xE0 | ch >> 12;
+                text[n++] = 0x80 | (ch >> 6 & 0x3F);
+                text[n++] = 0x80 | (ch & 0x3F);
+            } else if (ch >= 0x80) {
+                text[n++] = 0xC0 | ch >> 6;
+                text[n++] = 0x80 | (ch & 0x3F);
+            } else {
+                text[n++] = ch >= 32 && ch < 127 ? ch : ' ';
+            }
+        }
         while (n > start && text[n - 1] == ' ')
             n--;
         if (r < br)
@@ -556,12 +688,12 @@ static void click_select(int r, int c)
         sel_bc = cols - 1;
         clicks = 0;
     } else {
-        if (grid[r][c].ch <= ' ')
+        if (grid[r][c].ch <= ' ' && !(grid[r][c].attr & 8))
             return;
         int a = c, b = c;
-        while (a > 0 && grid[r][a - 1].ch > ' ')
+        while (a > 0 && (grid[r][a - 1].ch > ' ' || (grid[r][a - 1].attr & 8)))
             a--;
-        while (b < cols - 1 && grid[r][b + 1].ch > ' ')
+        while (b < cols - 1 && (grid[r][b + 1].ch > ' ' || (grid[r][b + 1].attr & 8)))
             b++;
         sel_ar = sel_br = r;
         sel_ac = a;
@@ -753,7 +885,7 @@ int main(int argc, char **argv)
             } else if (t == BWM_MOUSE) {
                 struct bwm_mouse *e = (struct bwm_mouse *)buf;
                 if (mouse_mode) {                /* the program asked for the pointer: no selection, no scrolling back */
-                    int mr = e->y / CH, mc = e->x / CW;
+                    int mr = (int)e->y < 0 ? 0 : e->y / CH, mc = (int)e->x < 0 ? 0 : e->x / CW;
                     mouse_report(m, e->buttons, mr >= rows ? rows - 1 : mr, mc >= cols ? cols - 1 : mc);
                     continue;
                 }
@@ -775,7 +907,7 @@ int main(int argc, char **argv)
                     back = 0;                    /* a click works on the live screen */
                     memset(dirty, 1, sizeof dirty);
                 }
-                int er = e->y / CH, ec = e->x / CW;
+                int er = (int)e->y < 0 ? 0 : e->y / CH, ec = (int)e->x < 0 ? 0 : e->x / CW;
                 if (er >= rows) er = rows - 1;
                 if (ec >= cols) ec = cols - 1;
                 if ((e->buttons & 1) && !selecting) {

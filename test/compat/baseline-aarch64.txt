@@ -248,6 +248,7 @@ t_dir: stat /tmp
 t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
+t_dir: statvfs names up to 255 bytes, as NAME_MAX says
 t_dir: unlink file in directory
 t_dns: connect to a looked-up name
 t_dns: getaddrinfo AF_INET
@@ -286,6 +287,8 @@ t_fanotify: remove the mark
 t_fanotify: the event says who did it
 t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC
+t_fdlock: 200 separate byte-range locks on one file
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
@@ -963,6 +966,7 @@ t_proc: an eventfd shows its count
 t_proc: an inotify instance lists its watches
 t_proc: a pidfd shows the process
 t_proc: fdinfo lists the open descriptors
+t_proc: fdinfo of a closed descriptor does not open
 t_proc: /proc/self lists fdinfo
 t_proc: maps lists an anonymous mapping
 t_proc: maps lists a shared mapping with s
@@ -1250,6 +1254,7 @@ t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: settimeofday
+t_sysv: shmat over its own address with SHM_REMAP replaces the attachment
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: GETNCNT counts a waiting process
 t_sysv: IPC_RMID ends a wait with EIDRM

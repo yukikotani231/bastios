@@ -3,9 +3,10 @@
 /* bview, an image viewer for bwm: "bview FILE" shows a PPM (P6, 8 bits) or an
  * uncompressed 24 or 32 bit BMP, scaled by a whole factor to fit 512 x 360
  * (small images are enlarged, big ones sampled), in a window of its own. The
- * pixels live in bfiles' buffer. Any key or the close box ends it. Says
+ * pixels live in bfiles' buffer. Any other key or the close box ends it. Says
  * "bview: window ID WxH" when the window is open and "bview: cannot show
- * FILE" otherwise. It is part of the bterm program, which runs it when
+ * FILE" otherwise. + and - (or =) zoom, h j k l or the arrow keys move
+ * about a zoomed image, 0 goes back to the first view. It is part of the bterm program, which runs it when
  * started as "bview" (bfiles' i runs it on the file shown). */
 #include <stdio.h>
 #include <stdlib.h>
@@ -75,6 +76,45 @@ static uint32_t bv_get(const struct bv_img *m, long x, long y)
     return m->bmp ? (uint32_t)p[2] << 16 | (uint32_t)p[1] << 8 | p[0] : (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2];
 }
 
+/* Draws the image into bf_pix, WW x WH, at the scale BN / BD doubled (E > 0) or halved (E < 0) E times. The window shows
+ * the middle of the image when it is smaller, else the part at (*PANX, *PANY), moved by DX, DY; a change of scale keeps
+ * the middle of the window where it was. */
+static long bv_cur_n = 1, bv_cur_d = 1, bv_cur_w, bv_cur_h;
+
+static void bv_draw(const struct bv_img *m, long bn, long bd, int e, long ww, long wh, long *panx, long *pany, long dx, long dy)
+{
+    long n = e > 0 ? bn << e : bn, d = e < 0 ? bd << -e : bd;
+    long w = m->w * n / d, h = m->h * n / d;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    if (bv_cur_w) {                                        /* the image coordinate at the middle of the window, at the old scale */
+        long ox = bv_cur_w < ww ? (ww - bv_cur_w) / 2 : -*panx, oy = bv_cur_h < wh ? (wh - bv_cur_h) / 2 : -*pany;
+        *panx = (ww / 2 - ox) * bv_cur_d * n / (bv_cur_n * d) - ww / 2;
+        *pany = (wh / 2 - oy) * bv_cur_d * n / (bv_cur_n * d) - wh / 2;
+    }
+    *panx += dx;
+    *pany += dy;
+    if (*panx > w - ww) *panx = w - ww;
+    if (*pany > h - wh) *pany = h - wh;
+    if (*panx < 0) *panx = 0;
+    if (*pany < 0) *pany = 0;
+    long ox = w < ww ? (ww - w) / 2 : -*panx, oy = h < wh ? (wh - h) / 2 : -*pany;
+    for (long y = 0; y < wh; y++)
+        for (long x = 0; x < ww; x++) {
+            uint32_t c = 0x00101018;
+            long sx = x - ox, sy = y - oy;
+            if (sx >= 0 && sx < w && sy >= 0 && sy < h) {
+                long ix = sx * d / n, iy = sy * d / n;
+                c = bv_get(m, ix < m->w ? ix : m->w - 1, iy < m->h ? iy : m->h - 1);
+            }
+            bf_pix[y * ww + x] = c;
+        }
+    bv_cur_n = n;
+    bv_cur_d = d;
+    bv_cur_w = w;
+    bv_cur_h = h;
+}
+
 static int bview_main(int argc, char **argv)
 {
     const char *path = argc > 1 ? argv[1] : "";
@@ -102,14 +142,10 @@ static int bview_main(int argc, char **argv)
     if (w < 1) w = 1;
     if (h < 1) h = 1;
     long ww = w < 128 ? 128 : w, wh = h < 64 ? 64 : h;       /* a window never smaller than this */
-    for (long y = 0; y < wh; y++)
-        for (long x = 0; x < ww; x++) {
-            uint32_t c = 0x00101018;
-            long ox = x - (ww - w) / 2, oy = y - (wh - h) / 2;
-            if (ox >= 0 && ox < w && oy >= 0 && oy < h)
-                c = k ? bv_get(&m, ox * dn, oy * dn) : bv_get(&m, ox / up, oy / up);
-            bf_pix[y * ww + x] = c;
-        }
+    long bn = k ? 1 : up, bd = k ? dn : 1;                   /* the scale at the start: bn / bd window pixels per image pixel */
+    int ze = 0;                                              /* + and - double and halve it, up to 4 times each way */
+    long panx = 0, pany = 0;                                 /* where the window's corner is in the scaled image, when that is bigger */
+    bv_draw(&m, bn, bd, ze, ww, wh, &panx, &pany, 0, 0);
     int fd = bwm_connect();
     if (fd < 0) {
         puts("bview: no window server");
@@ -123,10 +159,37 @@ static int bview_main(int argc, char **argv)
     printf("bview: window %d %ldx%ld\n", id, m.w, m.h);
     fflush(stdout);
     static unsigned char buf[BWM_MAX_PAYLOAD];
+    int esc = 0;                                             /* 1 after ESC, 2 after ESC [ (an arrow key is three bytes) */
     for (;;) {
         int t = bwm_event(fd, buf);
-        if (t < 0 || t == BWM_CLOSE || t == BWM_KEY)
+        if (t < 0 || t == BWM_CLOSE)
             break;
+        if (t != BWM_KEY)
+            continue;
+        unsigned c = ((struct bwm_key *)buf)->ch;
+        long dx = 0, dy = 0;
+        int dz = 0, reset = 0;
+        if (esc == 0 && c == 27) { esc = 1; continue; }
+        if (esc == 1 && c == '[') { esc = 2; continue; }
+        if (esc == 2) {
+            esc = 0;
+            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : 0;
+        } else if (esc == 1) {
+            break;
+        }
+        if (c == 'h') dx = -32; else if (c == 'l') dx = 32;
+        else if (c == 'k') dy = -32; else if (c == 'j') dy = 32;
+        else if (c == '+' || c == '=') dz = 1;
+        else if (c == '-') dz = -1;
+        else if (c == '0') reset = 1;
+        else if (c == 0) continue;
+        else break;
+        long nz = reset ? 0 : ze + dz;
+        if (nz < -4 || nz > 4)
+            continue;
+        bv_draw(&m, bn, bd, nz, ww, wh, &panx, &pany, dx, dy);
+        ze = (int)nz;
+        bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh);
     }
     return 0;
 }

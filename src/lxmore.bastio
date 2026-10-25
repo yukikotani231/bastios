@@ -387,8 +387,11 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   let rdev = st_rdev(k.fs.xfer);
   let blocks = get_u64(k.fs.xfer, 64);
   let atime = get_u64(k.fs.xfer, 72);
+  let atime_ns = get_u64(k.fs.xfer, 80);
   let mtime = get_u64(k.fs.xfer, 88);
+  let mtime_ns = get_u64(k.fs.xfer, 96);
   let ctime = get_u64(k.fs.xfer, 104);
+  let ctime_ns = get_u64(k.fs.xfer, 112);
   let mut z = 0;
   while z < STATX_SIZE
     invariant z <= STATX_SIZE && kok(k)
@@ -408,8 +411,11 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   xfer_u64(&mut k.fs.xfer, 40, size);
   xfer_u64(&mut k.fs.xfer, 48, blocks);
   xfer_u64(&mut k.fs.xfer, 64, atime);                              // stx_atime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 72, atime_ns);                           // stx_atime.tv_nsec
   xfer_u64(&mut k.fs.xfer, 96, ctime);                              // stx_ctime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 104, ctime_ns);                          // stx_ctime.tv_nsec
   xfer_u64(&mut k.fs.xfer, 112, mtime);                             // stx_mtime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 120, mtime_ns);                          // stx_mtime.tv_nsec
   // stx_rdev_major and stx_rdev_minor, from Linux's 32-bit encoding
   xfer_u64(&mut k.fs.xfer, 128, rdev % 0x100000 / 256 + (rdev % 256 + rdev / 4096 / 256 * 256) * 0x100000000);
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
@@ -512,8 +518,8 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
   if nm != 0 {
     return nm;
   }
-  if flags / 2 != 0 && flags != MFD_CLOEXEC + 2 {
-    return EINVAL;                          // MFD_ALLOW_SEALING (2) is accepted; nothing else
+  if flags / 4 != 0 {
+    return EINVAL;                          // MFD_CLOEXEC (1) and MFD_ALLOW_SEALING (2), alone or together; nothing else
   }
   let mut oflags = LO_RDWR + LO_CREAT + LO_EXCL;
   if flags % 2 == MFD_CLOEXEC {

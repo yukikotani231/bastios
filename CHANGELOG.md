@@ -16,6 +16,17 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- In the `bfiles` list the Delete key does what `D` does: twice deletes the entry under the cursor.
+- In the `bfiles` list `e` edits the file under the cursor without opening the viewer first.
+- The `bfiles` editor copies the line under the cursor below it with Ctrl-D.
+- The title row of `bfiles` adds `[by size]` or `[by time]` when the list is not sorted by name.
+- In the `bfiles` list `-` goes back to the directory shown before the last change.
+- In the `bfiles` list `~` goes to the home directory (`$HOME`, or `/` when it is not set).
+- In the `bfiles` list `/` and the start of a name move the cursor to the first entry that begins with it (Backspace takes a letter back, Enter or Esc ends it).
+- `bview` zooms: `+` and `-` double and halve the scale about the middle of the window, `h j k l` or the arrow keys move about a zoomed image, `0` goes back.
+- The `bfiles` editor marks the text of the last Ctrl-F wherever it shows in the window.
+- A drag in a `bfiles` editor that rests above or below the window goes on scrolling: `bwm` repeats the motion every 60 ms while the button is held.
+- `bwm` types Japanese: Alt-Space turns on a romaji to hiragana mode, again a romaji to katakana mode, and a third time turns it off (a "Kana" or "Kata" mark shows in the task bar, with the letters that wait for a kana). There is no conversion to kanji.
 - `bwm` opens its launcher menu at the pointer on a right click on the empty desktop.
 - The `bsys` System window lists the processes (`p`), moves along the list (`j`, `k` or the arrow keys) and ends the selected one (`x`).
 - The `bfiles` editor cuts and pastes a line (Ctrl-K, Ctrl-U), finds text (Ctrl-F) and goes to a line (Ctrl-G), and shows the cursor's line number.
@@ -28,6 +39,18 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The `bfiles` editor goes to the start and the end of the line with Ctrl-A and Ctrl-E.
 - The `bfiles` editor moves by words with Ctrl-Left and Ctrl-Right, and `bwm` sends `ESC [ 1 ; 5 A` to `D` (and `H`, `F`) for an arrow key held with Ctrl, as xterm does; `bfiles` also skips such modifier numbers in a key sequence instead of typing them.
 - The `bfiles` editor deletes the word before the cursor with Ctrl-W (one Ctrl-Z puts it back).
+- The `bfiles` file list and viewer draw UTF-8 (a Japanese file name, text in a file) with the same font, a wide character in two cells.
+- `bterm` blanks what is left of a wide character when erase, insert or delete characters (`CSI X`, `@`, `P`, `K`, `J`) cut it in half, instead of drawing half a glyph.
+- A drag that began in a window's contents goes on when the pointer leaves it: `bwm` keeps sending the motion and the release to that window, with signed coordinates; the `bfiles` editor scrolls and stretches the selection, `bterm` stretches it to the edge.
+- The `bfiles` editor draws UTF-8 too, and the cursor, Left and Right, Up and Down, Backspace, Delete and the mouse move by character and by cell column, not by byte; a byte that is not UTF-8 is a `?`.
+- `bterm` draws UTF-8 text from the console's font (`src/font16.bin`): Latin and Greek letters, box drawing, blocks, kana, the kanji of JIS X 0208 and half-width katakana, a wide character in two cells; copying a selection writes UTF-8. Any other character is still a look-alike or `?`.
+- `bterm` reads UTF-8: a character takes one cell, drawn as a look-alike for box drawing, blocks, arrows, bullets and quotes (`-`, `|`, `+`, `#`, `*` and so on) and as `?` for anything else the 128-glyph font lacks; combining and zero-width characters take none. Before, every byte of such a character was dropped, so tmux borders and non-ASCII file names vanished or shifted the line.
+- The `bfiles` editor goes to the start and the end of the text with Ctrl-Home and Ctrl-End.
+- A triple click in the `bfiles` editor selects the line under the pointer, with its newline.
+- A double click in the `bfiles` editor selects the word under the pointer.
+- The `bfiles` editor selects text by dragging the mouse over it (a click puts the cursor and starts a selection there).
+- The `bfiles` editor selects text with Shift and the arrow keys, Home or End; typing, Backspace or Delete replaces or removes the selection, Ctrl-C copies it and Ctrl-W cuts it (into the clipboard other windows paste from). `bwm` now sends the Shift-modified arrow sequences.
+- The task bar clock of `bwm` follows `TZ` (or `/etc/TZ`) in POSIX form such as `JST-9`; there is still no zone database, so it shows UTC when neither is set.
 - `bfiles` copies a directory with everything in it (down to 8 levels), not only a file.
 - `bwm` maximizes a resizable window, or puts a maximized one back, on a double click on its title bar.
 - `bwm` snaps the focused window to the left or right half of the screen with Alt-Left and Alt-Right, and maximizes it with Alt-Up.
@@ -49,7 +72,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bsys` is a System window (kernel, uptime, memory, processors, screen, root disk, time) that the launcher menu opens; `r` refreshes it. It is part of `bterm`, so it adds no image.
 - `g` and `G` in `bfiles` jump to the top and the end of the list or the file.
 - `R` in the `bfiles` list reads the directory again.
-- `s` in the `bfiles` list sorts the files by size (largest first) or back by name.
+- `s` in the `bfiles` list sorts the files by size (largest first), then by time (newest first), then back by name.
 - `bfiles` leaves out names that start with a dot, and `h` in the list shows or hides them.
 - `bfiles` copies the file it is showing to `NAME.copy` on `c`.
 - `bfiles` opens a terminal window in the directory shown on `t` in the list.
