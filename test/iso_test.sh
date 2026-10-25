@@ -833,6 +833,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and last != first and len(first) > 2 and len(last) > 2
             print(("ok  " if good else "FAIL"), f"({name}) G and g in the process list go to the last and the first ({last!r} {first!r})")
             fails += not good
+            # n sorts the list by name: the first name is not after the last, and n again goes back to newest first.
+            mark3 = len(out)
+            monitor("sendkey n")
+            good = until(b"bsys: sorted by name", mark3)
+            names = []
+            for key in ("g", "shift-g"):
+                mark3 = len(out)
+                monitor("sendkey " + key)
+                good = good and until(b"bsys: select", mark3)
+                sel = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0].split() if good else []
+                names.append(sel[1] if len(sel) > 1 else b"")
+            mark3 = len(out)
+            monitor("sendkey n")
+            good = good and until(b"bsys: sorted by pid", mark3) and names[0] and names[0] <= names[1]
+            print(("ok  " if good else "FAIL"), f"({name}) n sorts the process list by name ({names!r})")
+            fails += not good
             monitor("sendkey p")
             good = until(b"bsys: system", mark)
             print(("ok  " if good else "FAIL"), f"({name}) p goes back to the figures")
@@ -1328,6 +1344,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"cat /tmp/tt.txt; echo end$((1+1))\r"); q.stdin.flush()
         good = good and (until(b"acb\r\nbar\r\nend2", mark) or until(b"acb\nbar\nend2", mark))
         print(("ok  " if good else "FAIL"), f"({name}) Ctrl-B in the editor swaps two characters")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Shift-Tab in the editor takes four blanks off the start of the line.
+        mark = len(out)
+        q.stdin.write(b"printf '      ab\\nbar\\n' > /tmp/st.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/st.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/st.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/st.txt", mark)
+        if good:
+            monitor("sendkey shift-tab", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/st.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/st.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"  ab\r\nbar\r\nend2", mark) or until(b"  ab\nbar\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Shift-Tab in the editor takes four blanks off the line")
         fails += not good
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()

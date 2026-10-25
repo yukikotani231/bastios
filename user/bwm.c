@@ -1142,6 +1142,7 @@ static int key_bytes(unsigned code, char *out)
             memcpy(out, fkey[i].seq, n);
             return (int)n;
         }
+    if (code == 15 && k_shift) { memcpy(out, "\033[Z", 3); return 3; }   /* Shift-Tab */
     if (code == 111) { memcpy(out, "\033[3~", 4); return 4; }        /* Delete */
     if (code == 104) { memcpy(out, "\033[5~", 4); return 4; }        /* Page Up */
     if (code == 109) { memcpy(out, "\033[6~", 4); return 4; }        /* Page Down */
