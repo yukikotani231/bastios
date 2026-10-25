@@ -30,6 +30,26 @@ fn put_range(con: &Serial, line: &Buf, from: u64, to: u64)
   }
 }
 
+/// Like put_range, but `\e` writes ESC, so a line can drive the terminal.
+fn put_escaped(con: &Serial, line: &Buf, from: u64, to: u64)
+  requires from >= 1
+  requires to < len(line)
+  requires forall j: u64 :: 1 <= j && j < len(line) ==> get(line, j) <= 255
+{
+  let mut i = from;
+  while i <= to
+    invariant from <= i
+  {
+    if get(line, i) == 92 && i < to && get(line, i + 1) == 101 {
+      serial_write(con, 27);
+      i = i + 2;
+    } else {
+      serial_write(con, cast[u8](get(line, i)));
+      i = i + 1;
+    }
+  }
+}
+
 // ---------------------------------------------------------------- input
 
 fn read_line(con: &Serial, mut line: Buf) -> Buf
@@ -499,7 +519,7 @@ fn find_gt(line: &Buf, n: u64) -> u64
 fn cmd_help(con: &Serial) {
   print_str(con, "commands:\r\n");
   print_str(con, "  help             this list\r\n");
-  print_str(con, "  echo TEXT        print TEXT\r\n");
+  print_str(con, "  echo TEXT        print TEXT (`\\e` is ESC)\r\n");
   print_str(con, "  echo TEXT > FILE write TEXT to FILE (`>>`: append)\r\n");
   print_str(con, "  ls [DIR]         list files with their sizes (or what is in DIR)\r\n");
   print_str(con, "  mkdir DIR        make a directory (rmdir: remove an empty one)\r\n");
@@ -1145,7 +1165,7 @@ fn main(con: &mut Serial) -> u64 {
         echo_to(con, line, n, g);
       } else {
         if n >= 6 {
-          put_range(con, line, 6, n);
+          put_escaped(con, line, 6, n);
         }
         print_str(con, "\r\n");
       }

@@ -20,7 +20,19 @@ DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa346626
 JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c1602330a80b5f2d2fcfa0aa97c4e
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
+PYTHON_IMAGE := library/python@sha256:f6a589d43c42b9e7f7dc67a12d37132491f362859a5d750607710cc56da3bc72
+PODMAN_IMAGE ?= mgoltzsche/podman@sha256:86e6ecde27e86140a20fa16dcc03cc1e67150536bd8335f6effbba067e352b48
 NODE_IMAGE ?= library/node@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+# gopls, the Go language server, built from this release (Makefile: build/compat/gopls).
+GOPLS_VER := v0.20.0
+# rust-analyzer, Rust's language server, from the Rust release the rust image holds
+# (the musl build of the rust-analyzer component, pinned by the SHA-256 of its
+# tar.gz in that release's manifest, https://static.rust-lang.org/dist/channel-rust-1.99.0.toml).
+RUST_ANALYZER_URL    := https://static.rust-lang.org/dist/2026-10-01/rust-analyzer-1.99.0-x86_64-unknown-linux-musl.tar.gz
+RUST_ANALYZER_SHA256 := 9c135328ac82c90b6e2b801f679f75cf6e9fa4ff77a4486106b839e529e67f51
+# The standard library's source (rust-src), which rust-analyzer reads, from the same release.
+RUST_SRC_URL    := https://static.rust-lang.org/dist/2026-10-01/rust-src-1.99.0.tar.gz
+RUST_SRC_SHA256 := 82b978093b33c71bcbe69005b92181bfb76d3d0e434ef303e637812e21badcd7
 # The tree-sitter C parser for Neovim (npm package, pinned by version and SHA-256).
 TREESITTER_C_VER    := 0.24.1
 TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b757451e
@@ -28,3 +40,12 @@ TREESITTER_C_SHA256 := 8e9ecd7687665d2fa1b3c07fbd1f4380b7d285850d6954629e2156e1b
 # strace for AArch64, built from source (arch/aarch64/Makefile).
 STRACE_VER := 6.11
 STRACE_SHA256 := 83262583a3529f02c3501aa8b8ac772b4cbc03dc934e98bab6e4883626e283a5
+# Eclipse JDT LS (jdtls), the Java language server: a milestone, the last one
+# that runs on the JDK 21 of the Java disk (1.62 wants Java 25).
+JDTLS_URL    := https://download.eclipse.org/jdtls/milestones/1.61.0/jdt-language-server-1.61.0-202609031315.tar.gz
+JDTLS_SHA256 := 338e7e73d61836651ba2453919a0d34fa763eb4e7c03342092309bffb8934c64
+# TypeScript 7's compiler, a static Go program that also speaks LSP
+# (`tsc --lsp --stdio`), with the standard library's declaration files: the
+# linux-x64 package from npm, pinned by the SHA-256 of its tarball.
+TSC_VER    := 7.0.2
+TSC_SHA256 := 7ecad6f67377e831856367ab062ef394f21506a611405bf8ac0ff039348637d3

@@ -9,6 +9,7 @@
 import "pages.bastio";
 import "proc.bastio";
 import "console.bastio";
+import "utf8.bastio";
 import "space.bastio";
 import "syscall.bastio";
 import "oflags.bastio";
@@ -54,6 +55,9 @@ const LX_IO_GETEVENTS: u64 = 208;
 const LX_IO_SUBMIT: u64 = 209;
 const LX_IO_CANCEL: u64 = 210;
 const LX_MEMBARRIER: u64 = 324;
+const LX_MBIND: u64 = 237;
+const LX_SET_MEMPOLICY: u64 = 238;
+const LX_GET_MEMPOLICY: u64 = 239;
 const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
 const LX_OPENAT: u64 = 257;
 const LX_CREAT: u64 = 85;
@@ -100,7 +104,6 @@ const MAP_FIXED_NOREPLACE: u64 = 0x100000;
 const MAP_LEGACY_MASK: u64 = 0xFC17F973;
 const PATH_MAX_LX: u64 = 4096;          // the longest path read from user memory (Linux's PATH_MAX)
 const PATH_FIRST: u64 = 256;            // read first; most paths end within it
-const PATH_OUT: u64 = 512;              // room for a name being built
 
 const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
@@ -248,7 +251,107 @@ fn read_l3(l3: &mut PageTable, off: u64) -> Word
   return Word { ok: true, v: v };
 }
 
+/// read(2) and readv(2) (kept out of linux_syscall, whose proof is near the
+/// solver's limit).
+fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, was: u64) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let early = rw_early(&mut k, pid, n, a, b, c);
+  if early != NO_RESULT {
+    ret(&mut k.procs, pid, early);
+    return KEEP;
+  }
+  let rv = fd_look(k, pid, a);
+  if n == LX_READV && rv.kind == K_FILE {
+    let got = file_readv(&mut k, pid, rv.x, b, c);
+    if got == DISK_RETRY {
+      return disk_retry(&mut k, pid, n);   // nothing read yet: wait for the disk
+    }
+    ret(&mut k.procs, pid, got);
+    return KEEP;
+  }
+  // readv on anything but a file reads into the first buffer that has
+  // room: a short read, as Linux allows (a later buffer could wait).
+  let mut va = b;
+  let mut cnt = c;
+  if n == LX_READV {
+    let v = first_iov(&mut k, pid, b, c);
+    if v.err != 0 {
+      ret(&mut k.procs, pid, v.err);
+      return KEEP;
+    }
+    va = v.base;
+    cnt = v.len;
+  }
+  let d = fd_look(k, pid, a);
+  if d.kind == K_CONSOLE {
+    return console_read(&mut k, pid, va, cnt, was);
+  }
+  if d.kind == K_DEV && (d.x | 4) == DEV_SER {   // DEV_MICE or DEV_SER
+    return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio; the serial port too
+  }
+  if d.kind == K_DEV && d.x == DEV_KEYEV {
+    return keyev_read(&mut k, pid, n, a, va, cnt);  // src/lxkeyev.bastio
+  }
+  let mut r = EBADF;
+  if d.kind == K_FILE {
+    r = lx_file_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_PIPE_R {
+    r = pipe_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_EVENT || d.kind == K_TIMER {
+    r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
+  } else if d.kind == K_SIGFD {
+    r = sfd_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_INOTIFY && d.x < INO_N {
+    r = ino_read(&mut k, pid, d.x, va, cnt);   // src/lxinotify.bastio
+  } else if d.kind == K_DEV && d.x >= PROC_DEV {
+    r = proc_read(&mut k, pid, a, d.x, va, cnt);
+  } else if d.kind == K_DEV && is_loop(d.x) {
+    r = loop_io(&mut con, &mut k, pid, a, d.x, false, va, cnt);
+  } else if d.kind == K_DEV && is_pty_dev(d.x) {
+    r = pty_read(&mut k, pid, d.x, va, cnt);   // src/lxpty.bastio
+  } else if d.kind == K_DEV {
+    r = dev_read(&mut k, pid, d.x, va, cnt);
+  } else if d.kind == K_SOCK {
+    r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
+    if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
+      return sock_retry(&mut k, pid, n);  // a network socket: sleep until a frame comes in
+    }
+    if r == SK_WAIT {
+      r = EAGAIN;                         // wait for a datagram, below
+    } else if r == EAGAIN {
+      ret(&mut k.procs, pid, r);          // nonblocking: say so
+      return KEEP;
+    }
+  }
+  if r == EAGAIN && !pipe_nonblock(k, pid, a) {
+    return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
+  }
+  if r == DISK_RETRY {
+    return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
+  }
+  if r >= READ_MAX / 2 && r <= READ_MAX {
+    // A read this large may have faulted its buffer in from the kernel
+    // (copy_to_user), which anon_fault's look at every 256th page never
+    // sees, and it can finish before a timer tick does (under KVM, 120 MiB
+    // from /dev/zero in a quarter of a second): memory.max is looked at
+    // here too. Outside a group with a limit the look ends at once.
+    cg_oom_tick(&mut k, pid);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
 /// Handles the Linux system call process `pid` just made.
+/// getppid for process `pid`: its group leader's parent, as `pid` sees it.
+/// `reap_gen` below changes whenever an exit gives any process a new parent.
+fn lx_ppid(k: &Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  return vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1)));
+}
+
 fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k) && con_ok(con)
@@ -258,6 +361,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   if sp >= USER_BASE + 128 {
     stack_reach(&mut k.mem, &mut k.spaces, pid, sp - 128);   // the red zone too
   }
+  swap_args(&mut k, pid);                   // pages the arguments point at come back from swap (src/swap.bastio)
   let was = pget(k.procs, pid, F_RESTART);  // a timed wait keeps its deadline here
   pset(&mut k.procs, pid, F_RESTART, 0);
   let mut a = pget(k.procs, pid, F_REGS + R_RDI);
@@ -290,6 +394,10 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   let mut clear = false;                  // CLONE_CLEAR_SIGHAND (clone3)
+  let mut pfdp = c;                       // where CLONE_PIDFD stores the descriptor: clone3 has a word for it
+  if copies_space(&mut k, pid, n, a) && !win_quiet(&mut k, pid) {
+    return lx_retry(&mut k, pid, n);        // fork with another thread of pid on a processor (copies_space)
+  }
   if n == LX_CLONE3 {
     let fw = user_u64(&mut k.spaces, pid, a);
     if fw.ok && fw.v / 0x200000000 % 2 == 1 {
@@ -318,8 +426,12 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     clear = c3.clear;
     b = c3.sp;
     c = c3.ptid;
+    pfdp = c3.pfd;
     ctid = c3.ctid;
     tls = c3.tls;
+  }
+  if (n == LX_EXIT || n == LX_EXIT_GROUP) && pt_exit_event(&mut k, pid, a) {
+    return SWITCH;                          // PTRACE_O_TRACEEXIT: the tracer is told first
   }
   if n == LX_EXIT && thread_only(k.procs, pid) {
     lx_thread_exit(&mut k, mmu, pid);
@@ -363,79 +475,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_READ || n == LX_READV {
-    let early = rw_early(&mut k, pid, n, a, b, c);
-    if early != NO_RESULT {
-      ret(&mut k.procs, pid, early);
-      return KEEP;
-    }
-    let rv = fd_look(k, pid, a);
-    if n == LX_READV && rv.kind == K_FILE {
-      let got = file_readv(&mut k, pid, rv.x, b, c);
-      if got == DISK_RETRY {
-        return disk_retry(&mut k, pid, n);   // nothing read yet: wait for the disk
-      }
-      ret(&mut k.procs, pid, got);
-      return KEEP;
-    }
-    // readv on anything but a file reads into the first buffer that has
-    // room: a short read, as Linux allows (a later buffer could wait).
-    let mut va = b;
-    let mut cnt = c;
-    if n == LX_READV {
-      let v = first_iov(&mut k, pid, b, c);
-      if v.err != 0 {
-        ret(&mut k.procs, pid, v.err);
-        return KEEP;
-      }
-      va = v.base;
-      cnt = v.len;
-    }
-    let d = fd_look(k, pid, a);
-    if d.kind == K_CONSOLE {
-      return console_read(&mut k, pid, va, cnt, was);
-    }
-    if d.kind == K_DEV && d.x == DEV_MICE {
-      return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio
-    }
-    let mut r = EBADF;
-    if d.kind == K_FILE {
-      r = lx_file_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_PIPE_R {
-      r = pipe_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_EVENT || d.kind == K_TIMER {
-      r = ev_read(&mut k, pid, d.kind, d.x, va, cnt);
-    } else if d.kind == K_SIGFD {
-      r = sfd_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_INOTIFY && d.x < INO_N {
-      r = ino_read(&mut k, pid, d.x, va, cnt);   // src/lxinotify.bastio
-    } else if d.kind == K_DEV && d.x >= PROC_DEV {
-      r = proc_read(&mut k, pid, a, d.x, va, cnt);
-    } else if d.kind == K_DEV && is_loop(d.x) {
-      r = loop_io(&mut con, &mut k, pid, a, d.x, false, va, cnt);
-    } else if d.kind == K_DEV && is_pty_dev(d.x) {
-      r = pty_read(&mut k, pid, d.x, va, cnt);   // src/lxpty.bastio
-    } else if d.kind == K_DEV {
-      r = dev_read(&mut k, pid, d.x, va, cnt);
-    } else if d.kind == K_SOCK {
-      r = lx_recvfrom(&mut k, pid, a, va, cnt, 0, 0, 0);
-      if r == SK_WAIT && !is_unix(k, pid, a) && !is_nl(k, pid, a) {
-        return sock_retry(&mut k, pid, n);  // a network socket: sleep until a frame comes in
-      }
-      if r == SK_WAIT {
-        r = EAGAIN;                         // wait for a datagram, below
-      } else if r == EAGAIN {
-        ret(&mut k.procs, pid, r);          // nonblocking: say so
-        return KEEP;
-      }
-    }
-    if r == EAGAIN && !pipe_nonblock(k, pid, a) {
-      return lx_retry(&mut k, pid, n);       // an empty pipe: wait for a writer
-    }
-    if r == DISK_RETRY {
-      return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
-    }
-    ret(&mut k.procs, pid, r);
-    return KEEP;
+    return lx_read_call(&mut con, &mut k, pid, n, a, b, c, was);
   }
   if n == LX_WRITE || n == LX_WRITEV {
     return lx_write_call(&mut con, &mut k, pid, n, a, b, c);
@@ -590,8 +630,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
     }
     let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
-    if flags & 0x2000 != 0 && r < 0x8000000000000000 {
-      lock_mapped(&mut k, pid, b);          // MAP_LOCKED
+    if r < 0x8000000000000000 {
+      if flags / MAP_FIXED % 2 == 1 {
+        lock_unmapped(&mut k, pid, r, b);   // what was locked there is replaced
+      }
+      if flags & 0x2000 != 0 {
+        lock_mapped(&mut k, pid, r, b);     // MAP_LOCKED
+      }
     }
     ret(&mut k.procs, pid, r);
     return KEEP;
@@ -601,20 +646,65 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     ret(&mut k.procs, pid, lx_stat_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
+  return lx_proc_call(&mut con, &mut k, mmu, pid, n, was, a, b, c, pfdp, ctid, tls, clear);
+}
+
+/// Whether call n (with first argument a) makes a new process with a copy
+/// of pid's address space: fork, vfork (which copies here), and clone or
+/// clone3 without CLONE_VM. The copy is made page by page, so another
+/// thread of pid that ran on a processor meanwhile could write some pages
+/// before they were copied and others after: the child would see a state
+/// the parent never had at any one moment (a lock taken in one page and
+/// what it guards not yet written in another). So these calls first wait,
+/// as munmap does, until no thread of the group runs on the space
+/// (win_quiet); the others are not picked meanwhile (group_free).
+fn copies_space(k: &mut Kernel, pid: u64, n: u64, a: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_FORK || n == LX_VFORK {
+    return true;
+  }
+  if n == LX_CLONE {
+    return a & CLONE_VM == 0;
+  }
+  if n == LX_CLONE3 {
+    let fw = user_u64(&mut k.spaces, pid, a);
+    return fw.ok && fw.v & CLONE_VM == 0;
+  }
+  return false;
+}
+
+/// The process-creating and exec calls, apart from linux_syscall so that its proof stays small.
+fn lx_proc_call(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64, pfdp: u64, ctid: u64, tls: u64, clear: bool) -> u64
+  requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
+  ensures kok(k) && con_ok(con)
+{
   if n == LX_CLONE && a & CLONE_VM != 0 && a & CLONE_VFORK != 0 && a & CLONE_THREAD == 0 {
+    if a / 0x1000 % 2 == 1 && fd_free(k, pid, 0) >= LXNFD {
+      ret(&mut k.procs, pid, EMFILE);
+      return KEEP;
+    }
     let r = lx_vfork_vm(&mut k, mmu, pid, b);
     if r >= NPROC {
       ret(&mut k.procs, pid, r);            // -errno: no child
       return KEEP;
     }
+    if a / 0x1000 % 2 == 1 {                // CLONE_PIDFD
+      // Go's os/exec asks for a pidfd this way. The space is the child's
+      // while the parent waits, so the descriptor's number goes in through it.
+      let pfd = ev_install(&mut k, pid, OF_PIDFD, r, 0, true);
+      let w = put_user_u32(&mut k, r, pfdp, pfd % 0x100000000);
+    }
     if clear {
       sig_reset(&mut k.sigact, r, true);
     }
     pt_fork_event(&mut k, pid, r, 2);
+    pt_vfork_stop(&mut k, pid);
     return SWITCH;                          // the parent waits until the child lets go
   }
   if n == LX_CLONE && a & CLONE_THREAD != 0 {
-    let r = lx_thread_clone(&mut k, pid, a, b, c, ctid, tls);
+    let r = lx_thread_clone(&mut k, pid, a, b, c, pfdp, ctid, tls);
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC {
       pt_fork_event(&mut k, pid, r, 3);
@@ -626,7 +716,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return KEEP;
   }
   if n == LX_CLONE && clone_proc_flags(a) {
-    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, ctid, tls);
+    let r = lx_clone_proc(&mut k, mmu, pid, a, b, c, pfdp, ctid, tls);
     ret(&mut k.procs, pid, child_id(k, pid, r));
     if r < NPROC && clear {
       sig_reset(&mut k.sigact, r, true);
@@ -649,6 +739,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
         kind = 2;
       }
       pt_fork_event(&mut k, pid, r, kind);
+      if n == LX_VFORK {
+        pt_vfork_copied(&mut k, pid);
+      }
     }
     return KEEP;
   }
@@ -680,6 +773,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   return lx_mid_call(&mut con, &mut k, pid, n, was, a, b, c);
 }
 
+
 /// The calls after the sleeping ones, apart from linux_syscall so that its proof stays small.
 fn lx_mid_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
@@ -710,16 +804,6 @@ fn lx_mid_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64
   }
   if is_ipc_call(n) {
     return lx_ipc_call(&mut k, pid, n, was, a, b, c);
-  }
-  if is_sys_call(n) {
-    return lx_sys_call(&mut k, pid, n, a, b);
-  }
-  if is_prio_call(n) {
-    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));
-    return KEEP;
-  }
-  if is_cred_call(n) {
-    return lx_cred_call(&mut k, pid, n, a, b, c);
   }
   return lx_last_call(&mut con, &mut k, pid, n, a, b, c);
 }
@@ -767,6 +851,19 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   requires con_ok(con) && kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  if is_sys_call(n) {
+    return lx_sys_call(&mut k, pid, n, a, b);
+  }
+  if is_swap_call(n) {
+    return lx_swap_call(&mut k, pid, n, a, b);
+  }
+  if is_prio_call(n) {
+    ret(&mut k.procs, pid, lx_prio_call(&mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10)));
+    return KEEP;
+  }
+  if is_cred_call(n) {
+    return lx_cred_call(&mut k, pid, n, a, b, c);
+  }
   if n == LX_GETCWD {
     ret(&mut k.procs, pid, lx_getcwd(&mut k, pid, a, b));
     return KEEP;
@@ -792,7 +889,7 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     return KEEP;
   }
   if n == LX_GETPPID {
-    ret(&mut k.procs, pid, vpid_of(k, pid, tgid(k.procs, smaller(pget(k.procs, tgid(k.procs, pid), F_PARENT), NPROC - 1))));
+    ret(&mut k.procs, pid, lx_ppid(k, pid));
     return KEEP;
   }
   if n == LX_IOCTL {
@@ -846,6 +943,17 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
       || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
     ret(&mut k.procs, pid, ENOSYS);
+    return KEEP;
+  }
+  // The memory policy calls: there is one memory node, so every policy is
+  // already in force. mbind and set_mempolicy accept what they are given
+  // (numpy's BLAS threads call mbind); get_mempolicy says MPOL_DEFAULT.
+  if n == LX_MBIND || n == LX_SET_MEMPOLICY {
+    ret(&mut k.procs, pid, 0);
+    return KEEP;
+  }
+  if n == LX_GET_MEMPOLICY {
+    ret(&mut k.procs, pid, lx_zero_out(&mut k, pid, a, 4));   // *mode = MPOL_DEFAULT
     return KEEP;
   }
   // membarrier: MEMBARRIER_CMD_QUERY answers that no command is
@@ -938,6 +1046,7 @@ const TCGETA: u64 = 0x5405;           // struct termio: the first four flag word
 const TCSETS: u64 = 0x5402;
 const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
+const TIOCSWINSZ: u64 = 0x5414;
 const FIONREAD: u64 = 0x541B;
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
@@ -956,6 +1065,7 @@ const SIOCSIFNAME: u64 = 0x8923;
 const SIOCGIFINDEX: u64 = 0x8933;
 const SIOCGIFMTU: u64 = 0x8921;
 const SIOCGIFTXQLEN: u64 = 0x8942;
+const SIOCETHTOOL: u64 = 0x8946;
 const IFREQ_SIZE: u64 = 40;
 const TIOCGPGRP: u64 = 0x540F;
 const TIOCSPGRP: u64 = 0x5410;
@@ -971,11 +1081,12 @@ const OPOST: u64 = 1;                     // c_oflag: process output
 const ONLCR: u64 = 4;                     // c_oflag: LF goes out as CR LF
 const VTIME_AT: u64 = 22;                 // c_cc[VTIME], in tenths of a second
 const VMIN_AT: u64 = 23;                  // c_cc[VMIN]
+const VSUSP_AT: u64 = 27;                 // c_cc[VSUSP]
 
 /// Byte i of the terminal's settings until a program sets them: canonical
 /// mode with echo, as a Linux console starts.
 fn tt_default(i: u64) -> u64 {
-  if i == 1 { return 1; }                 // c_iflag: ICRNL (0x100)
+  if i == 1 { return 0x41; }              // c_iflag: ICRNL (0x100) | IUTF8 (0x4000)
   if i == 4 { return 5; }                 // c_oflag: OPOST | ONLCR
   if i == 8 { return 0xBF; }              // c_cflag: B38400 | CS8 | CREAD
   if i == 12 { return 0x3B; }             // c_lflag: ISIG | ICANON | ECHO | ECHOE | ECHOK
@@ -985,6 +1096,7 @@ fn tt_default(i: u64) -> u64 {
   if i == 19 { return 0x7F; }             // c_cc[VERASE] = DEL
   if i == 20 { return 0x15; }             // c_cc[VKILL] = Ctrl-U
   if i == 21 { return 4; }                // c_cc[VEOF] = Ctrl-D
+  if i == VSUSP_AT { return 0x1A; }       // c_cc[VSUSP] = Ctrl-Z
   if i == VMIN_AT { return 1; }
   return 0;
 }
@@ -1111,9 +1223,18 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && d.x == DEV_FB {
     return fb_ioctl(&mut k, pid, req % 0x100000000, arg);    // src/lxfb.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_KEYEV {
+    return keyev_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxkeyev.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_SER {
+    return ser_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxserial.bastio
+  }
   if d.kind == K_SOCK && (req == SIOCATMARK || req == SIOCGIFNAME || (req >= SIOCGIFCONF && req <= SIOCGIFADDR) || req == SIOCSIFNAME || req == SIOCGIFINDEX
     || req == SIOCGIFMTU || req == SIOCGIFTXQLEN || req == SIOCGIFBRDADDR || req == SIOCGIFNETMASK || req == SIOCGIFHWADDR) {
     return sock_ioctl(&mut k, pid, fd, req, arg);
+  }
+  if d.kind == K_SOCK && req == SIOCETHTOOL {
+    return EOPNOTSUPP;                       // no driver to ask (psutil's net_if_stats takes this)
   }
   if d.kind != K_CONSOLE {
     return ENOTTY;
@@ -1201,13 +1322,32 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return lx_put_out(&mut k, pid, arg, 4);
   }
   if req == TIOCSPGRP {
-    return 0;                               // accepted: see TIOCGPGRP
+    // Kept only for Ctrl-Z (tty_intr): TIOCGPGRP still answers with the asker's group.
+    let g = pty_int_in(&mut k, pid, arg);
+    if g == NO_RESULT {
+      return EFAULT;
+    }
+    k.line = set(k.line, TT_FG, pidarg_k(k, pid, g) % 0x100000000);
+    return 0;
   }
   if req == TIOCGWINSZ {
     lx_fill(&mut k, 0, WINSIZE_SIZE);
-    bset(&mut k.fs.xfer, 0, 24);            // ws_row
-    bset(&mut k.fs.xfer, 2, 80);            // ws_col
+    let ws = get(k.line, TT_WS);
+    if ws != 0 {
+      xfer_u64(&mut k.fs.xfer, 0, ws % 4294967296);   // ws_row, ws_col as TIOCSWINSZ left them
+    } else {
+      bset(&mut k.fs.xfer, 0, 24);          // ws_row
+      bset(&mut k.fs.xfer, 2, 80);          // ws_col
+    }
     return lx_put_out(&mut k, pid, arg, WINSIZE_SIZE);
+  }
+  if req == TIOCSWINSZ {
+    // Only remembered: the console is not resized, and no SIGWINCH goes out.
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, WINSIZE_SIZE) != WINSIZE_SIZE {
+      return EFAULT;
+    }
+    k.line = set(k.line, TT_WS, 4294967296 + get_u64(k.fs.xfer, 0) % 4294967296);
+    return 0;
   }
   return ENOTTY;                            // a request the terminal does not know
 }
@@ -1436,7 +1576,7 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
   requires con_ok(con) && kok(k)
   ensures kok(k) && con_ok(con)
 {
-  if !lx_reading(k.procs) {
+  if !lx_reading(k) {
     return;
   }
   if !tt_canon(k.line) {
@@ -1470,21 +1610,32 @@ fn tty_cook(con: &mut Con, k: &mut Kernel)
 /// Whether some process is blocked in a Linux read of the console, or
 /// waits in poll (which may be for the console: a poll on pipes or sockets
 /// alone also lets typed bytes go to the Linux line).
-fn lx_reading(procs: &Buf) -> bool
-  requires ptab_ok(procs)
+fn lx_reading(k: &Kernel) -> bool
+  requires kok(k)
 {
   let mut p = 1;
   while p < NPROC
-    invariant 1 <= p && p <= NPROC
+    invariant 1 <= p && p <= NPROC && kok(k)
   {
-    if state(procs, p) == LXREADING {
+    let st = state(k.procs, p);
+    if st == LXREADING {
       return true;
     }
-    let n = pget(procs, p, F_REGS + R_LXNR);
-    if pget(procs, p, F_RESTART) >= 2
-      && (n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
-        || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 || n == LX_READ) {
-      return true;                          // a timed read is one of the console's (console_read); the waits may be for it
+    // A process that ended keeps its registers and restart word until its
+    // row is used again: it must not count (it would take the next typed line).
+    // (The cheap tests come first: this runs for every row on every poll.)
+    if st != FREE && st != ZOMBIE && pget(k.procs, p, F_RESTART) >= 2 {
+      let n = pget(k.procs, p, F_REGS + R_LXNR);
+      if n == LX_POLL || n == LX_PPOLL || n == LX_SELECT || n == LX_PSELECT6 || n == LX_EPOLL_WAIT
+        || n == LX_EPOLL_PWAIT || n == LX_EPOLL_PWAIT2 {
+        return true;                          // the waits may be for the console
+      }
+      if n == LX_READ {
+        let fd = fd_look(k, p, pget(k.procs, p, F_REGS + R_RDI));
+        if fd.kind == K_CONSOLE {
+          return true;                        // a timed read of the console (console_read; the key events and the mouse sleep the same way but are not its)
+        }
+      }
     }
     p = p + 1;
   }
@@ -1512,18 +1663,54 @@ fn tty_key(con: &mut Con, l: &mut Buf, c: u64, echo: bool)
     l = set(l, 1, 1);
   } else if c == 127 || c == 8 {
     if n > 0 {
-      l = set(l, 0, n - 1);
+      // With IUTF8 one erase takes the whole character, and takes back
+      // as many cells on the screen as it filled.
+      let mut cut = 1;
+      let mut cp = get(l, 2 + n - 1) % 256;
+      if tt_flags(l, 0) & IUTF8 != 0 {
+        let mut mul = 1;
+        let mut acc = 0;
+        while cut < 4 && cut < n && utf8_cont(get(l, 2 + n - cut) % 256)
+          invariant 1 <= cut && cut <= 4 && cut <= n && n <= LINE_MAX && lineok(l) && acc < mul
+          && (cut == 1 ==> mul == 1) && (cut == 2 ==> mul == 64) && (cut == 3 ==> mul == 4096) && (cut == 4 ==> mul == 262144)
+        {
+          acc = acc + (get(l, 2 + n - cut) % 64) * mul;
+          mul = mul * 64;
+          cut = cut + 1;
+        }
+        let lead = get(l, 2 + n - cut) % 256;
+        if cut > 1 && utf8_len(lead) == cut {
+          cp = acc + utf8_lead_bits(lead, cut) * mul;
+        } else if cut > 1 {
+          cut = 1;                              // stray continuation bytes: one at a time
+          cp = 0x80;
+        }
+      }
+      l = set(l, 0, n - cut);
       if echo {
-        con_write(&mut con, 8);
-        con_write(&mut con, 32);
-        con_write(&mut con, 8);
+        let mut w = cp_width(cp);
+        while w > 0
+          invariant con_ok(con)
+        {
+          con_write(&mut con, 8);
+          con_write(&mut con, 32);
+          con_write(&mut con, 8);
+          w = w - 1;
+        }
       }
     }
-  } else if c >= 32 && c <= 255 && n + 1 < LINE_MAX {
+  } else if (c >= 32 || c == 9 || c == 27) && c <= 255 && n + 1 < LINE_MAX {
+    // Tab and ESC are kept in the line, as on Linux, so the escape
+    // sequences of the arrow and function keys reach the program.
     l = set(l, 2 + n, c);
     l = set(l, 0, n + 1);
     if echo {
-      con_write(&mut con, cast[u8](c));
+      if c == 27 {
+        con_write(&mut con, 94);              // ECHOCTL: ESC is shown as ^[
+        con_write(&mut con, 91);
+      } else {
+        con_write(&mut con, cast[u8](c));
+      }
     }
   }
 }
@@ -1611,6 +1798,151 @@ fn line_take(l: &mut Buf, t: u64)
   }
 }
 
+/// Copies up to m bytes of page p of a file, from byte `from` of it, to user
+/// address va in one copy, from the page itself. A hole, a page past the
+/// end of `pages`, or a user page that cannot be written ends it short: 0
+/// here, and the staged read takes over.
+fn ram_page_to_user(spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, pages: &mut Vec[Slot], p: u64, from: u64, va: u64, m: u64) -> u64
+  requires spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && vlen(pages) <= FILE_PAGES && from + m <= 4096
+  ensures spaces_ok(spaces) && mem_ok(mem) && vlen(pages) == old(vlen(pages))
+  ensures result <= m
+{
+  if p >= vec_len(pages) {
+    return 0;
+  }
+  let mut got = 0;
+  match vec_swap(&mut pages, p, Slot::Hole) {
+    Slot::Hole => {},
+    Slot::Page(fr) => {
+      let r = copy_frame_to_user(&mut spaces, &mut mem, an, pid, va, fr, from, m);
+      if r != NO_RESULT {
+        got = r;
+      }
+      match vec_swap(&mut pages, p, Slot::Page(fr)) {
+        Slot::Hole => {},
+        Slot::Page(_x) => { unreachable; },
+      }
+    },
+  }
+  return got;
+}
+
+fn pcu_frame(f: &mut Frame, spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, from: u64, va: u64, m: u64) -> u64
+  requires spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && from + m <= 4096
+  ensures spaces_ok(spaces) && mem_ok(mem)
+  ensures result <= m
+{
+  let r = copy_frame_to_user(&mut spaces, &mut mem, an, pid, va, f, from, m);
+  if r == NO_RESULT {
+    return 0;
+  }
+  return r;
+}
+
+fn pcu_l1(l1: &mut PageTable, i: u64, spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, from: u64, va: u64, m: u64) -> u64
+  requires pt_level(l1) == 1 && i < 512 && spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && from + m <= 4096
+  ensures pt_level(l1) == 1 && spaces_ok(spaces) && mem_ok(mem)
+  ensures result <= m
+{
+  if !pt_has(l1, i) {
+    return 0;
+  }
+  return pt_borrow_frame(&mut l1, i, pcu_frame, &mut spaces, &mut mem, an, pid, from, va, m);
+}
+
+/// Copies up to m bytes of page pg of file h, from byte `from` of it, from
+/// the page cache's page to user address va in one copy. 0 if the cache
+/// does not hold the page, or the user page cannot be written.
+fn pc_page_to_user(c: &mut PCache, spaces: &mut Vec[Space], mem: &mut Mem, an: &Buf, pid: u64, h: u64, pg: u64, from: u64, va: u64, m: u64) -> u64
+  requires pc_ok(c) && spaces_ok(spaces) && mem_ok(mem) && pid < NPROC && from + m <= 4096
+  ensures pc_ok(c) && spaces_ok(spaces) && mem_ok(mem)
+  ensures result <= m
+{
+  let slot = pc_get(&mut c, h, pg);
+  if slot >= PC_N {
+    return 0;
+  }
+  let mut got = 0;
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_has(t, slot / 512) {
+        got = pt_borrow(&mut t, slot / 512, pcu_l1, slot % 512, &mut spaces, &mut mem, an, pid, from, va, m);
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  return got;
+}
+
+/// read(2) of up to `want` bytes of disk file `node` from offset `off`,
+/// from the page cache's pages straight to the process's, as
+/// ram_read_direct does for a RAM file. It stops at the end of the file or
+/// at the first page the cache does not hold (or a user page that cannot
+/// be written), and the staged read goes on from there.
+fn disk_read_direct(k: &mut Kernel, pid: u64, node: u64, off: u64, va: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC && node < DSLOTS && want <= READ_MAX && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX
+  ensures kok(k)
+  ensures result <= want
+{
+  let size = disk_size(k.fs.disk, node);
+  if size == NO_DISK_FILE || off >= size || off >= 0x1000000000000 {
+    return 0;
+  }
+  let lim = smaller(want, size - off);
+  let f = NFILES + node;
+  let mut done = 0;
+  let mut go = true;
+  while go && done < lim
+    invariant done <= lim && lim <= want && off < 0x1000000000000 && kok(k)
+  {
+    let a = off + done;
+    let m = page_chunk(a, lim - done);
+    let got = pc_page_to_user(&mut k.fs.pc, &mut k.spaces, &mut k.mem, k.anon, pid, f, a / 4096, a % 4096, va + done, m);
+    done = done + got;
+    if got < m {
+      go = false;
+    }
+  }
+  return done;
+}
+
+/// read(2) of up to `want` bytes of RAM file f from offset `off`, straight
+/// from the file's pages to the process's, with no staging buffer between
+/// them. Returns how many bytes it copied: it stops at the end of the file,
+/// a hole, or a user page it cannot write, and the staged read goes on from
+/// there.
+fn ram_read_direct(k: &mut Kernel, pid: u64, f: u64, off: u64, va: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC && f < NFILES && want <= READ_MAX && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX
+  ensures kok(k)
+  ensures result <= want
+{
+  let mut done = 0;
+  match take_node(&mut k.fs.ram, f) {
+    Node::Free => {},
+    Node::File(g0) => {
+      let mut g = g0;
+      if off < g.size {
+        let lim = smaller(want, g.size - off);
+        let mut go = true;
+        while go && done < lim
+          invariant done <= lim && lim <= want && file_ok(g) && kok(k) && slot_free(k.fs.ram, f)
+        {
+          let a = off + done;
+          let m = page_chunk(a, lim - done);
+          let got = ram_page_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, &mut g.pages, a / 4096, a % 4096, va + done, m);
+          done = done + got;
+          if got < m {
+            go = false;
+          }
+        }
+      }
+      put_node(&mut k.fs.ram, f, Node::File(g));
+    },
+  }
+  return done;
+}
+
 /// read from the file open on native row `row`: up to READ_MAX bytes, a
 /// transfer buffer at a time, so a regular file is not read short (as
 /// programs expect of one, and the JDK's jimage reader takes the count for
@@ -1625,6 +1957,26 @@ fn lx_file_read(k: &mut Kernel, pid: u64, row: u64, va: u64, n: u64) -> u64
   let want = smaller(n, READ_MAX);
   let start = vfs_offset(k.fs, row);
   let mut done = 0;
+  if want > 0 && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX && fget(k.fs.ftab, row, FD_FS) == FS_RAM && fget(k.fs.ftab, row, FD_MODE) / O_READ % 2 == 1 {
+    // A RAM file nothing has cached: its pages go to the process's pages in
+    // one copy each (src/ramfs.bastio holds them as pages).
+    let node = fget(k.fs.ftab, row, FD_NODE);
+    if node < NFILES {
+      let f = vfs_target(&mut k.fs, node);
+      if f < NFILES && !pc_any(k.fs.pc, f) {
+        done = ram_read_direct(&mut k, pid, f, start, va, want);
+        vfs_advance(&mut k.fs, row, start, done);
+      }
+    }
+  }
+  if want > 0 && va <= 0xFFFFFFFFFFFFFFFF - READ_MAX && fget(k.fs.ftab, row, FD_FS) == FS_DISK && fget(k.fs.ftab, row, FD_MODE) / O_READ % 2 == 1 && pc_on(k.fs.pc) {
+    // A disk file whose pages the cache holds: the same, from the cache.
+    let node = fget(k.fs.ftab, row, FD_NODE);
+    if node < DSLOTS {
+      done = disk_read_direct(&mut k, pid, node, start, va, want);
+      vfs_advance(&mut k.fs, row, start, done);
+    }
+  }
   while done < want
     invariant done <= want && want <= READ_MAX && kok(k)
   {
@@ -1691,6 +2043,9 @@ fn lx_write_fd(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, va: u64, n0: u6
   }
   if d.kind == K_DEV && d.x == DEV_MICE {
     return mice_write(&mut k, pid, va, n);  // mouse commands (src/lxmouse.bastio)
+  }
+  if d.kind == K_DEV && d.x == DEV_SER {
+    return ser_write(&mut k, pid, va, n);   // src/lxserial.bastio
   }
   if d.kind == K_DEV && is_mem_file(d.x) {
     return mem_io(&mut k, pid, fd, d.x, va, n, true);   // /proc/PID/mem (src/lxprocfs.bastio)
@@ -1935,13 +2290,30 @@ fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u6
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
 {
+  let r = writev_run(&mut con, &mut k, pid, fd, iov, cnt);
+  if r != DISK_RETRY {
+    pset(&mut k.procs, pid, F_WDONE, 0);    // nothing left to restart
+  }
+  return r;
+}
+
+/// The body of do_writev. If the disk lags after some bytes, the count so
+/// far is kept in F_WDONE (twice it, as lx_write_call keeps it) and the
+/// call restarts: the bytes done are skipped over in the iovecs.
+fn writev_run(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
   if cnt > IOV_MAX {
     return EINVAL;
   }
   if iov > USER_BASE + USER_SIZE {
     return EFAULT;
   }
-  let mut total = 0;
+  let wd = smaller(pget(k.procs, pid, F_WDONE) / 2, READ_MAX * 64);
+  pset(&mut k.procs, pid, F_WDONE, 0);
+  let mut skip = wd;
+  let mut total = wd;
   let mut i = 0;
   while i < cnt
     invariant i <= cnt && cnt <= IOV_MAX && iov <= USER_BASE + USER_SIZE && con_ok(con)
@@ -1955,6 +2327,13 @@ fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u6
     }
     // A file write moves at most XFER bytes at once: go round until done.
     let mut done = 0;
+    if skip >= size.v {
+      done = size.v;
+      skip = skip - size.v;
+    } else {
+      done = skip;
+      skip = 0;
+    }
     while done < size.v
       invariant done <= size.v && kok(k) && total <= TOTAL_MAX && con_ok(con)
       invariant base.v <= USER_BASE + USER_SIZE
@@ -1964,6 +2343,10 @@ fn do_writev(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, iov: u64, cnt: u6
         return lx_fail_or(total, EFAULT);       // past the window: base + done faults
       }
       let w = lx_write_fd(&mut con, &mut k, pid, fd, base.v + done, left);
+      if w == DISK_RETRY && total > 0 && total <= READ_MAX * 64 {
+        pset(&mut k.procs, pid, F_WDONE, total * 2);
+        return DISK_RETRY;                      // restart for the rest
+      }
       if w > left || w > USER_SIZE {
         return lx_fail_or(total, w);            // an error
       }
@@ -2068,9 +2451,9 @@ fn base_byte(k: &Kernel, pid: u64, h: u64, i: u64) -> u8
   requires kok(k) && pid < NPROC && h <= OFD_N && i < FNAME_MAX
 {
   if h == OFD_N {
-    return cast[u8](wget(k.cwd, pid * CWD_STRIDE + 1 + i) % 256);
+    return cast[u8](rbyte(k.cwd, k.cwdx, pid, i));
   }
-  return cast[u8](wget(k.dpath, h * CWD_STRIDE + 1 + i) % 256);
+  return cast[u8](rbyte(k.dpath, k.dpathx, h, i));
 }
 
 /// The length of process pid's root if the name out[0..o] is inside it,
@@ -2088,7 +2471,7 @@ fn root_under(k: &Kernel, pid: u64, out: &Bytes, o: u64) -> u64
   while i < rl
     invariant i <= rl && rl <= o && o <= blen(out) && rl <= FNAME_MAX && kok(k) && pid < NPROC
   {
-    if cast[u64](bget(out, i)) != wget(k.croot, pid * CWD_STRIDE + 1 + i) % 256 {
+    if cast[u64](bget(out, i)) != rbyte(k.croot, k.crootx, pid, i) {
       return 0;
     }
     i = i + 1;
@@ -2217,6 +2600,10 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
   ensures kok(k)
 {
   let bad = Lex { n: NO_RESULT, floor: 0, trail: false, abs: false, esc: false, dirend: false };
+  if blen(k.lexb) != PATH_OUT {
+    bfree(k.lexb);                          // lx_follow has it (see Kernel.lexb)
+    k.lexb = balloc(PATH_OUT);
+  }
   k.perr = ENAMETOOLONG;
   k.pdir = false;
   let trail = bget(k.fs.xfer, e - 1) == 47;  // "link/" names what the link points to, as on Linux
@@ -2225,7 +2612,6 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
   // Build the name in `out`, starting from the working directory unless
   // the path starts at "/", which is the process's root (chroot). ".."
   // stops at `floor`: the root, for a name inside it.
-  let mut out = balloc(PATH_OUT);
   let mut o = 0;
   let rl = root_len(k, pid);
   let mut floor = 0;
@@ -2234,16 +2620,15 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
   let mut esc = false;
   if abs {
     while o < rl
-      invariant o <= rl && rl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC
+      invariant o <= rl && rl <= FNAME_MAX && blen(k.lexb) == PATH_OUT && kok(k) && pid < NPROC
     {
-      bset(&mut out, o, cast[u8](wget(k.croot, pid * CWD_STRIDE + 1 + o) % 256));
+      bset(&mut k.lexb, o, cast[u8](rbyte(k.croot, k.crootx, pid, o)));
       o = o + 1;
     }
     floor = rl;
   } else {
     if h > OFD_N {
-      bfree(out);
-      k.perr = EBADF;
+        k.perr = EBADF;
       if h > OFD_N + 1 {
         k.perr = ENOTDIR;
       }
@@ -2251,18 +2636,18 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
     }
     let cl = base_len(k, pid, h);
     while o < cl
-      invariant o <= cl && cl <= FNAME_MAX && blen(out) == PATH_OUT && kok(k) && pid < NPROC && h <= OFD_N
+      invariant o <= cl && cl <= FNAME_MAX && blen(k.lexb) == PATH_OUT && kok(k) && pid < NPROC && h <= OFD_N
     {
-      bset(&mut out, o, base_byte(k, pid, h, o));
+      bset(&mut k.lexb, o, base_byte(k, pid, h, o));
       o = o + 1;
     }
     start = o;
-    floor = root_under(k, pid, out, o);
+    floor = root_under(k, pid, k.lexb, o);
   }
   let mut i = 0;
   let mut ok = true;
   while ok && i < e
-    invariant i <= e && e < XFER && o <= PATH_OUT && blen(out) == PATH_OUT && kok(k)
+    invariant i <= e && e < XFER && o <= PATH_OUT && blen(k.lexb) == PATH_OUT && kok(k)
   {
     if bget(k.fs.xfer, i) == 47 {
       i = i + 1;
@@ -2281,22 +2666,22 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
         if o <= start {
           esc = true;                       // from the base itself
         }
-        while o > floor && bget(out, o - 1) != 47
-          invariant o <= PATH_OUT && blen(out) == PATH_OUT
+        while o > floor && bget(k.lexb, o - 1) != 47
+          invariant o <= PATH_OUT && blen(k.lexb) == PATH_OUT
         {
           o = o - 1;
         }
         if o > floor {
           o = o - 1;
         }
-      } else if o + 1 + w > FNAME_MAX {
+      } else if w > COMP_MAX || o + 1 + w > FNAME_MAX {
         ok = false;
       } else {
         if o > 0 {
-          bset(&mut out, o, 47);
+          bset(&mut k.lexb, o, 47);
           o = o + 1;
         }
-        bytes_copy_span(&mut out, o, k.fs.xfer, i, j);
+        bytes_copy_span(&mut k.lexb, o, k.fs.xfer, i, j);
         o = o + w;
       }
       i = j;
@@ -2308,20 +2693,18 @@ fn lx_lex_xfer(k: &mut Kernel, pid: u64, e: u64, h: u64) -> Lex
     // as Linux reports it.
     let mut c = 0;
     while c < o && c < FNAME_MAX
-      invariant c <= o && blen(out) == PATH_OUT && kok(k)
+      invariant c <= o && blen(k.lexb) == PATH_OUT && kok(k)
     {
-      bset(&mut k.fs.xfer, c, bget(out, c));
+      bset(&mut k.fs.xfer, c, bget(k.lexb, c));
       c = c + 1;
     }
-    bfree(out);
     if c > 0 && lx_follow(&mut k, pid, c, true, smaller(floor, c)) == NO_RESULT {
       return bad;                           // k.perr says why
     }
     k.perr = ENAMETOOLONG;
     return bad;
   }
-  bytes_copy_span(&mut k.fs.xfer, 0, out, 0, o);
-  bfree(out);
+  bytes_copy_span(&mut k.fs.xfer, 0, k.lexb, 0, o);
   return Lex { n: o, floor: floor, trail: trail, abs: abs, esc: esc, dirend: dirend };
 }
 
@@ -2514,7 +2897,9 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 
 /// mmap: private memory, taken downward from the stack, or at addr with
 /// MAP_FIXED. A file mapping is a copy of the file's bytes from `off` (the
-/// rest of the last page zero), so writes to it never reach the file, even
+/// rest of the last page zero), except that a private one without PROT_WRITE
+/// maps the page cache's pages for the part of the file that fills whole
+/// pages. Writes to it never reach the file, even
 /// with MAP_SHARED (they are written back at msync, munmap and exit). A
 /// MAP_SHARED mapping, of a file or anonymous, is made of shared pages,
 /// which fork maps in the child too instead of copying: parent and child
@@ -2591,10 +2976,16 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   // the cache's page would reach every reader of the file
   // (docs/security.md). Such a copy does not see later writes to the file.
   let cached = sh && !anon && f != NO_FILE && can_write;
+  // A private mapping the program cannot write maps the page cache's pages
+  // for the part of the file that fills whole pages, read-only and marked
+  // as program text: no copy, and mprotect gives a private one before a
+  // write (lx_map_file_text). The rest of the pages are copied as before.
+  let ro = !anon && !sh && f != NO_FILE && prot % 2 == 1 && prot / 2 % 2 == 0;
   // Private writable anonymous memory gets its pages when first touched
-  // (src/lxanon.bastio), unless MAP_POPULATE or MAP_LOCKED asks for them
-  // now.
-  let lazy = anon && !sh && prot / 2 % 2 == 1 && prot / 4 % 2 == 0 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
+  // (src/lxanon.bastio), executable or not, unless MAP_POPULATE or
+  // MAP_LOCKED asks for them now.
+  let lazy = anon && !sh && prot / 2 % 2 == 1 && flags & 0xA000 == 0;   // MAP_POPULATE, MAP_LOCKED
+  let x = prot / 4 % 2 == 1;
   let mut at = 0;
   let noreplace = flags & MAP_FIXED_NOREPLACE != 0;
   if flags / MAP_FIXED % 2 == 1 || noreplace {
@@ -2614,28 +3005,28 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     map_forget(&mut k, pid, at / 4096, at / 4096 + pages, false);
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
     fixed_taken(&mut k, pid, at / 4096, at / 4096 + pages);
-    if !cached && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
+    if !cached && !ro && !(lazy && anon_add_x(&mut k, pid, at / 4096, at / 4096 + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, at / 4096 + pages, sh) {
       return ENOMEM;
     }
   } else {
-    let reserve = (anon && prot == 0 && !sh) || cached;
+    let reserve = (anon && prot == 0 && !sh) || cached || ro;
     // Where addr asks, if nothing is there (mmap_hint, src/lxmem.bastio).
     let hp = mmap_hint(&mut k, pid, addr, pages);
     if hp < STACK_FIRST {
-      if !reserve && !(lazy && anon_add(&mut k, pid, hp, hp + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
+      if !reserve && !(lazy && anon_add_x(&mut k, pid, hp, hp + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, hp, hp + pages, sh) {
         hole_add(&mut k, pid, hp, hp + pages);
         return ENOMEM;
       }
-      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, f, sh);
+      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
     }
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
     if h < STACK_FIRST {
-      if !reserve && !(lazy && anon_add(&mut k, pid, h, h + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
+      if !reserve && !(lazy && anon_add_x(&mut k, pid, h, h + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, h, h + pages, sh) {
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
-      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, f, sh);
+      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
     }
     let brk = pget(k.procs, pid, F_BRK);
     let low = pget(k.procs, pid, F_MMAP);
@@ -2650,19 +3041,19 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     // mapped when an mprotect makes them usable (lx_mprotect), and touching
     // it before that faults, as on Linux. Shared memory is mapped now and
     // hidden (read_only), so the pages mprotect uncovers are the shared ones.
-    if !reserve && !(lazy && anon_add(&mut k, pid, at / 4096, at / 4096 + pages)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
+    if !reserve && !(lazy && anon_add_x(&mut k, pid, at / 4096, at / 4096 + pages, x)) && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096, low / 4096, sh) {
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
-  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, f, sh);
+  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
 }
 
 /// The rest of mmap once window offset `at` has its pages (a `cached`
 /// mapping gets the page cache's instead): a file's bytes copied in, the
 /// mapping recorded if shared, and write access taken away without
 /// PROT_WRITE.
-fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, f: u64, sh: bool) -> u64
+fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, ro: bool, f: u64, sh: bool) -> u64
   requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES && off % 4096 == 0
   ensures kok(k)
   ensures lx_user_addr_or_errno(result)
@@ -2691,6 +3082,17 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
   }
   let total = pages * 4096;
   let mut done = 0;
+  if ro {
+    if at / 4096 > WPAGES || pages > WPAGES - at / 4096 {
+      return ENOMEM;
+    }
+    let n = lx_map_file_text(&mut k, pid, at / 4096, pages, f, off);
+    done = n * 4096;
+    if n < pages && !lx_map_pages(&mut k.mem, &mut k.spaces, pid, at / 4096 + n, at / 4096 + pages, false) {
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + n, 0);
+      return ENOMEM;
+    }
+  }
   while done < total
     invariant done <= total && kok(k) && pid < NPROC
   {

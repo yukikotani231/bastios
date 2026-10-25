@@ -571,11 +571,13 @@ def stall_acks(f):
         now = time.time()
         if stall["from"] is None:
             stall["from"] = now
-        if now < stall["from"] + 1.5:
-            return stall["from"] + 1.5 - now
+        # Eight of the guest's 1 s timeouts: on a loaded host the guest's
+        # clock (its timer ticks) runs behind ours, and 1.5 s, then 3 s,
+        # still ended before its first resend now and then.
+        if now < stall["from"] + 8:
+            return stall["from"] + 8 - now
     return 0
 p = echo_run("late ACKs", pattern(12000, 3), lambda p: setattr(link, "out_rule", stall_acks))
-seqs = [s["seq"] for _, s in link.seen if s["data"]]
 seqs = [s["seq"] for _, s in link.seen if s["data"]]
 check(len(seqs) > len(set(seqs)), f"late ACKs: the guest timed out and went back ({len(seqs) - len(set(seqs))} segments resent)")
 
@@ -593,10 +595,15 @@ def zero_window_scenario():
     net.peer = q
     q.emit(SYN, q.iss)
     q.timer = time.time() + q.rto
-    t0 = time.time()
-    shut = 12.0
-    until(lambda: time.time() - t0 > shut or q.state == "RESET", shut + 1)
-    probes = [s for t, s in q.log if s["data"] and t - t0 < shut]
+    # The guest's probes back off from 1 s (1, 2, 4, 8 s apart, by its own
+    # clock). Keep the window shut until it has probed three times: on a
+    # loaded host the echo program can take seconds to start and the
+    # guest's clock runs behind ours, so a fixed span of our time saw only
+    # one or two probes now and then.
+    def probes_now():
+        return [s for _, s in q.log if s["data"]]
+    until(lambda: len(probes_now()) >= 3 or q.state == "RESET", 60)
+    probes = probes_now()
     guest_shut = any(s["wnd"] == 0 for _, s in q.log)
     alive = q.state == "ESTABLISHED"
     q.rwin = 8192

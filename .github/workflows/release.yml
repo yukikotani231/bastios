@@ -36,9 +36,9 @@ jobs:
           ref: ${{ env.BASTIOLANG_REF }}
           path: bastiolang
       - name: Install tools
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y z3 qemu-system-x86 musl-tools xorriso ovmf
+        uses: ./.github/actions/apt-install
+        with:
+          packages: z3 qemu-system-x86 musl-tools xorriso ovmf
       - name: The tag matches the boot banner and the changelog
         run: |
           version=${TAG#v}

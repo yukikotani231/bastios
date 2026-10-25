@@ -8,7 +8,7 @@
 // Between them sits a line discipline like the console's (tty_cook): in
 // canonical mode input is gathered into lines, echoed, and erased with
 // VERASE and VKILL, and VEOF ends a line (an empty one reads as end of
-// file); with ISIG, VINTR and VQUIT send SIGINT and SIGQUIT to the
+// file); with ISIG, VINTR, VQUIT and VSUSP send SIGINT, SIGQUIT and SIGTSTP to the
 // terminal's foreground process group; ICRNL turns CR into LF; output gets
 // OPOST/ONLCR. In noncanonical mode each byte can be read at once. The
 // settings are a struct termios per terminal, which the slave and the
@@ -25,7 +25,7 @@
 // PTY_CAP bytes per terminal: input (master to slave), then output.
 //
 // Not done: job control signals for background reads and writes
-// (SIGTTIN, SIGTTOU), VSUSP, VMIN above 1 (read as 1), VTIME, flow control
+// (SIGTTIN, SIGTTOU), VMIN above 1 (read as 1), VTIME, flow control
 // (IXON), and packet mode. A canonical read can return more than one line.
 // /dev/tty names the console unless the process's session has a terminal.
 
@@ -52,7 +52,6 @@ const PT_W_TT: u64 = 16;               // the termios, a byte a word (TERMIOS_SI
 
 const SIGHUP: u64 = 1;
 const SIGQUIT: u64 = 3;
-const TIOCSWINSZ: u64 = 0x5414;
 const TIOCSCTTY: u64 = 0x540E;
 const TIOCNOTTY: u64 = 0x5422;
 const TIOCGPTN: u64 = 0x80045430;
@@ -102,7 +101,7 @@ fn pt_set(t: &mut Buf, p: u64, f: u64, v: u64)
 /// The slave device the n-byte path in the transfer buffer names
 /// ("dev/pts/3"), or DEV_NONE.
 fn pts_at(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && n <= FNAME_MAX
+  requires blen(x) == XBUF && n <= FNAME_MAX
 {
   if (n == 9 || n == 10) && xfer_is(x, 0, 8, "dev/pts/") {
     let c = cast[u64](bget(x, 8));
@@ -408,23 +407,54 @@ fn echo(k: &mut Kernel, p: u64, c: u64)
   }
 }
 
-/// Takes back the last byte of the unfinished line, echoing its erasure.
-/// False if the line is empty.
+/// Takes back the last character of the unfinished line (the last byte,
+/// or under IUTF8 the whole UTF-8 sequence), echoing its erasure, one
+/// back-space, space, back-space for each cell it filled. False if the
+/// line is empty.
 fn erase1(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < PTY_N
   ensures kok(k)
 {
   let mut r = pty_ring(k.ptys, p, false);
-  if r.n == 0 || r.n <= pt_get(k.ptys, p, PT_W_READY) {
+  let ready = pt_get(k.ptys, p, PT_W_READY);
+  if r.n == 0 || r.n <= ready {
     return false;
   }
-  r.n = r.n - 1;
+  let base = pty_base(p, false);
+  let mut cut = 1;
+  let mut cp = cast[u64](bget(k.ptyb, base + (r.h + r.n - 1) % PTY_CAP));
+  if pt_flags(k.ptys, p, 0) & IUTF8 != 0 {
+    let mut mul = 1;
+    let mut acc = 0;
+    while cut < 4 && cut < r.n - ready && utf8_cont(cast[u64](bget(k.ptyb, base + (r.h + r.n - cut) % PTY_CAP)))
+      invariant 1 <= cut && cut <= 4 && cut <= r.n && r.n <= PTY_CAP && ring_ok(r) && acc < mul && kok(k)
+        && (cut == 1 ==> mul == 1) && (cut == 2 ==> mul == 64) && (cut == 3 ==> mul == 4096) && (cut == 4 ==> mul == 262144)
+    {
+      acc = acc + (cast[u64](bget(k.ptyb, base + (r.h + r.n - cut) % PTY_CAP)) % 64) * mul;
+      mul = mul * 64;
+      cut = cut + 1;
+    }
+    let lead = cast[u64](bget(k.ptyb, base + (r.h + r.n - cut) % PTY_CAP));
+    if cut > 1 && utf8_len(lead) == cut {
+      cp = acc + utf8_lead_bits(lead, cut) * mul;
+    } else if cut > 1 {
+      cut = 1;                                // stray continuation bytes: one at a time
+      cp = 0x80;
+    }
+  }
+  r.n = r.n - cut;
   pty_keep(&mut k.ptys, p, false, r);
   let lf = pt_flags(k.ptys, p, 12);
   if lf & ECHO != 0 && lf & ECHOE != 0 {
-    out_raw(&mut k, p, 8);
-    out_raw(&mut k, p, 32);
-    out_raw(&mut k, p, 8);
+    let mut w = cp_width(cp);
+    while w > 0
+      invariant kok(k)
+    {
+      out_raw(&mut k, p, 8);
+      out_raw(&mut k, p, 32);
+      out_raw(&mut k, p, 8);
+      w = w - 1;
+    }
   }
   return true;
 }
@@ -440,11 +470,14 @@ fn pty_input(k: &mut Kernel, p: u64, ch: u64) -> bool
   if c == 13 && pt_flags(k.ptys, p, 0) & ICRNL != 0 {
     c = 10;
   }
-  if lf & ISIG != 0 && c != 0 && (c == pt_byte(k.ptys, p, 17) || c == pt_byte(k.ptys, p, 18)) {
-    // VINTR or VQUIT: the signal, and what was typed is thrown away.
+  if lf & ISIG != 0 && c != 0 && (c == pt_byte(k.ptys, p, 17) || c == pt_byte(k.ptys, p, 18) || c == pt_byte(k.ptys, p, VSUSP_AT)) {
+    // VINTR, VQUIT or VSUSP: the signal, and what was typed is thrown away.
     let mut s = SIGINT;
     if c == pt_byte(k.ptys, p, 18) {
       s = SIGQUIT;
+    }
+    if c == pt_byte(k.ptys, p, VSUSP_AT) && c != pt_byte(k.ptys, p, 17) && c != pt_byte(k.ptys, p, 18) {
+      s = SIGTSTP;
     }
     let mut r = pty_ring(k.ptys, p, false);
     ring_clear(&mut r);

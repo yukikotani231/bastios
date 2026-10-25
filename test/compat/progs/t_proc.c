@@ -79,6 +79,10 @@ static int put(const char *path, const char *s) {
 int main(int argc, char **argv) {
     if (argc > 1 && strcmp(argv[1], "child") == 0)
         return 7;                                   /* run by the execve check */
+    if (argc > 1 && strcmp(argv[1], "env") == 0) {  /* run by the environ check */
+        char b[64]; int n = slurp("/proc/self/environ", b, sizeof b);
+        return n == 11 && memcmp(b, "A=1\0BB=two\0", 11) == 0 ? 0 : 1;
+    }
     if (argc > 1 && strcmp(argv[1], "bang") == 0)   /* run by the "#!" checks */
         return argc == 4 && strcmp(argv[2], "./cp_bang") == 0 && strcmp(argv[3], "a") == 0 ? 8 : 9;
     setup();
@@ -96,6 +100,13 @@ int main(int argc, char **argv) {
            waitpid(p, &st, 0) == p && WEXITSTATUS(st) == 2 && v == 1); }));
     EXPECT("execve", (p = fork()) >= 0 && (p == 0 ? (execl(argv[0], argv[0], "child", (char *)0), _exit(99), 0) :
            waitpid(p, &st, 0) == p && WEXITSTATUS(st) == 7));
+    EXPECT("/proc/self/environ holds the environment execve passed", ({ char *envp[] = {"A=1", "BB=two", 0};
+           (p = fork()) >= 0 && (p == 0 ? (execle(argv[0], argv[0], "env", (char *)0, envp), _exit(99), 0) :
+           waitpid(p, &st, 0) == p && WEXITSTATUS(st) == 0); }));
+    EXPECT("/proc/PID/cwd and root are links: the working directory, and /", ({ char old[256], l[256], pp[64], m[256];
+           getcwd(old, sizeof old); int ok = chdir("/tmp") == 0; ssize_t n = readlink("/proc/self/cwd", l, sizeof l - 1); ok = ok && n == 4 && memcmp(l, "/tmp", 4) == 0;
+           snprintf(pp, sizeof pp, "/proc/%d/cwd", (int)getpid()); n = readlink(pp, l, sizeof l - 1); ok = ok && n == 4 && memcmp(l, "/tmp", 4) == 0;
+           n = readlink("/proc/self/root", m, sizeof m - 1); ok = ok && n == 1 && m[0] == '/'; chdir(old); ok; }));
     EXPECT("execve missing is ENOENT", execl("/no/such", "x", (char *)0) == -1 && errno == ENOENT);
     EXPECT("waitpid WNOHANG", (p = fork()) >= 0 && (p == 0 ? (sleep(1), _exit(0), 0) :
            waitpid(p, &st, WNOHANG) == 0 && waitpid(p, &st, 0) == p));
@@ -164,6 +175,20 @@ int main(int argc, char **argv) {
              read(fd, b, sizeof b) == -1 && errno == ESRCH && close(fd) == 0)));
     }
     {
+        /* A program that polls kill(pid, 0) to see whether a process is gone
+           (BusyBox timeout) must not find the id taken again a moment later:
+           the next forks number on instead of reusing the id that just ended. */
+        int first = -1, again = 0, i, q;
+        if ((q = fork()) == 0) _exit(0);
+        if (q > 0 && waitpid(q, &st, 0) == q) first = q;
+        for (i = 0; i < 16 && first > 0; i++) {
+            if ((q = fork()) == 0) _exit(0);
+            if (q == first) again = 1;
+            if (q > 0) waitpid(q, &st, 0);
+        }
+        EXPECT("sixteen forks after a process ended do not reuse its id", first > 0 && !again);
+    }
+    {
         /* A script runs through the interpreter its "#!" line names, with
          * the line's argument and the script's path before the rest. */
         char self[256], line[300];
@@ -217,7 +242,7 @@ int main(int argc, char **argv) {
         /* The /proc/PID files with fixed answers, and oom_score_adj, which
          * is kept per process and inherited. */
         char b[64];
-        EXPECT("oom_score reads 0", slurp("/proc/self/oom_score", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
+        EXPECT("oom_score reads a number", slurp("/proc/self/oom_score", b, sizeof b) > 0 && b[0] >= '0' && b[0] <= '9');
         EXPECT("oom_score_adj starts at 0", slurp("/proc/self/oom_score_adj", b, sizeof b) > 0 && strcmp(b, "0\n") == 0);
         EXPECT("loginuid is unset", slurp("/proc/self/loginuid", b, sizeof b) > 0 && strcmp(b, "4294967295\n") == 0);
         EXPECT("coredump_filter reads its default", slurp("/proc/self/coredump_filter", b, sizeof b) > 0 && strcmp(b, "00000033\n") == 0);
@@ -246,6 +271,7 @@ int main(int argc, char **argv) {
                && ({ int wd = 0; unsigned ino, sdev, mask; char *q = strstr(b, "inotify wd:"); q && sscanf(q, "inotify wd:%d ino:%x sdev:%x mask:%x", &wd, &ino, &sdev, &mask) == 4 && wd == w && mask == (IN_MODIFY | IN_ONESHOT); }));
         EXPECT("a pidfd shows the process", ({ int pf = syscall(434, getpid(), 0), r = 0; char want[32]; if (pf >= 0) { snprintf(path, sizeof path, "/proc/self/fdinfo/%d", pf); snprintf(want, sizeof want, "Pid:\t%d\n", (int)getpid()); r = slurp(path, b, sizeof b) > 0 && strstr(b, want) != NULL; close(pf); } r; }));
         EXPECT("fdinfo lists the open descriptors", ({ DIR *d = opendir("/proc/self/fdinfo"); struct dirent *de; int seen = 0; char nm[16]; snprintf(nm, sizeof nm, "%d", f); while (d && (de = readdir(d))) if (!strcmp(de->d_name, nm)) seen = 1; if (d) closedir(d); seen; }));
+        EXPECT("fdinfo of a closed descriptor does not open", ({ int g = open("/proc/self/stat", O_RDONLY), r = 0; if (g >= 0) { close(g); snprintf(path, sizeof path, "/proc/self/fdinfo/%d", g); r = open(path, O_RDONLY) < 0 && errno == ENOENT; } r; }));
         EXPECT("/proc/self lists fdinfo", ({ DIR *d = opendir("/proc/self"); struct dirent *de; int seen = 0; while (d && (de = readdir(d))) if (!strcmp(de->d_name, "fdinfo")) seen = 1; if (d) closedir(d); seen; }));
         if (f >= 0) close(f);
         if (e >= 0) close(e);

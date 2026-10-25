@@ -342,6 +342,7 @@ static int t_fileread(long n) {
   size_t chunk = 64 << 10;
   char *buf = malloc(chunk);
   snprintf(p, sizeof p, "%s/osbench.data", dir);
+  sync();                 // filewrite's data is on its way to the disk, not part of the reads
   begin("fileread");
   long kib = 0;
   for (long i = 0; i < n; i++) {
@@ -499,19 +500,26 @@ int main(int argc, char **argv) {
     snprintf(dir, sizeof dir, "%s", argv[2]);
     i = 3;
   }
+  // -r: run the tests again and again, until killed (bench/insnprof.py steps
+  // through a loop that would otherwise end before the debugger is attached).
+  int again = i < argc && !strcmp(argv[i], "-r");
+  if (again) i++;
+  int first = i;
   if (access(self, X_OK) != 0) self = argv[0];
-  for (; i < argc; i++) {
-    char *eq = strchr(argv[i], '=');
-    size_t len = eq ? (size_t)(eq - argv[i]) : strlen(argv[i]);
-    size_t t;
-    for (t = 0; t < sizeof tests / sizeof *tests; t++)
-      if (strlen(tests[t].name) == len && !strncmp(tests[t].name, argv[i], len)) break;
-    if (t == sizeof tests / sizeof *tests) {
-      fprintf(stderr, "osbench: no test %s\n", argv[i]);
-      return 2;
+  do {
+    for (i = first; i < argc; i++) {
+      char *eq = strchr(argv[i], '=');
+      size_t len = eq ? (size_t)(eq - argv[i]) : strlen(argv[i]);
+      size_t t;
+      for (t = 0; t < sizeof tests / sizeof *tests; t++)
+        if (strlen(tests[t].name) == len && !strncmp(tests[t].name, argv[i], len)) break;
+      if (t == sizeof tests / sizeof *tests) {
+        fprintf(stderr, "osbench: no test %s\n", argv[i]);
+        return 2;
+      }
+      tests[t].fn(eq ? atol(eq + 1) : tests[t].n);
     }
-    tests[t].fn(eq ? atol(eq + 1) : tests[t].n);
-  }
+  } while (again);
   printf("@done\n");
   return 0;
 }

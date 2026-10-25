@@ -1,0 +1,28 @@
+# Maintainer: Compat Suite <compat@example.org>
+pkgname=tinycc
+pkgver=0.9.28
+pkgrel=0
+pkgdesc="Tiny C compiler"
+url="https://repo.or.cz/tinycc.git"
+arch="x86_64"
+license="LGPL-2.1-or-later"
+subpackages="$pkgname-dev"
+source="@URL@/tinycc-$pkgver.tar.gz"
+
+build() {
+	./configure \
+		--prefix=/usr \
+		--libdir=/usr/lib \
+		--cc=gcc \
+		--config-musl
+	make
+}
+
+check() {
+	echo 'int main(void) { return 6 * 7 - 42; }' > "$srcdir/check.c"
+	./tcc -B. -Iinclude -run "$srcdir/check.c"
+}
+
+package() {
+	make DESTDIR="$pkgdir" install
+}

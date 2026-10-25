@@ -264,7 +264,7 @@ fn v6_out(n: &mut Net, flen: u64) -> bool
   let total = be16(n.out, 16);
   let nh = cast[u64](bget(n.out, 23));
   let dst = be32(n.out, 30);
-  if total < 28 || 14 + total > flen || !is_v6tok(dst) || l4_csum_at(nh) == 0 || nh == NH_ICMP6 {
+  if total < 28 || 14 + total > flen || !is_v6tok(dst) || l4_csum_at(nh) == 0 {
     return false;
   }
   let plen = total - 20;
@@ -355,6 +355,13 @@ fn v6_in(n: &mut Net, flen: u64)
   if v6_sum_in(n.pkt, nh, plen) != 65535 || n.ip == 0 || n.ip > IP_MAX {
     return;
   }
+  if nh == NH_UDP {
+    let dport = be16(n.pkt, 56);
+    if dport != UDP_ECHO_PORT && dport != PORT_DHCP_CLIENT && sock_find_in(n, dport, true) >= SOCKS {
+      udp6_refuse(&mut n, plen, shi, slo, smac);
+      return;
+    }
+  }
   let tok = v6_token(&mut n, shi, slo, smac);
   // Rewrite it as the IPv4 packet it stands for, and take that in.
   let mut k = 0;
@@ -383,6 +390,94 @@ fn v6_in(n: &mut Net, flen: u64)
   }
   put16(&mut n.pkt, at, c);
   ip_in(&mut n, 34 + plen);
+}
+
+// ---------------------------------------------------------------- raw sockets
+
+/// The queue slot a message for raw ICMPv6 socket s goes in, or RXQ if s
+/// is not one of namespace n.ns's or its queue is full.
+fn raw6_slot(n: &Net, s: u64) -> u64
+  requires net_ok(n) && s < SOCKS
+  ensures result <= RXQ
+  ensures result < RXQ ==> (s + 1) * RXQ * UDP_MAX <= blen(n.dq) && (s + 1) * RXQ * SLOT_W <= len(n.dm)
+{
+  let count = sk_get(n, s, S_COUNT);
+  if udp_slot_ok(n, s) && sk_get(n, s, S_OPEN) == 1 && sk_get(n, s, S_PORT) == RAW_ICMP6 && sk_get(n, s, S_NS) == n.ns && count < RXQ {
+    return (sk_get(n, s, S_HEAD) % RXQ + count) % RXQ;
+  }
+  return RXQ;
+}
+
+/// Queues the ICMPv6 message of plen bytes at 54 of the packet that came
+/// in, from IPv6 peer token src, on every raw ICMPv6 socket of namespace
+/// n.ns, without the IPv6 header (as Linux does).
+fn raw6_deliver(n: &mut Net, plen: u64, src: u64, hops: u64)
+  requires net_ok(n) && plen <= UDP_MAX && 54 + plen <= blen(n.pkt) && hops <= 255
+  ensures net_ok(n)
+{
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS && net_ok(n) && plen <= UDP_MAX
+  {
+    let slot = raw6_slot(n, s);
+    let count = sk_get(n, s, S_COUNT);
+    if slot < RXQ && count < RXQ {
+      bcopy(&mut n.dq, (s * RXQ + slot) * UDP_MAX, n.pkt, 54, plen);
+      dm_set(&mut n, s, slot, 0, plen);
+      dm_set(&mut n, s, slot, 1, src);
+      dm_set(&mut n, s, slot, 2, hops);   // the "port" of a raw message: its hop limit
+      sk_set(&mut n, s, S_COUNT, count + 1);
+    }
+    s = s + 1;
+  }
+}
+
+/// A raw ICMPv6 message (size bytes of buf) to ::1 or to our own address,
+/// which stay inside: an echo request is answered with the echo reply on
+/// the raw ICMPv6 sockets of the namespace, from the address it was sent
+/// to. Anything else is dropped. Returns size.
+fn raw6_local(n: &mut Net, ip: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n) && 8 <= size && size <= UDP_MAX + 8 && size <= blen(buf)
+  ensures net_ok(n)
+{
+  if cast[u64](bget(buf, 0)) != ICMP6_ECHO || size > UDP_MAX {
+    return size;
+  }
+  let mut s = 0;
+  while s < SOCKS
+    invariant s <= SOCKS && net_ok(n) && size <= UDP_MAX
+  {
+    let slot = raw6_slot(n, s);
+    let count = sk_get(n, s, S_COUNT);
+    if slot < RXQ && count < RXQ {
+      let at = (s * RXQ + slot) * UDP_MAX;
+      bcopy(&mut n.dq, at, buf, 0, size);
+      bset(&mut n.dq, at, cast[u8](ICMP6_ECHO_REPLY));
+      dm_set(&mut n, s, slot, 0, size);
+      dm_set(&mut n, s, slot, 1, ip);
+      dm_set(&mut n, s, slot, 2, 64);
+      sk_set(&mut n, s, S_COUNT, count + 1);
+    }
+    s = s + 1;
+  }
+  return size;
+}
+
+/// Tells the sender of the UDP datagram in the frame (plen bytes of UDP at
+/// 54, from shi:slo at MAC smac) that nothing listens on its port: an
+/// ICMPv6 destination unreachable (code 4) carrying the start of it.
+fn udp6_refuse(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
+  requires net_ok(n) && 8 <= plen && 54 + plen <= FRAME_MAX && smac < MAC_LIMIT
+  ensures net_ok(n)
+{
+  let inv = smaller(40 + plen, 128);
+  bset(&mut n.out, 54, 1);            // destination unreachable
+  bset(&mut n.out, 55, 4);            // port unreachable
+  put32(&mut n.out, 56, 0);
+  put32(&mut n.out, 58, 0);
+  bcopy(&mut n.out, 62, n.pkt, 14, inv);
+  v6_header(&mut n, smac, NH_ICMP6, 8 + inv, be64(n.pkt, 38), be64(n.pkt, 46), shi, slo, 64);
+  net_send(&mut n, 62 + inv);
 }
 
 /// An ICMPv6 message (checked) of plen bytes at 54, from shi:slo at MAC
@@ -417,7 +512,12 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
       v6_release(&mut n, tok);
     }
   } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI {
-    ra_in(&mut n, plen, smac);
+    ra_in(&mut n, plen, smac, slo);
+  } else if (kind == ICMP6_ECHO_REPLY || (1 <= kind && kind <= 4)) && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46))
+    && shi / TWO48 != 0xFF02 {
+    // An echo reply, or an error report: for the raw ICMPv6 sockets (ping6).
+    let tok = v6_token(&mut n, shi, slo, smac);
+    raw6_deliver(&mut n, smaller(plen, UDP_MAX), tok, hops);
   }
 }
 
@@ -478,12 +578,13 @@ fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64)
 /// A router advertisement (plen bytes at 54) from MAC smac: the router is
 /// where frames off the link go, and a prefix information option of
 /// length 64 with the autonomous flag gives our global address.
-fn ra_in(n: &mut Net, plen: u64, smac: u64)
+fn ra_in(n: &mut Net, plen: u64, smac: u64, slo: u64)
   requires net_ok(n) && 16 <= plen && 54 + plen <= FRAME_MAX && smac < MAC_LIMIT
   ensures net_ok(n)
 {
   if be16(n.pkt, 60) != 0 {
     n.rtr_mac = smac;                 // a router lifetime: a default router
+    n.rtr_lo = slo;
   }
   let end = 54 + plen;
   let mut o = 70;
@@ -499,6 +600,16 @@ fn ra_in(n: &mut Net, plen: u64, smac: u64)
       let p = be64(n.pkt, o + 16);
       if p / TWO48 / 64 != 0xFE80 / 64 && p / TWO48 / 256 != 0xFF {
         n.pfx = p;
+      }
+    }
+    if kind == 25 && l >= 24 && cast[u64](bget(n.pkt, o + 4)) + cast[u64](bget(n.pkt, o + 5)) + cast[u64](bget(n.pkt, o + 6)) + cast[u64](bget(n.pkt, o + 7)) != 0 {
+      // Recursive DNS server (RFC 8106): the first address, if its lifetime is not 0.
+      let dhi = be64(n.pkt, o + 8);
+      let dlo = be64(n.pkt, o + 16);
+      if (dhi != n.dns6_hi || dlo != n.dns6_lo) && (dhi != 0 || dlo != 0) {
+        n.dns6_hi = dhi;
+        n.dns6_lo = dlo;
+        n.dns_new = true;
       }
     }
     o = o + l;
@@ -544,6 +655,42 @@ fn nic_v6_token(c: &mut Nic, hi: u64, lo: u64) -> u64
     },
   }
   return r;
+}
+
+/// Our IPv6 state, for /proc and netlink: `what` 0 is the advertised
+/// prefix (0: none yet), 1 our interface id, 2 the default router's
+/// interface id (0: no router), 3 whether there is an IPv6 interface (the
+/// card is up).
+fn nic_v6_state(c: &Nic, what: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if what == 0 {
+        return n.pfx;
+      }
+      if what == 1 {
+        return n.iid;
+      }
+      if what == 2 {
+        if n.rtr_mac != 0 {
+          return n.rtr_lo;
+        }
+        return 0;
+      }
+      if what == 5 {
+        return n.dns6_hi;
+      }
+      if what == 6 {
+        return n.dns6_lo;
+      }
+      if card_live(n.dev) {
+        return 1;
+      }
+      return 0;
+    },
+  }
 }
 
 /// Half `half` (0 high, 1 low) of the IPv6 address token `ip` stands for,

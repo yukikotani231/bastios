@@ -7,6 +7,7 @@
 #include "compat.h"
 #include <fcntl.h>
 #include <limits.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <sys/resource.h>
 #include <sys/wait.h>
@@ -119,8 +120,33 @@ static int io_signal(void) {
     return ok;
 }
 
+static int many_locks(void) {
+    int fd = open("fl_many", O_CREAT | O_RDWR, 0644);
+    if (fd < 0) return 0;
+    int ok = ftruncate(fd, 1 << 20) == 0;
+    for (int i = 0; ok && i < 200; i++) {
+        struct flock f = { .l_type = F_WRLCK, .l_whence = SEEK_SET, .l_start = i * 512, .l_len = 256 };
+        ok = fcntl(fd, F_OFD_SETLK, &f) == 0;
+    }
+    struct flock g = { .l_type = F_UNLCK, .l_whence = SEEK_SET, .l_start = 0, .l_len = 0 };
+    ok = ok && fcntl(fd, F_OFD_SETLK, &g) == 0;
+    close(fd);
+    unlink("fl_many");
+    return ok;
+}
+
+static int memfd_sealing_alone(void) {
+    int fd = memfd_create("seal_alone", MFD_ALLOW_SEALING);
+    int ok = fd >= 0 && ftruncate(fd, 4096) == 0 && fcntl(fd, F_ADD_SEALS, F_SEAL_SHRINK) == 0
+        && (fcntl(fd, F_GET_SEALS) & F_SEAL_SHRINK) && ftruncate(fd, 0) == -1 && errno == EPERM;
+    if (fd >= 0) close(fd);
+    return ok && memfd_create("bad", 4) == -1 && errno == EINVAL;
+}
+
 int main(void) {
     setup();
+    EXPECT("memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC", memfd_sealing_alone());
+    EXPECT("200 separate byte-range locks on one file", many_locks());
     EXPECT("200 descriptors, dup2 to 200 and F_DUPFD from 100", many_descriptors());
     EXPECT("F_GETLK reports the conflicting lock that starts first", getlk_first());
     EXPECT("a lock needs the matching access mode; bad requests are EINVAL", lock_modes());

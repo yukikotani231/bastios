@@ -17,7 +17,8 @@ import "pages.bastio";
 import "core/bytes.bastio";
 
 const NFILES: u64 = 32768;          // more than every descriptor of a process, or a build tree
-const FNAME_MAX: u64 = 255;
+const FNAME_MAX: u64 = 4095;      // PATH_MAX - 1
+const COMP_MAX: u64 = 255;         // NAME_MAX: the longest path component
 const FILE_PAGES: u64 = 262144;
 const FILE_MAX: u64 = 1073741824;     // FILE_PAGES * 4096 (1 GiB)
 
@@ -29,7 +30,7 @@ struct RamFile {
   size: u64,
   pages: Vec[Slot],     // page i holds bytes 4096 * i .. 4096 * (i + 1)
   mode: u64,            // permission bits, such as 0644
-  mtime: u64,           // last change, in seconds
+  mtime: u64,           // last change, in nanoseconds since the epoch
   link: u64,            // a hard link: the node it names (and nothing else here is used); NFILES if not
   own: u64,             // the owner: user id + group id * 2^32
 }

@@ -16,7 +16,7 @@ SECTIONS {
         __bss_end = .;
     }
     . = ALIGN(4096);
-    . += 0x10000;
+    . += 0x40000;
     stack_top = .;
     _end = .;
     __image_size = _end - 0x40080000;

@@ -102,6 +102,17 @@ static int bad_writes(void) {
     return 0;
 }
 
+/* An offset that takes the clock past what 64 bits of nanoseconds hold, or
+ * below zero, is ERANGE; a large one that fits is not. */
+static int range_writes(void) {
+    if (unshare(CLONE_NEWTIME) != 0) return 1;
+    if (put("1 9223372036 0") != -ERANGE) return 2;
+    if (put("1 -9223372036 0") != -ERANGE) return 3;
+    if (put("7 99999999999 0") != -ERANGE) return 4;
+    if (put("1 4000000000 0") != 0) return 5;
+    return 0;
+}
+
 static int negative_ok(void) {
     if (unshare(CLONE_NEWTIME) != 0) return 1;
     return put("1 -2 500000000") == 0 ? 0 : 2;
@@ -219,6 +230,10 @@ static int links(void) {
 
 int main(void) {
     setup();
+    /* A negative offset must leave the clock above zero (as on Linux, which
+     * answers ERANGE), so a guest that has only just booted waits a little. */
+    while (now_ms(CLOCK_MONOTONIC) < 4000 || now_ms(CLOCK_BOOTTIME) < 4000)
+        usleep(100000);
     kernel_mono = now_ms(CLOCK_MONOTONIC);
     kernel_boot = now_ms(CLOCK_BOOTTIME);
     CHILD("the time links name the first namespace, and NS_GET_NSTYPE says CLONE_NEWTIME", links);
@@ -227,6 +242,7 @@ int main(void) {
     CHILD("the offsets are frozen once a process is in the namespace", frozen_in_child);
     CHILD("a clock other than monotonic or boottime, or a bad time, is EINVAL", bad_writes);
     CHILD("an offset may be negative", negative_ok);
+    CHILD("an offset that overflows the clock is ERANGE", range_writes);
     CHILD("an absolute clock_nanosleep waits on the shifted clock", abs_sleep);
     CHILD("an absolute timerfd waits on the shifted clock", timerfd_abs);
     CHILD("sysinfo and /proc/uptime show the shifted boot time", uptime_shifted);

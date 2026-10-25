@@ -435,8 +435,24 @@ static int msgmni_written(void) {
     return ok;
 }
 
+static int shm_remap_loop(void) {
+    int id = shmget(IPC_PRIVATE, 8192, IPC_CREAT | 0600);
+    int ok = id >= 0;
+    char *p = ok ? shmat(id, 0, 0) : (char *)-1;
+    ok = ok && p != (char *)-1;
+    /* Attaching over the same address again replaces the first attachment: one shmdt ends it. */
+    for (int i = 0; ok && i < 200; i++) {
+        char *q = shmat(id, p, SHM_REMAP);
+        ok = q == p;
+    }
+    ok = ok && shmdt(p) == 0 && shmdt(p) == -1 && errno == EINVAL;
+    shmctl(id, IPC_RMID, 0);
+    return ok;
+}
+
 int main(void) {
     setup();
+    EXPECT("shmat over its own address with SHM_REMAP replaces the attachment", shm_remap_loop());
     EXPECT("msgsnd, msgrcv and IPC_STAT", queue_basics());
     EXPECT("msgrcv picks by type", queue_types());
     EXPECT("msgget keys: IPC_EXCL, ENOENT", queue_keys());

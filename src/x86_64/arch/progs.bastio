@@ -114,6 +114,21 @@ fn prog_image(i: u64) -> Str {
   if i == 36 {
     return include_bytes("../../../build/user/mfb.elf");
   }
+  if i == 37 {
+    return include_bytes("../../../build/user/bwm.elf");
+  }
+  if i == 38 {
+    return include_bytes("../../../build/user/bhello.elf");
+  }
+  if i == 39 {
+    return include_bytes("../../../build/user/bterm.elf");
+  }
+  if i == 40 {
+    return include_bytes("../../../build/user/mserial.elf");
+  }
+  if i == 41 {
+    return include_bytes("../../../build/user/mkeyev.elf");
+  }
   return include_bytes("../../../build/user/fault.bin");
 }
 

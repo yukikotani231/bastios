@@ -9,6 +9,7 @@
 // first 16 buses. Its registers are at ECAM base + index * 4096.
 
 const PCI_NONE: u64 = 4096;
+const PCI_BUS_END: u64 = 16;          // PCI_NONE / 256: one past the last bus
 const ECAM_LEN: u64 = 16777216;       // 16 buses * 32 devices * 8 functions * 4096
 
 struct Pci { cfg: Mmio }
@@ -35,4 +36,13 @@ fn pci_write(p: &mut Pci, dev: u64, off: u64, v: u64)
   requires pci_ok(p) && dev < PCI_NONE && off < 256 && off % 4 == 0 && v <= 4294967295
 {
   mmio_write32(&mut p.cfg, dev * 4096 + off, cast[u32](v));
+}
+
+/// The first bus from `b` on that may hold a device: all of them are looked
+/// at (probing the ECAM window costs no port accesses).
+fn pci_bus_from(p: &mut Pci, b: u64) -> u64
+  requires pci_ok(p) && b <= PCI_BUS_END
+  ensures b <= result && result <= PCI_BUS_END
+{
+  return b;
 }

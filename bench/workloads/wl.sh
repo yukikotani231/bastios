@@ -40,6 +40,22 @@ hello)
     chr /bin/sh -c 'cd /root/proj && gcc -O2 -o hello hello.c'
     echo @end hello $?
     ;;
+hello_*)
+    # The stages of `hello`, ten times each so that a stage is long enough
+    # to time: the preprocessor, cc1, as, the link, and a bare exec.
+    $bb tar -xf /disk/proj.tar -C $R/root 2>/dev/null
+    case $phase in
+    hello_e) cmd='gcc -E -o /tmp/h.i hello.c' ;;
+    hello_s) cmd='gcc -O2 -S -o /tmp/h.s hello.c' ;;
+    hello_c) cmd='gcc -O2 -c -o /tmp/h.o hello.c' ;;
+    hello_x) cmd='/bin/true' ;;
+    esac
+    [ $phase = hello_l ] && chr /bin/sh -c 'cd /root/proj && gcc -O2 -c -o /tmp/h.o hello.c'
+    [ $phase = hello_l ] && cmd='gcc -o /tmp/h /tmp/h.o'
+    echo @begin $phase
+    chr /bin/sh -c "cd /root/proj && for i in 1 2 3 4 5 6 7 8 9 10; do $cmd; done"
+    echo @end $phase $?
+    ;;
 make1|make2)
     # make builds the generated project: one gcc per file, then a link.
     j=${phase#make}
@@ -55,6 +71,23 @@ tgz)
     chr /bin/sh -c 'tar -cf - /usr/lib/gcc /usr/include | gzip -1 > /tmp/x.tgz'
     echo @end tgz $?
     $bb rm -f $R/tmp/x.tgz
+    ;;
+git)
+    # git over the generated project: init, add, commit, status, log.
+    chr /sbin/apk add --allow-untrusted -q --no-progress git > /dev/null 2>&1
+    $bb rm -rf $R/root/proj
+    $bb tar -xf /disk/proj.tar -C $R/root
+    echo @begin git
+    chr /bin/sh -c 'cd /root/proj && git init -q . && git add -A && git -c user.name=b -c user.email=b@b commit -q -m x && git status -s && git log --stat | wc -l > /dev/null'
+    echo @end git $?
+    ;;
+python)
+    # CPython: five starts that import a spread of the standard library
+    # (many small reads, compiling the modules once), then a compute loop.
+    chr /sbin/apk add --allow-untrusted -q --no-progress python3 > /dev/null 2>&1
+    echo @begin python
+    chr /bin/sh -c 'for i in 1 2 3 4 5; do python3 -c "import json, re, argparse, decimal, http.client, email.parser"; done; python3 -c "print(sum(i * i % 7 for i in range(2000000)))" > /dev/null'
+    echo @end python $?
     ;;
 scan)
     # Walk the whole root and grep the headers: path lookup and small reads.

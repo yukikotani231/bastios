@@ -83,6 +83,41 @@ fn may_meta(procs: &Buf, pid: u64, mode: u64, own: u64, want: u64) -> bool
   return mode_allows_g(mode, own, fs_id(procs, pid, false), has_group(procs, pid, own / 0x100000000 % 0x100000000, true), want);
 }
 
+/// Does process pid hold CAP_DAC_OVERRIDE over a file owned by own
+/// (uid + 2^32 * gid) in the user namespace it is in: it is the root there
+/// and the file's owner and group have ids in that namespace?
+fn ns_dac(k: &Kernel, pid: u64, own: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return ns_over(k, pid, CAP_DAC_OVERRIDE, own);
+}
+
+/// Whether pid holds capability `cap` in its user namespace and that
+/// namespace maps both the owner and the group in `own`.
+fn ns_over(k: &Kernel, pid: u64, cap: u64, own: u64) -> bool
+  requires kok(k) && pid < NPROC && cap <= 40
+{
+  let s = usr_slot_of(k, pid);
+  if s >= USR_N || !ns_cap(k, pid, cap) {
+    return false;
+  }
+  return um_in(k, s, 0, own % 0x100000000) != OVERFLOW_ID && um_in(k, s, 1, own / 0x100000000 % 0x100000000) != OVERFLOW_ID;
+}
+
+/// may_meta, and the root of a user namespace passes for the files whose
+/// owner and group it maps (as Linux's capable_wrt_inode_uidgid).
+fn may_meta_k(k: &Kernel, pid: u64, mode: u64, own: u64, want: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  if may_meta(k.procs, pid, mode, own, want) {
+    return true;
+  }
+  if ns_dac(k, pid, own) {
+    return want & MAY_X == 0 || mode / 4096 % 16 == 4 || mode & 73 != 0;
+  }
+  return false;
+}
+
 /// Whether the path in the first n bytes of the transfer buffer names a
 /// file or directory of the file layer, the ones that keep an owner and
 /// a mode. The rest (/bin, /proc, /dev) is root's, with fixed modes.
@@ -90,7 +125,17 @@ fn kept_meta(k: &mut Kernel, n: u64) -> bool
   requires kok(k) && n <= FNAME_MAX
   ensures kok(k)
 {
-  if vfs_lookup(&mut k.fs, n) != NO_FILE {
+  let f = vfs_lookup(&mut k.fs, n);
+  return kept_meta_f(&mut k, n, f);
+}
+
+/// kept_meta, for a caller that has looked the name up (f is what
+/// vfs_lookup gave).
+fn kept_meta_f(k: &mut Kernel, n: u64, f: u64) -> bool
+  requires kok(k) && n <= FNAME_MAX
+  ensures kok(k)
+{
+  if f != NO_FILE {
     return true;
   }
   let d = dir_at(&mut k, n);
@@ -111,7 +156,7 @@ fn may_path(k: &mut Kernel, pid: u64, n: u64, want: u64) -> u64
     return 0;
   }
   let m = meta_keep(&mut k, n, n);
-  if m.ok && !may_meta(k.procs, pid, m.mode, m.own, want) {
+  if m.ok && !may_meta_k(k, pid, m.mode, m.own, want) {
     return EACCES;
   }
   return 0;
@@ -170,7 +215,7 @@ fn may_dir(k: &mut Kernel, pid: u64, n: u64) -> u64
   }
   let j = dir_part(k, n);
   let m = meta_keep(&mut k, n, j);
-  if m.ok && !may_meta(k.procs, pid, m.mode, m.own, MAY_W + MAY_X) {
+  if m.ok && !may_meta_k(k, pid, m.mode, m.own, MAY_W + MAY_X) {
     return EACCES;
   }
   return 0;
@@ -222,7 +267,7 @@ fn perm_walk(k: &mut Kernel, pid: u64, n: u64) -> u64
   {
     if j == 0 || (j < n && bget(k.fs.xfer, j) == 47) {
       let m = meta_keep(&mut k, n, j);
-      if m.ok && !may_meta(k.procs, pid, m.mode, m.own, MAY_X) {
+      if m.ok && !may_meta_k(k, pid, m.mode, m.own, MAY_X) {
         k.perr = EACCES;
         return NO_RESULT;
       }
@@ -375,7 +420,11 @@ fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u
     ng = g % 0x100000000;
   }
   if uid != 0 && (uid != own % 0x100000000 || nu != own % 0x100000000 || (ng != own / 0x100000000 % 0x100000000 && !has_group(k.procs, pid, ng, true))) {
-    return EPERM;
+    // The root of a user namespace may chown files it maps to ids it maps.
+    let tgt = nu + ng * 0x100000000;
+    if !(ns_over(k, pid, CAP_CHOWN, own) && ns_over(k, pid, CAP_CHOWN, tgt)) {
+      return EPERM;
+    }
   }
   if f >= HFILES {
     if nu == 0 && ng == 0 {
@@ -541,7 +590,7 @@ fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
   }
   // A file in a loop-mounted image (handles LO0 on) is as if mounted
   // nosuid: whoever made the image chose its owners and modes.
-  if file && f < LO0 && !nnp {
+  if file && f < LO0 && !nnp && vfs_file_mflags(&mut k.fs, f) / 2 % 2 == 0 {   // not on a nosuid mount
     let m = vfs_meta(&mut k.fs, f);
     if m.ok && m.mode & S_ISUID != 0 {
       euid = m.own % ID_SPAN;

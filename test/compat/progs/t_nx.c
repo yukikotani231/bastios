@@ -4,15 +4,19 @@
  * it. From the stack, the heap, a data array or a plain read-write mapping
  * that must kill the child with SIGSEGV; from a mapping that is executable,
  * or that mprotect made executable after the code was written, it returns 42.
- * x86-64 only: the other architectures do not mark pages no-execute yet. */
+ * x86-64 (mov eax, 42; ret) and AArch64 (mov w0, #42; ret). */
 #include "compat.h"
 #include <signal.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 
-#ifdef __x86_64__
+#if defined(__x86_64__) || defined(__aarch64__)
 
+#ifdef __x86_64__
 static const unsigned char CODE[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};
+#else
+static const unsigned char CODE[] = {0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6};
+#endif
 
 typedef int (*fn_t)(void);
 
@@ -30,7 +34,10 @@ static int in_child(int (*body)(void)) {
 
 static unsigned char data_page[4096] __attribute__((aligned(4096)));
 
-static int call(void *p) { return ((fn_t)p)() == 42 ? 0 : 1; }
+static int call(void *p) {
+    __builtin___clear_cache((char *)p, (char *)p + 64);   /* no-op on x86-64 */
+    return ((fn_t)p)() == 42 ? 0 : 1;
+}
 
 static int from_stack(void) {
     unsigned char buf[64] __attribute__((aligned(16)));
@@ -98,6 +105,20 @@ static int rx_map(void) {
     return call(q);
 }
 
+/* How V8 gets code memory: a PROT_NONE reservation, made read-write-execute,
+ * touched, and then emptied with MADV_DONTNEED. The page still takes the code
+ * and runs it. */
+static int jit_reserve(void) {
+    char *p = mmap(NULL, 2 * 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+    if (p == MAP_FAILED) return 2;
+    if (madvise(p, 2 * 4096, MADV_DONTFORK) != 0) return 3;
+    if (mprotect(p, 2 * 4096, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) return 4;
+    p[4096] = 1;
+    if (madvise(p, 2 * 4096, MADV_DONTNEED) != 0) return 5;
+    memcpy(p + 4096, CODE, sizeof CODE);
+    return call(p + 4096);
+}
+
 /* A page the parent wrote and the fork shared copy-on-write still cannot run. */
 static int forked_stack(void) {
     static unsigned char buf[64] __attribute__((aligned(16)));
@@ -145,6 +166,7 @@ int main(void) {
     RUNS("mprotect(PROT_EXEC) after writing makes the code run", flip_to_x)
     RUNS("mprotect(PROT_EXEC) on a shared mapping makes the code run", shm_flip)
     RUNS("mprotect to read-write-execute keeps the code running", flip_to_rwx)
+    RUNS("a read-write-execute page emptied with MADV_DONTNEED still runs code", jit_reserve)
     FAULTS("mprotect back to read-write stops the code", x_then_w)
     RUNS("a fork child's copy-on-write stack stays no-execute", forked_stack)
     return done();

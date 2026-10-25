@@ -424,6 +424,24 @@ int main(void) {
         unlink("l3_big");
     }
 
+    /* A block device reports its direct-I/O alignment: statx's
+       STATX_DIOALIGN fields and the sysfs files that give the same numbers. */
+    {
+        char lb[16] = "", da[16] = "";
+        int f1 = open("/sys/block/loop0/queue/logical_block_size", O_RDONLY);
+        int f2 = open("/sys/block/loop0/queue/dma_alignment", O_RDONLY);
+        if (f1 >= 0) { ssize_t n = read(f1, lb, 15); if (n >= 0) lb[n] = 0; close(f1); }
+        if (f2 >= 0) { ssize_t n = read(f2, da, 15); if (n >= 0) da[n] = 0; close(f2); }
+        EXPECT("a loop device's queue/ files give the sector size and DMA alignment",
+               strcmp(lb, "512\n") == 0 && strcmp(da, "511\n") == 0);
+        unsigned int sx[64] = { 0 };
+        long r = syscall(SYS_statx, AT_FDCWD, "/dev/loop0", 0, 0x2000, sx);
+        EXPECT("statx(STATX_DIOALIGN) of a block device gives its alignment",
+               r == 0 && (sx[0] & 0x2000) && sx[38] == 512 && sx[39] == 512);
+        long r2 = syscall(SYS_statx, AT_FDCWD, "l3_d", 0, 0x2000, sx);
+        EXPECT("statx(STATX_DIOALIGN) of a directory leaves the bit clear", r2 == 0 && !(sx[0] & 0x2000));
+    }
+
     unlink("l3_d/f2");
     unlink("l3_link");
     rmdir("l3_d");

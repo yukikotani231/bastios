@@ -4,7 +4,7 @@
 // Not done: sendfile and copy_file_range read only from files, and write
 // only to files, pipes, TCP connections and the console. flock is src/lxlock.bastio's.
 // fallocate only grows a file (mode 0).
-// getcpu says processor 0, node 0, wherever the caller runs.
+// getcpu says node 0 and the first processor the caller's mask allows (0 unless sched_setaffinity narrowed it).
 
 import "lxmisc.bastio";
 import "statfmt.bastio";
@@ -387,8 +387,11 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
   let rdev = st_rdev(k.fs.xfer);
   let blocks = get_u64(k.fs.xfer, 64);
   let atime = get_u64(k.fs.xfer, 72);
+  let atime_ns = get_u64(k.fs.xfer, 80);
   let mtime = get_u64(k.fs.xfer, 88);
+  let mtime_ns = get_u64(k.fs.xfer, 96);
   let ctime = get_u64(k.fs.xfer, 104);
+  let ctime_ns = get_u64(k.fs.xfer, 112);
   let mut z = 0;
   while z < STATX_SIZE
     invariant z <= STATX_SIZE && kok(k)
@@ -396,15 +399,23 @@ fn lx_statx(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, buf: u6
     bset(&mut k.fs.xfer, z, 0);
     z = z + 1;
   }
-  xfer_u64(&mut k.fs.xfer, 0, STATX_BASIC + 4096 * 0x100000000);   // stx_mask, stx_blksize
+  let mut smask = STATX_BASIC;
+  if mode / 4096 == 6 && mask / 0x2000 % 2 == 1 {
+    smask = smask + 0x2000;                 // STATX_DIOALIGN, answered for a block device
+    xfer_u64(&mut k.fs.xfer, 152, 512 + 512 * 0x100000000);   // stx_dio_mem_align, stx_dio_offset_align
+  }
+  xfer_u64(&mut k.fs.xfer, 0, smask + 4096 * 0x100000000);   // stx_mask, stx_blksize
   xfer_u64(&mut k.fs.xfer, 16, nlink % 0x100000000 + uid * 0x100000000);   // stx_nlink, stx_uid
   xfer_u64(&mut k.fs.xfer, 24, gid + mode % 65536 * 0x100000000);   // stx_gid, stx_mode
   xfer_u64(&mut k.fs.xfer, 32, ino);
   xfer_u64(&mut k.fs.xfer, 40, size);
   xfer_u64(&mut k.fs.xfer, 48, blocks);
   xfer_u64(&mut k.fs.xfer, 64, atime);                              // stx_atime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 72, atime_ns);                           // stx_atime.tv_nsec
   xfer_u64(&mut k.fs.xfer, 96, ctime);                              // stx_ctime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 104, ctime_ns);                          // stx_ctime.tv_nsec
   xfer_u64(&mut k.fs.xfer, 112, mtime);                             // stx_mtime.tv_sec
+  xfer_u64(&mut k.fs.xfer, 120, mtime_ns);                          // stx_mtime.tv_nsec
   // stx_rdev_major and stx_rdev_minor, from Linux's 32-bit encoding
   xfer_u64(&mut k.fs.xfer, 128, rdev % 0x100000 / 256 + (rdev % 256 + rdev / 4096 / 256 * 256) * 0x100000000);
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, k.fs.xfer, STATX_SIZE) != STATX_SIZE {
@@ -507,8 +518,8 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
   if nm != 0 {
     return nm;
   }
-  if flags / 2 != 0 && flags != MFD_CLOEXEC + 2 {
-    return EINVAL;                          // MFD_ALLOW_SEALING (2) is accepted; nothing else
+  if flags / 4 != 0 {
+    return EINVAL;                          // MFD_CLOEXEC (1) and MFD_ALLOW_SEALING (2), alone or together; nothing else
   }
   let mut oflags = LO_RDWR + LO_CREAT + LO_EXCL;
   if flags % 2 == MFD_CLOEXEC {
@@ -811,14 +822,17 @@ fn lx_more_result(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u6
       r = EBADF;
     } else if d.kind != K_FILE {
       r = ESPIPE;
+    } else if r10 % 4294967296 > 5 {
+      r = EINVAL;                           // POSIX_FADV_NORMAL .. NOREUSE are 0 to 5
     }
     // Otherwise accepted: advice is not taken.
   } else if n == LX_GETCPU {
-    lx_fill(&mut k, 0, 4);
     if a != 0 {
+      xfer_u64(&mut k.fs.xfer, 0, aff_cpu(k, pid));
       r = lx_put_out(&mut k, pid, a, 4);
     }
     if r == 0 && b != 0 {
+      lx_fill(&mut k, 0, 4);
       r = lx_put_out(&mut k, pid, b, 4);
     }
   } else if n == LX_MEMFD_CREATE {
