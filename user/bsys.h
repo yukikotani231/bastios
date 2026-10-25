@@ -192,6 +192,17 @@ static int bsys_main(void)
         int t = bwm_event(fd, buf);
         if (t < 0 || t == BWM_CLOSE)
             break;
+        if (t == BWM_MOUSE && bs_tasks) {                     /* the wheel walks the list: three processes a step, negative is up */
+            int wheel = (signed char)((((struct bwm_mouse *)buf)->buttons >> 8) & 0xFF);
+            if (wheel) {
+                bs_move(wheel * 3);
+                bs_paint_tasks();
+                fflush(stdout);
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
+                    break;
+            }
+            continue;
+        }
         if (t != BWM_KEY)
             continue;
         int c = ((struct bwm_key *)buf)->ch;

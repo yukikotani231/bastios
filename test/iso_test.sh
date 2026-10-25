@@ -931,6 +931,27 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The wheel walks the bsys process list: down from the first process moves off it.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bsys\r"); q.stdin.flush()
+        good = until(b"bsys: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey p")
+            good = until(b"bsys: processes", mark)
+        if good:
+            mark3 = len(out)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 -1")
+            good = until(b"bsys: select", mark3)
+        print(("ok  " if good else "FAIL"), f"({name}) the wheel walks the process list")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Alt-F4 closes the focused window: bhello answers the close request.
         mark = len(out)
         q.stdin.write(b"bwm -n -c bhello\r"); q.stdin.flush()
