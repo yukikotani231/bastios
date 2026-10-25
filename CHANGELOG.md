@@ -20,6 +20,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The mouse wheel zooms the image in `bview`: up in, down out.
 - In the `bfiles` list the Delete key does what `D` does: twice deletes the entry under the cursor.
 - In the `bfiles` list `e` edits the file under the cursor without opening the viewer first.
+- In the `bsys` process list Page Up and Page Down move a page at a time.
 - In the `bfiles` list F5 reads the directory again, as `R` does.
 - Shift-Tab in the `bfiles` editor takes up to four blanks off the start of the line.
 - In the `bsys` process list `n` sorts by name and back to newest first.
