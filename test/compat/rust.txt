@@ -124,4 +124,3 @@ test result: ok. 42 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 $ rc() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/cargo/bin:/usr/bin:/bin RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo LD_LIBRARY_PATH=/usr/local/rustup/toolchains/1.99.0-x86_64-unknown-linux-musl/lib HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/* /disk/r/tmp/*; bb wget -q -O - HOSTURL/oss/fnv.tar.gz | bb tar -xz -C /disk/r/work && rc sh -c 'cd /work/fnv && CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 cargo test --offline -j2 2>&1' | bb grep -E '^(test result|error)' | bb sed 's/; finished in.*//'
 test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
 test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
-test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
