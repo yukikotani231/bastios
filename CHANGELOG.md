@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- In the `bfiles` list `~` goes to the home directory (`$HOME`, or `/` when it is not set).
 - In the `bfiles` list `/` and the start of a name move the cursor to the first entry that begins with it (Backspace takes a letter back, Enter or Esc ends it).
 - `bview` zooms: `+` and `-` double and halve the scale about the middle of the window, `h j k l` or the arrow keys move about a zoomed image, `0` goes back.
 - The `bfiles` editor marks the text of the last Ctrl-F wherever it shows in the window.
@@ -66,7 +67,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bsys` is a System window (kernel, uptime, memory, processors, screen, root disk, time) that the launcher menu opens; `r` refreshes it. It is part of `bterm`, so it adds no image.
 - `g` and `G` in `bfiles` jump to the top and the end of the list or the file.
 - `R` in the `bfiles` list reads the directory again.
-- `s` in the `bfiles` list sorts the files by size (largest first) or back by name.
+- `s` in the `bfiles` list sorts the files by size (largest first), then by time (newest first), then back by name.
 - `bfiles` leaves out names that start with a dot, and `h` in the list shows or hides them.
 - `bfiles` copies the file it is showing to `NAME.copy` on `c`.
 - `bfiles` opens a terminal window in the directory shown on `t` in the list.

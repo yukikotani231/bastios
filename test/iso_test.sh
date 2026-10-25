@@ -1620,13 +1620,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bfiles: dotfiles hidden", mark)
         print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
         fails += not good
-        # s in the list sorts the files by size (largest first) or back by name.
+        # s in the list sorts the files by size (largest first), then by time (newest first), then back by name.
         if good:
             monitor("sendkey s")
             good = until(b"bfiles: sorted by size", mark)
             monitor("sendkey s")
+            good = good and until(b"bfiles: sorted by time", mark)
+            monitor("sendkey s")
             good = good and until(b"bfiles: sorted by name", mark)
-        print(("ok  " if good else "FAIL"), f"({name}) s in bfiles toggles the sort order")
+        print(("ok  " if good else "FAIL"), f"({name}) s in bfiles cycles the sort order")
         fails += not good
         # R in the list reads the directory again (so a file made elsewhere shows).
         if good:
@@ -1643,6 +1645,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey g")
             good = good and until(b"bfiles: top 0", mark2)
         print(("ok  " if good else "FAIL"), f"({name}) g and G in bfiles jump to the top and the end")
+        fails += not good
+        # The time order puts the file written last first.
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ts; echo a > /tmp/ts/aa; sleep 2; echo z > /tmp/ts/zz; bwm -n -c bfiles /tmp/ts\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey s", "sendkey s")
+            good = until(b"bfiles: sorted by time", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 24)
+            good = lines[2].startswith("zz") and lines[3].startswith("aa")
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) s twice in bfiles puts the newest file first")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -1771,6 +1796,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey ret")
             good = until(b"bfiles: image /tmp/ni/p.ppm", mark) and until(b"bview: window", mark)
         print(("ok  " if good else "FAIL"), f"({name}) the arrow, Home and End keys and Enter work on the bfiles list")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # ~ in the bfiles list goes to the home directory.
+        mark = len(out)
+        q.stdin.write(b"HOME=/tmp bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            mark2 = len(out)
+            monitor("sendkey shift-grave_accent")
+            good = until(b"bfiles: dir /tmp\r\n", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) ~ in the bfiles list goes to the home directory")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)

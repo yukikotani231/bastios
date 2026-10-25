@@ -49,7 +49,7 @@ static int bf_rows = 24;
 #define BF_VIEWMAX 65536
 #define BF_MAXLINES 8192
 
-struct bf_ent { char name[NAME_MAX + 1]; int dir; off_t size; };
+struct bf_ent { char name[NAME_MAX + 1]; int dir; off_t size; time_t mtime; };
 
 static uint32_t bf_pix[BF_WIDTH * BF_MAXROWS * BF_CH];
 static struct bf_ent bf_ents[BF_MAXENT];
@@ -85,15 +85,17 @@ static char bf_ebuf[40], bf_efind[40];          /* what was typed, and what was 
 static size_t bf_ebn;
 
 static int bf_sel;                              /* the entry the keyboard cursor is on (arrows move it, Enter opens it) */
-static int bf_by_size;                          /* 1: files largest first, 0: by name */
+static int bf_sort;                             /* 0: by name, 1: files largest first, 2: newest first */
 
 static int bf_cmp(const void *a, const void *b)
 {
     const struct bf_ent *x = a, *y = b;
     if (x->dir != y->dir)
         return y->dir - x->dir;
-    if (bf_by_size && x->size != y->size)
+    if (bf_sort == 1 && x->size != y->size)
         return x->size < y->size ? 1 : -1;
+    if (bf_sort == 2 && x->mtime != y->mtime)
+        return x->mtime < y->mtime ? 1 : -1;
     return strcmp(x->name, y->name);
 }
 
@@ -257,6 +259,7 @@ static void bf_load_dir(void)
         snprintf(bf_ents[bf_nent].name, sizeof bf_ents[bf_nent].name, "%s", e->d_name);
         bf_ents[bf_nent].dir = stat(p, &st) == 0 && S_ISDIR(st.st_mode);
         bf_ents[bf_nent].size = stat(p, &st) == 0 ? st.st_size : 0;
+        bf_ents[bf_nent].mtime = stat(p, &st) == 0 ? st.st_mtime : 0;
         bf_nent++;
     }
     closedir(d);
@@ -1742,14 +1745,18 @@ static int bfiles_main(int argc, char **argv)
                 printf("bfiles: reloaded %d entries\n", bf_nent);
                 fflush(stdout);
             } else if (c == 's' && !bf_viewing) {
-                bf_by_size = !bf_by_size;
-                printf("bfiles: sorted by %s\n", bf_by_size ? "size" : "name");
+                bf_sort = (bf_sort + 1) % 3;
+                printf("bfiles: sorted by %s\n", bf_sort == 1 ? "size" : bf_sort == 2 ? "time" : "name");
                 fflush(stdout);
                 bf_load_dir();
             } else if (c == 'h' && !bf_viewing) {
                 bf_hidden = !bf_hidden;
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);
+                bf_load_dir();
+            } else if (c == '~' && !bf_viewing) {
+                const char *home = getenv("HOME");
+                snprintf(bf_cwd, sizeof bf_cwd, "%s", home && home[0] == '/' ? home : "/");
                 bf_load_dir();
             } else if (c == 't' && !bf_viewing) {
                 bf_spawn("bterm", NULL, "terminal in");
