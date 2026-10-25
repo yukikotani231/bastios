@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- The mouse wheel zooms the image in `bview`: up in, down out.
 - In the `bfiles` list the Delete key does what `D` does: twice deletes the entry under the cursor.
 - In the `bfiles` list `e` edits the file under the cursor without opening the viewer first.
 - The `bfiles` editor copies the line under the cursor below it with Ctrl-D.
