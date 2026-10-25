@@ -1308,6 +1308,18 @@ static void be_key(int c)
         } else if (c == '~' && num == 3) { for (size_t n = be_clen(bf_cur); n > 0; n--) be_delete(bf_cur); }
         else if (c == '~' && num == 5) be_move_rows(-page);
         else if (c == '~' && num == 6) be_move_rows(page);
+        else if (c == 'Z' && !num) {                         /* Shift-Tab: up to four blanks off the start of the line */
+            size_t s = bf_erow[be_row_of(bf_cur)], k = 0;
+            while (k < 4 && s + k < bf_vlen && bf_vtext[s + k] == ' ')
+                k++;
+            if (k) {
+                be_undo_push(3);
+                size_t at = bf_cur;
+                for (size_t i = 0; i < k; i++)
+                    be_delete(s);
+                bf_cur = at >= s + k ? at - k : s;
+            }
+        }
         return;
     }
     if (c != 27 && c != 3 && c != 22 && c != 23 && c != 127 && c != 8 && c != '\n' && c != '\r' &&
