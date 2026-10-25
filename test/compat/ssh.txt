@@ -37,7 +37,7 @@ $ @host test/compat/ssh_tty.py -- build/compat/dbclient -y -y -t -i build/compat
 icanon
 
 == ssh: an interactive login, the shell's exit status
-$ @host (test/compat/ssh_tty.py 'echo $((6*7))' 'exit 5' -- build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1; echo status $?) | grep -x -e 42 -e 'status 5'
+$ @host (test/compat/ssh_tty.py 'echo $((6*7))' 'exit 5' -- build/compat/dbclient -y -y -i build/compat/ssh_id -p SSHPORT root@127.0.0.1; echo status $?) | sed 's/^# //' | grep -x -e 42 -e 'status 5'
 42
 status 5
 

@@ -14,6 +14,18 @@
 #include <sys/wait.h>
 
 static char *cow_buf;
+static volatile int fast_phase;
+static char *fast_page;
+/* Runs only system calls the kernel answers without its lock (getpid), so the
+ * processor keeps its translations between them, until the other thread has
+ * unmapped the page. */
+static void *fast_thread(void *a) {
+    fast_page[0] = 1;
+    fast_phase = 1;
+    while (fast_phase < 2) syscall(SYS_getpid);
+    fast_page[0] = 2;
+    return a;
+}
 static void *cow_thread(void *a) { cow_buf[4096 * 3] = 7; return a; }
 
 int main(void) {
@@ -40,6 +52,29 @@ int main(void) {
     EXPECT("munmap faults on touch", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
            munmap(q, 4096) == 0 && ({ pid_t c = fork(); c == 0 ? (q[0] = 1, _exit(0), 0) :
            c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    // A translation cached while the page was mapped must not outlive a
+    // system call that changes the mapping (what a TLB tagged with process
+    // identifiers must still honour): touch first, change, touch again.
+    EXPECT("a page touched before munmap faults after it", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ pid_t c = fork(); c == 0 ? (q[0] = 1, munmap(q, 4096), q[0] = 2, _exit(0), 0) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    EXPECT("a page written before mprotect(PROT_READ) faults on the next write", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ pid_t c = fork(); c == 0 ? (q[0] = 1, mprotect(q, 4096, PROT_READ), q[0] = 2, _exit(0), 0) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    EXPECT("a page another thread unmaps while this one makes quick system calls faults on its next touch", (fast_page = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ pid_t c = fork(); c == 0 ? ({ pthread_t t; fast_phase = 0;
+              if (pthread_create(&t, 0, fast_thread, 0)) _exit(1);
+              while (fast_phase < 1) sched_yield();
+              for (int i = 0; i < 1000; i++) syscall(SYS_getpid);
+              munmap(fast_page, 4096);
+              fast_phase = 2;
+              pthread_join(t, 0); _exit(0); 0; }) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV; }));
+    EXPECT("a page read before munmap and mapped again at its address is a fresh zero page", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED &&
+           ({ q[0] = 'P'; pid_t c = fork(); c == 0 ? ({ char r = q[0]; munmap(q, 4096);
+              char *n = mmap(q, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+              _exit(r == 'P' && n == q && q[0] == 0 ? 0 : 1); 0; }) :
+           c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && q[0] == 'P'; }));
     {
         int ro = open("cm_ro", O_RDWR | O_CREAT | O_TRUNC, 0644), wo = -1, bad;
         if (ro >= 0) { write(ro, "x", 1); close(ro); }
@@ -340,6 +375,33 @@ int main(void) {
            }
            if (sf >= 0) close(sf);
            unlink("mem_shared");
+           ok; }));
+    for (int x = 0; x < 2; x++)
+    EXPECT(x ? "mprotect makes 300 MiB of a PROT_NONE reservation readable, writable and executable (a JIT's code range), more than the machine has: only touched pages count, and code written there runs"
+             : "mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the machine has: only touched pages count", ({
+           int rwx = PROT_READ | PROT_WRITE | (x ? PROT_EXEC : 0);
+           size_t sz = 300u << 20;
+           char *r = mmap(0, 512u << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+           int ok = r != MAP_FAILED && mprotect(r, sz, rwx) == 0;
+           if (ok) {
+               r[0] = 1; r[sz / 2] = 2; r[sz - 1] = 3;
+               ok = r[0] == 1 && r[sz / 2] == 2 && r[sz - 1] == 3 && r[4096] == 0;
+#if defined(__x86_64__) || defined(__aarch64__)
+               if (ok && x) {
+#ifdef __x86_64__
+                   static const unsigned char code[] = {0xB8, 0x2A, 0x00, 0x00, 0x00, 0xC3};   /* mov eax, 42; ret */
+#else
+                   static const unsigned char code[] = {0x40, 0x05, 0x80, 0x52, 0xC0, 0x03, 0x5F, 0xD6};   /* mov w0, #42; ret */
+#endif
+                   char *c = r + sz / 4;   /* a page not touched yet */
+                   memcpy(c, code, sizeof code);
+                   __builtin___clear_cache(c, c + sizeof code);
+                   ok = ((int (*)(void))(void *)c)() == 42;
+               }
+#endif
+               ok = ok && mprotect(r + 4096, 8192, PROT_NONE) == 0 && mprotect(r + 4096, 8192, PROT_READ | PROT_WRITE) == 0 && r[4096] == 0;
+               ok = ok && munmap(r, 512u << 20) == 0;
+           }
            ok; }));
     return done();
 }

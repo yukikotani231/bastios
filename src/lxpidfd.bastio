@@ -16,8 +16,9 @@
 // -EINVAL, as before Linux 6.9), /proc/PID/fdinfo's Pid line, and fstat's
 // anonymous inode. pidfd_getfd needs the same user ids or root (Linux's
 // PTRACE_MODE_ATTACH_REALCREDS without a ptrace scope), and so does kcmp.
-// kcmp's KCMP_FILE compares open file descriptions; the other kinds
-// (address space, descriptor table, working directory, signal actions, I/O
+// kcmp's KCMP_FILE compares open file descriptions and KCMP_FILES the
+// descriptor tables (processes that share one are a ring, src/lxfd.bastio);
+// the other kinds (address space, working directory, signal actions, I/O
 // context, System V undo list) are each one per thread group here, so it
 // compares groups. KCMP_EPOLL_TFD is -EOPNOTSUPP. process_vm_writev, like
 // the kernel's other copies to user memory, does not check that a page is
@@ -32,7 +33,13 @@ const LX_PIDFD_SEND_SIGNAL: u64 = 424;
 const LX_PIDFD_OPEN: u64 = 434;
 const LX_PIDFD_GETFD: u64 = 438;
 const PVM_WAIT: u64 = 4611686018427387904;           // process_vm's answer: not yet (no byte count is this large)
+const PIDFD_THREAD: u64 = 128;                       // pidfd_open's flag: O_EXCL
+const PIDFD_SIGNAL_THREAD: u64 = 1;
+const PIDFD_SIGNAL_THREAD_GROUP: u64 = 2;
+const PIDFD_SIGNAL_PROCESS_GROUP: u64 = 4;
 const KCMP_FILE: u64 = 0;
+const KCMP_FILES: u64 = 2;
+const KCMP_FS: u64 = 3;
 const KCMP_EPOLL_TFD: u64 = 7;
 
 fn is_pidfd_call(n: u64) -> bool {
@@ -68,21 +75,24 @@ fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
 }
 
 /// pidfd_open(p, flags): a close-on-exec descriptor for process p, which
-/// must be running (or a zombie) and lead its thread group.
+/// must be running (or a zombie) and lead its thread group, or with
+/// PIDFD_THREAD any thread.
 fn pidfd_open(k: &mut Kernel, pid: u64, p: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if flags & !LO_NONBLOCK != 0 || p == 0 || p >= 0x80000000 {
+  if flags & !(LO_NONBLOCK + PIDFD_THREAD) != 0 || p == 0 || p >= 0x80000000 {
     return EINVAL;
   }
   if p >= NPROC || state(k.procs, p) == FREE {
     return ESRCH;
   }
-  if tgid(k.procs, p) != p {
+  if tgid(k.procs, p) != p && flags & PIDFD_THREAD == 0 {
     return EINVAL;                          // a thread, not a process
   }
-  return ev_install(&mut k, pid, OF_PIDFD, p, flags / LO_NONBLOCK % 2, true);
+  // Word 3: bit 0 nonblocking, bit 1 a pidfd on a thread (it is ready when
+  // that thread ends).
+  return ev_install(&mut k, pid, OF_PIDFD, p, flags / LO_NONBLOCK % 2 + flags / PIDFD_THREAD % 2 * 2, true);
 }
 
 /// The process pidfd fd of process pid names (NPROC if it is gone), or
@@ -108,7 +118,10 @@ fn pidfd_signal(k: &mut Kernel, pid: u64, fd: u64, s: u64, info: u64, flags: u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
-  if flags != 0 {
+  // At most one of the scopes: the thread (what a pidfd on a thread
+  // means unasked), the thread group (a process's), or its process group.
+  if flags & !(PIDFD_SIGNAL_THREAD + PIDFD_SIGNAL_THREAD_GROUP + PIDFD_SIGNAL_PROCESS_GROUP) != 0
+     || (flags != 0 && flags & (flags - 1) != 0) {
     return EINVAL;
   }
   let p = pidfd_target(k, pid, fd, true);
@@ -120,6 +133,12 @@ fn pidfd_signal(k: &mut Kernel, pid: u64, fd: u64, s: u64, info: u64, flags: u64
   }
   if p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
     return ESRCH;
+  }
+  if flags == PIDFD_SIGNAL_PROCESS_GROUP {
+    if info != 0 {
+      return EINVAL;                        // a siginfo goes to one process
+    }
+    return lx_kill(&mut k, pid, wrap_sub(0, pgid_of(k.procs, p)), s);   // -pgid
   }
   if info == 0 {
     return lx_kill(&mut k, pid, p, s);
@@ -152,9 +171,9 @@ fn pidfd_getfd(k: &mut Kernel, pid: u64, fd: u64, target: u64, flags: u64) -> u6
   if !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
     return EPERM;
   }
-  // A thread group's descriptors are in the row of whichever member holds
-  // the group's shared state (src/lxthread.bastio).
-  let h = fd_ofd(k, fd_row(&mut k, p), target);
+  // Shared descriptors are in the row of whichever member holds them
+  // (src/lxfd.bastio).
+  let h = fd_ofd(k, fd_home(k, p), target);
   if target >= LXNFD || h >= OFD_N {
     return EBADF;                           // not open there (the console is not passed on)
   }
@@ -233,9 +252,17 @@ fn lx_kcmp(k: &mut Kernel, pid: u64, p1: u64, p2: u64, kind: u64, i1: u64, i2: u
   }
   let mut x = tgid(k.procs, p1);
   let mut y = tgid(k.procs, p2);
+  if t == KCMP_FILES {
+    x = fd_ring_id(k, p1);                  // processes that share a table share a ring
+    y = fd_ring_id(k, p2);
+  }
+  if t == KCMP_FS {
+    x = fs_ring_id(k, p1);
+    y = fs_ring_id(k, p2);
+  }
   if t == KCMP_FILE {
-    let r1 = fd_row(&mut k, tgid(k.procs, p1));
-    let r2 = fd_row(&mut k, tgid(k.procs, p2));
+    let r1 = fd_home(k, p1);
+    let r2 = fd_home(k, p2);
     x = fd_ofd(k, r1, i1 % 0x100000000);
     y = fd_ofd(k, r2, i2 % 0x100000000);
     if x >= OFD_N || y >= OFD_N {

@@ -30,11 +30,16 @@ fn pci_next(p: &mut Pci, dev: u64) -> u64
   requires pci_ok(p) && dev < PCI_NONE
   ensures dev < result && result <= PCI_NONE
 {
+  let mut n = dev + 1;
   if dev % 8 == 0 && dev + 8 <= PCI_NONE
     && (pci_read(&mut p, dev, PCI_ID) == 0xFFFFFFFF || (pci_read(&mut p, dev, PCI_HEADER) >> 23) % 2 == 0) {
-    return dev + 8;
+    n = dev + 8;
   }
-  return dev + 1;
+  // On a new bus: skip the buses past the last one with a device.
+  if n % 256 == 0 && n < PCI_NONE {
+    return pci_bus_from(&mut p, n / 256) * 256;
+  }
+  return n;
 }
 
 /// Is there no PCI at all (no host bridge answers at 0:0.0)? True on

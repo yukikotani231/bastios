@@ -1,6 +1,7 @@
 // Device files for Linux programs: /dev/null, /dev/zero, /dev/random,
 // /dev/urandom and /dev/tty, the loop devices (src/lxloop.bastio), /dev/dsp
 // (src/lxsnd.bastio), /dev/input/mice and /dev/psaux (src/lxmouse.bastio),
+// /dev/ttyUSB0 and /dev/ttyACM0 (src/lxserial.bastio),
 // and /dev
 // itself as a directory to stat.
 // Opening one makes an open file description of kind OF_DEV whose x is the
@@ -20,7 +21,7 @@ const DEV_DIR: u64 = 5;             // /dev itself
 /// The device the n-byte path in the transfer buffer ("dev/null", from
 /// lx_path_in) names, or DEV_NONE.
 fn dev_at(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && n <= FNAME_MAX
+  requires blen(x) == XBUF && n <= FNAME_MAX
 {
   if xfer_is(x, 0, n, "dev") {
     return DEV_DIR;
@@ -45,6 +46,15 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 0, n, "dev/input/mice") || xfer_is(x, 0, n, "dev/psaux") {
     return DEV_MICE;                        // src/lxmouse.bastio
+  }
+  if xfer_is(x, 0, n, "dev/input/event0") {
+    return DEV_KEYEV;                       // src/lxkeyev.bastio
+  }
+  if xfer_is(x, 0, n, "dev/ttyUSB0") || xfer_is(x, 0, n, "dev/ttyACM0") {
+    return DEV_SER;                         // src/lxserial.bastio
+  }
+  if xfer_is(x, 0, n, "dev/fb0") {
+    return DEV_FB;                          // src/lxfb.bastio
   }
   if xfer_is(x, 0, n, "dev/ptmx") {
     return DEV_PTMX;
@@ -76,14 +86,26 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_TTY {
     return 0x500;
   }
+  if d == DEV_PTMX {
+    return 0x502;                           // 5:2
+  }
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return 0x700 + d - DEV_LOOP;            // block major 7
   }
   if d == DEV_LOOPCTL {
     return 0xAED;                           // 10:237
   }
+  if d == DEV_FB {
+    return 0x1D00;                          // 29:0, /dev/fb0
+  }
+  if d == DEV_KEYEV {
+    return 0xD40;                           // 13:64, /dev/input/event0
+  }
   if d == DEV_MICE {
     return 0xD3F;                           // 13:63, /dev/input/mice
+  }
+  if d == DEV_SER {
+    return 0xBC00;                          // 188:0, /dev/ttyUSB0 (an ACM port is 166:0)
   }
   return 0;
 }
@@ -105,14 +127,26 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev == 0x500 || rdev == 0x501 {
     return DEV_TTY;
   }
+  if rdev == 0x502 {
+    return DEV_PTMX;                        // a /dev/ptmx made by mknod, in a chroot
+  }
   if rdev >= 0x700 && rdev < 0x700 + LOOP_N {
     return DEV_LOOP + rdev - 0x700;
   }
   if rdev == 0xAED {
     return DEV_LOOPCTL;
   }
+  if rdev == 0x1D00 {
+    return DEV_FB;
+  }
+  if rdev == 0xD40 {
+    return DEV_KEYEV;
+  }
   if rdev == 0xD3F || rdev == 0xA01 {
     return DEV_MICE;                        // /dev/input/mice, /dev/psaux (10:1)
+  }
+  if rdev == 0xBC00 || rdev == 0xA600 {
+    return DEV_SER;                         // /dev/ttyUSB0 (188:0), /dev/ttyACM0 (166:0)
   }
   return DEV_NONE;
 }
@@ -153,7 +187,10 @@ fn dev_meta(d: u64) -> Meta {
 // it as the next key ("fast key erasure"), so earlier output cannot be
 // recomputed from a later state. The counter's jitter is an estimate of
 // entropy, not a measured one. A virtio-rng, if the machine has one, adds
-// 64 bytes at boot (src/virtio_rng.bastio); there is no RDRAND source yet.
+// 64 bytes at boot (src/virtio_rng.bastio). A processor with RDSEED or
+// RDRAND gives 64 bytes at boot and one more word every RNG_HWEVERY
+// scheduler passes (rng_hw_boot, rng_stir). Neither source is trusted alone:
+// each word only goes into the pool, which the key absorbs with the rest.
 //
 // k.rng holds RNG_LEN words:
 const RNG_KEY: u64 = 0;             // 8 key words of 32 bits
@@ -162,6 +199,9 @@ const RNG_HAVE: u64 = 9;            // how many of the buffered words are left
 const RNG_OUT: u64 = 10;            // 4 buffered 64-bit words of output
 const RNG_POOL: u64 = 14;           // 4 pool words
 const RNG_AT: u64 = 18;             // the pool word the next sample goes into
+const RNG_PASSES: u64 = 19;         // scheduler passes since the last hardware word
+const RNG_HW: u64 = 20;             // the processor's generators (INFO_RAND 0), 0 for none
+const RNG_HWEVERY: u64 = 4096;
 // RNG_LEN is in src/proc.bastio, which kok needs it before this file.
 
 /// A new generator whose pool starts from `seed`.
@@ -194,12 +234,44 @@ fn rng_add(r: &mut Buf, x: u64)
   r = set(r, RNG_AT, (get(r, RNG_AT) % 4 + 1) % 4);
 }
 
-/// Adds the time-stamp counter now to the pool (each scheduler pass).
+/// Adds the time-stamp counter now to the pool (each scheduler pass), and
+/// every RNG_HWEVERY passes a word from the processor's generator, if it has one.
 fn rng_stir(k: &mut Kernel, cpu: &Cpu)
   requires kok(k)
   ensures kok(k)
 {
   rng_add(&mut k.rng, cpu_tsc(cpu));
+  if get(k.rng, RNG_HW) != 0 {
+    let n = smaller(get(k.rng, RNG_PASSES), RNG_HWEVERY) + 1;
+    if n >= RNG_HWEVERY {
+      k.rng = set(k.rng, RNG_PASSES, 0);
+      rng_add(&mut k.rng, boot_info(cpu, INFO_RAND, 1));
+    } else {
+      k.rng = set(k.rng, RNG_PASSES, n);
+    }
+  }
+}
+
+/// At boot: notes which generators the processor has, and if there is one,
+/// adds 8 words from it to the pool. Returns how many bytes that gave
+/// (0: the processor has none).
+fn rng_hw_boot(k: &mut Kernel, cpu: &Cpu) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= 64
+{
+  let have = boot_info(cpu, INFO_RAND, 0) % 4;
+  k.rng = set(k.rng, RNG_HW, have);
+  if have == 0 {
+    return 0;
+  }
+  let mut i = 0;
+  while i < 8
+    invariant i <= 8 && kok(k)
+  {
+    rng_add(&mut k.rng, boot_info(cpu, INFO_RAND, 1));
+    i = i + 1;
+  }
+  return 64;
 }
 
 /// Adds the 64-bit word x, from a source outside the kernel (a virtio-rng at

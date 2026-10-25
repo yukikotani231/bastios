@@ -138,13 +138,27 @@ What the page tables enforce for a user process, and what they do not.
   24 bits of pages (the window is 512 GiB, Linux's is 128 TiB). The vDSO
   page still lies at a fixed place just under the stack, and so does the
   first part of the window (a non-PIE program).
-- **No execute (NX) and W^X: not done.** The CPU's NX bit is off
-  (`EFER.NXE` is never set), so every user page the program may read, it
-  may also run. Stack and heap are executable. The kernel does not
-  record `PROT_EXEC` anywhere. Closing this takes a page-table
-  primitive in bastiolang's prelude (an execute bit next to
-  `pt_set_access`) and every place that maps a page to say whether it may
-  run.
+- **No execute (NX) and W^X, on x86-64.** `EFER.NXE` is set on every
+  processor (`boot/boot.S`, `boot/ap.S`). Whether a page can run is decided
+  when its page-table entry is made, in bastiolang's prelude: a page mapped
+  writable (`pt_put_frame`, `pt_put_shared` with `w`) gets the no-execute
+  bit, a read-only one does not, and `pt_set_access` leaves the bit alone.
+  So the stack, the heap, anonymous mappings, a program's data and bss, and
+  every page fork shares copy-on-write cannot run code. `PROT_EXEC` is
+  honoured: `mmap` and `mprotect` map the page again with the bit its new
+  protection wants (`l2_protect`, `src/lxmem.bastio`), so a JIT that writes
+  code and then `mprotect`s it executable works, and `PROT_READ|PROT_WRITE`
+  after that stops the code again. The pages of an executable segment are
+  made executable after the image is copied in (`exec_pages`,
+  `src/elf.bastio`). What is not enforced yet:
+  - A page that is both writable and executable (a program asking for
+    `PROT_WRITE|PROT_EXEC`, the flat images of the built-in programs) is
+    marked in the page bitmap (`XPAGE`, `src/pages.bastio`), because the
+    entry cannot be asked; fork (copy-on-write or copying) and the copy a
+    write makes keep it. `mremap` of such a page drops the execute right.
+  - A program's text is not made read-only (only the pages shared from the
+    page cache are), and read-only data in shared pages can run code.
+  - The AArch64 port and the native backends do not set the bit.
 - **SMEP and SMAP: not needed.** The kernel runs on its own page table
   and loads it on every entry from user mode (`trap_alias`); the user
   pages are not in it. A kernel jump to user code, or a kernel read of a
@@ -155,3 +169,15 @@ What the page tables enforce for a user process, and what they do not.
   1 GiB pages, read-write and executable. A write through a kernel bug
   could change kernel code. The proofs say the kernel makes no such write;
   this would be a second line.
+
+## Randomness
+
+`/dev/urandom`, `/dev/random` and `getrandom` come from one ChaCha20 generator
+(`src/lxdev.bastio`) with fast key erasure. Its pool takes the time-stamp
+counter on every scheduler pass, the clocks at boot, a virtio-rng's 64 bytes
+at boot if the machine has one, and, if the processor has RDSEED or RDRAND, 64
+bytes at boot and one word every 4096 scheduler passes (`rng_hw_boot`,
+`rng_stir`; `hw_random` in `boot/smp.c`). Without one of those two
+hardware sources (a QEMU CPU model without them, an old processor, a virtual
+machine without virtio-rng) the pool's early state rests on timing jitter and
+the clock, which is an estimate of entropy and not a measured one. `test/rng_test.sh` boots with and without the instructions.

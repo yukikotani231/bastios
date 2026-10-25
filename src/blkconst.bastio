@@ -4,4 +4,8 @@
 
 const SECTOR: u64 = 512;
 const VIO_BATCH: u64 = 32;                // blocks one background read takes at most
+const SER_NONE: u64 = 0;                  // no USB serial port
+const SER_FTDI: u64 = 1;                  // an FTDI adapter: /dev/ttyUSB0
+const SER_ACM: u64 = 2;                   // a CDC-ACM device: /dev/ttyACM0
+const SER_PKT: u64 = 0x200000000;         // kbd_poll's answer for a byte received on a USB serial port: SER_PKT + the byte
 const MOUSE_PKT: u64 = 0x100000000;       // kbd_poll's answer for a mouse packet: MOUSE_PKT + b0 * 2^24 + x * 65536 + y * 256 + wheel

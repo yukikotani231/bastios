@@ -7,11 +7,14 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <sys/mman.h>
+#include <sys/ioctl.h>
 #include <sys/sendfile.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 
 #define NOBODY 65534
@@ -62,6 +65,42 @@ static int long_paths(void) {
     p[PATH_MAX] = 0;
     ok = ok && fails(chdir(p), ENAMETOOLONG);
     return ok && chdir(here) == 0;
+}
+
+/* A path of a few thousand bytes (PATH_MAX is 4096) made of components below NAME_MAX: made, used, and removed again; a component of 256 bytes is ENAMETOOLONG. */
+static int deep_paths(void) {
+    enum { L = 100, N = 30 };
+    static char comp[L + 1], full[PATH_MAX + 16], cwd[PATH_MAX + 16], base[PATH_MAX + 16], nm[300];
+    struct stat st;
+    if (!getcwd(base, sizeof base) || strlen(base) + N * (L + 1) + 8 >= PATH_MAX) return 1;   /* not enough room under here: skip */
+    memset(comp, 'd', L);
+    size_t len = 0;
+    int ok = 1;
+    for (int i = 0; i < N && ok; i++) {
+        if (len) full[len++] = '/';
+        memcpy(full + len, comp, L);
+        len += L;
+        full[len] = 0;
+        ok = mkdir(full, 0755) == 0;
+    }
+    ok = ok && len > 3000 && stat(full, &st) == 0 && S_ISDIR(st.st_mode);
+    strcat(full, "/f");
+    int fd = ok ? open(full, O_CREAT | O_WRONLY, 0644) : -1;
+    ok = ok && fd >= 0 && write(fd, "deep", 4) == 4 && close(fd) == 0 && stat(full, &st) == 0 && st.st_size == 4;
+    full[len] = 0;
+    ok = ok && chdir(full) == 0 && getcwd(cwd, sizeof cwd) && strlen(cwd) == (strcmp(base, "/") ? strlen(base) : 0) + 1 + len
+        && stat("f", &st) == 0 && chdir(base) == 0;
+    memset(nm, 'n', 256); nm[256] = 0;
+    ok = ok && mkdir(nm, 0755) == -1 && errno == ENAMETOOLONG;
+    nm[255] = 0;
+    ok = ok && mkdir(nm, 0755) == 0 && rmdir(nm) == 0;
+    full[len] = '/'; full[len + 1] = 'f'; full[len + 2] = 0;
+    ok = ok && unlink(full) == 0;
+    for (int i = N; i > 0; i--) {
+        full[i * (L + 1) - 1] = 0;
+        ok = ok && rmdir(full) == 0;
+    }
+    return ok;
 }
 
 static int loop_is_eloop(void) {
@@ -150,6 +189,20 @@ static int sendfile_statx(void) {
     return ok;
 }
 
+/* A socket bound by a name in a chroot reads back by that name, not by the
+ * path from the top (multiprocessing's managers connect to what they read). */
+static int jail_socket_name(void) {
+    struct sockaddr_un a = { .sun_family = AF_UNIX }, got;
+    socklen_t len = sizeof got;
+    int s = socket(AF_UNIX, SOCK_STREAM, 0), c = socket(AF_UNIX, SOCK_STREAM, 0);
+    strcpy(a.sun_path, "/sub/js");
+    int ok = s >= 0 && c >= 0 && bind(s, (struct sockaddr *)&a, sizeof a) == 0 && listen(s, 1) == 0
+        && getsockname(s, (struct sockaddr *)&got, &len) == 0 && strcmp(got.sun_path, "/sub/js") == 0
+        && connect(c, (struct sockaddr *)&a, sizeof a) == 0;
+    close(s); close(c);
+    return ok;
+}
+
 static int in_jail(void) {
     struct stat st;
     char here[64];
@@ -158,7 +211,8 @@ static int in_jail(void) {
         && fails(stat("/pt_jail", &st), ENOENT)
         && chdir("/sub") == 0 && getcwd(here, sizeof here) && strcmp(here, "/sub") == 0
         && stat("../f", &st) == 0 && stat("../../../f", &st) == 0 && stat("up", &st) == 0
-        && chdir("/") == 0 && getcwd(here, sizeof here) && strcmp(here, "/") == 0;
+        && chdir("/") == 0 && getcwd(here, sizeof here) && strcmp(here, "/") == 0
+        && jail_socket_name();
 }
 
 static int nobody_chroot(void) {
@@ -171,7 +225,7 @@ static int chroot_jail(void) {
     int ok = make("pt_jail/f") && symlink("/f", "pt_jail/abs") == 0 && symlink("../../../f", "pt_jail/sub/up") == 0
         && fails(chroot("pt_jail/f"), ENOTDIR) && fails(chroot("pt_none"), ENOENT)
         && in_child(nobody_chroot) && in_child(in_jail);
-    unlink("pt_jail/sub/up"); unlink("pt_jail/abs"); unlink("pt_jail/f"); rmdir("pt_jail/sub"); rmdir("pt_jail");
+    unlink("pt_jail/sub/js"); unlink("pt_jail/sub/up"); unlink("pt_jail/abs"); unlink("pt_jail/f"); rmdir("pt_jail/sub"); rmdir("pt_jail");
     return ok;
 }
 
@@ -189,6 +243,11 @@ static int device_nodes(void) {
     int fd = open("pt_null", O_RDWR | O_TRUNC);
     ok = ok && fd >= 0 && write(fd, "data", 4) == 4 && read(fd, b, 4) == 0;
     close(fd);
+    int one = 0;
+    fd = mknod("pt_ptmx", S_IFCHR | 0666, makedev(5, 2)) == 0 ? open("pt_ptmx", O_RDWR | O_NOCTTY) : -1;   /* a /dev/ptmx made in a chroot */
+    ok = ok && fd >= 0 && ioctl(fd, 0x80045430, &one) == 0 && one == 0;                                  /* TIOCGPTN */
+    if (fd >= 0) close(fd);
+    unlink("pt_ptmx");
     ok = ok && mknod("pt_zero", S_IFCHR | 0444, makedev(1, 5)) == 0;
     fd = open("pt_zero", O_RDONLY);
     ok = ok && fd >= 0 && read(fd, b, 4) == 4 && b[0] == 0 && b[3] == 0;
@@ -221,11 +280,26 @@ static int trailing_slash(void) {
     return ok;
 }
 
+static int deep_names(void) {
+    struct stat st;
+    int ok = mkdir("pd_a", 0755) == 0 && mkdir("pd_a/b", 0755) == 0 && make("pd_a/b/f");
+    ok = ok && symlink("pd_a/b", "pd_ln") == 0;
+    ok = ok && stat("pd_a/b/f", &st) == 0 && stat("pd_ln/f", &st) == 0 && stat("pd_a/b/../b/./f", &st) == 0;
+    ok = ok && fails(stat("pd_a/b/f/x", &st), ENOTDIR) && fails(stat("pd_a/nob/f", &st), ENOENT);
+    ok = ok && fails(open("pd_a/b/f/x", O_RDONLY), ENOTDIR) && fails(open("pd_ln/nof", O_RDONLY), ENOENT);
+    unlink("pd_a/b/f"); rmdir("pd_a/b");
+    ok = ok && symlink("../pd_a", "pd_a/b") == 0 && make("pd_a/f");   /* a link where a directory was */
+    ok = ok && stat("pd_a/b/f", &st) == 0 && stat("pd_a/b/b/b/f", &st) == 0 && fails(stat("pd_a/b/nof", &st), ENOENT);
+    unlink("pd_a/f"); unlink("pd_a/b"); unlink("pd_ln"); rmdir("pd_a");
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("a path in unmapped memory is EFAULT", unreadable_is_efault());
     EXPECT("an empty path is ENOENT, except with AT_EMPTY_PATH", empty_is_enoent());
     EXPECT("paths are read up to PATH_MAX", long_paths());
+    EXPECT("a path of 3000 bytes works; a component of 256 bytes is ENAMETOOLONG", deep_paths());
     EXPECT("a loop of links through a long path is ELOOP", loop_is_eloop());
     EXPECT("pread and pwrite take no negative offset", offsets());
     EXPECT("fstat of a directory gives its mode", fstat_dir());
@@ -235,6 +309,7 @@ int main(void) {
     EXPECT("chroot keeps absolute paths, links and .. inside the new root", chroot_jail());
     EXPECT("mknod makes device and socket nodes; a device node opens its device", device_nodes());
     EXPECT("a name ending in / or /. must be a directory", trailing_slash());
+    EXPECT("a name below a directory, a file or a link that replaced a directory", deep_names());
     EXPECT("execve of a missing /bin program is ENOENT", ({ char *av[] = {"nope", 0};
            fails(execve("/bin/no_such_program", av, 0), ENOENT); }));
     return done();

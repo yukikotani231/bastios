@@ -244,6 +244,28 @@ int main(void) {
 	write(fds[1], "x", 1);
 	pid_t got = wait(&st);                   /* the orphan reaches us, not init */
 	if (got <= 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) return fail("adopted orphan");
+	/* getppid is answered without a trip into the kernel's lock while the parent stays; an exit
+	   that gives a process a new parent must still show at once in a process that keeps asking. */
+	int fds2[2];
+	if (pipe(fds2) != 0) return fail("pipe");
+	kid = fork();
+	if (kid == 0) {
+		pid_t mid = getpid();
+		pid_t gk = fork();
+		if (gk == 0) {
+			pid_t first = getppid();
+			write(fds2[1], "x", 1);         /* the middle process may end now */
+			for (long i = 0; i < 50000000; i++)
+				if (getppid() != first) _exit(first == mid ? 0 : 3);
+			_exit(4);                        /* the parent id never changed */
+		}
+		char ch;
+		read(fds2[0], &ch, 1);
+		_exit(gk > 0 ? 0 : 1);
+	}
+	if (waitpid(kid, &st, 0) != kid || !WIFEXITED(st) || WEXITSTATUS(st) != 0) return fail("middle process 2");
+	got = wait(&st);
+	if (got <= 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0) return fail("getppid after the parent's exit");
 	printf("mcont: ok\n");
 	return 0;
 }

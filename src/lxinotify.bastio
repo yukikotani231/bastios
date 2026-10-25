@@ -72,6 +72,7 @@ const LX_FANOTIFY_MARK: u64 = 301;
 const FD_QUIET: u64 = 32;                     // in a file's FD_MODE: opened by fanotify, no events for it
 const FAN_CLOEXEC: u64 = 1;
 const FAN_NONBLOCK: u64 = 2;
+const FAN_CLASS_MASK: u64 = 0xC;             // FAN_CLASS_NOTIF (0), CONTENT (4), PRE_CONTENT (8)
 const FAN_UNLIMITED_QUEUE: u64 = 0x10;
 const FAN_UNLIMITED_MARKS: u64 = 0x20;
 const FAN_REPORT_TID: u64 = 0x100;
@@ -115,6 +116,9 @@ const P_LEN: u64 = 38;
 const G_A0: u64 = 118;                         // the call's first argument (the result may overwrite its register)
 const G_PID: u64 = 119;
 const G_FANM: u64 = 120;
+const G_COOL: u64 = 121;                       // no call waits for a reader before this time (ns): the last wait found none, and nothing was read since
+const G_PROG: u64 = 122;                       // events queued in all when the wait began: a reader that took some is making progress
+const G_READ: u64 = 123;                       // when an instance was last read with events queued (ns)
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
 const P_DIR: u64 = 2;                          // 1 if it is a directory
@@ -154,14 +158,14 @@ fn lx_inotify_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> 
 fn iget(k: &Kernel, at: u64) -> u64
   requires kok(k) && at < EVT_LEN
 {
-  return get(k.evt, at);
+  return evg(k, at);
 }
 
 fn iput(k: &mut Kernel, at: u64, v: u64)
   requires kok(k) && at < EVT_LEN
   ensures kok(k)
 {
-  k.evt = set(k.evt, at, v);
+  evs(&mut k, at, v);
 }
 
 /// Word f of instance i.
@@ -243,6 +247,35 @@ fn ino_free(k: &mut Kernel, i: u64)
     w = w + 1;
   }
   iput(&mut k, ino_base(i), 0);
+}
+
+/// The overlay copied the file or directory at handle `from` up to handle
+/// `to` (ovl_make_up): inotify watches on it follow, as Linux hashes the
+/// copy by the lower inode.
+fn ino_retarget(k: &mut Kernel, from: u64, to: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if from >= 0xFFFFFFFFFFFF || to >= 0xFFFFFFFFFFFF || from == to || iget(k, INO_G + G_WATCHES) == 0 {
+    return;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    if iget(k, ino_base(i)) == 1 {
+      let mut w = 0;
+      while w < INO_W
+        invariant w <= INO_W && i < INO_N && kok(k)
+      {
+        if iget(k, wat_at(i, w)) == from + 1 {
+          iput(&mut k, wat_at(i, w), to + 1);
+        }
+        w = w + 1;
+      }
+    }
+    i = i + 1;
+  }
 }
 
 /// Frees watch w of instance i.
@@ -400,7 +433,7 @@ fn ino_rm_watch(k: &mut Kernel, pid: u64, fd: u64, wd: u64) -> u64
 /// event queued, it is dropped; one short of full, IN_Q_OVERFLOW goes in
 /// instead.
 fn ino_queue(k: &mut Kernel, i: u64, wd: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
-  requires kok(k) && i < INO_N && nat + INO_NAMEW <= EVT_LEN && nlen <= FNAME_MAX
+  requires kok(k) && i < INO_N && nat + INO_NAMEW <= EVT_LEN && nlen <= COMP_MAX
   ensures kok(k)
 {
   let b = ino_base(i);
@@ -442,7 +475,7 @@ fn ino_queue(k: &mut Kernel, i: u64, wd: u64, mask: u64, cookie: u64, nat: u64, 
 fn ino_same_name(k: &Kernel, a: u64, c: u64, nlen: u64) -> bool
   requires kok(k) && a + INO_NAMEW <= EVT_LEN && c + INO_NAMEW <= EVT_LEN
 {
-  let words = (smaller(nlen, FNAME_MAX) + 7) / 8;
+  let words = (smaller(nlen, COMP_MAX) + 7) / 8;
   let mut j = 0;
   while j < words
     invariant j <= words && words <= INO_NAMEW
@@ -460,7 +493,7 @@ fn ino_same_name(k: &Kernel, a: u64, c: u64, nlen: u64) -> bool
 /// it happened in, without one for a watch on the file itself. A one-shot
 /// watch goes once it has reported.
 fn ino_note(k: &mut Kernel, h: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
-  requires kok(k) && nat + INO_NAMEW <= EVT_LEN && nlen <= FNAME_MAX
+  requires kok(k) && nat + INO_NAMEW <= EVT_LEN && nlen <= COMP_MAX
   ensures kok(k)
 {
   if h == NO_FILE {
@@ -537,10 +570,10 @@ fn byte_or0(x: &Bytes, j: u64, end: u64) -> u64
   return 0;
 }
 
-/// Keeps x[from..from + l] (l <= FNAME_MAX) as the name of path slot p:
+/// Keeps x[from..from + l] (l <= COMP_MAX) as the name of path slot p:
 /// 8 bytes to a word, the first in the low byte.
 fn keep_name(k: &mut Kernel, p: u64, from: u64, l: u64)
-  requires kok(k) && (p == P1 || p == P2 || p == P3) && l <= FNAME_MAX && from <= XFER
+  requires kok(k) && (p == P1 || p == P2 || p == P3) && l <= COMP_MAX && from <= XBUF
   ensures kok(k)
 {
   let at = INO_G + p + P_NAME;
@@ -596,7 +629,7 @@ fn keep_path(k: &mut Kernel, p: u64, n: u64)
     keep_name(&mut k, p, 0, 0);
     return;
   }
-  keep_name(&mut k, p, s, n - s);
+  keep_name(&mut k, p, s, smaller(n - s, COMP_MAX));
   let mut pl = 0;
   if s > 0 {
     pl = s - 1;
@@ -637,7 +670,7 @@ fn note_entry(k: &mut Kernel, p: u64, mask: u64, cookie: u64)
   if iget(k, at + P_DIR) == 1 {
     m = m | IN_ISDIR;
   }
-  ino_note(&mut k, iget(k, at + P_PAR), m, cookie, at + P_NAME, smaller(iget(k, at + P_NAMELEN), FNAME_MAX));
+  ino_note(&mut k, iget(k, at + P_PAR), m, cookie, at + P_NAME, smaller(iget(k, at + P_NAMELEN), COMP_MAX));
 }
 
 /// An event on handle f that its directory hears of too (IN_ACCESS,
@@ -661,7 +694,7 @@ fn ino_child(k: &mut Kernel, f: u64, mask: u64)
     if n > 0 && n <= FNAME_MAX {
       keep_path(&mut k, P3, n);
       ino_note(&mut k, iget(k, INO_G + P3 + P_PAR), m, 0, INO_G + P3 + P_NAME,
-        smaller(iget(k, INO_G + P3 + P_NAMELEN), FNAME_MAX));
+        smaller(iget(k, INO_G + P3 + P_NAMELEN), COMP_MAX));
     }
   }
   ino_note(&mut k, f, m, 0, INO_G + P3 + P_NAME, 0);
@@ -749,6 +782,8 @@ fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   if q == 0 {
     return EAGAIN;
   }
+  iput(&mut k, INO_G + G_READ, k.ns);
+  iput(&mut k, INO_G + G_COOL, 0);         // somebody reads after all
   let room = smaller(n, XFER);
   let mut off = 0;
   let mut taken = 0;
@@ -757,7 +792,7 @@ fn ino_read_in(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
     invariant taken <= q && q <= INO_Q && off <= room && room <= XFER && kok(k)
   {
     let e = ev_at(i, (first + taken) % INO_Q);
-    let nlen = smaller(iget(k, e + 3), FNAME_MAX);
+    let nlen = smaller(iget(k, e + 3), COMP_MAX);
     let mut plen = 0;
     if nlen > 0 {
       plen = (nlen + 16) / 16 * 16;         // the name, its NUL and padding to 16
@@ -821,6 +856,106 @@ fn ino_bits(k: &Kernel, x: u64) -> u64
 }
 
 // ---------------------------------------------------------------- the calls
+
+/// Calls that queue inotify or fanotify events: the ones ino_before and
+/// ino_after report on, and writes.
+fn ino_producer(n: u64) -> bool {
+  return n == LX_OPEN || n == LX_CREAT || n == LX_OPENAT || n == LX_OPENAT2 || n == LX_UNLINK || n == LX_UNLINKAT
+    || n == LX_RMDIR || n == LX_RENAME || n == LX_RENAMEAT || n == LX_RENAMEAT2 || n == LX_MKDIR || n == LX_MKDIRAT
+    || n == LX_LINK || n == LX_LINKAT || n == LX_SYMLINK || n == LX_SYMLINKAT || n == LX_MKNOD || n == LX_MKNODAT
+    || n == LX_WRITE || n == LX_WRITEV || n == LX_PWRITE64 || n == LX_TRUNCATE || n == LX_FTRUNCATE;
+}
+
+const INO_WAIT: u64 = 30000000;                // how long a call waits for a reader of a half-full queue (ns): three timer ticks, as a reader on an idle processor starts at the next tick
+const INO_LIVE: u64 = 1000000000;              // a reader that took events this recently is slow, not gone: the call waits on for it
+const INO_COOL: u64 = 1000000000;              // and how long calls go on without waiting after one found no reader
+
+/// Before a call that queues events, when some queue is half full: the
+/// process waits (true) for its reader to drain it, as it would have no
+/// need to on Linux, whose queue holds 16384 events and this kernel's far
+/// fewer. On another processor a reader gets no turn from the writer's
+/// yielding. The wait is bounded: if the readers took no events by the
+/// time it ends, and none has read an instance for INO_LIVE, nobody is
+/// reading, and for INO_COOL calls go on at once. A reader that read
+/// within INO_LIVE is waited for again: on a loaded host the processor it
+/// runs on can stall for far longer than INO_WAIT, and a queue left to
+/// overflow then loses its events.
+fn ino_throttle(k: &mut Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if iget(k, INO_G + G_WATCHES) == 0 && iget(k, INO_G + G_FANM) == 0 {
+    return false;
+  }
+  let n = pget(k.procs, pid, F_REGS + R_LXNR);
+  if !ino_producer(n) || !ino_pressed(k) || k.ns < iget(k, INO_G + G_COOL) {
+    return false;
+  }
+  let r = pget(k.procs, pid, F_RESTART);
+  if r >= 2 && r - 2 <= k.ns {
+    // The wait is over. If the readers took no events meanwhile, nobody is
+    // reading; if they took some, a slow one is (it may start only at the
+    // next timer tick), and the next call waits again.
+    if ino_queued(k) >= iget(k, INO_G + G_PROG) {
+      if k.ns - smaller(iget(k, INO_G + G_READ), k.ns) < INO_LIVE {
+        wait_until(&mut k, pid, n, sat_add(k.ns, INO_WAIT));
+        return true;
+      }
+      iput(&mut k, INO_G + G_COOL, sat_add(k.ns, INO_COOL));
+    }
+    return false;
+  }
+  let mut dl = sat_add(k.ns, INO_WAIT);
+  if r >= 2 {
+    dl = r - 2;
+  } else {
+    iput(&mut k, INO_G + G_PROG, ino_queued(k));
+  }
+  wait_until(&mut k, pid, n, dl);
+  return true;
+}
+
+/// Events queued in all instances.
+fn ino_queued(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let mut n = 0;
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k) && n <= i * 0x100000
+  {
+    let b = ino_base(i);
+    if iget(k, b) != 0 {
+      n = n + smaller(iget(k, b + 2), 0x100000);
+    }
+    i = i + 1;
+  }
+  return n;
+}
+
+/// Whether some inotify or fanotify instance has half its queue full. The
+/// kernel then lets another process run after the call that queued the
+/// event, so a reader gets its turn before the queue (INO_Q events, far
+/// fewer than Linux's 16384) overflows and drops events a fast writer made
+/// within one time slice.
+fn ino_pressed(k: &Kernel) -> bool
+  requires kok(k)
+{
+  if iget(k, INO_G + G_WATCHES) == 0 && iget(k, INO_G + G_FANM) == 0 {
+    return false;
+  }
+  let mut i = 0;
+  while i < INO_N
+    invariant i <= INO_N && kok(k)
+  {
+    let b = ino_base(i);
+    if iget(k, b) != 0 && iget(k, b + 2) >= INO_Q / 2 {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
 
 /// Before process pid's Linux system call runs: which call it is, and
 /// what it will remove, rename or create, looked up now while its old
@@ -1112,7 +1247,11 @@ fn next_cookie(k: &mut Kernel) -> u64
 // as on Linux. The file of an event is opened when it is read, and that
 // descriptor makes no events itself (FD_QUIET in the open file's mode).
 //
-// Not done: permission events and the other classes, the events that need
+// The content classes are accepted but make no difference: they only matter
+// for permission events, which are not done, and for the order groups are
+// served in, and the events here are only notifications.
+//
+// Not done: permission events, the events that need
 // FAN_REPORT_FID (create, delete, move, attributes), pidfds, unlimited queues
 // and marks beyond the fixed limits, and the ignore mask's eviction.
 
@@ -1140,8 +1279,8 @@ fn fan_init(k: &mut Kernel, pid: u64, flags: u64, evf: u64) -> u64
   if !cap_has(k, pid, CAP_SYS_ADMIN) {
     return EPERM;
   }
-  if flags >= 0x100000000 || flags & !(FAN_CLOEXEC | FAN_NONBLOCK | FAN_UNLIMITED_QUEUE | FAN_UNLIMITED_MARKS | FAN_REPORT_TID) != 0 {
-    return EINVAL;                          // the other classes and the FID reports are not offered
+  if flags >= 0x100000000 || flags & !(FAN_CLOEXEC | FAN_NONBLOCK | FAN_CLASS_MASK | FAN_UNLIMITED_QUEUE | FAN_UNLIMITED_MARKS | FAN_REPORT_TID) != 0 || flags & FAN_CLASS_MASK == FAN_CLASS_MASK {
+    return EINVAL;                          // the FID reports are not offered; the content classes only order groups, which see no permission events
   }
   let okf = LO_ACCMODE | LO_APPEND | LO_NONBLOCK | 0x101000 | LO_NOATIME | LO_CLOEXEC | 0x8000;
   if evf >= 0x100000000 || evf & !okf != 0 || evf & LO_ACCMODE == 3 {
@@ -1668,6 +1807,8 @@ fn fan_read(k: &mut Kernel, pid: u64, i: u64, va: u64, n: u64) -> u64
   if q == 0 {
     return EAGAIN;
   }
+  iput(&mut k, INO_G + G_READ, k.ns);
+  iput(&mut k, INO_G + G_COOL, 0);         // somebody reads after all
   if n < FAN_META {
     return EINVAL;
   }

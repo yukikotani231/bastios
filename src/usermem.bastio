@@ -147,6 +147,79 @@ fn copy_to_user(spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, pid: u64, va: u6
   return k;
 }
 
+/// Copies src[s .. s + n] to user address va of process pid as copy_to_user
+/// copies a buffer, but straight from the page: no staging buffer between
+/// them. Returns the count, short at a page that is not written, or
+/// NO_RESULT if the range is not inside the user window.
+fn copy_frame_to_user(spaces: &mut Vec[Space], m: &mut Mem, an: &Buf, pid: u64, va: u64, src: &Frame, s: u64, n: u64) -> u64
+  requires spaces_ok(spaces) && mem_ok(m) && pid < NPROC && s + n <= 4096
+  ensures spaces_ok(spaces) && mem_ok(m)
+  ensures result <= n || result == NO_RESULT
+{
+  if !user_range(va, n) {
+    return NO_RESULT;
+  }
+  let off = va - USER_BASE;
+  let mut k = 0;
+  let mut last = WPAGES;
+  let mut go = true;
+  while go
+    invariant k <= n && s + n <= 4096 && off + n <= USER_SIZE && spaces_ok(spaces) && mem_ok(m)
+  {
+    let r = raw_frame_to_user(&mut spaces, pid, off, src, s, k, n);
+    if r == NO_RESULT {
+      return NO_RESULT;
+    }
+    k = r;
+    go = false;
+    if k < n && (off + k) / 4096 != last {
+      last = (off + k) / 4096;
+      go = cow_touch(&mut m, &mut spaces, pid, last) || anon_touch(&mut m, &mut spaces, an, pid, last);
+    }
+  }
+  return k;
+}
+
+/// The bytes from k0 on of copy_frame_to_user, without faulting anything in.
+fn raw_frame_to_user(spaces: &mut Vec[Space], pid: u64, off: u64, src: &Frame, s: u64, k0: u64, n: u64) -> u64
+  requires spaces_ok(spaces) && pid < NPROC && k0 <= n && s + n <= 4096 && off + n <= USER_SIZE
+  ensures spaces_ok(spaces)
+  ensures (k0 <= result && result <= n) || result == NO_RESULT
+{
+  match take_space(&mut spaces, pid) {
+    Space::Empty => { return NO_RESULT; },
+    Space::Mapped(mut root) => {
+      let mut k = k0;
+      if pt_has(root, 1) {
+        k = pt_borrow(&mut root, 1, frame_to_l3, off, src, s, k0, n);
+      }
+      put_space(&mut spaces, pid, Space::Mapped(root));
+      return k;
+    },
+  }
+}
+
+/// copy_frame_to_user below the top-level table, in place.
+fn frame_to_l3(l3: &mut PageTable, off: u64, src: &Frame, s: u64, k0: u64, n: u64) -> u64
+  requires pt_level(l3) == 3 && off + n <= USER_SIZE && k0 <= n && s + n <= 4096
+  ensures k0 <= result && result <= n
+{
+  let mut k = k0;
+  let mut ok = true;
+  while ok && k < n
+    invariant k0 <= k && k <= n && pt_level(l3) == 3
+  {
+    let a = off + k;
+    let m = chunk(a, n - k);
+    if w_write_fr(&mut l3, a, src, s + k, m) {
+      k = k + m;
+    } else {
+      ok = false;
+    }
+  }
+  return k;
+}
+
 /// Copies the first n bytes of buf to user address va of process pid as
 /// copy_to_user does, but into a read-only page too if it is the process's
 /// own (not shared with others). Faults nothing in. Returns the count, short
@@ -255,7 +328,7 @@ fn user_shared_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> u64
         r = pt_borrow(&mut root, 1, l3_shared, off);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
-      if r < len(bm) && get(bm, r) == COW_PAGE {
+      if r < len(bm) && bm_cow(get(bm, r)) {
         return NO_RESULT;
       }
       return r;
@@ -285,7 +358,7 @@ fn user_cow_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> bool
         r = pt_borrow(&mut root, 1, l3_shared, off);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
-      return r < len(bm) && get(bm, r) == COW_PAGE;
+      return r < len(bm) && bm_cow(get(bm, r));
     },
   }
 }
@@ -393,6 +466,7 @@ fn an_at(p: u64, i: u64, f: u64) -> u64
   return (p * AN_N + i) * 2 + f;
 }
 
+
 /// Word i of an, or 0 past its end.
 fn an_get(an: &Buf, i: u64) -> u64 {
   if i < len(an) {
@@ -411,8 +485,28 @@ fn anon_covers(an: &Buf, pid: u64, q: u64) -> bool
     invariant i <= AN_N && pid < NPROC
   {
     let first1 = an_get(an, an_at(pid, i, 0));
-    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < an_get(an, an_at(pid, i, 1)) {
+    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < an_get(an, an_at(pid, i, 1)) % AN_X {
       return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// Whether the record of process pid that covers window page q is of
+/// memory the program may also run code from (mprotect or mmap with
+/// PROT_WRITE and PROT_EXEC).
+fn anon_exec(an: &Buf, pid: u64, q: u64) -> bool
+  requires pid < NPROC
+{
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && pid < NPROC
+  {
+    let first1 = an_get(an, an_at(pid, i, 0));
+    let w = an_get(an, an_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < w % AN_X {
+      return w / AN_X == 1;
     }
     i = i + 1;
   }
@@ -430,7 +524,7 @@ fn anon_end(an: &Buf, pid: u64, q: u64) -> u64
     invariant i <= AN_N && pid < NPROC && q < WPAGES
   {
     let first1 = an_get(an, an_at(pid, i, 0));
-    let pages = an_get(an, an_at(pid, i, 1));
+    let pages = an_get(an, an_at(pid, i, 1)) % AN_X;
     if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < pages && pages <= WPAGES - (first1 - 1) {
       return first1 - 1 + pages;
     }
@@ -451,7 +545,7 @@ fn anon_after(an: &Buf, pid: u64, q: u64) -> u64
     invariant i <= AN_N && pid < NPROC && best <= WPAGES
   {
     let first1 = an_get(an, an_at(pid, i, 0));
-    let pages = an_get(an, an_at(pid, i, 1));
+    let pages = an_get(an, an_at(pid, i, 1)) % AN_X;
     if first1 != 0 && first1 - 1 > q && first1 - 1 < best && pages != 0 {
       best = first1 - 1;
     }
@@ -461,7 +555,8 @@ fn anon_after(an: &Buf, pid: u64, q: u64) -> u64
 }
 
 /// Window page q of process pid, if a record covers it: maps a fresh zero
-/// page there unless one is there. True if q is mapped now.
+/// page there unless one is there, one that may run code if the record says
+/// so. True if q is mapped now.
 fn anon_touch(m: &mut Mem, spaces: &mut Vec[Space], an: &Buf, pid: u64, q: u64) -> bool
   requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC
   ensures mem_ok(m) && spaces_ok(spaces)
@@ -474,7 +569,7 @@ fn anon_touch(m: &mut Mem, spaces: &mut Vec[Space], an: &Buf, pid: u64, q: u64) 
     Space::Mapped(mut root) => {
       let mut ok = false;
       if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, touch_l3, &mut m, q);
+        ok = pt_borrow(&mut root, 1, touch_l3, &mut m, q, anon_exec(an, pid, q));
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return ok;
@@ -482,11 +577,50 @@ fn anon_touch(m: &mut Mem, spaces: &mut Vec[Space], an: &Buf, pid: u64, q: u64) 
   }
 }
 
-fn touch_l3(l3: &mut PageTable, m: &mut Mem, q: u64) -> bool
+fn touch_l3(l3: &mut PageTable, m: &mut Mem, q: u64, x: bool) -> bool
   requires pt_level(l3) == 3 && mem_ok(m) && q < WPAGES
   ensures mem_ok(m)
 {
-  return w_map(&mut m, &mut l3, q, false);
+  if !x {
+    return w_map(&mut m, &mut l3, q, false);
+  }
+  if !w_tables(&mut m, &mut l3, q) || !pt_has(l3, q / L2_PAGES) {
+    return false;
+  }
+  return pt_borrow(&mut l3, q / L2_PAGES, touch_l2_x, &mut m, q % L2_PAGES);
+}
+
+fn touch_l2_x(l2: &mut PageTable, m: &mut Mem, p: u64) -> bool
+  requires pt_level(l2) == 2 && mem_ok(m) && p < L2_PAGES
+  ensures mem_ok(m)
+{
+  if !pt_has(l2, p / 512) {
+    return false;
+  }
+  return pt_borrow(&mut l2, p / 512, touch_l1_x, &mut m, p % 512);
+}
+
+/// A fresh zero page in slot i that the program may write and run code
+/// from, as l2_protect (src/lxmem.bastio) leaves a page mprotect makes
+/// readable, writable and executable: mapped read-only, which may run,
+/// then given write access, which leaves that alone. The tree may be
+/// leased: a new entry is one store, and it only allows more than none.
+fn touch_l1_x(l1: &mut PageTable, m: &mut Mem, i: u64) -> bool
+  requires pt_level(l1) == 1 && mem_ok(m) && i < 512
+  ensures mem_ok(m)
+{
+  if pt_has(l1, i) {
+    return true;
+  }
+  let b = find_free(&mut m);
+  if b >= NPAGES {
+    return false;
+  }
+  let f = take_page(&mut m, b);
+  mark_x(&mut m, f, true);
+  pt_put_frame(&mut l1, i, f, false);
+  pt_set_access(&mut l1, i, 2);
+  return true;
 }
 
 // ---------------------------------------------- copy-on-write pages
@@ -579,9 +713,16 @@ fn cow_l1(l1: &mut PageTable, m: &mut Mem, i: u64, text: bool) -> u64
     pt_put_shared(&mut l1, i, s, false);
     return COW_NOMEM;
   }
+  let x = is_cow_x(m, s);
   let f = shared_copy(take_dirty(&mut m, b), s);
   drop_shared(&mut m, s);
-  pt_put_frame(&mut l1, i, f, cow);
+  if x {
+    mark_x(&mut m, f, true);
+    pt_put_frame(&mut l1, i, f, false);
+    pt_set_access(&mut l1, i, 2);           // read, write and run, as before fork
+  } else {
+    pt_put_frame(&mut l1, i, f, cow);
+  }
   return COW_DONE;
 }
 

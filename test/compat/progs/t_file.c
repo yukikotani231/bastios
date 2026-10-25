@@ -2,9 +2,11 @@
  * renaming, links, metadata. Works in /tmp if it exists, else in /. */
 #include "compat.h"
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/uio.h>
 #include <sys/xattr.h>
+#include <sys/wait.h>
 #include <utime.h>
 
 static int fd = -1;
@@ -48,6 +50,17 @@ int main(void) {
         int x = -1;
         EXPECT("O_EXCL on existing", (x = open("cf_a", O_RDWR | O_CREAT | O_EXCL, 0644)) == -1 && errno == EEXIST);
         if (x >= 0) close(x);
+    }
+    {
+        /* O_CREAT | O_EXCL never follows a link at the end, a dangling one included. */
+        int x = -1;
+        unlink("cf_dl");
+        EXPECT("O_EXCL on a dangling symbolic link is EEXIST and makes nothing",
+               symlink("cf_dl_target", "cf_dl") == 0 &&
+               (x = open("cf_dl", O_WRONLY | O_CREAT | O_EXCL, 0644)) == -1 && errno == EEXIST &&
+               access("cf_dl_target", F_OK) == -1 && errno == ENOENT);
+        if (x >= 0) close(x);
+        unlink("cf_dl");
     }
     EXPECT("open missing is ENOENT", open("cf_none", O_RDONLY) == -1 && errno == ENOENT);
     EXPECT("O_APPEND", (fd = open("cf_a", O_WRONLY | O_APPEND)) >= 0 && write(fd, "XY", 2) == 2 &&
@@ -148,6 +161,19 @@ int main(void) {
         EXPECT("a bad descriptor is EBADF", fgetxattr(-1, "user.a", v, sizeof v) == -1 && errno == EBADF);
         EXPECT("a bad name pointer is EFAULT", getxattr("cx_h", (const char *)1, v, sizeof v) == -1 && errno == EFAULT);
         EXPECT("the attributes of a removed file do not come back", setxattr("cx_h", "user.z", "z", 1, 0) == 0 && unlink("cx_h") == 0 && open("cx_h", O_RDWR | O_CREAT, 0644) >= 0 && listxattr("cx_h", l, sizeof l) == 0);
+        {
+            /* Two hundred at once: the table holds 256 in all. */
+            int y = open("cx_two", O_RDWR | O_CREAT, 0644), ok = y >= 0, n = 0;
+            char nm[24], big[4096];
+            for (int i = 0; i < 200; i++) {
+                snprintf(nm, sizeof nm, "user.n%d", i);
+                if (fsetxattr(y, nm, "v", 1, 0) == 0) n++;
+            }
+            ok = ok && n == 200 && flistxattr(y, big, sizeof big) > 1000;
+            EXPECT("two hundred attributes on one file", ok);
+            if (y >= 0) close(y);
+            unlink("cx_two");
+        }
         unlink("cx_h");
         unlink("cx_s");
         rmdir("cx_d");
@@ -166,5 +192,50 @@ int main(void) {
            if (g >= 0) close(g);
            unlink("cf_big");
            r == 6; }));
+    {
+        /* read(2) goes from the file's pages to the process's: through a
+         * hole, to unaligned and fresh buffers, to a copy-on-write page, a
+         * buffer that ends at an unmapped page, a read-only one and an
+         * unmapped one, and after a store through a shared mapping. The
+         * second round reads what the first one cached. */
+        static char want[20000], got[24000];
+        int g = open("cf_rd", O_RDWR | O_CREAT | O_TRUNC, 0644), ok = g >= 0;
+        for (int j = 0; j < (int)sizeof want; j++) want[j] = (char)(j * 13 + 5);
+        ok = ok && pwrite(g, want, 6000, 0) == 6000 && pwrite(g, want + 11000, 9000, 11000) == 9000;
+        memset(want + 6000, 0, 5000);
+        sync();
+        for (int round = 0; round < 2; round++) {
+            memset(got, 0x55, sizeof got);
+            ok = ok && lseek(g, 5, SEEK_SET) == 5 && read(g, got + 3, 19990) == 19990 && memcmp(got + 3, want + 5, 19990) == 0 &&
+                 got[2] == 0x55 && got[19993] == 0x55 && lseek(g, 0, SEEK_CUR) == 19995 &&
+                 read(g, got, 100) == 5 && read(g, got, 100) == 0;
+            ok = ok && lseek(g, 0, SEEK_SET) == 0 && read(g, got, sizeof got) == 20000 && memcmp(got, want, 20000) == 0;
+            ok = ok && lseek(g, 100, SEEK_SET) == 100 && read(g, got + 7, 4096 - 100) == 4096 - 100 && memcmp(got + 7, want + 100, 4096 - 100) == 0;
+        }
+        EXPECT("read across a hole into unaligned buffers", ok);
+        char *m = mmap(0, 6 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        EXPECT("read into untouched anonymous memory", m != MAP_FAILED && lseek(g, 0, SEEK_SET) == 0 && read(g, m + 100, 19000) == 19000 && memcmp(m + 100, want, 19000) == 0);
+        memset(got, 'x', sizeof got);
+        pid_t c = fork();
+        if (c == 0) _exit(lseek(g, 0, SEEK_SET) == 0 && read(g, got + 5, 19000) == 19000 && memcmp(got + 5, want, 19000) == 0 ? 0 : 1);
+        int st = 0;
+        EXPECT("read into a copy-on-write buffer leaves the parent's own", c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && got[5] == 'x' && got[19000] == 'x');
+        char *q = mmap(0, 2 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        munmap(q + 4096, 4096);
+        EXPECT("read into a buffer that ends at an unmapped page returns what fits", lseek(g, 0, SEEK_SET) == 0 && read(g, q + 4096 - 100, 5000) == 100 && memcmp(q + 4096 - 100, want, 100) == 0 && lseek(g, 0, SEEK_CUR) == 100);
+        char *r = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        EXPECT("read into a read-only buffer is EFAULT", lseek(g, 0, SEEK_SET) == 0 && read(g, r, 100) == -1 && errno == EFAULT);
+        errno = 0;
+        EXPECT("read into an unmapped buffer is EFAULT", read(g, (void *)8, 100) == -1 && errno == EFAULT);
+        char *s = mmap(0, 20000, PROT_READ | PROT_WRITE, MAP_SHARED, g, 0);
+        if (s != MAP_FAILED) {
+            s[4100] = 'Z';
+            want[4100] = 'Z';
+        }
+        EXPECT("read sees a store through a shared mapping", s != MAP_FAILED && lseek(g, 4000, SEEK_SET) == 4000 && read(g, got, 300) == 300 && got[100] == 'Z' && memcmp(got, want + 4000, 300) == 0);
+        if (s != MAP_FAILED) munmap(s, 20000);
+        close(g);
+        unlink("cf_rd");
+    }
     return done();
 }

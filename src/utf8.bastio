@@ -1,0 +1,59 @@
+// UTF-8 helpers shared by the terminal's line disciplines and the screen:
+// what a byte does in a sequence, and how many cells a character takes.
+
+const IUTF8: u64 = 0x4000;             // c_iflag: the input is UTF-8, so erase takes a whole character
+
+/// Whether b is a continuation byte (10xxxxxx).
+fn utf8_cont(b: u64) -> bool {
+  return b >= 0x80 && b < 0xC0;
+}
+
+/// How many bytes the sequence a lead byte starts has (0: b is no lead).
+fn utf8_len(b: u64) -> u64
+  ensures result <= 4
+{
+  if b < 0x80 { return 1; }
+  if b < 0xC2 { return 0; }              // a continuation, or an overlong C0 / C1
+  if b < 0xE0 { return 2; }
+  if b < 0xF0 { return 3; }
+  if b < 0xF5 { return 4; }
+  return 0;
+}
+
+/// The bits a lead byte of an n-byte sequence carries.
+fn utf8_lead_bits(b: u64, n: u64) -> u64
+  requires b < 256
+  ensures result < 256
+{
+  if n == 2 { return b % 32; }
+  if n == 3 { return b % 16; }
+  if n == 4 { return b % 8; }
+  return b;
+}
+
+/// How many cells the character cp takes on a terminal: 0 for a combining
+/// mark or a zero width character, 2 for East Asian wide and fullwidth
+/// characters and emoji, else 1.
+fn cp_width(cp: u64) -> u64
+  ensures result <= 2
+{
+  if cp < 0x300 { return 1; }
+  if cp < 0x370 { return 0; }            // combining diacritical marks
+  if cp < 0x1100 { return 1; }
+  if cp < 0x1160 { return 2; }           // Hangul Jamo
+  if cp >= 0x200B && cp < 0x2010 { return 0; }   // zero width space, joiners, marks
+  if cp >= 0xFE00 && cp < 0xFE10 { return 0; }   // variation selectors
+  if cp >= 0x2E80 && cp < 0x303F { return 2; }   // CJK radicals, symbols and punctuation
+  if cp >= 0x3041 && cp < 0x3400 { return 2; }   // kana, Hangul compatibility Jamo, CJK letters and months
+  if cp >= 0x3400 && cp < 0x4DC0 { return 2; }   // CJK extension A
+  if cp >= 0x4E00 && cp < 0xA4D0 { return 2; }   // CJK unified ideographs, Yi
+  if cp >= 0xAC00 && cp < 0xD7A4 { return 2; }   // Hangul syllables
+  if cp >= 0xF900 && cp < 0xFB00 { return 2; }   // CJK compatibility ideographs
+  if cp >= 0xFE30 && cp < 0xFE70 { return 2; }   // CJK compatibility forms, small forms
+  if cp >= 0xFF00 && cp < 0xFF61 { return 2; }   // fullwidth forms
+  if cp >= 0xFFE0 && cp < 0xFFE7 { return 2; }   // fullwidth signs
+  if cp >= 0x1F300 && cp < 0x1F650 { return 2; } // emoji and pictographs
+  if cp >= 0x1F900 && cp < 0x1FA00 { return 2; }
+  if cp >= 0x20000 && cp < 0x3FFFE { return 2; } // CJK extensions B and up
+  return 1;
+}

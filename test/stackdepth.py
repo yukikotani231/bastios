@@ -67,7 +67,7 @@ for line in open(path):
 # A cycle counts as bounded when all its functions are in the set: a backend
 # that does not inline a small helper of the cycle (post_from, lx_open_fd_link)
 # shows a longer cycle than one that does, with the same bound.
-BOUNDED = [({"f_dev_attach", "f_hub_setup"}, 3), ({"f_post_sig", "f_jc_tell", "f_post_from"}, 2),
+BOUNDED = [({"f_dev_attach", "f_hub_setup"}, 3), ({"f_post_sig", "f_jc_tell", "f_post_from", "f_post_w", "f_post_raw"}, 2),
            ({"f_lx_deliver"}, 2), ({"f_lx_open_n", "f_lx_open_fd_link"}, 4)]
 
 sys.setrecursionlimit(100000)

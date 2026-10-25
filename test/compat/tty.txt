@@ -51,6 +51,13 @@ $ /disk/ttyepoll /tmp/ct_e
 $ cat /tmp/ct_e; echo; rm /tmp/ct_e
 abcq
 
+== job control: Ctrl-Z stops the foreground group, not the shell
+$ /disk/ttysusp /tmp/ct_z
+> \x1a
+$ cat /tmp/ct_z; rm /tmp/ct_z
+stopped
+resumed
+
 == kilo: edit and save a file
 $ echo abc > /tmp/ct_k; /disk/kilo /tmp/ct_k
 > X\x1b[C\x1b[CY\rline2
@@ -65,6 +72,13 @@ $ /disk/kilo /tmp/ct_s
 > \x11
 $ bb stty -a < /dev/tty 2>/dev/null | bb tr ' ;' '\n\n' | bb grep -x -e icanon -e -icanon -e echo -e -echo | bb tr '\n' ,; echo
 icanon,echo,
+
+== utf-8: erase takes back a whole character on the console
+$ bb sh -c 'echo ready; read x; read y; printf "%s %s" "$x" "$y" > /tmp/ct_u8'
+> a\xc3\xa9\x7fb\r
+> c\xe6\x97\xa5\x7fd\r
+$ bb cat /tmp/ct_u8; echo; bb rm /tmp/ct_u8
+ab cd
 
 == python: the REPL, and Ctrl-C is KeyboardInterrupt
 $ PYTHONHOME=/disk/py /disk/python

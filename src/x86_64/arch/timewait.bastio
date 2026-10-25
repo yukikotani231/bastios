@@ -1,0 +1,7 @@
+// How close to its deadline a timed wait stops sleeping and polls (x86-64).
+// An idle bootstrap processor sleeps to within STRETCH_LEAD of the deadline
+// (src/main.bastio), so only a wait that cannot stretch the tick (a busy
+// processor, a polled device) polls this long. With 20 ms, some of LTP's
+// timer tests ended 3 to 9 ms late under emulation on a busy host, as ticks
+// are not on time there.
+const NEAR: u64 = 50000000;

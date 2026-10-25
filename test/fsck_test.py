@@ -138,6 +138,34 @@ GROWN = [
     ("entry 64 in use", dtop_used, "error"),
 ]
 
+def long_cont_gone(img):
+    img[entry(img, 3)] = 0                        # entry 2 holds the 255-byte name; its continuation is free: the name is cut
+
+
+def long_old_magic(img):
+    img[0:8] = b"BSTDISK5"
+
+
+def long_odd(img):
+    # The name moved to an odd entry: it cannot have a continuation.
+    e2, e3 = entry(img, 2), entry(img, 3)
+    img[e3 + DENT:e3 + 2 * DENT] = img[e3:e3 + DENT]
+    img[e3:e3 + DENT] = img[e2:e2 + DENT]
+    img[e2:e2 + DENT] = bytes(DENT)
+
+
+def long_slash(img):
+    img[entry(img, 3) + 1 + 10] = ord("/")
+
+
+def long_nlen(img):
+    img[entry(img, 2) + 1] = 201                  # 201 bytes, but the whole 255-byte name is there: bytes after the name
+
+
+def stray_cont(img):
+    img[entry(img, 6)] = 5                        # a continuation with no name before it
+
+
 CASES = [
     ("untouched", None, "clean"),
     ("a hard link", lambda img: add_link(img, 5, b"other", 0), "clean"),
@@ -160,6 +188,17 @@ CASES = [
 ]
 
 
+LONG = [
+    ("a 255-byte name", None, "clean"),
+    ("a name over 200 bytes whose continuation is gone", long_cont_gone, "error"),
+    ("a name over 200 bytes on a BSTDISK5 disk", long_old_magic, "error"),
+    ("a name over 200 bytes in an odd entry", long_odd, "error"),
+    ("a byte after a name in its continuation", long_nlen, "error"),
+    ("a '/' in the continuation of a name", long_slash, "error"),
+    ("a continuation with no name", stray_cont, "note"),
+]
+
+
 def main():
     fails = 0
     with tempfile.TemporaryDirectory() as t:
@@ -176,7 +215,10 @@ def main():
         grown = os.path.join(t, "grown.img")
         subprocess.run([sys.executable, os.path.join(here, "compat", "mkdisk.py"), grown, big] + many, check=True)
         grown_img = open(grown, "rb").read()
-        runs = [(n, d, w, pristine) for n, d, w in CASES] + [(n, d, w, grown_img) for n, d, w in GROWN]
+        longd = os.path.join(t, "long.img")
+        subprocess.run([sys.executable, os.path.join(here, "compat", "mkdisk.py"), longd, small, "x" * 255 + "=" + small, "y" * 201 + "=" + small, "z" * 200 + "=" + small], check=True)
+        long_img = open(longd, "rb").read()
+        runs = [(n, d, w, pristine) for n, d, w in CASES] + [(n, d, w, grown_img) for n, d, w in GROWN] + [(n, d, w, long_img) for n, d, w in LONG]
         for name, damage, want, start in runs:
             img = bytearray(start)
             if damage:

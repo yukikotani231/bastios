@@ -20,6 +20,7 @@ import "net.bastio";
 // TCBS and TCB_W are in net.bastio, which sizes the table; the buffers
 // (TCP_RING bytes each way) are rings of pages, in src/tcpbuf.bastio.
 
+const TCP_MSS_V6: u64 = 1440;         // ... and to an IPv6 peer, whose headers are 20 bytes longer
 const TCP_MSS: u64 = 1460;            // the largest segment we send to or ask of another machine
 const TCP_MSS_LO: u64 = 14946;        // ... and to an address of this one: a frame of NET_BUF bytes
 const TCP_WS: u64 = 4;                // our window scale (RFC 7323): TCP_RING fits in 16 bits after it
@@ -80,6 +81,8 @@ const W_RXHEAD: u64 = 24;             // where the next byte to read is in the r
 const W_WS: u64 = 25;                 // the peer's window scale + 1, once both sides scale; 0: neither does
 const W_SACK: u64 = 26;               // 1 if the peer takes SACK blocks (it sent SACK-permitted)
 const W_NS: u64 = 27;                 // its network namespace (src/netns.bastio)
+const W_FAM: u64 = 28;                // a listener's FAM_* (net.bastio) plus FAM_REUSE if it set SO_REUSEPORT; a connection's: FAM_V4 if its peer is an IPv4 socket (FAM_BOTH: an IPv6 one)
+const FAM_REUSE: u64 = 16;
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
 // Connection t's rings (src/tcpbuf.bastio).
@@ -97,18 +100,65 @@ fn tx_ring(t: u64) -> u64
   return 2 * t + 1;
 }
 
+/// A word of slot t, or 0 for a slot the table has not grown to yet (a
+/// slot is made, with every word set, by tcb_init).
 fn tw(n: &Net, t: u64, f: u64) -> u64
   requires net_ok(n) && t < TCBS && f < TCB_W
-  ensures result == get(n.tcbs, t * TCB_W + f)
+  ensures t * TCB_W + f < len(n.tcbs) ==> result == get(n.tcbs, t * TCB_W + f)
+  ensures t * TCB_W + f >= len(n.tcbs) ==> result == 0
 {
-  return get(n.tcbs, t * TCB_W + f);
+  if t * TCB_W + f < len(n.tcbs) {
+    return get(n.tcbs, t * TCB_W + f);
+  }
+  return 0;
 }
 
 fn tset(n: &mut Net, t: u64, f: u64, v: u64)
   requires net_ok(n) && t < TCBS && f < TCB_W
   ensures net_ok(n)
 {
-  n.tcbs = set(n.tcbs, t * TCB_W + f, v);
+  if t * TCB_W + f < len(n.tcbs) {
+    n.tcbs = set(n.tcbs, t * TCB_W + f, v);
+  }
+}
+
+/// Makes the table hold slot t: it starts with TCB0 slots and doubles, up
+/// to TCBS, so a machine that opens few connections does not pay for the
+/// most it could. False, with the table as it was, when memory runs out.
+fn tcb_room(n: &mut Net, t: u64) -> bool
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let have = len(n.tcbs);
+  if have >= (t + 1) * TCB_W {
+    return true;
+  }
+  let mut slots = have / TCB_W * 2;
+  if slots < TCB0 {
+    slots = TCB0;
+  }
+  if slots < t + 1 {
+    slots = t + 1;
+  }
+  if slots > TCBS {
+    slots = TCBS;
+  }
+  let mut nt = try_alloc(slots * TCB_W);
+  if len(nt) != slots * TCB_W {
+    free(nt);
+    return false;
+  }
+  let mut i = 0;
+  while i < have
+    invariant i <= have && have == len(n.tcbs) && len(nt) == slots * TCB_W && have <= slots * TCB_W
+  {
+    nt = set(nt, i, get(n.tcbs, i));
+    i = i + 1;
+  }
+  let prev = n.tcbs;
+  n.tcbs = nt;
+  free(prev);
+  return true;
 }
 
 /// a + b on sequence numbers (mod 2^32).
@@ -162,10 +212,13 @@ fn tnxt(n: &mut Net, t: u64, v: u64)
 /// frames, or the loopback buffer's if `ip` is an address of this machine.
 fn mss_for(n: &Net, ip: u64) -> u64
   requires net_ok(n)
-  ensures result == TCP_MSS || result == TCP_MSS_LO
+  ensures result == TCP_MSS || result == TCP_MSS_LO || result == TCP_MSS_V6
 {
   if is_local(n, ip) {
     return TCP_MSS_LO;
+  }
+  if is_v6tok(ip) {
+    return TCP_MSS_V6;
   }
   return TCP_MSS;
 }
@@ -249,13 +302,24 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
     put32(&mut n.out, 62, seq_add(rcv, hhi - rxlen));
   }
   let head = twb(n, t, W_TXHEAD, TCP_RING);
+  let hop = next_hop(n, rip);
+  if dl > 0 && is_local(n, rip) && is_local(n, hop) {
+    // To ourselves: the data goes from the send ring straight into the
+    // loopback queue, and only the headers are copied from out.
+    let at = lo_room(n, 34 + tlen);
+    if at != NO_SOCK {
+      rb_get(&mut n.rb, tx_ring(t), (head + off) % TCP_RING, &mut n.lo, at + 34 + hl, dl);
+      q_put(&mut n, ns_lo(n), 34 + tlen, 34 + hl, at);
+    }
+    return;
+  }
   rb_get(&mut n.rb, tx_ring(t), (head + off) % TCP_RING, &mut n.out, 34 + hl, dl);
   // Round the loopback queue the frame never meets a wire, so it has no
   // checksum (tcp_in does not look for one there).
   if !is_local(n, rip) {
     put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, rip), rip, IP_TCP, tlen));
   }
-  send_via(&mut n, next_hop(n, rip), 34 + tlen);
+  send_via(&mut n, hop, 34 + tlen);
 }
 
 /// Arms the resend timer if it is off: TCP_RTO, doubled for each resend
@@ -401,22 +465,25 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
 /// connection waiting out TIME_WAIT that nobody holds is taken instead,
 /// as Linux reuses them under pressure: a program that opens and closes
 /// many connections in a row would otherwise run out of slots.
-fn tcb_free_slot(n: &Net) -> u64
+fn tcb_free_slot(n: &mut Net) -> u64
   requires net_ok(n)
-  ensures result <= TCBS
+  ensures net_ok(n) && result <= TCBS
 {
   let mut t = 0;
   while t < TCBS
-    invariant t <= TCBS
+    invariant t <= TCBS && net_ok(n)
   {
     if tw(n, t, W_STATE) == T_CLOSED && tw(n, t, W_HELD) == 0 {
-      return t;
+      if tcb_room(&mut n, t) {
+        return t;
+      }
+      return TCBS;                    // no memory to grow the table
     }
     t = t + 1;
   }
   let mut w = 0;
   while w < TCBS
-    invariant w <= TCBS
+    invariant w <= TCBS && net_ok(n)
   {
     if tw(n, w, W_STATE) == T_TIME_WAIT && tw(n, w, W_HELD) == 0 {
       return w;
@@ -452,30 +519,60 @@ fn tcb_init(n: &mut Net, t: u64, st: u64, lport: u64, rip: u64, rport: u64, pare
   tset(&mut n, t, W_PARENT, parent);
   tset(&mut n, t, W_HELD, held);
   tset(&mut n, t, W_NS, n.ns);
+  tset(&mut n, t, W_FAM, FAM_V4);
 }
 
 /// The connection a segment from rip:rport to our lport belongs to: an
-/// exact match first, else a listener on lport; TCBS if neither.
+/// exact match first, else a listener on lport; TCBS if neither. A peer on
+/// loopback is also taken by an IPv6-only listener if no listener of its
+/// own family has the port: ::1 stands for 127.0.0.1 in this stack, so an
+/// IPv6 client of ::1 reaches it as an IPv4 peer.
 fn tcb_find(n: &Net, lport: u64, rip: u64, rport: u64) -> u64
   requires net_ok(n)
   ensures result <= TCBS
 {
   let mut lis = TCBS;
+  let mut lo6 = TCBS;
   let mut t = 0;
   while t < TCBS
-    invariant t <= TCBS && lis <= TCBS
+    invariant t <= TCBS && lis <= TCBS && lo6 <= TCBS
   {
     let st = tw(n, t, W_STATE);
     if st != T_CLOSED && tw(n, t, W_LPORT) == lport && tw(n, t, W_NS) == n.ns {
       if st == T_LISTEN {
-        lis = t;
+        if fam_takes(tw(n, t, W_FAM) % FAM_REUSE, is_v6tok(rip)) {
+          lis = t;
+        } else if tw(n, t, W_FAM) % FAM_REUSE == FAM_V6 && rip / 16777216 == LO_NET {
+          lo6 = t;
+        }
       } else if tw(n, t, W_RIP) == rip && tw(n, t, W_RPORT) == rport {
         return t;
       }
     }
     t = t + 1;
   }
+  if lis == TCBS {
+    return lo6;
+  }
   return lis;
+}
+
+/// The family of the socket that is connecting from sport to dport on this
+/// machine (loopback carries no family): FAM_V4 for an IPv4 socket, or none
+/// found.
+fn tcb_syn_sent_fam(n: &Net, sport: u64, dport: u64) -> u64
+  requires net_ok(n)
+{
+  let mut t = 0;
+  while t < TCBS
+    invariant t <= TCBS
+  {
+    if tw(n, t, W_STATE) == T_SYN_SENT && tw(n, t, W_LPORT) == sport && tw(n, t, W_RPORT) == dport && tw(n, t, W_NS) == n.ns {
+      return tw(n, t, W_FAM);
+    }
+    t = t + 1;
+  }
+  return FAM_V4;
 }
 
 /// Is a port in use by any connection or listener?
@@ -499,7 +596,7 @@ fn tcp_port_used(n: &Net, port: u64) -> bool
 /// does not keep a new listener off its port: segments go to the
 /// connection whose addresses they carry first (tcb_find), so the two
 /// never mix. This is Linux with SO_REUSEADDR, which servers set.
-fn tcp_port_taken(n: &Net, port: u64) -> bool
+fn tcp_port_taken(n: &Net, port: u64, fam: u64, reuse: bool) -> bool
   requires net_ok(n)
 {
   let mut t = 0;
@@ -507,7 +604,10 @@ fn tcp_port_taken(n: &Net, port: u64) -> bool
     invariant t <= TCBS
   {
     let st = tw(n, t, W_STATE);
-    if (st == T_LISTEN || tw(n, t, W_HELD) == 1) && tw(n, t, W_LPORT) == port && tw(n, t, W_NS) == n.ns {
+    let wf = tw(n, t, W_FAM);
+    if (st == T_LISTEN || tw(n, t, W_HELD) == 1) && tw(n, t, W_LPORT) == port && tw(n, t, W_NS) == n.ns
+      && !(st == T_LISTEN && fam_apart(wf % FAM_REUSE, fam))
+      && !(reuse && (st != T_LISTEN || wf / FAM_REUSE % 2 == 1)) {
       return true;
     }
     t = t + 1;
@@ -671,11 +771,14 @@ fn tcp_accept_syn(n: &mut Net, lis: u64, seq: u64, hl: u64)
   requires net_ok(n) && lis < TCBS && seq < SEQ_MOD && 20 <= hl && 34 + hl <= FRAME_MAX
   ensures net_ok(n)
 {
-  let t = tcb_free_slot(n);
+  let t = tcb_free_slot(&mut n);
   if t >= TCBS {
     return;
   }
   tcb_init(&mut n, t, T_SYN_RCVD, be16(n.pkt, 36), be32(n.pkt, 26), be16(n.pkt, 34), lis, 0);
+  if n.lo_in {
+    tset(&mut n, t, W_FAM, tcb_syn_sent_fam(n, be16(n.pkt, 34), be16(n.pkt, 36)));
+  }
   tset(&mut n, t, W_RCV, seq_add(seq, 1));
   tset(&mut n, t, W_WND, be16(n.pkt, 48));
   tset(&mut n, t, W_MSS, tcp_mss_opt(n, hl));
@@ -805,7 +908,17 @@ fn tcp_in(n: &mut Net, total: u64)
     }
     // Fewer if the ring found no page for the rest: dropped, and resent.
     let head = twb(n, t, W_RXHEAD, TCP_RING);
-    take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.pkt, doff, take);
+    if n.lo_split {
+      // A long segment from ourselves: its data is still in lo (net_poll).
+      let base = n.lo_src;
+      if base <= LO_BYTES && base + doff + take <= LO_BYTES {
+        take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.lo, base + doff, take);
+      } else {
+        take = 0;
+      }
+    } else {
+      take = rb_put(&mut n.rb, rx_ring(t), (head + rxlen) % TCP_RING, n.pkt, doff, take);
+    }
     let mut got = rxlen + take;
     let hlo = twb(n, t, W_HLO, TCP_RING + 1);
     let hhi = twb(n, t, W_HHI, TCP_RING + 1);
@@ -863,7 +976,15 @@ fn tcp_hold(n: &mut Net, t: u64, ahead: u64, doff: u64, dl: u64)
   // The ring may find pages for only part of it: hold that part, if it
   // still touches what is held.
   let head = twb(n, t, W_RXHEAD, TCP_RING);
-  let got = rb_put(&mut n.rb, rx_ring(t), (head + lo) % TCP_RING, n.pkt, doff, hi - lo);
+  let mut got = 0;
+  if n.lo_split {
+    let base = n.lo_src;
+    if base <= LO_BYTES && base + doff + (hi - lo) <= LO_BYTES {
+      got = rb_put(&mut n.rb, rx_ring(t), (head + lo) % TCP_RING, n.lo, base + doff, hi - lo);
+    }
+  } else {
+    got = rb_put(&mut n.rb, rx_ring(t), (head + lo) % TCP_RING, n.pkt, doff, hi - lo);
+  }
   if got == 0 || (hhi > 0 && lo + got < hlo) {
     return;
   }
@@ -994,22 +1115,27 @@ fn tcb_held(n: &Net, t: u64) -> bool
 
 /// Listens on `port` (0: an ephemeral one): the listener's number, or
 /// NO_SOCK.
-fn tcp_listen_on(n: &mut Net, want: u64) -> u64
-  requires net_ok(n)
+fn tcp_listen_on(n: &mut Net, want: u64, fam: u64, reuse: bool) -> u64
+  requires net_ok(n) && fam <= 6
   ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
 {
   let mut port = want;
   if port == 0 {
     port = tcp_eph_port(&mut n);
   }
-  if port == 0 || port > 65535 || (n.ns == 0 && n.ip == 0) || tcp_port_taken(n, port) {
+  if port == 0 || port > 65535 || (n.ns == 0 && n.ip == 0) || tcp_port_taken(n, port, fam, reuse) {
     return NO_SOCK;
   }
-  let t = tcb_free_slot(n);
+  let t = tcb_free_slot(&mut n);
   if t >= TCBS {
     return NO_SOCK;
   }
   tcb_init(&mut n, t, T_LISTEN, port, 0, 0, TCBS, 1);
+  let mut wfam = fam;
+  if reuse {
+    wfam = fam + FAM_REUSE;
+  }
+  tset(&mut n, t, W_FAM, wfam);
   return t;
 }
 
@@ -1058,7 +1184,7 @@ fn tcp_eph_port(n: &mut Net) -> u64
 
 /// Opens a connection to to:port (0.0.0.0: this machine) from an ephemeral port: its number (it is
 /// SYN_SENT; poll tcp_status), or NO_SOCK.
-fn tcp_open(n: &mut Net, to: u64, port: u64) -> u64
+fn tcp_open(n: &mut Net, to: u64, port: u64, fam: u64) -> u64
   requires net_ok(n)
   ensures net_ok(n) && (result < TCBS || result == NO_SOCK)
 {
@@ -1066,7 +1192,7 @@ fn tcp_open(n: &mut Net, to: u64, port: u64) -> u64
   if ip > IP_MAX || port == 0 || port > 65535 || !can_reach(n, ip) {
     return NO_SOCK;
   }
-  let t = tcb_free_slot(n);
+  let t = tcb_free_slot(&mut n);
   if t >= TCBS {
     return NO_SOCK;
   }
@@ -1075,6 +1201,7 @@ fn tcp_open(n: &mut Net, to: u64, port: u64) -> u64
     return NO_SOCK;
   }
   tcb_init(&mut n, t, T_SYN_SENT, lport, ip, port, TCBS, 1);
+  tset(&mut n, t, W_FAM, fam);
   let iss = twb(n, t, W_ISS, SEQ_MOD);
   tcp_emit(&mut n, t, TF_SYN, iss, 0, 0);
   tnxt(&mut n, t, seq_add(iss, 1));
@@ -1221,6 +1348,28 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
   return true;
 }
 
+/// close with SO_LINGER {1, 0}: an established connection (or one that
+/// already got the peer's FIN) is dropped with a reset, and what is still
+/// buffered is lost, as on Linux. Any other state closes as tcp_release does.
+fn tcp_abort(n: &mut Net, t: u64) -> bool
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  tcb_enter(&mut n, t);
+  if !tcb_held(n, t) {
+    return false;
+  }
+  let st = tw(n, t, W_STATE);
+  if st == T_ESTABLISHED || st == T_CLOSE_WAIT || st == T_FIN_WAIT_1 || st == T_FIN_WAIT_2 {
+    tcp_emit(&mut n, t, TF_RST + TF_ACK, twb(n, t, W_NXT, SEQ_MOD), 0, 0);
+    tset(&mut n, t, W_HELD, 0);
+    tset(&mut n, t, W_PARENT, TCBS);
+    tcb_close(&mut n, t, false);
+    return true;
+  }
+  return tcp_release(&mut n, t);
+}
+
 /// Listener lis stops: the connections that came in on it and were never
 /// accepted close (their FIN after anything buffered), and no longer name
 /// it, so a new listener in its slot does not hand them out.
@@ -1267,8 +1416,8 @@ fn tcp_shut(n: &mut Net, t: u64) -> bool
 // Each takes the card or none; with none, every call fails.
 
 /// tcp_listen and tcp_connect make the connection in namespace ns.
-fn tcp_listen(c: &mut Nic, ns: u64, port: u64) -> u64
-  requires nic_ok(c)
+fn tcp_listen(c: &mut Nic, ns: u64, port: u64, fam: u64, reuse: bool) -> u64
+  requires nic_ok(c) && fam <= 6
   ensures nic_ok(c)
 {
   match c {
@@ -1279,7 +1428,7 @@ fn tcp_listen(c: &mut Nic, ns: u64, port: u64) -> u64
         return NO_SOCK;
       }
       n.ns = ns;
-      let r = tcp_listen_on(&mut n, port);
+      let r = tcp_listen_on(&mut n, port, fam, reuse);
       c = Nic::Up(n);
       return r;
     },
@@ -1300,7 +1449,7 @@ fn tcp_accept(c: &mut Nic, lis: u64) -> u64
   }
 }
 
-fn tcp_connect(c: &mut Nic, ns: u64, ip: u64, port: u64) -> u64
+fn tcp_connect(c: &mut Nic, ns: u64, ip: u64, port: u64, fam: u64) -> u64
   requires nic_ok(c)
   ensures nic_ok(c)
 {
@@ -1312,7 +1461,7 @@ fn tcp_connect(c: &mut Nic, ns: u64, ip: u64, port: u64) -> u64
         return NO_SOCK;
       }
       n.ns = ns;
-      let r = tcp_open(&mut n, ip, port);
+      let r = tcp_open(&mut n, ip, port, fam);
       c = Nic::Up(n);
       return r;
     },
@@ -1417,15 +1566,23 @@ fn tcp_cork(c: &mut Nic, t: u64, more: bool)
   match c {
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
-      if tcb_held(n, t) {
-        if !more {
-          tset(&mut n, t, W_CORK, 0);
-        } else if tw(n, t, W_CORK) == 0 && n.now < 0xFFFFFFFFFFFF0000 {
-          tset(&mut n, t, W_CORK, n.now + TCP_CORK_TICKS);
-        }
-      }
+      net_cork(&mut n, t, more);
       c = Nic::Up(n);
     },
+  }
+}
+
+/// tcp_cork on the card itself.
+fn net_cork(n: &mut Net, t: u64, more: bool)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if tcb_held(n, t) {
+    if !more {
+      tset(&mut n, t, W_CORK, 0);
+    } else if tw(n, t, W_CORK) == 0 && n.now < 0xFFFFFFFFFFFF0000 {
+      tset(&mut n, t, W_CORK, n.now + TCP_CORK_TICKS);
+    }
   }
 }
 
@@ -1472,6 +1629,20 @@ fn tcp_close(c: &mut Nic, t: u64) -> bool
   }
 }
 
+fn tcp_reset_close(c: &mut Nic, t: u64) -> bool
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return false; },
+    Nic::Up(mut n) => {
+      let r = tcp_abort(&mut n, t);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
 /// The peer's address and port (0 for a listener or a free slot).
 fn tcp_peer_ip(c: &Nic, t: u64) -> u64
   requires nic_ok(c)
@@ -1484,6 +1655,21 @@ fn tcp_peer_ip(c: &Nic, t: u64) -> u64
         return tw(n, t, W_RIP);
       }
       return 0;
+    },
+  }
+}
+
+/// Whether connection t came from an IPv4 socket (or went to one): FAM_V4.
+fn tcp_peer_fam(c: &Nic, t: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return FAM_V4; },
+    Nic::Up(n) => {
+      if tcb_held(n, t) {
+        return tw(n, t, W_FAM);
+      }
+      return FAM_V4;
     },
   }
 }
