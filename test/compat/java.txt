@@ -75,3 +75,11 @@ $ jc() { bb chroot /disk/r /usr/bin/env PATH=/opt/java/openjdk/bin:/usr/bin:/bin
 0 containers failed
 1718 tests found
 0 tests failed
+
+== java: a real library (Apache Commons Lang, its number, tuple, text and function packages) with its test libraries, tested with the JUnit console launcher
+# timeout 1200
+$ jc() { bb chroot /disk/r /usr/bin/env PATH=/opt/java/openjdk/bin:/usr/bin:/bin JAVA_HOME=/opt/java/openjdk HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/commons-lang3.tar.gz | bb tar -xz -C /disk/r/work && jc sh -c 'cd /work/commons-lang3 && cp=; for j in libs/*.jar; do cp="$cp:$j"; done; java -Xlog:disable -Xmx512m -jar junit-console.jar execute --class-path classes:test-classes$cp --scan-class-path test-classes --include-package org.apache.commons.lang3.math --include-package org.apache.commons.lang3.tuple --include-package org.apache.commons.lang3.mutable --include-package org.apache.commons.lang3.text --include-package org.apache.commons.lang3.function --include-package org.apache.commons.lang3.stream --include-package org.apache.commons.lang3.compare --details=summary --disable-banner 2>&1' | bb grep -E 'tests found|tests failed|containers failed|^  JUnit|=> ' | bb sed 's/^\[ *//; s/ *\]$//'
+0 containers failed
+1051 tests found
+0 tests failed
+
