@@ -545,7 +545,47 @@ fn no_poll_dev(x: u64) -> bool {
   if DEV_LOOP <= x && x < DEV_LOOP + LOOP_N {
     return true;                            // DEV_LOOP + N (the pseudo-terminals above them poll)
   }
-  return 256 <= x && x - 256 < 16 * NPROC && x % 16 != 1;   // PROC_DEV + 16 * pid + PF_*, but PF_MOUNTS
+  return PROC_DEV <= x && x - PROC_DEV < 16 * NPROC && !is_mounts_dev(x);   // PROC_DEV + 16 * pid + PF_*, but the mount tables
+}
+
+/// Whether OF_DEV device x is /proc/mounts or /proc/PID/mounts (PF_MOUNTS)
+/// or /proc/PID/mountinfo (PF_MOUNTINFO; pid 0's slot 13 is loadavg): the
+/// files whose poll reports a change of the mount table.
+fn is_mounts_dev(x: u64) -> bool {
+  if x < PROC_DEV || x - PROC_DEV >= 16 * NPROC {
+    return false;
+  }
+  return x % 16 == 1 || (x % 16 == 13 && x - PROC_DEV >= 16);
+}
+
+/// How many times the mount table changed, modulo 2^32.
+fn mnt_events(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result < 4294967296
+{
+  return get(k.sys, SYS_MNTEV) % 4294967296;
+}
+
+/// The mount table changes description h of a mounts file has seen (they
+/// ride in the eights of the word k.inet6 keeps, which only a socket uses
+/// otherwise).
+fn mnt_seen(k: &Kernel, h: u64) -> u64
+  requires kok(k)
+{
+  if h < len(k.inet6) {
+    return get(k.inet6, h) / 8;
+  }
+  return 0;
+}
+
+/// Description h has now seen every change of the mount table.
+fn mnt_catch_up(k: &mut Kernel, h: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if h < len(k.inet6) {
+    k.inet6 = set(k.inet6, h, 8 * mnt_events(k));
+  }
 }
 
 /// epoll_ctl(epfd, op, fd, event).

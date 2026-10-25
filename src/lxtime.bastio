@@ -385,6 +385,12 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_EVENT || f.kind == K_TIMER || f.kind == K_EPOLL {
     return ev_bits(k, f.kind, f.x);
   }
+  if f.kind == K_DEV && is_mounts_dev(f.x) {
+    if mnt_seen(k, fd_ofd(k, pid, fd)) != mnt_events(k) {
+      return POLLIN | POLLOUT | POLLPRI | POLLERR;   // the mount table changed since it was read
+    }
+    return POLLIN | POLLOUT;
+  }
   if f.kind == K_SIGFD {
     return sfd_bits(k, pid, f.x);
   }

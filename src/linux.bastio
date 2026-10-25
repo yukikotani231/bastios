@@ -294,6 +294,9 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if d.kind == K_DEV && d.x == DEV_KEYEV {
     return keyev_read(&mut k, pid, n, a, va, cnt);  // src/lxkeyev.bastio
   }
+  if d.kind == K_DEV && is_mounts_dev(d.x) {
+    mnt_catch_up(&mut k, fd_ofd(k, pid, a));  // reading a mount table answers a change of it
+  }
   let mut r = EBADF;
   if d.kind == K_FILE {
     r = lx_file_read(&mut k, pid, d.x, va, cnt);
