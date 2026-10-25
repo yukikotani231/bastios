@@ -1378,6 +1378,19 @@ static void be_key(int c)
                 be_insert(bf_vtext[i]);
             bf_cur = e + 1 + col;
         }
+    } else if (c == 2) {                        /* Ctrl-B: swaps the two characters around the cursor (before it, at a line end) */
+        size_t at = bf_cur;
+        if (at >= bf_vlen || bf_vtext[at] == '\n')
+            at--;
+        if (bf_cur > 0 && at > 0 && at < bf_vlen && bf_vtext[at - 1] != '\n' && bf_vtext[at] != '\n' &&
+            (unsigned char)bf_vtext[at - 1] < 128 && (unsigned char)bf_vtext[at] < 128) {
+            be_undo_push(3);
+            char t = bf_vtext[at - 1];
+            bf_vtext[at - 1] = bf_vtext[at];
+            bf_vtext[at] = t;
+            bf_cur = at + 1;
+            bf_modified = 1;
+        }
     } else if (c == 15) {                       /* Ctrl-O: an empty line below the one under the cursor */
         size_t e = bf_cur;
         while (e < bf_vlen && bf_vtext[e] != '\n')
