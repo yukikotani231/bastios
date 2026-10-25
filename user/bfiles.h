@@ -1754,6 +1754,9 @@ static int bfiles_main(int argc, char **argv)
                     else if (c == '~' && num == 3) {            /* Delete acts as D */
                         c = 'D';
                         goto dispatch;
+                    } else if (c == '~' && num == 15) {         /* F5 acts as R */
+                        c = 'R';
+                        goto dispatch;
                     } else
                         continue;
                     bf_paint();
