@@ -113,6 +113,7 @@ jm() {  # NAME URL TAG
 }
 
 jm commons-codec https://github.com/apache/commons-codec rel/commons-codec-1.17.1
+jm commons-lang3 https://github.com/apache/commons-lang rel/commons-lang-3.17.0
 
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
