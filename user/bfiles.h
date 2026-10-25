@@ -1754,6 +1754,10 @@ static int bfiles_main(int argc, char **argv)
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);
                 bf_load_dir();
+            } else if (c == '~' && !bf_viewing) {
+                const char *home = getenv("HOME");
+                snprintf(bf_cwd, sizeof bf_cwd, "%s", home && home[0] == '/' ? home : "/");
+                bf_load_dir();
             } else if (c == 't' && !bf_viewing) {
                 bf_spawn("bterm", NULL, "terminal in");
             } else if (c == 'N' && !bf_viewing)
