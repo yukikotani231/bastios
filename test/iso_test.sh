@@ -1781,6 +1781,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bfiles: dotfiles hidden", mark)
         print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
         fails += not good
+        # . does what h does.
+        if good:
+            mark2 = len(out)
+            monitor("sendkey dot")
+            good = until(b"bfiles: dotfiles shown", mark2)
+            mark2 = len(out)
+            monitor("sendkey dot")
+            good = good and until(b"bfiles: dotfiles hidden", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) . in bfiles toggles the dotfiles too")
+        fails += not good
         # s in the list sorts the files by size (largest first), then by time (newest first), then back by name.
         if good:
             monitor("sendkey s")
