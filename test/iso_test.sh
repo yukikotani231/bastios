@@ -1286,6 +1286,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Ctrl-B in the editor swaps the two characters before the cursor.
+        mark = len(out)
+        q.stdin.write(b"printf 'abc\\nbar\\n' > /tmp/tt.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/tt.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/tt.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/tt.txt", mark)
+        if good:
+            monitor("sendkey ctrl-e", "sendkey ctrl-b", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/tt.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/tt.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"acb\r\nbar\r\nend2", mark) or until(b"acb\nbar\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-B in the editor swaps two characters")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Ctrl-W in the editor deletes the word before the cursor.
         mark = len(out)
         q.stdin.write(b"printf 'foo bar baz\\n' > /tmp/dw.txt\r"); q.stdin.flush()
