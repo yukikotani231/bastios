@@ -505,9 +505,9 @@ jobs:
   # space). Disk images and everything built from this repository are never
   # cached. The caches are saved only after the build step succeeded, so a
   # build that failed halfway is never kept.
-  # The suite runs in three parts on runners of their own (run.py --lanes):
-  # the programs and the Bastio compiler, Alpine with Go, and the other
-  # languages' toolchains. Each builds only the disks of its lanes and holds
+  # The suite runs in four parts on runners of their own (run.py --lanes):
+  # the programs and the Bastio compiler, Alpine with Go, Python, and the
+  # other languages' toolchains. Each builds only the disks of its lanes and holds
   # to the baseline every check of the groups its lanes hold. The
   # third-party cache is kept per part; until a part has an entry of its own
   # it restores the whole one the single job saved.
@@ -528,8 +528,14 @@ jobs:
             lanes: alpine,alpine2,alpine3,alpine4,alpine5,go
             disks: alpine.img go.img
           - part: toolchains
-            lanes: debian,node,python,java,rust,podman,gitsuite
-            disks: alpine.img debian.img node.img python.img jdk.img rust.img podman.img gitsuite.tar
+            lanes: debian,node,java,rust,podman,gitsuite
+            disks: alpine.img debian.img node.img jdk.img rust.img podman.img gitsuite.tar
+          # The Python lane alone takes longer than all of the above (its
+          # test suites run for 25 minutes under emulation), so it has a
+          # runner of its own.
+          - part: python
+            lanes: python
+            disks: alpine.img python.img
     env:
       # Raise it to drop every cache entry below (a bad entry is never
       # replaced: a key that hits is not saved again).
