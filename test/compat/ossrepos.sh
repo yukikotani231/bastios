@@ -105,6 +105,10 @@ gv() {  # NAME URL TAG
 gv testify https://github.com/stretchr/testify v1.9.0
 gv fzf https://github.com/junegunn/fzf v0.58.0
 gv websocket https://github.com/gorilla/websocket v1.5.3
+gv uuid https://github.com/google/uuid v1.6.0
+gv pflag https://github.com/spf13/pflag v1.0.5
+gv mux https://github.com/gorilla/mux v1.8.1
+gv gjson https://github.com/tidwall/gjson v1.18.0
 
 # An npm package built on the host and shipped with its dependencies and one
 # test runner (or several, separated by spaces) installed beside it (node_modules), nothing else of its tooling.
