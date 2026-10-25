@@ -139,5 +139,7 @@ nm cookie https://github.com/jshttp/cookie v0.7.2 "mocha@10.2.0 safe-buffer@5.2.
 nm send https://github.com/pillarjs/send 0.19.0 "mocha@9.2.2 supertest@6.2.2 after@0.8.2"
 nm body-parser https://github.com/expressjs/body-parser 1.20.3 "mocha@10.2.0 supertest@6.3.3 methods@1.1.2 safe-buffer@5.2.1"
 nm async https://github.com/caolan/async v3.2.6 "mocha@6.2.3 babel-register@6.26.0 babel-plugin-transform-es2015-modules-commonjs@6.26.2 babel-plugin-syntax-async-generators@6.13.0 chai@4.3.10 bluebird@3.7.2 es6-promise@4.2.8 lodash@4.17.21 rsvp@4.8.5 native-promise-only@0.8.1"
+nm type-is https://github.com/jshttp/type-is 1.6.18 "mocha@6.1.4"
+nm ms https://github.com/vercel/ms 2.1.3 "mocha@4.0.1 expect.js@0.3.1"
 
 tb nanoid https://github.com/ai/nanoid 5.0.7
