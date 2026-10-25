@@ -1803,6 +1803,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The title row of bfiles says when the list is not sorted by name.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ff; bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        t0 = t1 = 0
+        if good:
+            time.sleep(1.5)
+            def white():
+                w, h, px = screendump()
+                return sum(1 for y in range(90, 106) for x in range(72, 72 + 480) if tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255))
+            t0 = white()
+            mark2 = len(out)
+            monitor("sendkey s")
+            good = until(b"bfiles: sorted by size", mark2)
+            time.sleep(1)
+            t1 = white()
+            good = good and t0 > 20 and t1 > t0 + 40
+        print(("ok  " if good else "FAIL"), f"({name}) the bfiles title row names a sort order ({t0} then {t1} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # - in the bfiles list goes back to the directory shown before.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/ff; HOME=/tmp bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()

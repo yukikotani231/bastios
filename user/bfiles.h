@@ -369,7 +369,7 @@ static void bf_paint(void)
     else if (bf_confirm)
         snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
     else
-        snprintf(h, sizeof h, "%s", bf_cwd);
+        snprintf(h, sizeof h, "%s%s", bf_cwd, bf_sort == 1 ? "  [by size]" : bf_sort == 2 ? "  [by time]" : "");
     bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
     for (int r = 1; r < BF_ROWS; r++) {
         int i = bf_top + r - 1;
