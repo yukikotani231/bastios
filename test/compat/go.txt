@@ -128,7 +128,7 @@ ok  	github.com/tidwall/gjson
 
 == go: a semantic version library (Masterminds/semver) tested with go test -mod=vendor
 # timeout 1800
-$ bb wget -q -O - HOSTURL/oss/semver.tar.gz | bb tar -xz -C /disk/g/work; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on; bb chroot /disk/g /usr/local/go/bin/go -C /work/semver test -mod=vendor -vet=off . 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//' | bb grep -v 'no test files'
+$ bb wget -q -O - HOSTURL/oss/gosemver.tar.gz | bb tar -xz -C /disk/g/work; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on; bb chroot /disk/g /usr/local/go/bin/go -C /work/gosemver test -mod=vendor -vet=off . 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//' | bb grep -v 'no test files'
 ok  	github.com/Masterminds/semver/v3
 
 == go: a map-to-struct decoder (mitchellh/mapstructure) tested with go test -mod=vendor
