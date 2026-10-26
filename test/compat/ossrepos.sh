@@ -106,6 +106,10 @@ gs() {  # NAME URL TAG
 }
 
 gs rake https://github.com/ruby/rake v13.3.0
+gs rexml https://github.com/ruby/rexml v3.4.4
+gs kramdown https://github.com/gettalong/kramdown REL_2_5_2
+gs csv https://github.com/ruby/csv v3.3.6
+gs optparse https://github.com/ruby/optparse v0.8.1
 
 # A Java project built with Maven on the host: its classes, test classes, test
 # resources (the tests open them by their path in the source tree) and the
