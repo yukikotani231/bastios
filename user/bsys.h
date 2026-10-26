@@ -21,14 +21,23 @@
 
 #define BS_ROWS 12
 #define BS_MAXPROC 64
+#define BS_PGUP 0x100                             /* keys that are not characters */
+#define BS_PGDN 0x101
 #define BS_LIST 8                                 /* process rows shown, rows 2 .. 9 */
 
 struct bs_proc { int pid; char state; char name[24]; };
 static struct bs_proc bs_procs[BS_MAXPROC];
 static int bs_nproc, bs_sel, bs_top, bs_tasks, bs_esc;
 
+static int bs_byname;                   /* n sorts the list by name instead of newest first */
+
 static int bs_cmp(const void *a, const void *b)
 {
+    if (bs_byname) {
+        int r = strcmp(((const struct bs_proc *)a)->name, ((const struct bs_proc *)b)->name);
+        if (r)
+            return r;
+    }
     return ((const struct bs_proc *)b)->pid - ((const struct bs_proc *)a)->pid;   /* newest first */
 }
 
@@ -89,7 +98,7 @@ static void bs_move(int by)
 static void bs_paint_tasks(void)
 {
     char t[BF_COLS + 1];
-    snprintf(t, sizeof t, "Processes (%d)", bs_nproc);
+    snprintf(t, sizeof t, "Processes (%d)%s", bs_nproc, bs_byname ? "  [by name]" : "");
     bf_put_row(0, t, strlen(t), 0x00FFFFFF, 0x00305090);
     bf_put_row(1, "  PID    S  Name", 16, 0x00808090, 0x00101018);
     for (int i = 0; i < BS_LIST; i++) {
@@ -102,7 +111,7 @@ static void bs_paint_tasks(void)
         bf_put_row(2 + i, t, strlen(t), 0x00D8D8D8, k == bs_sel ? 0x00305090 : 0x00101018);
     }
     bf_put_row(10, "", 0, 0x00D8D8D8, 0x00101018);
-    bf_put_row(11, "  j/k: move  x: end the process  p: back", 41, 0x00808090, 0x00101018);
+    bf_put_row(11, "  j/k g/G: move  n: sort  x: end  p: back", 41, 0x00808090, 0x00101018);
 }
 
 static void bs_row(int r, const char *k, const char *v)
@@ -192,6 +201,20 @@ static int bsys_main(void)
         int t = bwm_event(fd, buf);
         if (t < 0 || t == BWM_CLOSE)
             break;
+        if (t == BWM_MOUSE && bs_tasks) {                     /* the wheel walks the list: three processes a step, negative is up */
+            struct bwm_mouse *mo = (struct bwm_mouse *)buf;
+            int wheel = (signed char)((mo->buttons >> 8) & 0xFF);
+            int row = (int)mo->y / BF_CH - 2;                  /* a click on a process selects it */
+            int hit = (mo->buttons & 1) && (int)mo->y >= 0 && row >= 0 && row < BS_LIST && bs_top + row < bs_nproc;
+            if (wheel || hit) {
+                bs_move(wheel ? wheel * 3 : bs_top + row - bs_sel);
+                bs_paint_tasks();
+                fflush(stdout);
+                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
+                    break;
+            }
+            continue;
+        }
         if (t != BWM_KEY)
             continue;
         int c = ((struct bwm_key *)buf)->ch;
@@ -203,9 +226,29 @@ static int bsys_main(void)
             bs_esc = c == '[' ? 2 : 0;
             continue;
         }
-        if (bs_esc == 2) {
+        if (bs_esc == 2 && (c == '5' || c == '6' || c == '3')) {   /* Page Up, Page Down and Delete are ESC [ 5 ~, ESC [ 6 ~ and ESC [ 3 ~ */
+            bs_esc = c;
+            continue;
+        }
+        if (bs_esc == 2 && c == '1') {                        /* F5 is ESC [ 1 5 ~ */
+            bs_esc = 'a';
+            continue;
+        }
+        if (bs_esc == 'a') {
+            bs_esc = c == '5' ? 'b' : 0;
+            continue;
+        }
+        if (bs_esc == 'b') {
             bs_esc = 0;
-            c = c == 'A' ? 'k' : c == 'B' ? 'j' : 0;
+            if (c != '~')
+                continue;
+            c = 'r';
+        } else if (bs_esc == '5' || bs_esc == '6' || bs_esc == '3') {
+            c = c == '~' ? (bs_esc == '5' ? BS_PGUP : bs_esc == '6' ? BS_PGDN : 'x') : 0;       /* Delete acts as x */
+            bs_esc = 0;
+        } else if (bs_esc == 2) {
+            bs_esc = 0;
+            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'H' ? 'g' : c == 'F' ? 'G' : 0;
         }
         if (c == 'p') {
             bs_tasks = !bs_tasks;
@@ -221,6 +264,18 @@ static int bsys_main(void)
         } else if (bs_tasks && (c == 'j' || c == 'k')) {
             bs_move(c == 'j' ? 1 : -1);
             bs_paint_tasks();
+        } else if (bs_tasks && (c == BS_PGUP || c == BS_PGDN)) {            /* a page up and a page down */
+            bs_move(c == BS_PGUP ? -BS_LIST : BS_LIST);
+            bs_paint_tasks();
+        } else if (bs_tasks && (c == 'g' || c == 'G')) {            /* the first and the last of the list */
+            bs_move(c == 'g' ? -bs_nproc : bs_nproc);
+            bs_paint_tasks();
+        } else if (bs_tasks && c == 'n') {                           /* by name, or newest first again */
+            bs_byname = !bs_byname;
+            bs_scan();
+            bs_sel = bs_top = 0;
+            bs_paint_tasks();
+            printf("bsys: sorted by %s\n", bs_byname ? "name" : "pid");
         } else if (bs_tasks && c == 'x' && bs_nproc) {
             int pid = bs_procs[bs_sel].pid;
             if (pid == 1 || pid == getpid())

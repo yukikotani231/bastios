@@ -88,6 +88,53 @@ rs fastrand https://github.com/smol-rs/fastrand v2.3.0
 rs itoa https://github.com/dtolnay/itoa 1.0.11
 rs either https://github.com/rayon-rs/either 1.13.0
 rs smallvec https://github.com/servo/rust-smallvec v1.13.2
+rs arrayvec https://github.com/bluss/arrayvec 0.7.6
+rs fnv https://github.com/servo/rust-fnv v1.0.7
+
+# A Ruby project's source tree, for tests that need only the gems of the
+# ruby image (minitest, test-unit, rake): a plain tarball.
+gs() {  # NAME URL TAG
+  [ -f "$out/$1.tar.gz" ] && return 0
+  mkdir "$work/gs-$1"
+  git -C "$work/gs-$1" init -q
+  git -C "$work/gs-$1" fetch -q --depth 1 "$2" "$3"
+  git -C "$work/gs-$1" checkout -q FETCH_HEAD
+  rm -rf "$work/gs-$1/.git"
+  mkdir "$work/gs-top-$1"
+  mv "$work/gs-$1" "$work/gs-top-$1/$1"
+  tar -C "$work/gs-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
+}
+
+gs rake https://github.com/ruby/rake v13.3.0
+gs rexml https://github.com/ruby/rexml v3.4.4
+gs kramdown https://github.com/gettalong/kramdown REL_2_5_2
+gs csv https://github.com/ruby/csv v3.3.6
+gs optparse https://github.com/ruby/optparse v0.8.1
+
+# A Java project built with Maven on the host: its classes, test classes, test
+# resources (the tests open them by their path in the source tree) and the
+# libraries of its tests, and the JUnit console launcher that runs them.
+jm() {  # NAME URL TAG
+  [ -f "$out/$1.tar.gz" ] && return 0
+  mkdir "$work/jm-$1"
+  git -C "$work/jm-$1" init -q
+  git -C "$work/jm-$1" fetch -q --depth 1 "$2" "$3"
+  git -C "$work/jm-$1" checkout -q FETCH_HEAD
+  rm -rf "$work/jm-$1/.git"
+  mkdir -p "$work/jm-top-$1/$1/libs"
+  (cd "$work/jm-$1" && mvn -q -B test-compile dependency:copy-dependencies -DincludeScope=test \
+      -DoutputDirectory="$work/jm-top-$1/$1/libs" >/dev/null \
+    && mvn -q -B dependency:copy -Dartifact=org.junit.platform:junit-platform-console-standalone:1.11.0 \
+      -DoutputDirectory="$work/jm-top-$1/$1" >/dev/null \
+    && cp -r target/classes target/test-classes "$work/jm-top-$1/$1/" \
+    && { [ ! -d src/test/resources ] || { mkdir -p "$work/jm-top-$1/$1/src/test" && cp -r src/test/resources "$work/jm-top-$1/$1/src/test/"; }; })
+  mv "$work/jm-top-$1/$1"/junit-platform-console-standalone-*.jar "$work/jm-top-$1/$1/junit-console.jar"
+  tar -C "$work/jm-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
+}
+
+jm commons-codec https://github.com/apache/commons-codec rel/commons-codec-1.17.1
+jm commons-lang3 https://github.com/apache/commons-lang rel/commons-lang-3.17.0
+jm commons-collections4 https://github.com/apache/commons-collections rel/commons-collections-4.5.0
 
 # A Go module with its dependencies vendored beside it (go build -mod=vendor).
 gv() {  # NAME URL TAG
@@ -110,6 +157,9 @@ gv uuid https://github.com/google/uuid v1.6.0
 gv pflag https://github.com/spf13/pflag v1.0.5
 gv mux https://github.com/gorilla/mux v1.8.1
 gv gjson https://github.com/tidwall/gjson v1.18.0
+gv gosemver https://github.com/Masterminds/semver v3.3.1
+gv mapstructure https://github.com/mitchellh/mapstructure v1.5.0
+gv cast https://github.com/spf13/cast v1.7.1
 
 # An npm package built on the host and shipped with its dependencies and one
 # test runner (or several, separated by spaces) installed beside it (node_modules), nothing else of its tooling.

@@ -226,6 +226,11 @@ $ bb dd if=/dev/zero bs=65536 count=16 2>ca_e | bb wc -c; bb head -n 1 ca_e; bb 
 1048576
 16+0 records in
 
+== dd one large read of a file
+$ bb dd if=/dev/zero of=ca_big bs=65536 count=40 2>/dev/null; bb dd if=ca_big bs=2097152 count=1 2>ca_e | bb wc -c; bb head -n 1 ca_e; bb rm ca_big ca_e
+2097152
+1+0 records in
+
 == cmp
 $ echo a > ca_1; echo a > ca_2; bb cmp ca_1 ca_2 && echo same; bb rm ca_1 ca_2
 same

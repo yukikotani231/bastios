@@ -164,16 +164,29 @@ static int bview_main(int argc, char **argv)
         int t = bwm_event(fd, buf);
         if (t < 0 || t == BWM_CLOSE)
             break;
-        if (t != BWM_KEY)
+        unsigned c;
+        if (t == BWM_KEY) {
+            c = ((struct bwm_key *)buf)->ch;
+        } else if (t == BWM_MOUSE) {                         /* the wheel zooms: up in, down out */
+            int wheel = (signed char)((((struct bwm_mouse *)buf)->buttons >> 8) & 0xFF);
+            if (!wheel)
+                continue;
+            c = wheel < 0 ? '+' : '-';
+            esc = 0;
+        } else {
             continue;
-        unsigned c = ((struct bwm_key *)buf)->ch;
+        }
         long dx = 0, dy = 0;
         int dz = 0, reset = 0;
         if (esc == 0 && c == 27) { esc = 1; continue; }
         if (esc == 1 && c == '[') { esc = 2; continue; }
-        if (esc == 2) {
+        if (esc == 2 && (c == '5' || c == '6')) { esc = c; continue; }      /* Page Up and Page Down are ESC [ 5 ~ and ESC [ 6 ~ */
+        if (esc == '5' || esc == '6') {
+            c = c == '~' ? (esc == '5' ? '+' : '-') : 0;                     /* Page Up zooms in, Page Down out */
             esc = 0;
-            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : 0;
+        } else if (esc == 2) {
+            esc = 0;
+            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : c == 'H' ? '0' : c == 'F' ? '9' : 0;   /* Home resets the zoom, End zooms in all the way */
         } else if (esc == 1) {
             break;
         }
@@ -182,6 +195,7 @@ static int bview_main(int argc, char **argv)
         else if (c == '+' || c == '=') dz = 1;
         else if (c == '-') dz = -1;
         else if (c == '0') reset = 1;
+        else if (c == '9') dz = 4 - ze;
         else if (c == 0) continue;
         else break;
         long nz = reset ? 0 : ze + dz;

@@ -1,0 +1,119 @@
+# Ruby on BastiOS, for the compatibility suite (test/compat): ruby, irb, gem,
+# rake and the bundled gems of the official ruby:alpine image, entered with
+# chroot. The Ruby disk (rubydisk.py) holds the image's root as a tar file
+# (/disk/root.tar) and a BusyBox at /disk/busybox. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root.
+
+== ruby: unpack the root, make the device nodes
+$ bb mkdir -p /disk/r && cd /disk/r && bb tar -xf /disk/root.tar && bb mkdir -p proc tmp work && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/r/proc; bb ls /disk/r/dev | bb cat
+console
+null
+random
+tty
+urandom
+zero
+
+== ruby: version
+# timeout 120
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; rb ruby -e 'puts RUBY_VERSION; puts RUBY_PLATFORM; puts RUBY_ENGINE'
+3.4.12
+x86_64-linux-musl
+ruby
+
+== ruby: core classes, strings, hashes and blocks
+# timeout 300
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb wget -q -O /disk/r/work/core.rb HOSTURL/rbprogs/core.rb && rb ruby /work/core.rb
+5.0
+{a: 1, b: 2}
+"a=1&b=2"
+003.1|ab  |ff
+[6, 15, 24, 10]
+{1 => 4, 2 => 5, 3 => 6}
+"HÉLLO WÖRLD"
+6
+"abd"
+1267650600228229401496703205376
+
+== ruby: threads, a mutex, a queue and fibers
+# timeout 300
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb wget -q -O /disk/r/work/threads.rb HOSTURL/rbprogs/threads.rb && rb ruby /work/threads.rb
+4000
+45
+[1, 2, 3]
+[0, 1, 1, 2, 3, 5, 8, 13, 21, 34]
+
+== ruby: fork, pipes, exit status and signals
+# timeout 300
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb wget -q -O /disk/r/work/process.rb HOSTURL/rbprogs/process.rb && rb ruby /work/process.rb
+from child true
+3
+true
+15
+got usr1
+"shell"
+false
+2
+
+== ruby: the standard library: json, yaml, digest, zlib, openssl, time
+# timeout 300
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb wget -q -O /disk/r/work/stdlib.rb HOSTURL/rbprogs/stdlib.rb && rb ruby /work/stdlib.rb
+{"a":[1,2.5,null,true],"b":{"c":"d"}}
+[1, 2.5, nil, true]
+---
+x:
+- 1
+- "y": z
+{"a" => [1, 2], "b" => {"c" => "d"}}
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
+900150983cd24fb0d6963f7d28e17f72
+true
+600
+2d93cbc1be167bcb1637a4a23cbff01a7878f0c50ee833954ea5221bb1b8c628
+16
+16
+#<Set: {1, 2, 3}>
+2026-10-25T12:30:05Z
+1767323045
+
+== ruby: sockets: TCP, UNIX, UDP and an HTTP client
+# timeout 300
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb wget -q -O /disk/r/work/net.rb HOSTURL/rbprogs/net.rb && rb ruby /work/net.rb
+hello ruby
+ping
+dgram
+200
+hello
+
+== ruby: a real project (rake) tested with its own test suite
+# timeout 900
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/rake.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/rake && ruby -Ilib -Itest -rhelper -e "Dir[%q(test/test_*.rb)].sort.each { |f| require %q(./) + f }" 2>&1' | bb grep -E '^[0-9]+ tests, |^(Failure|Error):' | bb cut -c1-200
+598 tests, 1460 assertions, 0 failures, 0 errors, 0 pendings, 1 omissions, 0 notifications
+
+== ruby: a real project (rexml) tested with its own test suite
+# The parse/ tests need core_assertions, a helper of Ruby's own test tree that no gem carries: left out.
+# timeout 900
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/rexml.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/rexml && ruby -Ilib -Itest -rhelper -e "Dir[%q(test/**/test_*.rb)].sort.reject { |f| File.read(f).include?(%q(core_assertions)) }.each { |f| require %q(./) + f }" 2>&1' | bb grep -E '^[0-9]+ tests, |^(Failure|Error):' | bb cut -c1-200
+619 tests, 1813 assertions, 0 failures, 0 errors, 0 pendings, 0 omissions, 0 notifications
+
+== ruby: a real project (kramdown) tested with its own test suite
+# The cases that need rouge, coderay or stringex (gems the image does not carry) are left out.
+# timeout 900
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/kramdown.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/kramdown && ruby -Ilib -Itest test/test_files.rb -n "/\A(?!.*(highlighting|guess_lang|options3|normal-css-class|rouge|with_auto_ids))/" 2>&1' | bb grep -E '^[0-9]+ runs, |^ +[0-9]+\) (Failure|Error)' | bb cut -c1-160
+1609 runs, 174047 assertions, 0 failures, 0 errors, 0 skips
+
+== ruby: a real project (csv) tested with its own test suite
+# timeout 900
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/csv.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/csv && ruby -Ilib -Itest -rtest/unit -e "Dir[%q(test/csv/**/test_*.rb)].sort.each { |f| require %q(./) + f }" 2>&1' | bb grep -E '^[0-9]+ tests, |^(Failure|Error):' | bb cut -c1-200
+527 tests, 4050 assertions, 0 failures, 0 errors, 0 pendings, 0 omissions, 0 notifications
+
+== ruby: a real project (optparse) tested with its own test suite
+# test_help_pager and test_ver need assert_in_out_err and assert_warning, helpers of Ruby's own test tree: left out.
+# timeout 900
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/optparse.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/optparse && ruby -Ilib -Itest -rtest/unit -e "Dir[%q(test/optparse/test_*.rb)].sort.each { |f| require %q(./) + f }" -- "--ignore-name=/^test_(help_pager|ver)$/" 2>&1' | bb grep -E '^[0-9]+ tests, |^(Failure|Error):' | bb cut -c1-200
+107 tests, 958 assertions, 0 failures, 0 errors, 0 pendings, 0 omissions, 0 notifications
