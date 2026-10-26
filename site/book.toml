@@ -1,0 +1,20 @@
+[book]
+title = "BastiOS"
+authors = ["The BastiOS contributors"]
+language = "en"
+# site/build.sh assembles the pages here from docs/ and the top-level Markdown
+# files, so the site never holds a second copy of the documentation.
+src = "build/src"
+
+[build]
+build-dir = "build/html"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/yukikotani231/bastios"
+no-section-label = true
+# Where GitHub Pages serves the site; mdBook needs it for the 404 page.
+site-url = "/bastios/"
+
+[output.html.search]
+enable = true
