@@ -1019,6 +1019,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bsys: select", mark3)
         print(("ok  " if good else "FAIL"), f"({name}) the wheel walks the process list")
         fails += not good
+        # A click on a process in the list selects it: the fourth row is what g followed by three j reaches.
+        clicked = keyed = b""
+        if good:
+            mark3 = len(out)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 150 %d" % (90 + 5 * 16 + 8), "mouse_button 1", "mouse_button 0")
+            good = until(b"bsys: select", mark3)
+            clicked = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey g", "sendkey j", "sendkey j", "sendkey j")
+            end = time.time() + 2
+            while time.time() < end:
+                r, _, _ = select.select([q.stdout], [], [], 0.2)
+                if r:
+                    out += q.stdout.read1(4096)
+            keyed = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if b"bsys: select" in out[mark3:] else b""
+            good = good and clicked == keyed and len(clicked) > 2
+        print(("ok  " if good else "FAIL"), f"({name}) a click on a process selects it ({clicked!r} {keyed!r})")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)

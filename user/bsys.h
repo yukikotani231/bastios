@@ -202,9 +202,12 @@ static int bsys_main(void)
         if (t < 0 || t == BWM_CLOSE)
             break;
         if (t == BWM_MOUSE && bs_tasks) {                     /* the wheel walks the list: three processes a step, negative is up */
-            int wheel = (signed char)((((struct bwm_mouse *)buf)->buttons >> 8) & 0xFF);
-            if (wheel) {
-                bs_move(wheel * 3);
+            struct bwm_mouse *mo = (struct bwm_mouse *)buf;
+            int wheel = (signed char)((mo->buttons >> 8) & 0xFF);
+            int row = (int)mo->y / BF_CH - 2;                  /* a click on a process selects it */
+            int hit = (mo->buttons & 1) && (int)mo->y >= 0 && row >= 0 && row < BS_LIST && bs_top + row < bs_nproc;
+            if (wheel || hit) {
+                bs_move(wheel ? wheel * 3 : bs_top + row - bs_sel);
                 bs_paint_tasks();
                 fflush(stdout);
                 if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
