@@ -1985,6 +1985,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             r3 = 0
         print(("ok  " if good else "FAIL"), f"({name}) Home resets the zoom in bview ({r3} against {r0} pixels)")
         fails += not good
+        # End zooms in all the way.
+        if good:
+            monitor("sendkey end")
+            time.sleep(2)
+            r4 = red()
+            good = r4 > r0
+        else:
+            r4 = 0
+        print(("ok  " if good else "FAIL"), f"({name}) End zooms in all the way in bview ({r4} against {r0} pixels)")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
