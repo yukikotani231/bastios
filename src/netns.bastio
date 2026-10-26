@@ -333,6 +333,7 @@ fn ns_new(n: &mut Net) -> u64
       nsset(&mut n, s, NS_FWD, 0);
       nsset(&mut n, s, NS_LO, lo);
       nsset(&mut n, s, NS_OWNER, 0);
+      nsset(&mut n, s, NS_DNS, 0);
       n.ns_seq = n.ns_seq % 1048576 + 1;
       nsset(&mut n, s, NS_INO, 4026532000 + n.ns_seq);
       if_make(&mut n, lo, IFK_LO, s, NAME_LO, 0);
