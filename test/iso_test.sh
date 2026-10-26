@@ -2525,6 +2525,35 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # Alt-Shift-Space turns on kanji conversion: the kana wait in the task bar, Space lists the dictionary's
+            # candidates, Enter puts the one shown in the window. "nihon" is 日本; "hi" and Space twice is the second, 火.
+            monitor("sendkey ctrl-u", *[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-shift-spc")
+            monitor(*[f"sendkey {c}" for c in "nihon"])
+            monitor("sendkey spc")
+            time.sleep(1)
+            monitor("sendkey ret")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any("echo \u65e5\u672c" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) kanji conversion turns nihon into the dictionary's word")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey ctrl-u", "sendkey alt-spc", *[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-shift-spc")
+            monitor("sendkey h", "sendkey i")
+            monitor("sendkey spc", "sendkey spc")
+            time.sleep(1)
+            monitor("sendkey ret")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any("echo \u706b" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) a second Space shows the next candidate")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey ctrl-u", "sendkey alt-spc")
             # 256 colours (38;5;N and 48;5;N) and 24-bit colours (48;2;R;G;B, drawn as the nearest of them).
             keys[";"] = "semicolon"
             typed("printf '\\033[48;5;196m      \\033[48;5;21m      \\033[48;2;0;255;0m      \\033[0m'")
