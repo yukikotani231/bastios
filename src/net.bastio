@@ -118,13 +118,16 @@ const FAM_V6: u64 = 6;                 // an AF_INET6 socket with IPV6_V6ONLY
 
 // Network namespaces and interfaces (src/netns.bastio).
 const NNET: u64 = 64;                  // network namespaces
-const NS_W: u64 = 6;                   // words per namespace:
+const NS_W: u64 = 7;                   // words per namespace:
 const NS_USED: u64 = 0;                //   1 while it exists
 const NS_GW: u64 = 1;                  //   the default route's gateway (0: none; ns 0 uses n.gw)
 const NS_FWD: u64 = 2;                 //   1: forwards packets between interfaces (ip_forward)
 const NS_LO: u64 = 3;                  //   its loopback interface's slot
 const NS_INO: u64 = 4;                 //   its inode number (/proc/PID/ns/net)
 const NS_OWNER: u64 = 5;               //   the user namespace id that made it (0: the first)
+const NS_DNS: u64 = 6;                 //   the ports of the sockets bound to 127.0.0.11 (0: none): UDP's, and 65536 times a stream listener's
+const DNS_IP: u64 = 2130706443;        // 127.0.0.11: Docker's embedded DNS server in a container
+const DNS_PORT: u64 = 53;
 
 const IFN: u64 = 128;                  // interfaces, all namespaces together
 const IF_W: u64 = 10;                  // words per interface:
@@ -1454,9 +1457,55 @@ fn udp_deliver(n: &mut Net, s: u64, ulen: u64)
   let at = (s * RXQ + slot) * UDP_MAX;
   bcopy(&mut n.dq, at, n.pkt, 42, plen);
   dm_set(&mut n, s, slot, 0, plen);
-  dm_set(&mut n, s, slot, 1, be32(n.pkt, 26));
-  dm_set(&mut n, s, slot, 2, be16(n.pkt, 34));
+  let sport = be16(n.pkt, 34);
+  if n.ns != 0 && sport != 0 && sport == nsw(n, n.ns, NS_DNS) % 65536 && be32(n.pkt, 26) / 16777216 == LO_NET {
+    // An answer from the resolver bound to 127.0.0.11 reads as from its port 53.
+    dm_set(&mut n, s, slot, 1, DNS_IP);
+    dm_set(&mut n, s, slot, 2, DNS_PORT);
+  } else {
+    dm_set(&mut n, s, slot, 1, be32(n.pkt, 26));
+    dm_set(&mut n, s, slot, 2, sport);
+  }
   sk_set(&mut n, s, S_COUNT, count + 1);
+}
+
+/// Docker's embedded DNS server listens on 127.0.0.11 in each container's
+/// namespace, at a port of its own, and an iptables rule sends port 53 there.
+/// BastiOS has no netfilter: the port that a socket of namespace n.ns bound
+/// with that address is where traffic for 127.0.0.11:53 goes in that
+/// namespace. This is the port for ip:port (a stream listener's if tcp).
+fn dns_redirect(n: &Net, ns: u64, ip: u64, port: u64, tcp: bool) -> u64
+  requires net_ok(n)
+{
+  if ip != DNS_IP || port != DNS_PORT || ns == 0 || ns >= NNET {
+    return port;
+  }
+  let w = nsw(n, ns, NS_DNS);
+  let mut p = w % 65536;
+  if tcp {
+    p = w / 65536 % 65536;
+  }
+  if p == 0 {
+    return port;
+  }
+  return p;
+}
+
+/// Notes that a socket of namespace ns bound ip:port: a bind to 127.0.0.11
+/// at a port other than 53 makes it the namespace's resolver.
+fn dns_note(n: &mut Net, ns: u64, tcp: bool, ip: u64, port: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if ns == 0 || ns >= NNET || ip != DNS_IP || port == DNS_PORT || port == 0 || port > 65535 {
+    return;
+  }
+  let w = nsw(n, ns, NS_DNS);
+  if tcp {
+    nsset(&mut n, ns, NS_DNS, w % 65536 + port * 65536);
+  } else {
+    nsset(&mut n, ns, NS_DNS, w / 65536 % 65536 * 65536 + port);
+  }
 }
 
 /// Queues the ICMP packet that came in (total bytes from its IP header,
@@ -1685,7 +1734,12 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
   eth_header(&mut n, 0, ETH_IP);
   ip_header(&mut n, 28 + size, IP_UDP, ip);
   put16(&mut n.out, 34, sport);
-  put16(&mut n.out, 36, port);
+  let mut dport = port;
+  let via = dns_redirect(n, n.ns, ip, port, false);
+  if via <= 65535 {
+    dport = via;
+  }
+  put16(&mut n.out, 36, dport);
   put16(&mut n.out, 38, 8 + size);
   bcopy(&mut n.out, 42, buf, 0, size);
   udp_seal(&mut n, ip, 8 + size);
@@ -2404,6 +2458,55 @@ fn sock_bind(c: &mut Nic, s: u64, port: u64) -> bool
       let ok = udp_bind(&mut n, s, port);
       c = Nic::Up(n);
       return ok;
+    },
+  }
+}
+
+/// Notes that a stream socket of namespace ns bound ip:port (see dns_note).
+fn nic_dns_note(c: &mut Nic, ns: u64, ip: u64, port: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+    },
+    Nic::Up(mut n) => {
+      dns_note(&mut n, ns, true, ip, port);
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// The port a stream connection of namespace ns to ip:port goes to (see
+/// dns_redirect).
+fn nic_dns_port(c: &Nic, ns: u64, ip: u64, port: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      return port;
+    },
+    Nic::Up(n) => {
+      return dns_redirect(n, ns, ip, port, true);
+    },
+  }
+}
+
+/// Notes that UDP socket s was bound to ip:port (see dns_note).
+fn sock_dns_note(c: &mut Nic, s: u64, ip: u64, port: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+    },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) {
+        dns_note(&mut n, sk_get(n, s, S_NS), false, ip, port);
+      }
+      c = Nic::Up(n);
     },
   }
 }
