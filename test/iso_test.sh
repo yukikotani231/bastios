@@ -743,6 +743,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = not any(blue(x) for x in range(0, 1000, 8))
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Down minimizes a window that is not maximized")
             fails += not good
+            # The task bar button brings the window back; Alt-F9 minimizes it again.
+            for step in ((-200, -200),) * 4 + ((88, 200), (0, 200), (0, 200), (0, 156)):
+                monitor(f"mouse_move {step[0]} {step[1]}")
+            monitor("mouse_button 1", "mouse_button 0", gap=0.05)
+            time.sleep(1)
+            blue = snapped("alt-f9")
+            good = not any(blue(x) for x in range(0, 1000, 8))
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F9 minimizes the focused window")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)

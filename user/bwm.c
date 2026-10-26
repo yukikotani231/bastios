@@ -1734,6 +1734,11 @@ int main(int argc, char **argv)
                             snap_win(t, code == 103 ? 0 : code == 106 ? 1 : -1);
                             touch_all();
                         }
+                    } else if (code == 67 && down && k_alt) {      /* Alt-F9: minimize the focused window */
+                        struct win *t = focus();
+                        if (t)
+                            minimize(t);
+                        touch_all();
                     } else if (code == 108 && down && k_alt) {     /* Alt-Down: a snapped or maximized window goes back, any other is minimized */
                         struct win *t = focus();
                         if (t && t->maxed)

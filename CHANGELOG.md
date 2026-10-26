@@ -24,6 +24,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - F5 in `bsys` reads the numbers again, as `r` does.
 - In the `bfiles` list F2 renames the entry under the cursor, as `r` does.
 - End zooms the image in `bview` in all the way.
+- Alt-F9 in `bwm` minimizes the focused window.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
 - In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
 - The mouse wheel zooms the image in `bview`: up in, down out.
