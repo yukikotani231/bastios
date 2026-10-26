@@ -697,6 +697,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(1.5)
                 w, h, px = screendump()
                 return lambda x: tuple(px[(3 * w + x) * 3:(3 * w + x) * 3 + 3]) == (40, 90, 200)
+            # Alt-F10 maximizes the window and puts it back.
+            blue = snapped("alt-f10")
+            good = blue(300) and blue(800)
+            blue = snapped("alt-f10")
+            good = good and not blue(1000)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F10 maximizes the window and puts it back")
+            fails += not good
             blue = snapped("alt-left")
             good = blue(300) and not blue(800)
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Left puts the window on the left half of the screen")
