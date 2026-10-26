@@ -1939,6 +1939,30 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Dragging a file onto a directory in the list moves it there.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/dd/sub; echo x > /tmp/dd/f; bwm -n -c bfiles /tmp/dd\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            mark2 = len(out)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 150 %d" % (90 + 3 * 16 + 8), "mouse_button 1", "mouse_move 0 -16", "mouse_button 0")
+            good = until(b"bfiles: moved /tmp/dd/f to /tmp/dd/sub/f", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) a drag from a file onto a directory in bfiles moves the file")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        if good:
+            mark = len(out)
+            q.stdin.write(b"[ -f /tmp/dd/sub/f ] && [ ! -e /tmp/dd/f ] && echo moved$((1+1))\r"); q.stdin.flush()
+            good = until(b"moved2", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) the dragged file is in the directory and gone from the old place")
+            fails += not good
         # The desktop has an icon for each launcher entry; a click on one starts the program.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
