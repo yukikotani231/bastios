@@ -180,7 +180,11 @@ static int bview_main(int argc, char **argv)
         int dz = 0, reset = 0;
         if (esc == 0 && c == 27) { esc = 1; continue; }
         if (esc == 1 && c == '[') { esc = 2; continue; }
-        if (esc == 2) {
+        if (esc == 2 && (c == '5' || c == '6')) { esc = c; continue; }      /* Page Up and Page Down are ESC [ 5 ~ and ESC [ 6 ~ */
+        if (esc == '5' || esc == '6') {
+            c = c == '~' ? (esc == '5' ? '+' : '-') : 0;                     /* Page Up zooms in, Page Down out */
+            esc = 0;
+        } else if (esc == 2) {
             esc = 0;
             c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : c == 'H' ? '0' : c == 'F' ? '9' : 0;   /* Home resets the zoom, End zooms in all the way */
         } else if (esc == 1) {

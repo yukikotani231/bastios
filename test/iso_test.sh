@@ -2044,6 +2044,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             r4 = 0
         print(("ok  " if good else "FAIL"), f"({name}) End zooms in all the way in bview ({r4} against {r0} pixels)")
         fails += not good
+        # Page Up zooms in and Page Down out.
+        if good:
+            monitor("sendkey home")
+            time.sleep(2)
+            monitor("sendkey pgup")
+            time.sleep(2)
+            r5 = red()
+            monitor("sendkey pgdn")
+            time.sleep(2)
+            r6 = red()
+            good = r5 > r0 and abs(r6 - r0) < r0 // 20
+        else:
+            r5 = r6 = 0
+        print(("ok  " if good else "FAIL"), f"({name}) Page Up and Page Down zoom in and out in bview ({r5}, {r6} against {r0} pixels)")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
