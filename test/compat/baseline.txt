@@ -1882,6 +1882,9 @@ go: go: a JSON path library (tidwall/gjson) with a vendored dependency, tested w
 go: go: a semantic version library (Masterminds/semver) tested with go test -mod=vendor
 go: go: a map-to-struct decoder (mitchellh/mapstructure) tested with go test -mod=vendor
 go: go: a type conversion library (spf13/cast) tested with go test -mod=vendor
+go: go: an error wrapping library (hashicorp/errwrap) tested with go test -mod=vendor
+go: go: a struct and slice comparison library (google/go-cmp) tested with go test -mod=vendor
+go: go: a JSON setter (tidwall/sjson) with vendored dependencies tested with go test -mod=vendor
 busybox: dd one large read of a file
 java: java: a real library (Apache Commons Lang, its number, tuple, text and function packages) with its test libraries, tested with the JUnit console launcher
 java: java: a real library (Apache Commons Collections, its queue, comparator, functor, iterator and trie packages) with its test libraries, tested with the JUnit console launcher
