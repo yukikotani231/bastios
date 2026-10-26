@@ -737,6 +737,51 @@ fn nl_route(n: &mut Net, dst: u64, len: u64, gw: u64, i: u64, src: u64, flags: u
   nl_end(&mut n);
 }
 
+/// RTM_GETROUTE of one destination (RTA_DST, an IPv4 address): the route
+/// that reaches it, as one RTM_NEWROUTE, or an errno. An address on the
+/// subnet of an interface is reached on the link, any other through the
+/// default gateway.
+fn rt_getroute(n: &mut Net, b: &Bytes, at: u64, end: u64, seq: u64, port: u64) -> u64
+  requires net_ok(n) && at + 28 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  let d = nla_find(b, at + 28, end, RTA_DST);
+  if nla_len(b, d) != 4 {
+    return NE_INVAL;
+  }
+  let ip = be_ip(b, d);
+  if ip == 0 {
+    return NE_INVAL;
+  }
+  if n.ns == 0 {
+    if n.ip == 0 {
+      return NE_NETUNREACH;
+    }
+    let s = if_span(n, IF_ETH);
+    if ip / s == n.ip / s {
+      nl_route(&mut n, ip, 32, 0, IF_ETH, n.ip, 0, seq, port);
+      return 0;
+    }
+    if n.gw == 0 {
+      return NE_NETUNREACH;
+    }
+    nl_route(&mut n, ip, 32, n.gw, IF_ETH, n.ip, 0, seq, port);
+    return 0;
+  }
+  let o = route_if(n, ip);
+  if o < IFN {
+    nl_route(&mut n, ip, 32, 0, o, if_ip(n, o), 0, seq, port);
+    return 0;
+  }
+  let g = nsw(n, n.ns, NS_GW);
+  let go = route_if(n, g);
+  if g == 0 || go >= IFN {
+    return NE_NETUNREACH;
+  }
+  nl_route(&mut n, ip, 32, g, go, if_ip(n, go), 0, seq, port);
+  return 0;
+}
+
 /// Every route of namespace n.ns: the default one, then one for each
 /// interface's subnet.
 fn nl_routes(n: &mut Net, seq: u64, port: u64)
@@ -818,8 +863,9 @@ fn auto_name(n: &Net, ns: u64, kind: u64, klen: u64, half: u64) -> u64
 /// RTM_NEWLINK and RTM_SETLINK (the message at b[at..end]): makes a veth
 /// pair or a bridge, or changes an interface. Returns 0 or an errno.
 /// tgt: the namespace IFLA_NET_NS_PID or _FD names, NS_UNSAID, or NNET if
-/// it named none that exists.
-fn rt_newlink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, tgt: u64, flags: u64) -> u64
+/// it named none that exists. ptgt: the same for a veth's peer, named by
+/// the attributes in its VETH_INFO_PEER (the peer is made there).
+fn rt_newlink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, tgt: u64, ptgt: u64, flags: u64) -> u64
   requires net_ok(n) && at + 32 <= end && end <= blen(b) && ns < NNET
   ensures net_ok(n)
 {
@@ -840,7 +886,7 @@ fn rt_newlink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, tgt: u64, flag
     data = nla_find(b, li, li + ll, IFLA_INFO_DATA);
   }
   if flags / NLM_F_CREATE % 2 == 1 && idx == 0 && (na == 0 || if_by_name(n, ns, name0, name1) == NO_IF) {
-    return rt_make(&mut n, b, ns, kind, data, name0, name1);
+    return rt_make(&mut n, b, ns, kind, data, name0, name1, ptgt);
   }
   let mut i = NO_IF;
   if idx != 0 {
@@ -892,7 +938,8 @@ fn rt_newlink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, tgt: u64, flag
 
 /// Makes a veth pair or a bridge in namespace ns named name0/1 (0: one is
 /// made up). data: the IFLA_INFO_DATA attribute (a veth's peer), or 0.
-fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, name1: u64) -> u64
+/// ptgt: the namespace the peer is made in, NS_UNSAID for ns.
+fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, name1: u64, ptgt: u64) -> u64
   requires net_ok(n) && ns < NNET
   ensures net_ok(n)
 {
@@ -930,12 +977,19 @@ fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, na
       p1 = nla_name(b, pn, 1);
     }
   }
-  if p0 != 0 && if_by_name(n, ns, p0, p1) != NO_IF {
+  let mut pns = ns;
+  if ptgt != NS_UNSAID {
+    if !ns_live(n, ptgt) {
+      return NE_INVAL;
+    }
+    pns = ptgt;
+  }
+  if p0 != 0 && (if_by_name(n, pns, p0, p1) != NO_IF || (pns == ns && p0 == w0 && p1 == w1)) {
     return NE_EXIST;
   }
   if_make(&mut n, a, IFK_VETH, ns, w0, w1);
   if p0 == 0 {
-    p0 = auto_name(n, ns, KIND_VETH, 4, 0);
+    p0 = auto_name(n, pns, KIND_VETH, 4, 0);
     p1 = 0;
   }
   let c = if_free_slot(n);
@@ -943,7 +997,7 @@ fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, na
     iset(&mut n, a, IF_KIND, IFK_FREE);
     return NE_NOSPC;
   }
-  if_make(&mut n, c, IFK_VETH, ns, p0, p1);
+  if_make(&mut n, c, IFK_VETH, pns, p0, p1);
   iset(&mut n, a, IF_PEER, c);
   iset(&mut n, c, IF_PEER, a);
   return 0;
@@ -1094,7 +1148,7 @@ fn rt_route(n: &mut Net, b: &Bytes, at: u64, end: u64, del: bool, flags: u64) ->
 
 /// The requests in b[0..len] from netlink socket q (of namespace ns), each
 /// answered on q. admin: the sender may change things (CAP_NET_ADMIN).
-fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
+fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, ptgt: u64, admin: bool)
   requires net_ok(n) && q < NLS && len <= blen(b)
   ensures net_ok(n)
 {
@@ -1188,13 +1242,15 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
         }
         nl_done(&mut n, seq, port);
       } else if (kind == RTM_NEWLINK || kind == RTM_SETLINK) && ml >= 32 {
-        e = rt_newlink(&mut n, b, at, end, ns, tgt, fl);
+        e = rt_newlink(&mut n, b, at, end, ns, tgt, ptgt, fl);
       } else if kind == RTM_DELLINK && ml >= 32 {
         e = rt_dellink(&mut n, b, at, end, ns);
       } else if (kind == RTM_NEWADDR || kind == RTM_DELADDR) && ml >= 24 {
         e = rt_addr(&mut n, b, at, end, ns, kind == RTM_DELADDR);
       } else if (kind == RTM_NEWROUTE || kind == RTM_DELROUTE) && ml >= 28 {
         e = rt_route(&mut n, b, at, end, kind == RTM_DELROUTE, fl);
+      } else if kind == RTM_GETROUTE && !dump && ml >= 28 {
+        e = rt_getroute(&mut n, b, at, end, seq, port);
       } else if dump {
         nl_done(&mut n, seq, port);   // a dump of something not kept: empty
       } else if kind != NLMSG_NOOP && kind != NLMSG_DONE {
@@ -1412,7 +1468,7 @@ fn nic_nl_queued(c: &Nic, q: u64) -> u64
   }
 }
 
-fn nic_nl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, tgt: u64, admin: bool)
+fn nic_nl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, tgt: u64, ptgt: u64, admin: bool)
   requires nic_ok(c)
   ensures nic_ok(c)
 {
@@ -1420,7 +1476,7 @@ fn nic_nl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, tgt: u64, admin: boo
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
       if q < NLS && len <= blen(b) {
-        rt_request(&mut n, q, b, len, tgt, admin);
+        rt_request(&mut n, q, b, len, tgt, ptgt, admin);
       }
       c = Nic::Up(n);
     },
