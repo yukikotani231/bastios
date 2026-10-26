@@ -41,9 +41,10 @@ jobs:
           code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
           guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
           if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
-  # test/all.sh in five parts that run on runners of their own (LANES, see
-  # test/all.sh): the x86-64 boots in four, the shell and network tests
-  # (a b), the lanes c, e and f, and the AArch64 kernel's. The x86-64
+  # test/all.sh in seven parts that run on runners of their own (LANES, see
+  # test/all.sh): the x86-64 boots in six, the shell and network tests
+  # (a b), the lanes c and e, the ISO boots in three (f g h), and the
+  # AArch64 kernel's. The x86-64
   # parts build the same kernel, so they share one proof cache; the AArch64
   # part keeps its own, since the caches are saved and restored whole.
   test:
@@ -67,6 +68,12 @@ jobs:
             cache: x86-64
           - part: x86-64 f
             lanes: f
+            cache: x86-64
+          - part: x86-64 g
+            lanes: g
+            cache: x86-64
+          - part: x86-64 h
+            lanes: h
             cache: x86-64
           - part: aarch64
             lanes: d
