@@ -1893,3 +1893,5 @@ ruby: ruby: threads, a mutex, a queue and fibers
 ruby: ruby: fork, pipes, exit status and signals
 ruby: ruby: the standard library: json, yaml, digest, zlib, openssl, time
 ruby: ruby: a real project (rake) tested with its own test suite
+ruby: ruby: a real project (rexml) tested with its own test suite
+ruby: ruby: a real project (kramdown) tested with its own test suite
