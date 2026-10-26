@@ -38,6 +38,9 @@ fn lx_number(n: u64) -> u64
   if n == 178 { return LX_GETTID; }
   if n == 129 { return LX_KILL; }
   if n == 220 { return LX_CLONE; }
+  if n == 235 { return LX_MBIND; }
+  if n == 236 { return LX_GET_MEMPOLICY; }
+  if n == 237 { return LX_SET_MEMPOLICY; }
   if n == 221 { return LX_EXECVE; }
   if n == 260 { return LX_WAIT4; }
   if n == 29 { return LX_IOCTL; }
@@ -179,6 +182,8 @@ fn lx_number(n: u64) -> u64
   if n == 169 { return LX_GETTIMEOFDAY; }
   if n == 170 { return LX_SETTIMEOFDAY; }
   if n == 171 { return LX_ADJTIMEX; }
+  if n == 224 { return LX_SWAPON; }
+  if n == 225 { return LX_SWAPOFF; }
   if n == 173 { return LX_GETPPID; }
   if n == 174 { return LX_GETUID; }
   if n == 175 { return LX_GETEUID; }

@@ -13,7 +13,7 @@
 #include <time.h>
 
 static volatile int got;
-static volatile char *where;
+static char *volatile where;   /* the pointer is volatile: a handler sets it, and the compiler must not assume otherwise */
 static void h(int s) { char here; got = s; where = &here; }
 
 /* Sends SIGUSR1 to the parent after 50 ms, from a child. */
@@ -110,5 +110,12 @@ int main(void) {
            for (int i = 0; i < 24; i++) { k[i] = fork(); if (k[i] == 0) { pause(); _exit(0); } if (k[i] > 0) n++; }
            for (int i = 0; i < 24; i++) if (k[i] > 0) { kill(k[i], SIGKILL); waitpid(k[i], 0, 0); }
            n == 24; }));
+    EXPECT("sigqueue carries a 64-bit sigval whole", ({ static volatile unsigned long long gv; static volatile int gc;
+           struct sigaction sa; memset(&sa, 0, sizeof sa); sa.sa_flags = SA_SIGINFO;
+           sa.sa_sigaction = (void (*)(int, siginfo_t *, void *)) 0;
+           void hv(int s, siginfo_t *si, void *u) { gv = (unsigned long long) si->si_value.sival_ptr; gc = si->si_code; }
+           sa.sa_sigaction = hv; sigaction(SIGUSR2, &sa, 0);
+           union sigval v; v.sival_ptr = (void *) 0x123456789abcdef0ull;
+           sigqueue(getpid(), SIGUSR2, v) == 0 && gv == 0x123456789abcdef0ull && gc == SI_QUEUE; }));
     return done();
 }

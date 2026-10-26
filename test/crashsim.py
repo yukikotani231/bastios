@@ -83,13 +83,28 @@ class Guest:
         self.q.wait()
 
 
-def record(kernel, runs, dirname, timeout):
-    """Runs crashme RUNS times on a blank disk; returns (base, log path)."""
+def mpc_disk(path):
+    """A disk holding user/mpc (test/compat/mkdisk.py): /disk/mpc."""
+    subprocess.run([sys.executable, os.path.join(os.path.dirname(os.path.abspath(__file__)), "compat", "mkdisk.py"),
+                    path, "mpc=" + os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "build/user/mpc.elf")],
+                   check=True)
+
+
+def record(kernel, runs, dirname, timeout, workload="crashme", secs=6, hog=False):
+    """Runs crashme RUNS times on a blank disk (or, for mpc, SECS seconds of
+    its workers on a disk holding it); returns (base, log path)."""
     disk = os.path.join(dirname, "rec.img")
     log = os.path.join(dirname, "log.img")
-    for path, size in ((disk, DISK_BYTES), (log, LOG_BYTES)):
-        with open(path, "wb") as f:
-            f.truncate(size)
+    if workload == "mpc":
+        mpc_disk(disk)
+        with open(disk, "rb") as f:
+            base = f.read()
+    else:
+        base = bytes(DISK_BYTES)
+        with open(disk, "wb") as f:
+            f.truncate(DISK_BYTES)
+    with open(log, "wb") as f:
+        f.truncate(LOG_BYTES)
     g = Guest(kernel, [
         "-machine", "q35", "-device", "pcie-root-port,id=rp1,chassis=1",
         "-blockdev", f"driver=file,filename={disk},node-name=d",
@@ -97,17 +112,26 @@ def record(kernel, runs, dirname, timeout):
         "-blockdev", "driver=blklogwrites,file=d,log=l,log-sector-size=512,node-name=w",
         "-device", "nvme,serial=bastios,drive=w,bus=rp1"], timeout)
     ok = g.until(b"bastios> ")
-    for n in range(runs):
-        if not ok:
-            break
-        mark = g.send("crashme")
-        ok = g.until(b"crashme: done", b"crashme: bad", start=mark) and b"crashme: done" in g.out[mark:]
-        ok = ok and g.until(b"bastios> ", start=mark)
+    if workload == "mpc":
+        if ok:
+            mark = g.send("ash")
+            ok = g.until(b"\n# ", start=mark)
+        if ok:
+            mark = g.send(("MPC_HOG=1 " if hog else "") + "/disk/mpc run /disk/pc 4")
+            ok = g.until(b"mpc: running", start=mark)
+            time.sleep(secs)
+    else:
+        for n in range(runs):
+            if not ok:
+                break
+            mark = g.send("crashme")
+            ok = g.until(b"crashme: done", b"crashme: bad", start=mark) and b"crashme: done" in g.out[mark:]
+            ok = ok and g.until(b"bastios> ", start=mark)
     g.kill()
     if not ok:
         sys.stdout.write(g.out[-2000:].decode(errors="replace"))
         sys.exit("crashsim: the recording run did not finish")
-    return bytes(DISK_BYTES), log
+    return base, log
 
 
 def parse(log):
@@ -266,10 +290,77 @@ def crashme_check(img):
     return None
 
 
+def mpc_pat(k, ident, i):
+    return 1 + (k * 131 + ident * 17 + i * 7 + (i >> 12) * 29) % 250
+
+
+_mpc_cache = {}
+
+
+def mpc_bytes(k, ident, n):
+    """The first N bytes of the pattern of identity (K, IDENT)."""
+    have = _mpc_cache.get((k, ident), b"")
+    if len(have) < n:
+        have = bytes(mpc_pat(k, ident, i) for i in range(max(n, 200000)))
+        _mpc_cache[(k, ident)] = have
+    return have[:n]
+
+
+def mpc_check(img, top="pc"):
+    """The first thing `mpc check` would find wrong in the tree under
+    TOP (user/mpc.c), or None: every name of a known form, every file's
+    bytes the pattern of its identity, no identity under two names."""
+    import re
+    f = files(img)
+    seen = set()
+
+    def ok(path, k, ident):
+        if (k, ident) in seen or not 0 <= k < 16:
+            return False
+        seen.add((k, ident))
+        d = f[path]
+        # The pattern repeats with period 4096 * 250 / gcd; compare by blocks.
+        return d == mpc_bytes(k, ident, len(d))
+
+    for path in sorted(f):
+        if not path.startswith(top + "/") or path.endswith("/"):
+            continue
+        rel = path[len(top) + 1:]
+        m = re.fullmatch(r"hog/h(\d+)", rel)
+        if m:
+            if f[path] != mpc_bytes(15, 160, len(f[path])):
+                return rel
+            continue
+        m = re.fullmatch(r"w(\d+)/(final|tmp)", rel)
+        if m:
+            d = f[path]
+            k = int(m[1])
+            if (m[2] == "final" and len(d) != 20000) or d != mpc_bytes(k, 150, len(d)) or len(d) > 20000:
+                return rel
+            if (k, m[2]) in seen:
+                return rel
+            seen.add((k, m[2]))
+            continue
+        m = re.fullmatch(r"w(\d+)/f(\d)", rel) or re.fullmatch(r"shared/k(\d+)f(\d)", rel)
+        if m:
+            if not ok(path, int(m[1]), int(m[2])):
+                return rel
+            continue
+        m = re.fullmatch(r"w(\d+)/d(\d)/x", rel) or re.fullmatch(r"shared/dk(\d+)m(\d)/x", rel)
+        if m:
+            if not ok(path, int(m[1]), 100 + int(m[2])):
+                return rel
+            continue
+        if re.fullmatch(r"(w\d+|shared)(/(d\d|dk\d+m\d))?/", rel + "/") or rel.count("/") == 0 or rel == "hog/":
+            continue
+        return rel
+    return None
+
+
 def check_range(args):
     """fsck on every cut state of epochs [lo, hi). Returns (states, the
     failures as (epoch, kind, writes, errors), the boot candidates)."""
-    base, epochs, lo, hi, seed, every = args
+    base, epochs, lo, hi, seed, every, workload = args
     rng = random.Random(seed * 100003 + lo)
     img = bytearray(base)
     for e in epochs[:lo]:
@@ -289,11 +380,11 @@ def check_range(args):
             if key not in seen:
                 seen.add(key)
                 states += 1
-                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5"):
+                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5", b"BSTDISK6"):
                     errors, _, _ = fsck.check(img)
                     if not errors:
-                        bad = crashme_check(img)
-                        errors = [f"crashme would find {bad} wrong"] if bad else []
+                        bad = mpc_check(img) if workload == "mpc" else crashme_check(img)
+                        errors = [f"{workload} would find {bad} wrong"] if bad else []
                     if errors:
                         fails.append((k, kind, writes, errors))
                     elif kind != "prefix":
@@ -312,10 +403,21 @@ def rebuild(base, epochs, k, writes):
     return img
 
 
-def boot_check(kernel, path, timeout):
+def boot_check(kernel, path, timeout, workload="crashme"):
     g = Guest(kernel, ["-drive", f"file={path},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"], timeout)
     ok = g.until(b"bastios> ")
     line = "(no prompt)"
+    if ok and workload == "mpc":
+        mark = g.send("ash")
+        ok = g.until(b"\n# ", start=mark)
+        if ok:
+            mark = g.send("/disk/mpc check /disk/pc")
+            ok = g.until(b"mpc: clean", b"mpc: damaged", start=mark)
+            lines = [l for l in g.out[mark:].split(b"\n") if b"mpc:" in l]
+            line = lines[0].strip().decode(errors="replace") if lines else "(nothing)"
+            ok = ok and b"mpc: clean" in g.out[mark:]
+        g.kill()
+        return ok, line
     if ok:
         mark = g.send("crashme")
         ok = g.until(b" records\r\n", b"crashme: bad", start=mark)
@@ -336,19 +438,23 @@ def main():
     ap.add_argument("--every", type=int, default=1, help="cut only every EVERY-th epoch (make test: a quick pass)")
     ap.add_argument("--jobs", type=int, default=min(4, os.cpu_count() or 1))
     ap.add_argument("--timeout", type=int, default=300)
+    ap.add_argument("--workload", default="crashme", choices=["crashme", "mpc"],
+                    help="mpc: concurrent workers (user/mpc.c) instead of crashme")
+    ap.add_argument("--hog", action="store_true", help="mpc: one more process fills the disk and frees it again")
+    ap.add_argument("--secs", type=int, default=6, help="how long mpc runs while recorded")
     a = ap.parse_args()
     rng = random.Random(a.seed)
     fails = 0
     with tempfile.TemporaryDirectory() as tmp:
         t0 = time.time()
-        base, log = record(a.kernel, a.runs, tmp, a.timeout)
+        base, log = record(a.kernel, a.runs, tmp, a.timeout, a.workload, a.secs, a.hog)
         epochs = parse(log)
         writes = sum(len(e) for e in epochs)
-        print(f"crashsim: recorded {a.runs} crashme run(s): {writes} writes in {len(epochs)} flush epochs "
+        print(f"crashsim: recorded {a.runs if a.workload == 'crashme' else str(a.secs) + ' s of mpc'} {'crashme run(s)' if a.workload == 'crashme' else ''}: {writes} writes in {len(epochs)} flush epochs "
               f"(largest {max(len(e) for e in epochs)} writes), {time.time() - t0:.0f} s")
         t0 = time.time()
         step = max(1, (len(epochs) + 4 * a.jobs - 1) // (4 * a.jobs))
-        ranges = [(base, epochs, lo, min(lo + step, len(epochs)), a.seed, a.every) for lo in range(0, len(epochs), step)]
+        ranges = [(base, epochs, lo, min(lo + step, len(epochs)), a.seed, a.every, a.workload) for lo in range(0, len(epochs), step)]
         with multiprocessing.Pool(a.jobs) as pool:
             results = pool.map(check_range, ranges)
         states = sum(r[0] for r in results)
@@ -380,7 +486,7 @@ def main():
             path = os.path.join(tmp, "cut.img")
             with open(path, "wb") as f:
                 f.write(rebuild(base, epochs, k, want))
-            ok, line = boot_check(a.kernel, path, a.timeout)
+            ok, line = boot_check(a.kernel, path, a.timeout, a.workload)
             booted += 1
             print(("ok  " if ok else "FAIL"), f"boot after a {kind} cut in epoch {k} ({n} writes):", line)
             fails += not ok
@@ -390,7 +496,7 @@ def main():
             path = os.path.join(tmp, "cut.img")
             with open(path, "wb") as f:
                 f.write(rebuild(base, epochs, k, w))
-            _, line = boot_check(a.kernel, path, a.timeout)
+            _, line = boot_check(a.kernel, path, a.timeout, a.workload)
             booted += 1
             print(f"     boot after the failing {kind} cut in epoch {k}:", line)
         print(f"crashsim: booted {booted} cut states ({time.time() - t0:.0f} s)")

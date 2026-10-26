@@ -222,7 +222,7 @@ _start:
         mov     %eax, %cr4
         mov     $0xC0000080, %ecx     /* EFER */
         rdmsr
-        or      $0x101, %eax          /* LME | SCE (the `syscall` instruction) */
+        or      $0x901, %eax          /* LME | SCE (the `syscall` instruction) | NXE (user pages the program may write are not executable) */
         wrmsr
         mov     %cr0, %eax
         and     $0xFFFFFFFB, %eax     /* clear EM: x87/SSE run natively */
@@ -288,13 +288,55 @@ bst_cpu_enter:
         and     $-CORE_BLOCK, %rsi              /* this processor's block */
         mov     %rsp, CORE_KRSP(%rsi)
 
+        /* Once per processor: what a trap loads into CR3 (CORE_KCR3). With
+         * PCIDs on (bst_pcid_on, platform.c) CR4.PCIDE comes on here, while CR3
+         * still has PCID 0, the kernel's table is PCID 1 and loaded without
+         * flushing (it never changes once the processors run: a trap no longer
+         * empties the TLB of the kernel's translations), and the shadow table
+         * is PCID 2, loaded with a flush every time (its slot 0 changes with
+         * the process, and the process's table with every munmap and mprotect). */
+        cmpq    $0, CORE_KCR3(%rsi)
+        jne     4f
+        movabs  $bst_kernel_pml4, %rax
+        cmpq    $0, bst_pcid_on(%rip)
+        je      5f
+        mov     %cr4, %rdx
+        bts     $17, %rdx                       /* PCIDE */
+        mov     %rdx, %cr4
+        or      $1, %rax
+        bts     $63, %rax                       /* do not flush */
+        movq    $2, CORE_UPCID(%rsi)
+5:      mov     %rax, CORE_KCR3(%rsi)
+4:
         /* The shadow table: slot 0 is the window's level-3 table. */
         mov     CORE_UROOT(%rsi), %rax
-        mov     CORE_INDEX(%rsi), %rdx
+        mov     %eax, %edi
+        and     $1, %edi                        /* set below by the entry before this one, unless the prelude entered a table since */
+        orq     $1, CORE_UROOT(%rsi)
+        and     $-2, %rax
+        test    %edi, %edi
+        jnz     7f
+        mov     bst_pt_gen(%rip), %r8           /* read before CR3 is loaded: a take after it shows at the next entry */
+        cmp     CORE_LROOT(%rsi), %rax          /* the table of the last flushing load, and no entry taken out of any table since (the prelude entered the table for a system call's copy, say) */
+        jne     8f
+        cmp     CORE_LGEN(%rsi), %r8
+        je      9f
+8:      mov     %rax, CORE_LROOT(%rsi)
+        mov     %r8, CORE_LGEN(%rsi)
+        jmp     7f
+9:      inc     %edi
+7:      mov     CORE_INDEX(%rsi), %rdx
         shl     $12, %rdx
         movabs  $bst_shadow_pml4, %rcx
         add     %rcx, %rdx
-        mov     %rdx, CORE_CR3(%rsi)
+        mov     %rdx, %rcx
+        or      CORE_UPCID(%rsi), %rcx
+        test    %edi, %edi
+        jz      6f
+        cmpq    $0, CORE_UPCID(%rsi)
+        je      6f
+        bts     $63, %rcx                       /* still the same lease: nothing was taken out of the table, keep its translations */
+6:      mov     %rcx, CORE_CR3(%rsi)
         mov     8(%rax), %rax                   /* slot 1 of the process's table */
         mov     %rax, (%rdx)
         movq    $1, CORE_UMODE(%rsi)
@@ -326,14 +368,17 @@ bst_cpu_enter:
         cmp     %rcx, %rax
         jbe     3f
         xor     %eax, %eax
-3:      mov     %rax, %rdx
+3:      mov     %rax, %rbx
+        bts     $63, %rbx               /* canonical bases never have bit 63: 0 in CORE_FSB means unknown */
+        cmp     CORE_FSB(%rsi), %rbx
+        je      6f                      /* the register holds it already: the same process comes back */
+        mov     %rbx, CORE_FSB(%rsi)
+        mov     %rax, %rdx
         shr     $32, %rdx
         mov     $0xC0000100, %ecx       /* FS_BASE */
         wrmsr
+6:
 
-        mov     $UDATA, %ax
-        mov     %ax, %ds
-        mov     %ax, %es
         mov     1*8(%rsi), %rbx
         mov     2*8(%rsi), %rcx
         mov     3*8(%rsi), %rdx
@@ -441,7 +486,7 @@ trap_alias:
         cmpq    $0, CORE_UMODE(%rax)
         je      1f
         movq    $0, CORE_UMODE(%rax)
-        movabs  $bst_kernel_pml4, %rax
+        mov     CORE_KCR3(%rax), %rax
         mov     %rax, %cr3
 1:      movabs  $trap_common, %rax
         jmp     *%rax
@@ -519,9 +564,6 @@ trap_common:
          * below their target. iretq gives the user its own DF back from the
          * saved RFLAGS. (syscall clears DF through FMASK already.) */
         cld
-        mov     $KDATA, %ax
-        mov     %ax, %ds
-        mov     %ax, %es
         mov     120(%rsp), %rdi
         call    bst_lapic_ack           /* smp.c: end-of-interrupt for local APIC vectors */
         testb   $3, 144(%rsp)
@@ -550,10 +592,15 @@ trap_common:
         mov     152(%rsp), %rax; mov %rax, 17*8(%rdi)
         mov     128(%rsp), %rax; mov %rax, 18*8(%rdi)
         mov     %cr2, %rax;      mov %rax, 19*8(%rdi)
+        cmpq    $0x81, 120(%rsp)
+        je      1f                      /* `syscall`: the base is what the kernel last set (a program can change it only through a system call, CR4.FSGSBASE being off) */
         mov     $0xC0000100, %ecx       /* FS_BASE */
         rdmsr
         shl     $32, %rdx
         or      %rdx, %rax;      mov %rax, 20*8(%rdi)
+        bts     $63, %rax
+        mov     %rax, CORE_FSB(%rdi)    /* what the register holds, for bst_cpu_enter */
+1:
         mov     120(%rsp), %rax
         mov     CORE_KRSP(%rdi), %rsp
         pop     %r15

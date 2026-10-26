@@ -82,7 +82,7 @@ def boot(cpus, with_disk=False, virtio=False, nvme=False, nvme4k=False, ahci=Fal
                "-device", "virtio-net-pci,netdev=n0"]
     # 1G: the kernel's arena is a fraction of RAM (4 MiB up to 128 MiB, 32 MiB
     # here). The per-process tables take 24 KiB a process and double with the
-    # process table, so the 300 processes of mproc need several MiB of it.
+    # process table, so the 700 processes of mproc need several MiB of it.
     return subprocess.Popen(
         [qemu_bin, "-kernel", kernel_path or kernel, "-m", "1G", "-smp", str(cpus),
          "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
@@ -195,6 +195,7 @@ steps = [
     ("cpus", f"processors running: {smp}\r\n".encode()),
     ("about", b"proved safe"),
     ("echo hello world", b"hello world"),
+    ("echo a\\eb", b"a\x1bb"),
     ("add 2 40", b"42"),
     ("mul 3 7", b"21"),
     ("mul 4294967296 4294967296", b"overflow"),
@@ -262,6 +263,10 @@ steps = [
     ("mhello > lxout; read y < lxout; echo y=$y", b"y=hello from musl: mhello, argc 1, 6", b"\n# "),
     ("export GREETING=hey; ash", b"built-in shell (ash)", b"\n# "),
     ("echo env $GREETING", b"env hey", b"\n# "),
+    # The environment the kernel gives what it starts names a UTF-8 locale,
+    # and /etc/profile (read by login shells) says the same.
+    ("echo lang $LANG", b"lang C.UTF-8", b"\n# "),
+    ("while read l; do echo p:$l; done < /etc/profile", b"p:export LANG=C.UTF-8", b"\n# "),
     ("exit", b"", b"\n# "),
     ("elfpie a b", b"elfpie: ok", b"\n# "),
     # execve of a file: elfdemo is the elfpie program installed at boot.
@@ -303,9 +308,9 @@ steps = [
     # src/tcpbuf.bastio), so the later page counts may be lower than the
     # first by that much.
     ("mtcp loop 3000000", b"mtcp: loop 3000000 bytes, 0 wrong", b"\n# "),
-    # 100 connections to ourselves at once is 200 in the kernel's table (it
-    # held 32), and 30 UDP sockets at once (8 before).
-    ("mtcp many 100", b"mtcp: 100 connections and 30 udp sockets, 16 queued", b"\n# "),
+    # 450 connections to ourselves at once is 900 in the kernel's table (it
+    # held 32, then 240), and 250 UDP sockets at once (32 before).
+    ("mtcp many 450", b"mtcp: 450 connections and 250 udp sockets, 64 queued", b"\n# "),
     ("sleep 1; echo slept$((1+1))", b"\r\nslept2\r\n", b"\n# "),
     # More processes at once than the 32 rows the process table starts with:
     # it grows (new_pid), and /proc lists three-digit pids. (stdin from the
@@ -322,8 +327,12 @@ steps = [
     # rmdir refusing a directory that is not empty.
     ("mkdir dd; cd dd; /bin/pwd; echo deep > f; cat ../dd/f", b"\r\n/dd\r\ndeep\r\n", b"\n# "),
     ("mkdir sub; cd sub && /bin/pwd && cd ../.. && /bin/pwd; ls dd", [b"\r\n/dd/sub\r\n/\r\n", b"sub"], b"\n# "),
+    # A directory lists only its own entries, though the disk's slots hold its neighbours' between them (getdents skips ahead over the others).
+    ("mkdir gl1 gl2; echo 1 > gl1/a; echo 2 > gl2/b; echo 3 > gl1/c; echo 4 > gl2/d; mkdir gl1/s; echo 5 > gl1/s/e; echo 6 > gl2/f; echo gl1/*; echo gl2/*; echo gl1/s/*; rm gl2/d; echo gl2/*", b"\r\ngl1/a gl1/c gl1/s\r\ngl2/b gl2/d gl2/f\r\ngl1/s/e\r\ngl2/b gl2/f\r\n", b"\n# "),
     ("rmdir dd; echo r=$?", [b"not empty", b"r=1"], b"\n# "),
     ("rm dd/f; rmdir dd/sub dd; test -d dd || echo gone$((1+1))", b"\r\ngone2\r\n", b"\n# "),
+    # getcwd of a working directory that has been removed fails with ENOENT, as on Linux.
+    ("mkdir gd; cd gd; rmdir ../gd; /bin/pwd >/dev/null 2>&1; echo p=$?; cd /", b"\r\np=1\r\n", b"\n# "),
     # rename through BusyBox's mv: over a file, into a directory, and a
     # directory with its contents.
     ("echo one > m1; echo two > m2; mv m1 m2; cat m2; test -e m1 || echo moved$((1+1))", b"\r\none\r\nmoved2\r\n", b"\n# "),
@@ -348,6 +357,10 @@ steps = [
     # and the file still there after an unmount and a second mount.
     ("truncate -s 1M im; mkfs.bstdisk3 im && mkdir mm && mount -t bstdisk3 im mm && echo kept > mm/f && umount mm && mount -t bstdisk3 im mm && cat mm/f; cat /proc/mounts; umount mm; rm im; rmdir mm; echo lo$((1+1))",
      [b"\r\nkept\r\n", b"bstdisk3 /mm bstdisk3 rw", b"\r\nlo2\r\n"], b"\n# "),
+    # Directories made on that file system ride the next commit: a tree of
+    # new directories and the files directly in them survives a remount.
+    ("truncate -s 1M im2; mkfs.bstdisk3 im2 && mkdir mm2 && mount -t bstdisk3 im2 mm2 && mkdir mm2/a mm2/a/b mm2/c && echo 1 > mm2/a/f && echo 2 > mm2/a/b/g && echo 3 > mm2/c/h && umount mm2 && mount -t bstdisk3 im2 mm2 && cat mm2/a/f mm2/a/b/g mm2/c/h; umount mm2; rm im2; rmdir mm2; echo dd$((1+1))",
+     [b"\r\n1\r\n2\r\n3\r\n", b"\r\ndd2\r\n"], b"\n# "),
     # A file in memory past the 64 MiB it was once limited to: grown to
     # 300 MiB (holes cost no pages), then written at its end.
     ("truncate -s 300M bigram; stat -c %s bigram; echo z >> bigram; stat -c %s bigram; rm bigram; echo bg$((1+1))",
@@ -422,6 +435,10 @@ steps = [
     # user without a mount namespace of its own (or without any) mounts nothing.
     ("su alice -c 'mkdir -p /tmp/ur; unshare -U -r -m sh -c \"mount -t tmpfs t /tmp/ur && echo own > /tmp/ur/f && cat /tmp/ur/f; ls -ln /tmp/ur/f\"; ls -A /tmp/ur | wc -l; unshare -U -r sh -c \"mount -t tmpfs t /tmp/ur || echo nons\"; mount -t tmpfs t /tmp/ur || echo plain; rmdir /tmp/ur'",
      [b"\r\nown\r\n", b"0        0", b"\r\n0\r\n", b"nons", b"plain"], b"\n# "),
+    # /sys/class/power_supply exists and is empty (a machine without a battery;
+    # psutil.sensors_battery lists it).
+    ("ls -A /sys/class/power_supply | wc -l; echo ps=$?",
+     [b"\r\n0\r\n", b"ps=0"], b"\n# "),
     # Control groups (src/lxcgroup.bastio): a group is made with mkdir, a
     # shell moves into it, and pids.max stops the fork that would pass it;
     # cgroup.kill empties a group so that rmdir works, and non-root users may
@@ -442,8 +459,8 @@ steps = [
     # cpu.max with every processor busy running waiting calls again (readers of
     # a fifo nobody writes to): the throttled group's next period must still
     # begin, or its process is never scheduled again.
-    ("mkdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/rq/cpu.max; mkfifo /tmp/rb; ash -c 'echo $$ > /sys/fs/cgroup/rk/cgroup.procs; for i in 1 2 3 4; do cat /tmp/rb > /dev/null & done; sleep 60 > /tmp/rb & wait' & sleep 1; ash -c 'echo $$ > /sys/fs/cgroup/rq/cgroup.procs; i=0; while [ $i -lt 3000 ]; do i=$((i+1)); done; echo burst > /tmp/rbd' & n=0; while [ ! -f /tmp/rbd ] && [ $n -lt 20 ]; do sleep 1; n=$((n+1)); done; read r < /tmp/rbd; echo r=$r; echo 1 > /sys/fs/cgroup/rk/cgroup.kill; echo 1 > /sys/fs/cgroup/rq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo c=$?; rm -f /tmp/rb /tmp/rbd",
-     [b"r=burst", b"c=0"], b"\n# "),
+    ("mkdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo '20000 100000' > /sys/fs/cgroup/rq/cpu.max; mkfifo /tmp/rb; ash -c 'echo $$ > /sys/fs/cgroup/rk/cgroup.procs; for i in 1 2 3 4; do cat /tmp/rb > /dev/null & done; sleep 60 > /tmp/rb & wait' & sleep 1; ash -c 'echo $$ > /sys/fs/cgroup/rq/cgroup.procs; while :; do :; done' & sleep 2; while read k v; do case $k in usage_usec) a=$v;; esac; done < /sys/fs/cgroup/rq/cpu.stat; sleep 5; while read k v; do case $k in usage_usec) b=$v;; esac; done < /sys/fs/cgroup/rq/cpu.stat; [ \"$b\" -gt \"$a\" ] && echo ran on; echo 1 > /sys/fs/cgroup/rk/cgroup.kill; echo 1 > /sys/fs/cgroup/rq/cgroup.kill; sleep 1; rmdir /sys/fs/cgroup/rk /sys/fs/cgroup/rq; echo c=$?; rm -f /tmp/rb",
+     [b"ran on", b"c=0"], b"\n# "),
     # cpu.weight: two groups that both have more busy processes than there are
     # processors share them in proportion to their weights, here 1 to 3.
     ("mkdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo +cpu > /sys/fs/cgroup/cgroup.subtree_control; echo 100 > /sys/fs/cgroup/wa/cpu.weight; echo 300 > /sys/fs/cgroup/wb/cpu.weight; cat /sys/fs/cgroup/wb/cpu.weight; printf 'echo $$ > /sys/fs/cgroup/$1/cgroup.procs\\nwhile :; do :; done\\n' > /tmp/wb.sh; for g in wa wb; do for i in 1 2 3 4 5 6; do ash /tmp/wb.sh $g & done; done; sleep 12; while read k v; do case $k in usage_usec) a=$v;; esac; done < /sys/fs/cgroup/wa/cpu.stat; while read k v; do case $k in usage_usec) b=$v;; esac; done < /sys/fs/cgroup/wb/cpu.stat; echo a=$a b=$b; [ $((b * 10)) -gt $((a * 20)) ] && [ $((b * 10)) -lt $((a * 45)) ] && echo weighted; echo 1 > /sys/fs/cgroup/wa/cgroup.kill; echo 1 > /sys/fs/cgroup/wb/cgroup.kill; sleep 2; rmdir /sys/fs/cgroup/wa /sys/fs/cgroup/wb; echo r=$?",
@@ -452,7 +469,14 @@ steps = [
      [b"r=0", b"z=0"], b"\n# "),
     ("echo root:pw | chpasswd; read l < /etc/shadow; case $l in 'root:$6$'*) echo sha512;; esac; su alice -c 'echo no | su -c id root; echo w=$?; echo pw | su -c id root'",
      [b"\r\nsha512\r\n", b"w=1", b"uid=0(root) gid=0(root)"], b"\n# "),
+    # A symbolic link belongs to whoever made it, who can set its times
+    # (touch -h).
+    ("su alice -c 'ln -s nowhere /tmp/al; stat -c \"%u %g\" /tmp/al; touch -h -d @1000000000 /tmp/al; echo t=$?; stat -c %Y /tmp/al'; rm /tmp/al",
+     [b"\r\n1000 1000\r\n", b"t=0", b"1000000000"], b"\n# "),
     # (BusyBox keeps the old /etc files as NAME-: gone, so no pages stay.)
+    # A symbolic link belongs to its creator (who can lchown it), and the
+    # root of a user namespace may chown what it owns to ids it maps.
+    ("su alice -c 'cd /home/alice; ln -s tgtx slk; ls -ln slk; chown -h $(id -u) slk; echo c1=$?; touch cf; unshare -U -r sh -c \"chown 0:0 cf; echo c2=\\$?; chown -h 0:0 slk; echo c3=\\$?; chown 5:5 cf; echo c4=\\$?\"'; rm -f /home/alice/slk /home/alice/cf", [b"slk -> tgtx", b"c1=0", b"c2=0", b"c3=0", b"c4=1"], b"\n# "),
     ("deluser alice; id alice; passwd -d root; echo u=$?; rm -rf /home/alice /etc/passwd- /etc/group- /etc/shadow-",
      [b"unknown user alice", b"u=0"], b"\n# "),
     # With a disk, /etc, /root and /home are links into it (src/main.bastio,
@@ -504,11 +528,12 @@ steps = [
     # any file, and kept on the disk across boots (disk/pf, for the virtio
     # boot below).
     ("mkfifo pp; ls -l pp; echo hi > pp & cat pp; wait; mv pp pq; rm pq; ls pq; mkfifo disk/pf; stat -c %F disk/pf", [b"prw", b"\r\nhi\r\n", b"pq: No such file", b"fifo"], b"\n# "),
-    ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n2\r\n"], b"\n# "),
+    ("echo dh > disk/hk1; ln disk/hk1 disk/hk2; ln disk/hk1 disk/hk3; ln disk/hk1 h3; mkdir hd; ln hd hd2; rmdir hd; stat -c %h disk/hk2", [b"Cross-device link", b"not permitted", b"\r\n3\r\n"], b"\n# "),
     # A file removed while its last writes are still in a batch that was
     # never queued (the disk never sees them), and one removed after a
     # second batch over blocks the disk has: both give every block back.
     ("sync; stat -f -c %f /disk > fr0; i=0; while [ $i -lt 20 ]; do echo data$i > disk/tmpdrop; rm disk/tmpdrop; i=$((i+1)); done; echo old > disk/keepdrop; sync; echo more >> disk/keepdrop; cat disk/keepdrop; rm disk/keepdrop; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo dropfree=same; ls disk/tmpdrop disk/keepdrop", [b"\r\nold\r\nmore\r\n", b"dropfree=same", b"tmpdrop: No such file"], b"\n# "),
+    ("sync; stat -f -c %f /disk > fr0; mkdir disk/mf; i=0; while [ $i -lt 30 ]; do echo a$i > disk/mf/a$i; echo b$i > disk/mf/b$i; ln -s a$i disk/mf/s$i; echo a$i >> disk/mf/a$i; i=$((i+1)); done; cat disk/mf/a7 disk/mf/b29; readlink disk/mf/s5; sync; cat disk/mf/a29; rm -r disk/mf; sync; stat -f -c %f /disk > fr1; cmp fr0 fr1 && echo mfree=same", [b"\r\na7\r\na7\r\nb29\r\na5\r\n", b"a29\r\na29\r\n", b"mfree=same"], b"\n# "),
     # Loop devices (src/lxloop.bastio): /dev/loopN are block devices and
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
@@ -524,6 +549,19 @@ steps = [
     ("i=0; while [ $i -lt 600 ]; do echo line$i; i=$((i+1)); done > /tmp/mref; for k in 1 2 3 4 5 6 7 8; do cat /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref /tmp/mref; done > /tmp/mall; cp /tmp/mall /disk/multi; sync; cmp /tmp/mall /disk/multi && echo multi=same; wc -c < /disk/multi; rm /disk/multi /tmp/mall /tmp/mref", [b"multi=same", b"\r\n225120\r\n"], b"\n# "),
     ("mkdir disk/many; i=0; while [ $i -lt 150 ]; do echo $i > disk/many/f$i || break; i=$((i+1)); done; ls disk/many | wc -l; cat disk/many/f149", b"\r\n150\r\n149\r\n", b"\n# "),
     ("rm -r disk/many; ls disk/many; echo gone$((1+1))", [b"No such file", b"gone2"], b"\n# "),
+    # Names of 255 bytes, the longest NAME_MAX allows (past 200 the disk keeps the rest of a name in the entry after it): create, read back, list, stat, rename between short and long names, and refuse 256.
+    ("n=a; i=0; while [ $i -lt 8 ]; do n=$n$n; i=$((i+1)); done; l=${n%?}; m=${l%?}; echo hi > disk/$l; cat disk/$l; for f in disk/*; do [ \"${f#disk/}\" = \"$l\" ] && echo listed; done; stat -c %s disk/$l; (echo no > disk/$n) 2>/dev/null; echo r=$?; mv disk/$l disk/s; cat disk/s; mv disk/s disk/$m; cat disk/$m; [ -e disk/$l ] || echo gone; rm disk/$m; mkdir disk/$l; [ -d disk/$l ] && echo isdir; rmdir disk/$l; [ -e disk/$l ] || echo gone2",
+     b"hi\r\nlisted\r\n3\r\nr=1\r\nhi\r\nhi\r\ngone\r\nisdir\r\ngone2\r\n", b"\n# "),
+    # The disk finds names through a hash index once it holds more than IX_MIN entries (src/diskfs.bastio), built when the
+    # directory first grows past it and kept up by each create, rename and removal: every name stays findable across the crossing.
+    ("mkdir disk/dix; i=0; while [ $i -lt 300 ]; do echo $i > disk/dix/f$i || break; i=$((i+1)); done; i=0; while [ $i -lt 300 ]; do [ $((i%3)) -eq 0 ] && rm disk/dix/f$i; [ $((i%3)) -eq 1 ] && mv disk/dix/f$i disk/dix/g$i; i=$((i+1)); done; ls disk/dix | wc -l; cat disk/dix/g100 disk/dix/f101",
+     b"\r\n200\r\n100\r\n101\r\n", b"\n# "),
+    ("i=0; while [ $i -lt 300 ]; do [ $((i%3)) -eq 0 ] && echo r$i > disk/dix/f$i; i=$((i+1)); done; ls disk/dix | wc -l; cat disk/dix/f102 disk/dix/g100; rm -r disk/dix; ls disk/dix",
+     [b"\r\n300\r\nr102\r\n100\r\n", b"No such file"], b"\n# "),
+    # A file created and removed before its first commit is dropped without reading its entry back (disk_remove): the files
+    # beside it, committed earlier, are left alone, and the slot serves the next ones.
+    ("echo keep1 > disk/byst; echo keep2 > disk/byst2; sync; i=0; while [ $i -lt 30 ]; do echo tmp$i > disk/chn; echo more > disk/chn2; rm disk/chn disk/chn2; i=$((i+1)); done; echo new > disk/after; cat disk/byst disk/byst2 disk/after; ls disk/chn; rm disk/byst disk/byst2 disk/after",
+     [b"keep1\r\nkeep2\r\nnew\r\n", b"No such file"], b"\n# "),
     # The in-memory file system finds names through a hash index (src/ramfs.bastio): creating, removing and renaming hundreds of files
     # must leave every name findable, and enough removals fill it with tombstones, which a rebuild clears.
     ("mkdir ixr; i=0; while [ $i -lt 600 ]; do echo $i > ixr/f$i || break; i=$((i+1)); done; i=0; while [ $i -lt 600 ]; do [ $((i%3)) -eq 0 ] && rm ixr/f$i; [ $((i%3)) -eq 1 ] && mv ixr/f$i ixr/g$i; i=$((i+1)); done; ls ixr | wc -l; cat ixr/g400 ixr/f401", b"\r\n400\r\n400\r\n401\r\n", b"\n# "),
@@ -538,7 +576,7 @@ steps = [
     # What Linux programs look for besides: processors, the file system
     # types, a process's own mount table, and three fixed sysctls.
     ("n=0; while read k r; do [ \"$k\" = processor ] && n=$((n+1)); done < /proc/cpuinfo; echo cpus=$n; cat /proc/filesystems; cat /proc/self/mounts", [f"cpus={smp}\r\n".encode(), b"nodev\tramfs", b"nodev\ttmpfs", b"\tbstdisk3", b"proc /proc proc"], b"\n# "),
-    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n512\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
+    ("cat /proc/sys/kernel/tainted /proc/sys/kernel/pid_max; ls /proc/self", [b"\r\n0\r\n1024\r\n", b"mounts", b"auxv", b"mem"], b"\n# "),
     # An 8 MiB stack, Linux's default (t_mem in make compat maps 640 MiB
     # of the 1 GiB window and grows the stack past 6 MiB).
     ("ulimit -s", b"\r\n8192\r\n", b"\n# "),
@@ -1059,10 +1097,13 @@ else:
     else:
         print("FAIL udpsend port 0"); fails += 1
     # Every page the finished processes and removed files used must be
-    # back in the pool.
+    # back in the pool. What the boot's commands leave behind is a few
+    # hundred pages (144 alone, 583 and 608 on loaded CI runners: tables
+    # and buffers that grow with the work done meanwhile); a leak shows
+    # as free[1] != free[2], or as growth past 1024 pages (4 MiB).
     mem = [l.strip() for l in out.split(b"\n") if l.strip().endswith(b"free pages")]
     free = [int(m.split()[0]) for m in mem]
-    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 512:
+    if len(mem) == 3 and free[1] == free[2] and 0 <= free[0] - free[1] <= 1024:
         print("ok   no pages leaked:", mem[2].decode())
     else:
         print("FAIL page leak:", mem); fails += 1
@@ -1199,6 +1240,8 @@ session("virtio", True, [
     ("rm disk/pf", b""),
     # The user made at the first boot, kept on the disk.
     ("ash", b"built-in shell (ash)", b"\n# "),
+    # The two names left of the file that had three are counted after the remount.
+    ("stat -c %h disk/hk2 disk/hk3; rm disk/hk3", b"\r\n2\r\n2\r\n", b"\n# "),
     ("id kept; cat /root/kept; stat -c %a /etc/shadow; deluser kept; rm -rf /home/kept /root/kept /etc/*-", [b"uid=1000(kept)", b"\r\nhi\r\n600\r\n"], b"\n# "),
     # seccomp (src/lxseccomp.bastio): programs that read outside seccomp_data
     # or jump out of themselves are refused at load; filters answer with an
@@ -1214,9 +1257,24 @@ session("virtio", True, [
     ("mcont", b"mcont: ok", b"\n# "),
     # Far more open file descriptions than the 1024 the table once held, from several processes (user/mfd.c).
     ("mfd", b"mfd: ok, 8 processes held 1856 descriptions", b"\n# "),
-    # More processes at once than the 256 the process table once held (user/mproc.c).
-    ("mproc", b"mproc: ok, 300 processes at once", b"\n# "),
+    # More processes at once than the 512 the process table once held (user/mproc.c).
+    ("mproc", b"mproc: ok, 700 processes at once", b"\n# "),
+    # /dev/fb0 without a screen (this machine has none): ENODEV (user/mfb.c; the drawing is tested in test/iso_test.sh).
+    ("mfb", b"mfb: no screen (ENODEV)", b"\n# "),
+    # /dev/input/event0 tells what it is (user/mkeyev.c; the events themselves are tested in test/iso_test.sh).
+    ("mkeyev", b"mkeyev: ok", b"\n# "),
+    ("bwm", b"bwm: no screen (ENODEV)", b"\n# "),
+    ("bhello", b"bhello: no window server", b"\n# "),
+    ("bterm", b"bterm: no window server", b"\n# "),
+    # A reader of the key events that is killed while it waits leaves its
+    # registers behind in the process table; the line typed after ash ends
+    # must still reach the native shell, not be taken for the dead reader's.
+    ("cat /dev/input/event0 > /tmp/evk & kill $!; echo ended", b"ended", b"\n# "),
+    # The same for a reader that is still waiting when ash ends: its timed
+    # wait is not one of the console's, so the next line is not taken for it.
+    ("cat /dev/input/event0 > /tmp/evk2 & echo waiting", b"waiting", b"\n# "),
     ("exit", b""),
+    ("hello", b"hello from user mode, pid "),
 ], halt=True, ready=lambda: irq_found("virtio"))
 
 # The same disk as an NVMe drive: what virtio wrote is there, and what is
@@ -1233,6 +1291,7 @@ session("NVMe", None, [
     ("echo written by nvme > disk/nv", b""),
     ("cat disk/nv", b"written by nvme\r\n"),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # runs of blocks go in one command (nvme_begin_n)
     ("rm disk/big", b""),
     ("cat disk/hk2", b"dh\r\n"),
     ("rm disk/hk2", b""),
@@ -1250,6 +1309,7 @@ session("AHCI", None, [
     ("cat disk/nv", b"written by nvme\r\n"),
     ("echo and ahci >> disk/nv", b""),
     ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),          # ahci_begin_n
     ("rm disk/big", b""),
 ], halt=True, ready=ahci_found)
 
@@ -1284,6 +1344,23 @@ def nvme_ns2_found():
 session("NVMe namespace 2", None, [
     ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
 ], halt=True, ready=nvme_ns2_found)
+
+# An NVMe drive that takes only 8 KiB per command (MDTS 1): batches are cut
+# to two blocks (src/nvme.bastio, nvme_room), and what is read and written
+# in runs is still right.
+qemu = boot(1, extra=["-machine", "q35", "-drive", f"file={disk},format=raw,if=none,id=nvm",
+                      "-device", "nvme,serial=bastios,drive=nvm,mdts=1"])
+def nvme_mdts_found():
+    global fails
+    ok = b"disk: NVMe\r\n" in out
+    print(("ok  " if ok else "FAIL"), "(NVMe MDTS 1) disk driver: NVMe")
+    fails += not ok
+session("NVMe MDTS 1", None, [
+    ("cat disk/nv", b"written by nvme\r\nand ahci\r\n"),
+    ("fstest", b"fstest: disk ok"),
+    ("diskbench", b"read 2 MiB: "),
+    ("rm disk/big", b""),
+], halt=True, ready=nvme_mdts_found)
 
 # And on an NVMe drive with 4 KiB sectors: what AHCI wrote is there, and
 # what is written here is where the ATA boot below looks for it.
@@ -1693,6 +1770,124 @@ qemu.kill(); qemu.wait()
 print("---- USB boot transcript ----")
 print(out.decode(errors="replace").replace("\r", "")[-400:])
 
+# A USB serial port: QEMU's usb-serial (an FTDI adapter) on the xHCI
+# controller, its other end a socket this script holds. /dev/ttyUSB0
+# (src/lxserial.bastio) carries what mserial writes out to the socket and
+# what the socket gets in: a line, 1500 bytes sent in pieces, and 2000
+# bytes written, more than the ring holds. The same exchange runs with the
+# controller as the disk's too (the stick boot below).
+ser_path = os.path.join(disk_dir.name, "ser.sock")
+def serial_extra():
+    return ["-chardev", f"socket,id=ser,path={ser_path},server=on,wait=off",
+            "-device", "usb-serial,bus=xh.0,chardev=ser"]
+def serial_connect():
+    # QEMU plugs the adapter in when something is connected to its socket,
+    # so the script connects right after starting QEMU, before the guest
+    # looks for devices.
+    end = time.time() + 10
+    while True:
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(15)
+        try:
+            s.connect(ser_path)
+            return s
+        except OSError:
+            s.close()
+            if time.time() > end:
+                raise
+            time.sleep(0.05)
+def serial_session(name, s):
+    global fails
+    mark = len(out)
+    qemu.stdin.write(b"mserial\r"); qemu.stdin.flush()
+    ok = read_until(b"mserial: ready", mark)
+    seen = b""
+    try:
+        while ok and not seen.endswith(b"ping\n"):
+            seen += s.recv(256)
+    except OSError:
+        ok = False
+    good = ok and seen == b"ping\n"
+    print(("ok  " if good else "FAIL"), f"({name}) what the program writes reaches the adapter", repr(seen))
+    fails += not good
+    if not ok:
+        s.close()
+        return
+    s.sendall(b"pong-from-host\n")
+    good = read_until(b"mserial: got pong-from-host", mark) and read_until(b"mserial: rx ready", mark)
+    print(("ok  " if good else "FAIL"), f"({name}) a line sent to the adapter is read")
+    fails += not good
+    data = bytes((i * 7 + 3) & 255 for i in range(1500))
+    for i in range(0, 1500, 250):
+        s.sendall(data[i:i + 250])
+        time.sleep(0.15)
+    good = read_until(b"mserial: rx 1500 bytes, sum %d\r\n" % sum(data), mark)
+    print(("ok  " if good else "FAIL"), f"({name}) 1500 bytes sent in pieces arrive whole")
+    fails += not good
+    want = bytes((i * 5 + 1) & 255 for i in range(2000))
+    back = b""
+    try:
+        while len(back) < len(want):
+            c = s.recv(4096)
+            if not c:
+                break
+            back += c
+    except OSError:
+        pass
+    good = back == want and read_until(b"mserial: tx done", mark) and read_until(b"bastios> ", mark)
+    print(("ok  " if good else "FAIL"), f"({name}) 2000 bytes written, more than the ring holds, arrive whole ({len(back)} received)")
+    fails += not good
+    s.close()
+if os.path.exists(ser_path):
+    os.unlink(ser_path)
+qemu = boot(1, virtio=True, extra=["-device", "qemu-xhci,id=xh"] + serial_extra())
+ser_sock = serial_connect()
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"serial: USB FTDI adapter (/dev/ttyUSB0)\r\n" in out
+print(("ok  " if good else "FAIL"), "(USB serial boot) the adapter is found")
+fails += not good
+if ok:
+    serial_session("USB serial boot", ser_sock)
+    qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
+    read_until(b"pages free at power off")
+    booted = re.search(rb"BastiOS 0.2: (\d+) pages of memory", out)
+    off = re.search(rb"BastiOS: (\d+) pages free at power off", out)
+    good = booted and off and booted.group(1) == off.group(1)
+    print(("ok  " if good else "FAIL"), "(USB serial boot) every page back at power off")
+    fails += not good
+qemu.kill(); qemu.wait()
+print("---- USB serial boot transcript ----")
+print(out.decode(errors="replace").replace("\r", "")[-400:])
+# Without an adapter, the device is there but cannot be opened.
+qemu = boot(1)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    mark = len(out)
+    qemu.stdin.write(b"mserial\r"); qemu.stdin.flush()
+    good = read_until(b"bastios> ", mark) and b"mserial: no serial port (ENODEV)\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), "(no adapter) /dev/ttyUSB0 fails to open with ENODEV")
+    fails += not good
+qemu.kill(); qemu.wait()
+
+# A UHCI controller (src/uhci.bastio), as on PCs from before xHCI: the
+# driver only looks, so the boot log says one controller with one device on
+# its ports and that it has no driver, and the keyboard stays the PS/2 one.
+qemu = boot(1, extra=["-device", "piix3-usb-uhci", "-device", "usb-kbd"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+good = ok and b"usb: 1 UHCI controller(s), 1 device(s) on their ports (" in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) the boot log counts the controller and the device on its port")
+fails += not good
+good = ok and b"keyboard: USB" not in out
+print(("ok  " if good else "FAIL"), "(UHCI boot) a UHCI keyboard is not mistaken for an xHCI one")
+fails += not good
+qemu.kill(); qemu.wait()
+
 # A USB stick with a BastiOS partition (tools/mkusb.py --blank: a GPT and
 # the partition, no boot image) on the same xHCI controller as the USB
 # keyboard: the partition is the disk, ahead of the virtio disk, which must
@@ -1706,8 +1901,10 @@ print(out.decode(errors="replace").replace("\r", "")[-400:])
 stick = os.path.join(disk_dir.name, "stick.img")
 subprocess.run(["tools/mkusb.py", stick, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
 before = open(disk, "rb").read()
-def stick_boot(name, steps, keys=False, image=None, hubs=False):
+def stick_boot(name, steps, keys=False, image=None, hubs=False, serial=False):
     global qemu, out, deadline, fails
+    if serial and os.path.exists(ser_path):
+        os.unlink(ser_path)
     usb = ["-device", "usb-storage,bus=xh.0,drive=st", "-device", "usb-kbd,bus=xh.0"]
     if hubs:
         usb = ["-device", "usb-hub,bus=xh.0,port=1", "-device", "usb-hub,bus=xh.0,port=1.2",
@@ -1715,7 +1912,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
                "-device", "usb-kbd,bus=xh.0,port=1.4"]
     qemu = boot(1, virtio=True, extra=["-machine", "pc,i8042=off", "-device", "qemu-xhci,id=xh",
                                        "-drive", f"file={image or stick},format=raw,if=none,id=st"] + usb +
-                                      ["-qmp", f"unix:{qmp_path},server,nowait"])
+                                      (serial_extra() if serial else []) + ["-qmp", f"unix:{qmp_path},server,nowait"])
+    ser_sock = serial_connect() if serial else None
     out = b""
     deadline = time.time() + timeout
     ok = read_until(b"bastios> ")
@@ -1749,6 +1947,8 @@ def stick_boot(name, steps, keys=False, image=None, hubs=False):
         if hubs:
             usbmouse(name, qmp_cmd)
         qmp.close()
+    if ok and serial:
+        serial_session(name, ser_sock)
     for line, w in steps:
         if not ok:
             break
@@ -1780,7 +1980,7 @@ stick_boot("USB disk", [
     ("diskbench", b"read 2 MiB: "),
 ], keys=True)
 stick_boot("USB disk behind hubs", [("cat disk/s", b"on the stick\r\n"), ("fstest", b"fstest: disk ok")],
-           keys=True, hubs=True)
+           keys=True, hubs=True, serial=True)
 f, n = map(int, subprocess.check_output(["tools/mkusb.py", "--find", stick]).split())
 part = os.path.join(disk_dir.name, "part.img")
 with open(stick, "rb") as src, open(part, "wb") as dst:
@@ -1874,6 +2074,64 @@ session("after the power cuts", False, [
     ("ls", b"about"),
 ], halt=True)
 fsck("at the end", clean=True)
+# Power cuts with several processes writing at once (user/mpc.c, on a disk
+# that holds it): files grow, are cut back, renamed across directories,
+# made and removed, and replaced whole after an fsync. After each cut the
+# image is checked, and the next boot's mpc finds every byte of every file
+# as it wrote it (test/powercut.py runs many more of these).
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mpc=build/user/mpc.elf"], check=True)
+for n, delay in enumerate([0.6, 1.1, 0.35]):
+    qemu = boot(2, with_disk=n % 2 == 0, virtio=n % 2 == 1)
+    out = b""
+    deadline = time.time() + timeout
+    ok = read_until(b"bastios> ")
+    if ok:
+        qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+        ok = read_until(b"\n# ")
+    mark = len(out)
+    if ok:
+        qemu.stdin.write(b"/disk/mpc run /disk/pc 4\r"); qemu.stdin.flush()
+        ok = read_until(b"mpc: running", mark) and b"mpc: clean" in out[mark:]
+    time.sleep(delay)
+    qemu.kill(); qemu.wait()
+    line = next((l for l in out[mark:].split(b"\n") if b"mpc:" in l), b"(nothing)")
+    print(("ok  " if ok else "FAIL"), f"concurrent writers, power cut {n + 1} after {delay} s:", line.strip().decode(errors="replace"))
+    fails += not ok
+    fsck(f"after concurrent writers' power cut {n + 1}")
+qemu = boot(1, with_disk=True)
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+if ok:
+    qemu.stdin.write(b"ash\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ")
+mark = len(out)
+if ok:
+    qemu.stdin.write(b"/disk/mpc check /disk/pc\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ", mark) and b"mpc: clean" in out[mark:]
+qemu.kill(); qemu.wait()
+print(("ok  " if ok else "FAIL"), "after the concurrent writers' power cuts mpc finds every file whole")
+fails += not ok
+# Mounting ext4 (src/ext4.bastio): images made on this machine with mke2fs
+# -d (test/ext4img.py) sit on the disk, and user/mext4.c mounts each of
+# them, checks every file, link, hole and refusal of a write, and unmounts.
+# Four damaged or unsupported images must be refused with EINVAL.
+img_dir = os.path.join(disk_dir.name, "ext4")
+if subprocess.run([sys.executable, "test/ext4img.py", img_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mext4=build/user/mext4.elf"]
+                   + [f"{n}={img_dir}/{f}.img" for n, f in (("e4", "e4"), ("e2", "e2"), ("e4k", "e4k"), ("bz", "bad-zero"), ("bs", "bad-short"), ("br", "bad-recover"), ("bi", "bad-inline"))], check=True)
+    qemu = boot(2, with_disk=True)
+    session("ext4", False, [
+        ("ash", b"", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4 m", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e2 m ext2", b"mext4: clean", b"\n# "),
+        ("mkdir m; /disk/mext4 tree /disk/e4k m", b"mext4: clean", b"\n# "),
+        ("for i in bz bs br bi; do mkdir m; /disk/mext4 refuse /disk/$i m; rmdir m; done", b"mext4: clean\r\nmext4: clean\r\nmext4: clean\r\nmext4: clean", b"\n# "),
+        ("mkdir fz; /disk/mext4 fuzz /disk/e4k fz 100 1", b"mext4: clean", b"\n# "),
+        ("exit", b"", b"bastios> "),
+    ], halt=True)
+else:
+    print("SKIP ext4: mke2fs is missing")
 # What a power cut inside disk_take_name leaves: a file under the name its
 # hard link still has (disk/b), and a link naming a free entry (disk/c).
 # The mount drops both links; the file stays, and the image is clean. The
@@ -1913,13 +2171,16 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
 for line, want, until in [
     ("ash", b"built-in shell (ash)", b"\n# "),
     ("/disk/mx", b"mmisc: ok on Linux", b"\n# "),
+    # A processor keeps a process's translations across system calls, and
+    # still drops the ones an unmap, mprotect or fork made wrong (user/mtlb.c).
+    ("/disk/mt", b"mtlb: ok, 400 rounds each", b"\n# "),
     ("/disk/mx && /disk/mx && echo twice", b"mmisc: ok on Linux x86_64, signals, pipe 65536\r\ntwice", b"\n# "),
     # Two at once: their code pages come from one page cache entry each,
     # and a fault that waits for the disk sleeps while the other runs.
@@ -2038,6 +2299,37 @@ if len(sizes) == 2 and sizes[0] and sizes[1] and sizes[1][0] > sizes[0][0]:
     print(f"ok   a disk made larger since the last boot: {sizes[0][0]} blocks became {sizes[1][0]}, with its file")
 else:
     print("FAIL a grown disk:", sizes); fails += 1
+# A slow disk: once the shell is up, QEMU is told (through its monitor) to
+# let the guest write 64 bytes a second, so a sector takes 8 s and a block
+# a minute, as a write with a flush to the host's disk can take on a busy
+# host. Making a directory waits for its directory sector (QEMU lets the
+# first write through at once, so the second and third mkdir are the slow
+# ones). The kernel must wait for them, not give the disk up and call it
+# full, as it did when its wait was a count of looks that passed in a
+# second or two.
+slow = os.path.join(disk_dir.name, "slow.img")
+subprocess.run([sys.executable, "test/compat/mkdisk.py", slow], check=True)
+mon_path = os.path.join(disk_dir.name, "mon_slow.sock")
+qemu = boot(1, monitor=mon_path, extra=["-drive", f"file={slow},format=raw,if=none,id=sl",
+                                        "-device", "virtio-blk-pci,drive=sl"])
+out = b""
+deadline = time.time() + timeout
+ok = read_until(b"bastios> ")
+for line, want in [("ash", b"built-in shell (ash)"), ("mkdir /disk/d1 /disk/d2 /disk/d3 && echo made", b"\r\nmade\r\n")]:
+    if not ok:
+        break
+    if line != "ash":
+        mon = socket.socket(socket.AF_UNIX)
+        mon.connect(mon_path)
+        mon.sendall(b"block_set_io_throttle sl 0 0 64 0 0 0\n")
+        time.sleep(0.5)
+        mon.close()
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = read_until(b"\n# ", mark) and want in out[mark:]
+print(("ok  " if ok else "FAIL"), "a disk that takes 8 s a sector: directories are made on it, not refused as full"); ok or print(repr(out[-600:]))
+fails += not ok
+qemu.kill(); qemu.wait()
 if smp >= 4:   # (the fake service above is set up on the four-processor run)
     # The boot option `mcloud` runs the same setup at boot, with no
     # argument: against QEMU's address for the metadata service, which a
@@ -2269,7 +2561,7 @@ for machine, name in (("pc,hpet=off", "i440fx, no HPET"), ("q35,hpet=off", "q35,
 # 2 GiB, whose firmware puts the ACPI tables just below 2 GiB: the kernel
 # must still find them (the processors, power off). Each pause in the report
 # waits for a key, which the serial line gives.
-def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
+def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None, settle=None):
     global qemu, out, deadline
     qemu = subprocess.Popen(
         [qemu_bin, "-kernel", kernel, "-display", "none", "-nic", "none",
@@ -2289,7 +2581,10 @@ def report_boot(args, name, keys, qemu_bin="qemu-system-x86_64", between=None):
     qemu.stdin.write(b"halt\r"); qemu.stdin.flush()
     read_until(b"pages free at power off", mark)
     try:
-        code = qemu.wait(timeout=max(1, deadline - time.time()))
+        # settle: seconds to wait for QEMU to exit, for a machine that is
+        # expected to stay up (no ACPI to switch it off) so that the test
+        # does not wait out the whole TIMEOUT for it.
+        code = qemu.wait(timeout=settle if settle else max(1, deadline - time.time()))
     except subprocess.TimeoutExpired:
         qemu.kill(); qemu.wait(); code = None
     print(f"---- {name} transcript ----")
@@ -2388,6 +2683,9 @@ def move():
     try:
         m = socket.socket(socket.AF_UNIX)
         m.connect(mon)
+        # The mouse raises IRQ 12, so it wakes a processor whose tick was
+        # stretched while the machine sat idle.
+        time.sleep(3)
         m.sendall(b"mouse_move 10 -5\n")
         time.sleep(0.3)
         m.sendall(b"mouse_button 1\n")
@@ -2462,7 +2760,18 @@ for machine, name, extra, status, wants in (
         time.sleep(2)
         t1, c1, w1 = uptime(), clock(), time.time()
         marks.extend([t0, t1, c0, c1, w1 - w0])
-    ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure)
+    # The two timing checks compare guest time with the host's clock over
+    # two seconds, so a host that stalls the guest for a moment fails them
+    # for no fault of the kernel: a boot whose timing was off is repeated
+    # once, and the second boot's results count.
+    for attempt in range(2):
+        marks = []
+        ok, code = report_boot(["-machine", machine, "-m", "64M", "-append", "diag"] + extra, name, 3, between=measure,
+                               settle=5 if status is None else None)
+        if (len(marks) == 5 and None not in marks and 60 * marks[4] <= marks[1] - marks[0] <= 200 * marks[4]
+                and 0.6e9 * marks[4] <= marks[3] - marks[2] <= 1.5e9 * marks[4]):
+            break
+        print(f"({name}) timing off on boot {attempt + 1}: {marks}")
     text = out.decode(errors="replace").replace("\r", "")
     for want, what in wants:
         good = ok and want in text
@@ -2581,6 +2890,46 @@ for name, at, data in (("an MBR", 510, b"\x55\xaa"), ("a backup GPT header", (33
     good = open(other, "rb").read() == before
     print(("ok  " if good else "FAIL"), f"(foreign disk) not a byte of the disk with {name} changed")
     fails += not good
+
+# An internal disk with a GPT that has a BastiOS partition (tools/mkusb.py
+# --blank, the layout the installer writes, docs/install.md): the partition
+# is the disk, files persist across boots, and every byte outside it (the
+# tables, the other partitions) stays as it was. The same GPT with another
+# type on that partition is someone else's disk and is left alone.
+gptdisk = os.path.join(disk_dir.name, "gpt.img")
+subprocess.run(["tools/mkusb.py", gptdisk, "--blank", "--mib", "33"], check=True, stdout=subprocess.DEVNULL)
+pf, pn = map(int, subprocess.check_output(["tools/mkusb.py", "--find", gptdisk]).split())
+before = open(gptdisk, "rb").read()
+def gpt_cmd(line, want):
+    def run():
+        global fails
+        mark = len(out)
+        qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+        good = read_until(b"bastios> ", mark) and want in out[mark:]
+        print(("ok  " if good else "FAIL"), "(GPT disk)", repr(line))
+        fails += not good
+    return run
+gpt_args = ["-m", "64M", "-drive", f"file={gptdisk},format=raw,if=none,id=gd", "-device", "virtio-blk-pci,drive=gd"]
+ok, code = report_boot(gpt_args, "GPT disk", 0, between=gpt_cmd("echo gpt > disk/g", b""))
+good = ok and b"disk: the BastiOS partition at sector %d" % pf in out
+print(("ok  " if good else "FAIL"), "(GPT disk) the kernel finds the BastiOS partition")
+fails += not good
+ok, code = report_boot(gpt_args, "GPT disk again", 0, between=gpt_cmd("cat disk/g", b"gpt\r\n"))
+after = open(gptdisk, "rb").read()
+good = after[:pf * 512] == before[:pf * 512] and after[(pf + pn) * 512:] == before[(pf + pn) * 512:]
+print(("ok  " if good else "FAIL"), "(GPT disk) not a byte outside the partition changed")
+fails += not good
+# Another type GUID on the partition: left alone.
+other = bytearray(before)
+other[1024:1040] = bytes(range(1, 17))
+open(gptdisk, "wb").write(other)
+ok, code = report_boot(gpt_args, "GPT disk of someone else", 0)
+good = ok and b"disk: it holds a partition table or other data; left alone" in out
+print(("ok  " if good else "FAIL"), "(GPT disk) a GPT without a BastiOS partition is left alone")
+fails += not good
+good = open(gptdisk, "rb").read() == bytes(other)
+print(("ok  " if good else "FAIL"), "(GPT disk) not a byte of it changed")
+fails += not good
 
 # With the boot option `login`, the console is BusyBox's login instead of
 # the native shell, and a new login starts whenever the last one ends

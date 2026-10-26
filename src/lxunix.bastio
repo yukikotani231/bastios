@@ -48,7 +48,9 @@
 // its slot when it reads, so a sender that closed by then shows as
 // unnamed; and no descriptors or credentials travel with datagrams to a
 // name. A name reads back (in getsockname and recvfrom) as the canonical
-// path, not as bound.
+// path, not as bound (less the reading process's root, so a chroot sees the
+// name it bound). A stream socket bound to a name that then connects gives
+// the name up.
 
 import "linux.bastio";
 
@@ -62,6 +64,7 @@ const UL_BOUND: u64 = 1;
 const UL_LISTEN: u64 = 2;
 const UL_DGRAM: u64 = 3;
 const UM_DGRAM: u64 = 4;
+const UL_SEQ: u64 = 5;                  // a listening SOCK_SEQPACKET socket (UL_LISTEN is a stream one)
 const STAMP_SPAN: u64 = 1099511627776;  // 2^40: bind stamps are below it
 const EPROTOTYPE: u64 = 18446744073709551525;      // 2^64 - 91
 const UXL0: u64 = 512;                 // UX_N * UX_W: the first listener word
@@ -347,6 +350,16 @@ fn ux_look(k: &Kernel, pid: u64, fd: u64) -> Ux
   return Ux { err: 0, h: h, x: x, nb: w % 2, mode: mode, dg: dg };
 }
 
+/// word 3's datagram bit for a socket whose message framing is dg.
+fn ux_dgbit(dg: bool) -> u64
+  ensures result == 0 || result == UX_DG
+{
+  if dg {
+    return UX_DG;
+  }
+  return 0;
+}
+
 /// A datagram (or seqpacket) unix socket.
 fn ux_dgram(k: &Kernel, pid: u64, fd: u64) -> bool
   requires kok(k) && pid < NPROC
@@ -502,7 +515,7 @@ fn ux_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if (kind % 16 != SOCK_STREAM && kind % 16 != SOCK_DGRAM) || proto != 0 {
+  if (kind % 16 != SOCK_STREAM && kind % 16 != SOCK_DGRAM && kind % 16 != SOCK_SEQPACKET) || proto != 0 {
     return EPROTONOSUPPORT;
   }
   let h = ofd_new(&mut k, OF_UNIX, 0);
@@ -512,6 +525,9 @@ fn ux_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   let mut w = 2 * UM_NEW;
   if kind % 16 == SOCK_DGRAM {
     w = 2 * UM_DGRAM + UX_DG;
+  }
+  if kind % 16 == SOCK_SEQPACKET {
+    w = UX_DG;                              // connects like a stream socket, its messages keep their boundaries
   }
   of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2 + w);
   let fd = fd_install(&mut k, pid, h);
@@ -870,7 +886,7 @@ fn ux_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   ul_set(&mut k, l, 2, 0);
   ul_set(&mut k, l, 3, 0);
   of_set(&mut k.ofd, u.h, 2, l);
-  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_BOUND);
+  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_BOUND + ux_dgbit(u.dg));
   return 0;
 }
 
@@ -925,10 +941,14 @@ fn ux_listen(k: &mut Kernel, pid: u64, fd: u64) -> u64
   if u.mode != UM_BOUND {
     return EINVAL;                          // no autobind
   }
-  ul_set(&mut k, u.x, 0, UL_LISTEN);
+  if u.dg {
+    ul_set(&mut k, u.x, 0, UL_SEQ);
+  } else {
+    ul_set(&mut k, u.x, 0, UL_LISTEN);
+  }
   k.ux = set(k.ux, UXLC0 + 2 * u.x, pid);
   k.ux = set(k.ux, UXLC0 + 2 * u.x + 1, ux_ids(k, pid));
-  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_LISTEN);
+  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_LISTEN + ux_dgbit(u.dg));
   return 0;
 }
 
@@ -1012,8 +1032,8 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if u.mode == UM_CONN {
     return EISCONN;
   }
-  if u.mode != UM_NEW {
-    return EINVAL;
+  if u.mode != UM_NEW && u.mode != UM_BOUND {
+    return EINVAL;                          // listening
   }
   let mut n = sun_in(&mut k, pid, addr, alen);
   if n > UX_PATH {
@@ -1042,8 +1062,12 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     }
     return ENOENT;
   }
-  if ul_get(k, l, 0) != UL_LISTEN {
+  let st = ul_get(k, l, 0);
+  if st != UL_LISTEN && st != UL_SEQ {
     return ECONNREFUSED;
+  }
+  if (st == UL_SEQ) != u.dg {
+    return EPROTOTYPE;                      // a stream socket to a seqpacket one, or the other way
   }
   let mut r = ul_ring(k, l);
   if ring_full(r) {
@@ -1052,7 +1076,7 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     }
     return SK_WAIT;                         // wait for accept to make room
   }
-  let p = ux_pair(&mut k, 0, 0);
+  let p = ux_pair(&mut k, 0, ux_dgbit(u.dg));
   if p == OFD_N {
     return ENFILE;
   }
@@ -1065,8 +1089,15 @@ fn ux_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   uc_set_cred(&mut k, x % UX_N, get(k.ux, UXLC0 + 2 * l), get(k.ux, UXLC0 + 2 * l + 1));
   // Our description takes over the first end; the one ux_pair made for it
   // is dropped.
+  if u.mode == UM_BOUND {
+    // A socket bound to a name before it connects (Python's test_socket
+    // does): the connection takes the place of the bind, and the name is
+    // released. Different from Linux, getsockname then reads it as unnamed.
+    ul_set(&mut k, u.x, 0, UL_FREE);
+    ul_set(&mut k, u.x, 3, 0);
+  }
   of_set(&mut k.ofd, u.h, 2, of_get(k.ofd, mine, 2));
-  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_CONN);
+  of_set(&mut k.ofd, u.h, 3, u.nb + 2 * UM_CONN + ux_dgbit(u.dg));
   of_set(&mut k.ofd, mine, 0, OF_FREE);
   of_set(&mut k.ofd, mine, 1, 0);
   let s = ring_push(&mut r);
@@ -1101,7 +1132,7 @@ fn ux_accept(k: &mut Kernel, pid: u64, fd: u64, addr: u64, lenp: u64, flags: u64
   if h >= OFD_N || of_get(k.ofd, h, 0) != OF_UNIX {
     return ECONNABORTED;
   }
-  of_set(&mut k.ofd, h, 3, flags / SOCK_NONBLOCK % 2 + 2 * UM_CONN);
+  of_set(&mut k.ofd, h, 3, flags / SOCK_NONBLOCK % 2 + 2 * UM_CONN + of_get(k.ofd, h, 3) / UX_DG % 2 * UX_DG);
   let nfd = fd_install(&mut k, pid, h);
   if nfd >= LXNFD {
     return nfd;                             // -EMFILE; the description is gone
@@ -1354,6 +1385,33 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   return put;
 }
 
+/// How many bytes of unix socket l's name (n of them, canonical, without
+/// the leading "/") are the root of process pid, with the "/" after it: 0 for
+/// a process at the top, or for a name outside its root. A process in a
+/// chroot reads a name back as it bound it, relative to its root.
+fn sun_root_skip(k: &Kernel, pid: u64, l: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && l < UX_LIS && n <= UX_PATH
+  ensures result <= n
+{
+  let rl = root_len(k, pid);
+  if rl == 0 || n <= rl {
+    return 0;
+  }
+  let mut i = 0;
+  while i < rl
+    invariant i <= rl && rl <= FNAME_MAX && rl < n && n <= UX_PATH && l < UX_LIS && kok(k) && pid < NPROC
+  {
+    if cast[u64](bget(k.uxb, UXP0 + l * UX_PATH + i)) != rbyte(k.croot, k.crootx, pid, i) {
+      return 0;
+    }
+    i = i + 1;
+  }
+  if bget(k.uxb, UXP0 + l * UX_PATH + rl) != 47 {
+    return 0;
+  }
+  return rl + 1;
+}
+
 /// Writes the struct sockaddr_un naming slot l to user address va and its
 /// length to the int at lenp (read first: what fits there is written):
 /// "/" and the canonical path for a path name, the bytes of an abstract
@@ -1382,17 +1440,19 @@ fn sun_name_out(k: &mut Kernel, pid: u64, va: u64, lenp: u64, l: u64, none: u64)
   }
   if l < UX_LIS && n >= 1 && n <= UX_PATH {
     let mut at = 2;                         // where the name's bytes go
-    let mut m = n;
+    let mut skip = 0;                       // the process's root, which it does not see
+    let mut m = smaller(n, SUN_LEN - 2);    // an abstract name: sun_in keeps it within that
     if bget(k.uxb, UXP0 + l * UX_PATH) != 0 {
       bset(&mut k.fs.xfer, 2, 47);          // "/"
       at = 3;
-      m = smaller(n, SUN_LEN - 4);          // and a NUL after
+      skip = sun_root_skip(k, pid, l, n);
+      m = smaller(n - skip, SUN_LEN - 4);   // and a NUL after
     }
     let mut i = 0;
     while i < m
-      invariant i <= m && m <= UX_PATH && at <= 3 && l < UX_LIS && kok(k)
+      invariant i <= m && m + skip <= n && n <= UX_PATH && at <= 3 && l < UX_LIS && kok(k)
     {
-      bset(&mut k.fs.xfer, at + i, bget(k.uxb, UXP0 + l * UX_PATH + i));
+      bset(&mut k.fs.xfer, at + i, bget(k.uxb, UXP0 + l * UX_PATH + skip + i));
       i = i + 1;
     }
     len = at + m;
@@ -1521,7 +1581,7 @@ fn ux_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     b = b | POLLIN | POLLRDHUP;             // shut for reading here
   }
   if uc_get(k, tx, 2) != 1 {
-    b = b | POLLERR;
+    b = b | POLLOUT;                        // as on Linux, a write is ready (and fails with EPIPE); no POLLERR
   } else if uc_get(k, tx, 1) < UX_CAP {
     b = b | POLLOUT;
   }

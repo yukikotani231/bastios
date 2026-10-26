@@ -1,0 +1,91 @@
+# The JDK on BastiOS, for the compatibility suite (test/compat): java, javac
+# and jar of the official eclipse-temurin alpine image, entered with chroot.
+# The JDK disk (jdkdisk.py) holds the image's root as a tar file
+# (/disk/root.tar) and a BusyBox at /disk/busybox. The format is
+# applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The expected output is what Linux prints for the same commands in a chroot
+# of the same root. The JDK reads its modules file (lib/modules, 130 MB) with
+# pread and a mapping; a read that came back short, or a page that read as
+# zeros, shows as a ClassFormatError.
+
+== java: unpack the root, make the device nodes
+$ bb mkdir -p /disk/r && cd /disk/r && bb tar -xf /disk/root.tar && bb mkdir -p proc tmp work && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/r/proc; bb ls /disk/r/dev | bb cat
+console
+null
+random
+tty
+urandom
+zero
+
+== java: version
+$ jc() { bb chroot /disk/r /usr/bin/env PATH=/opt/java/openjdk/bin:/usr/bin:/bin JAVA_HOME=/opt/java/openjdk HOME=/tmp "$@"; }; jj() { jc java -Xlog:disable "$@"; }; jv() { jc javac -J-Xlog:disable "$@"; }; jj -version 2>&1 | bb grep -c '^OpenJDK Runtime Environment Temurin-21'; jv -version 2>&1
+1
+javac 21.0.12.1
+
+== java: compile and run a program
+$ bb printf 'public class Hello { public static void main(String[] a) { System.out.println("hello " + 6*7); } }\n' > /disk/r/work/Hello.java; jv -d /work /work/Hello.java && jj -cp /work Hello
+hello 42
+
+== java: records, streams and collections
+$ bb printf 'public class Rec { record P(String n, int a) {} public static void main(String[] x) { java.util.List<P> l = java.util.List.of(new P("bo", 31), new P("al", 25), new P("cy", 40)); System.out.println(l.stream().sorted(java.util.Comparator.comparingInt(P::a)).map(P::n).collect(java.util.stream.Collectors.joining(","))); System.out.println(l.stream().mapToInt(P::a).sum() + " " + l.get(1)); } }\n' > /disk/r/work/Rec.java; jv -d /work /work/Rec.java && jj -cp /work Rec
+al,bo,cy
+96 P[n=al, a=25]
+
+== java: threads and an executor
+$ bb printf 'import java.util.concurrent.*; import java.util.concurrent.atomic.*;\npublic class T { public static void main(String[] x) throws Exception {\n  ExecutorService ex = Executors.newFixedThreadPool(4); AtomicLong n = new AtomicLong(); java.util.List<Future<Integer>> fs = new java.util.ArrayList<>();\n  for (int i = 0; i < 4; i++) { final int k = i; fs.add(ex.submit(() -> { for (int j = 0; j < 1000; j++) n.incrementAndGet(); return k; })); }\n  int s = 0; for (Future<Integer> f : fs) s += f.get(); ex.shutdown();\n  System.out.println(n.get() + " " + s); } }\n' > /disk/r/work/T.java; jv -d /work /work/T.java && jj -cp /work T
+4000 6
+
+== java: exit status and an uncaught exception
+$ bb printf 'public class X { public static void main(String[] a) { if (a.length > 0) System.exit(3); int[] v = new int[1]; System.out.println(v[1]); } }\n' > /disk/r/work/X.java; jv -d /work /work/X.java && { jj -cp /work X a; echo status $?; jj -cp /work X 2>&1 | bb sed -n 1p; jj -cp /work X >/dev/null 2>&1; echo status $?; }
+status 3
+Exception in thread "main" java.lang.ArrayIndexOutOfBoundsException: Index 1 out of bounds for length 1
+status 1
+
+== java: files and directories
+$ bb printf 'import java.nio.file.*; import java.util.*;\npublic class F { public static void main(String[] a) throws Exception {\n  Path d = Files.createDirectories(Path.of("/tmp/jd/a/b")); Path f = d.resolve("f.txt"); Files.writeString(f, "one\\ntwo\\n");\n  System.out.println(Files.readAllLines(f)); Files.move(f, Path.of("/tmp/jd/g.txt"));\n  List<String> names = new ArrayList<>(); try (var s = Files.list(Path.of("/tmp/jd"))) { s.forEach(p -> names.add(p.getFileName().toString())); } Collections.sort(names);\n  System.out.println(names + " " + Files.size(Path.of("/tmp/jd/g.txt"))); } }\n' > /disk/r/work/F.java; jv -d /work /work/F.java && jj -cp /work F
+[one, two]
+[a, g.txt] 8
+
+== java: a jar with a main class
+$ jc jar -J-Xlog:disable --create --file /work/h.jar --main-class Hello -C /work Hello.class && jj -jar /work/h.jar && jc jar -J-Xlog:disable --list --file /work/h.jar | bb sed -n 1,3p
+hello 42
+META-INF/
+META-INF/MANIFEST.MF
+Hello.class
+
+== java: a compile error is reported
+$ bb printf 'public class E { public static void main(String[] a) { int x = "no"; } }\n' > /disk/r/work/E.java; jv -d /work /work/E.java 2>&1 | bb sed -n 1p
+/work/E.java:1: error: incompatible types: String cannot be converted to int
+
+== java: Eclipse JDT LS, the language server, finds a type error and answers a hover
+$ jc() { bb chroot /disk/r /usr/bin/env PATH=/opt/java/openjdk/bin:/usr/bin:/bin JAVA_HOME=/opt/java/openjdk HOME=/tmp "$@"; }; bb tar -xf /disk/jdtls.tar -C /disk/r && bb mkdir -p /disk/r/work/jp && bb wget -q -O /disk/r/work/JdtlsClient.java HOSTURL/lsp-JdtlsClient.java && bb printf 'public class Main {\n    static int add(int a, int b) { return a + b; }\n    public static void main(String[] args) {\n        int n = "text";\n        System.out.println(add(1, 2));\n    }\n}\n' > /disk/r/work/jp/Main.java && jc timeout 600 java -Xlog:disable -Dwait=500 /work/JdtlsClient.java /work/jp/Main.java 2>/dev/null
+initialized
+hover-add
+diagnostic: Type mismatch: cannot convert from String to int
+stopped
+
+== java: a real library (Apache Commons Codec) with its test libraries, tested with the JUnit console launcher
+# timeout 1200
+$ jc() { bb chroot /disk/r /usr/bin/env PATH=/opt/java/openjdk/bin:/usr/bin:/bin JAVA_HOME=/opt/java/openjdk HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/commons-codec.tar.gz | bb tar -xz -C /disk/r/work && jc sh -c 'cd /work/commons-codec && cp=; for j in libs/*.jar; do cp="$cp:$j"; done; java -Xlog:disable -Xmx512m -jar junit-console.jar execute --class-path classes:test-classes$cp --scan-class-path test-classes --details=summary --disable-banner 2>&1' | bb grep -E 'tests found|tests failed|containers failed|^  JUnit|=> ' | bb sed 's/^\[ *//; s/ *\]$//'
+0 containers failed
+1718 tests found
+0 tests failed
+
+== java: a real library (Apache Commons Lang, its number, tuple, text and function packages) with its test libraries, tested with the JUnit console launcher
+# timeout 1200
+$ jc() { bb chroot /disk/r /usr/bin/env PATH=/opt/java/openjdk/bin:/usr/bin:/bin JAVA_HOME=/opt/java/openjdk HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/commons-lang3.tar.gz | bb tar -xz -C /disk/r/work && jc sh -c 'cd /work/commons-lang3 && cp=; for j in libs/*.jar; do cp="$cp:$j"; done; java -Xlog:disable -Xmx512m -jar junit-console.jar execute --class-path classes:test-classes$cp --scan-class-path test-classes --include-package org.apache.commons.lang3.math --include-package org.apache.commons.lang3.tuple --include-package org.apache.commons.lang3.mutable --include-package org.apache.commons.lang3.text --include-package org.apache.commons.lang3.function --include-package org.apache.commons.lang3.stream --include-package org.apache.commons.lang3.compare --details=summary --disable-banner 2>&1' | bb grep -E 'tests found|tests failed|containers failed|^  JUnit|=> ' | bb sed 's/^\[ *//; s/ *\]$//'
+0 containers failed
+1051 tests found
+0 tests failed
+
+== java: a real library (Apache Commons Collections, its queue, comparator, functor, iterator and trie packages) with its test libraries, tested with the JUnit console launcher
+# timeout 1200
+$ jc() { bb chroot /disk/r /usr/bin/env PATH=/opt/java/openjdk/bin:/usr/bin:/bin JAVA_HOME=/opt/java/openjdk HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/commons-collections4.tar.gz | bb tar -xz -C /disk/r/work && jc sh -c 'cd /work/commons-collections4 && cp=; for j in libs/*.jar; do cp="$cp:$j"; done; java -Xlog:disable -Xmx512m -jar junit-console.jar execute --class-path classes:test-classes$cp --scan-class-path test-classes --include-package org.apache.commons.collections4.queue --include-package org.apache.commons.collections4.comparators --include-package org.apache.commons.collections4.functors --include-package org.apache.commons.collections4.iterators --include-package org.apache.commons.collections4.trie --details=summary --disable-banner 2>&1' | bb grep -E 'tests found|tests failed|containers failed|^  JUnit|=> ' | bb sed 's/^\[ *//; s/ *\]$//'
+0 containers failed
+1170 tests found
+0 tests failed

@@ -15,6 +15,7 @@
 // the same arithmetic; the vDSO makes the system call for the others.
 
 import "linux.bastio";
+import "arch/timewait.bastio";
 
 const LX_NANOSLEEP: u64 = 35;
 const LX_GETTIMEOFDAY: u64 = 96;
@@ -25,17 +26,16 @@ const LX_CLOCK_NANOSLEEP: u64 = 230;
 
 const NS_PER_S: u64 = 1000000000;
 const NS_PER_TICK: u64 = 10000000;    // the timer runs at 100 Hz
-/// How close to its deadline a timed wait stops sleeping and goes back to
-/// trying its call each time it is scheduled, as all timed waits did
-/// before TIMEWAIT. A tick (every 10 ms) wakes the sleeper (idled,
-/// finish_p) well within that time, so the deadline is met as closely as
-/// before. 200 ms, not two ticks: LTP's timer tests (pselect01,
-/// epoll_pwait03, ...) time sleeps of 1 to 100 ms and fail if a few end
-/// late. Under emulation on a busy host, with 20 or 50 ms, some of them
-/// did end 3 to 9 ms late, and nothing found why. A wait that short then
-/// costs a processor as before; a longer one (sleep 15, a poll with a
-/// timeout of seconds) sleeps for all but its last 200 ms.
-const NEAR: u64 = 200000000;
+// How close to its deadline a timed wait stops sleeping and goes back to
+// trying its call each time it is scheduled, as all timed waits did
+// before TIMEWAIT (NEAR, in arch/timewait.bastio). A tick (every 10 ms)
+// wakes the sleeper (idled, finish_p) well within that time, so the
+// deadline is met as closely as before. It is not two ticks: LTP's timer
+// tests (pselect01, epoll_pwait03, ...) time sleeps of 1 to 100 ms and fail
+// if a few end late. A wait that short costs a processor as before; a
+// longer one (sleep 15, a poll with a timeout of seconds) sleeps for all
+// but its last NEAR.
+
 const FOREVER: u64 = 18446744073709551613;   // 2^64 - 3: a deadline never reached
 const TIMER_ABSTIME: u64 = 1;
 const CLOCK_PROCESS_CPUTIME_ID: u64 = 2;
@@ -219,15 +219,44 @@ fn time_out(k: &mut Kernel, pid: u64, va: u64, t: u64, unit: u64) -> u64
   return 0;
 }
 
-/// The CPU time process (or thread) p has used, in ns.
-fn cpu_ns(k: &Kernel, p: u64) -> u64
-  requires kok(k) && p < NPROC
+/// The CPU time thread p has used, or with `group` its process (all its
+/// threads, live or ended), in ns.
+fn cpu_ns(procs: &Buf, sys: &Buf, p: u64, group: bool) -> u64
+  requires ptab_ok(procs) && len(sys) == SYS_LEN && p < NPROC
 {
-  let t = pget(k.procs, p, F_TICKS);
+  let mut t = pget(procs, p, F_TICKS);
+  if group {
+    t = group_time(procs, sys, p, 0);
+  }
   if t >= FOREVER / NS_PER_TICK {
     return FOREVER - 1;
   }
   return t * NS_PER_TICK;
+}
+
+/// clock_now for the CPU-time clocks, apart so that clock_now stays small
+/// (it is in the timer tick's path) and gets the process table and k.sys
+/// alone: a `&Kernel` would be copied at every call.
+fn cpu_clock(procs: &Buf, sys: &Buf, pid: u64, clk: u64) -> u64
+  requires ptab_ok(procs) && len(sys) == SYS_LEN && pid < NPROC
+{
+  if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
+    return cpu_ns(procs, sys, pid, clk == CLOCK_PROCESS_CPUTIME_ID);
+  }
+  if clk % 4 == 3 {
+    return FOREVER;
+  }
+  let mut t = (!clk) >> 3;
+  if t == 0 {
+    t = pid;
+  }
+  if t >= NPROC || state(procs, t) == FREE {
+    return FOREVER;
+  }
+  if clk % 8 >= 4 && tgid(procs, t) != tgid(procs, pid) {
+    return FOREVER;                       // a thread of another process
+  }
+  return cpu_ns(procs, sys, t, clk % 8 < 4);
 }
 
 /// What clock `clk` reads now, or FOREVER for a clock there is not. A
@@ -238,24 +267,8 @@ fn cpu_ns(k: &Kernel, p: u64) -> u64
 fn clock_now(k: &Kernel, pid: u64, clk: u64) -> u64
   requires kok(k) && pid < NPROC
 {
-  if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID {
-    return cpu_ns(k, pid);
-  }
-  if clk >= 0x8000000000000000 {
-    if clk % 4 == 3 {
-      return FOREVER;
-    }
-    let mut t = (!clk) >> 3;
-    if t == 0 {
-      t = pid;
-    }
-    if t >= NPROC || state(k.procs, t) == FREE {
-      return FOREVER;
-    }
-    if clk % 8 >= 4 && tgid(k.procs, t) != tgid(k.procs, pid) {
-      return FOREVER;                       // a thread of another process
-    }
-    return cpu_ns(k, t);
+  if clk == CLOCK_PROCESS_CPUTIME_ID || clk == CLOCK_THREAD_CPUTIME_ID || clk >= 0x8000000000000000 {
+    return cpu_clock(k.procs, k.sys, pid, clk);
   }
   // The coarse clocks move a tick at a time, as Linux's do (they read
   // the time of the last tick), and clock_getres says so.
@@ -372,14 +385,26 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_EVENT || f.kind == K_TIMER || f.kind == K_EPOLL {
     return ev_bits(k, f.kind, f.x);
   }
+  if f.kind == K_DEV && is_mounts_dev(f.x) {
+    if mnt_seen(k, fd_ofd(k, pid, fd)) != mnt_events(k) {
+      return POLLIN | POLLOUT | POLLPRI | POLLERR;   // the mount table changed since it was read
+    }
+    return POLLIN | POLLOUT;
+  }
   if f.kind == K_SIGFD {
     return sfd_bits(k, pid, f.x);
   }
   if f.kind == K_DEV && is_pty_dev(f.x) {
     return pty_bits(k, f.x);                // src/lxpty.bastio
   }
+  if f.kind == K_DEV && f.x == DEV_KEYEV {
+    return keyev_bits(k);                   // src/lxkeyev.bastio
+  }
   if f.kind == K_DEV && f.x == DEV_MICE {
     return mice_bits(k);                    // src/lxmouse.bastio
+  }
+  if f.kind == K_DEV && f.x == DEV_SER {
+    return ser_bits(k);                     // src/lxserial.bastio
   }
   if f.kind == K_SECCOMP && f.x < SC_N {
     return sc_bits(k, f.x);                 // src/lxseccomp.bastio
@@ -652,6 +677,22 @@ fn post_proc(k: &mut Kernel, p: u64, s: u64)
   requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
   ensures kok(k)
 {
+  post_proc_w(&mut k, p, s, 0);
+}
+
+/// post_proc with the sender word of the siginfo (see info_from).
+fn post_proc_w(k: &mut Kernel, p: u64, s: u64, word: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
+  post_proc_wv(&mut k, p, s, word, 0);
+}
+
+/// post_proc_w with the sigval that goes with it (a POSIX timer's).
+fn post_proc_wv(k: &mut Kernel, p: u64, s: u64, word: u64, value: u64)
+  requires kok(k) && 1 <= p && p < NPROC && 1 <= s && s <= NSIG
+  ensures kok(k)
+{
   let mut at = p;
   if has_sig(pget(k.procs, p, F_SIGMASK), s) {
     let g = tgid(k.procs, p);
@@ -674,9 +715,20 @@ fn post_proc(k: &mut Kernel, p: u64, s: u64)
     let l = tgid(k.procs, p);
     if l >= 1 && state(k.procs, l) != FREE && state(k.procs, l) != ZOMBIE {
       at = l;
+      // Threads in sigtimedwait are asleep and look again; the first to run
+      // takes the signal off the leader (sig_adopt).
+      let mut q = 1;
+      while q < NPROC
+        invariant 1 <= q && q <= NPROC && kok(k)
+      {
+        if q != l && state(k.procs, q) == TIMEWAIT && tgid(k.procs, q) == tgid(k.procs, p) {
+          pset(&mut k.procs, q, F_STATE, READY);
+        }
+        q = q + 1;
+      }
     }
   }
-  post_sig(&mut k, at, s);
+  post_wv(&mut k, at, s, word, value);
 }
 
 /// On a timer tick, with k.ns just read: sends SIGALRM to each process
@@ -686,9 +738,10 @@ fn lx_alarms(k: &mut Kernel)
   requires kok(k)
   ensures kok(k)
 {
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);     // past it, every process is FREE and has no timer
   let mut p = 1;
-  while p < NPROC
-    invariant 1 <= p && p <= NPROC && kok(k)
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
   {
     let dl = get(k.alarms, 2 * p);
     if dl != 0 && k.ns >= dl {
@@ -884,6 +937,11 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
     }
     wait = ts.ns;
   }
+  // A signal sent to the process that every thread blocks waits on the
+  // leader for whichever thread sigwaits for it.
+  if pid >= 1 {
+    sig_adopt(&mut k, pid, want);
+  }
   let pend = pget(k.procs, pid, F_SIGPEND);
   let mut s = 1;
   while s <= NSIG
@@ -900,7 +958,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           i = i + 1;
         }
         bset(&mut k.fs.xfer, 0, cast[u8](s));
-        info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(pid, s)));   // si_pid, si_value
+        info_from(&mut k.fs.xfer, 0, wget(k.sigsave, sender_at(pid, s)), wget(k.sigsave, value_at(pid, s)));   // si_pid, si_value
         if wget(k.sigsave, sender_at(pid, s)) < FAULT_MARK && nsk_of(k, NSK_PID, pid) != 0 {
           xfer_u64(&mut k.fs.xfer, 16, vpid_of(k, pid, wget(k.sigsave, sender_at(pid, s)) % SW_PID));
         }
@@ -909,6 +967,7 @@ fn lx_sigtimedwait(k: &mut Kernel, pid: u64, n: u64, was: u64, setp: u64, info: 
           return KEEP;
         }
       }
+      rtq_refill(&mut k, pid, s);
       ret(&mut k.procs, pid, s);
       return KEEP;
     }

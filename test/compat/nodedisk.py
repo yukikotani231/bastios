@@ -53,7 +53,7 @@ def main():
         os.makedirs(os.path.join(root, d), exist_ok=True)
     keep = os.path.join(root, "etc", "hosts")
     open(keep, "w").write("127.0.0.1 localhost\n")
-    env = dict(os.environ, MKDISK_FREE_MB="64")
+    env = dict(os.environ, MKDISK_FREE_MB="128")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
                                f"busybox={busybox}", f"n={root}"], env)
 

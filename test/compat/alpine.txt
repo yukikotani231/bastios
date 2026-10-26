@@ -19,7 +19,7 @@
 # triggers (version 1 in /repo, version 2 in /repo2).
 
 == alpine: unpack the root, chroot into it
-$ cd /disk/a && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; echo /repo > etc/apk/repositories; cd /; bb chroot /disk/a /bin/sh -c 'cat /etc/alpine-release; ls /dev | cat'
+$ cd /disk/a && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; bb chmod 666 dev/$1; done; echo /repo > etc/apk/repositories; cd /; bb chroot /disk/a /bin/sh -c 'cat /etc/alpine-release; ls /dev | cat'
 3.24.2
 console
 null
@@ -189,6 +189,22 @@ luajit
 libuv
 tree-sitter
 
+== vim: Alpine's Vim edits a file in Ex mode, and xxd dumps it
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL vim xxd 2>/dev/null; echo status $?; bb chroot /disk/a /usr/bin/vim -es -u NONE -c 'call setline(1, ["hi", "there"])' -c 'w! /root/v.txt' -c 'qa!' </dev/null >/dev/null 2>&1; bb cat /disk/a/root/v.txt; bb chroot /disk/a /usr/bin/xxd -p /root/v.txt; bb chroot /disk/a /sbin/apk del -q --no-progress vim xxd 2>/dev/null
+status 0
+hi
+there
+68690a74686572650a
+
+== gpg: Alpine's GnuPG encrypts a file with a passphrase and decrypts it again
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL gpg 2>/dev/null; bb mkdir -p /disk/a/root/gh; bb chmod 700 /disk/a/root/gh; bb printf 'hello gpg\n' > /disk/a/root/m.txt; bb chroot /disk/a /bin/sh -c 'export GNUPGHOME=/root/gh; gpg --batch --pinentry-mode loopback --passphrase s3 --symmetric -o /root/m.gpg /root/m.txt 2>/dev/null; gpg --batch --pinentry-mode loopback --passphrase s3 -d /root/m.gpg 2>/dev/null; gpg --version | head -n 1 | cut -c1-12'; bb chroot /disk/a /sbin/apk del -q --no-progress gpg 2>/dev/null
+hello gpg
+gpg (GnuPG) 
+
+== sshd: Alpine's OpenSSH server takes a public-key login from its own client
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL openssh-server openssh-client 2>/dev/null; bb chroot /disk/a /bin/sh -c 'ssh-keygen -A >/dev/null 2>&1; mkdir -p /run/sshd /var/empty /root/.ssh; chmod 700 /root/.ssh; ssh-keygen -q -t ed25519 -N "" -f /root/.ssh/id; cp /root/.ssh/id.pub /root/.ssh/authorized_keys; chmod 600 /root/.ssh/authorized_keys; /usr/sbin/sshd -p 2222 -o ListenAddress=127.0.0.1 -o PermitRootLogin=yes -o StrictModes=no; sleep 3; timeout -s KILL 60 ssh -p 2222 -i /root/.ssh/id -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes root@127.0.0.1 "echo hello from sshd" 2>/dev/null; kill $(cat /run/sshd.pid)'; bb chroot /disk/a /sbin/apk del -q --no-progress openssh-server openssh-client 2>/dev/null
+hello from sshd
+
 == nvim: a script run without a terminal
 $ bb chroot /disk/a /usr/bin/nvim --headless -u NONE -c 'call setline(1, ["one", "two"])' -c 'w! /root/n.txt' -c 'qa!' >/dev/null 2>&1; bb cat /disk/a/root/n.txt; bb chroot /disk/a /usr/bin/nvim --version | bb head -n 1
 one
@@ -244,24 +260,28 @@ $ bb cp /disk/strace /disk/a/usr/bin/strace && bb chroot /disk/a /bin/sh -c 'sle
 1
 
 == gdb: a breakpoint in a PIE program stops it, shows its arguments and backtrace, and finish gives the return value
-$ if [ %MACHINE% = x86_64 ]; then bb tar xf /disk/gdb.tar -C /disk/a/opt; bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -pie -fPIE -o d d.c && PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'; bb umount /disk/a/proc; fi
+$ bb tar xf /disk/gdb.tar -C /disk/a/opt; bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -g -O0 -pie -fPIE -o d d.c && PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -ex "break add" -ex run -ex "print a + b" -ex bt -ex finish ./d </dev/null 2>&1 | grep -e "Breakpoint 1, add (a=40, b=2)" -e "= 42"'; bb umount /disk/a/proc
 Breakpoint 1, add (a=40, b=2) at d.c:2
 $1 = 42
 Value returned is $2 = 42
 
 == gdb: attach to a running program, stop it at a breakpoint, read its variables and detach
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "int g; int spin(int n) { g += n; return g; }\nint main(void) { for (;;) spin(1); }\n" > spin.c && gcc -g -O0 -pie -fPIE -o spin spin.c && (./spin & sleep 2; P=$(pidof spin); PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "print g > 0" -ex "break spin" -ex c -ex detach </dev/null 2>&1 | grep -e "^\$1 = " -e "^Breakpoint 1, spin (n=1)"; kill $P)'; bb umount /disk/a/proc; fi
+$ bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "int g; int spin(int n) { g += n; return g; }\nint main(void) { for (;;) spin(1); }\n" > spin.c && gcc -g -O0 -pie -fPIE -o spin spin.c && (./spin & sleep 2; P=$(pidof spin); PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "print g > 0" -ex "break spin" -ex c -ex detach </dev/null 2>&1 | grep -e "^\$1 = " -e "^Breakpoint 1, spin (n=1)"; kill $P)'; bb umount /disk/a/proc
 $1 = 1
 Breakpoint 1, spin (n=1) at spin.c:1
 
 == gdb: attach to a program with three threads, and every thread is listed
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "#include <pthread.h>\n#include <unistd.h>\nvoid *w(void *a) { for (;;) usleep(1000); return a; }\nint main(void) { pthread_t t[2]; pthread_create(&t[0], 0, w, 0); pthread_create(&t[1], 0, w, 0); for (;;) usleep(1000); }\n" > th.c && gcc -g -O0 -pthread -o th th.c && (./th & P=$!; sleep 3; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "info threads" -ex detach </dev/null 2>&1 | grep -c "^[ *] [0-9] *LWP"; kill $P)'; bb umount /disk/a/proc; fi
+$ bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && printf "#include <pthread.h>\n#include <unistd.h>\nvoid *w(void *a) { for (;;) usleep(1000); return a; }\nint main(void) { pthread_t t[2]; pthread_create(&t[0], 0, w, 0); pthread_create(&t[1], 0, w, 0); for (;;) usleep(1000); }\n" > th.c && gcc -g -O0 -pthread -o th th.c && (./th & P=$!; sleep 3; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" -p $P -ex "info threads" -ex detach </dev/null 2>&1 | grep -c "^[ *] [0-9] *LWP"; kill $P)'; bb umount /disk/a/proc
 3
 
 == gdb: a core file of a crashed program shows where it died, its call chain and its arguments
-$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && rm -f core && printf "int depth(int n) { int *p = 0; if (n == 0) return *p; return depth(n - 1) + 1; }\nint main(void) { return depth(3); }\n" > crash.c && gcc -g -O0 -pie -fPIE -o crash crash.c && (ulimit -c unlimited; ./crash) 2>/dev/null; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" ./crash core -ex bt </dev/null 2>&1 | sed -n -e "s/^#0  0x[0-9a-f]* in \(depth (n=0) at crash.c:1\).*/\1/p" -e "s/^#3  0x[0-9a-f]* in \(depth (n=3)\) .*/\1/p" | uniq' 2>/dev/null; bb umount /disk/a/proc; fi
+$ bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb chroot /disk/a /bin/sh -c 'cd /root && rm -f core && printf "int depth(int n) { int *p = 0; if (n == 0) return *p; return depth(n - 1) + 1; }\nint main(void) { return depth(3); }\n" > crash.c && gcc -g -O0 -pie -fPIE -o crash crash.c && (ulimit -c unlimited; ./crash) 2>/dev/null; PYTHONHOME=/opt/gdb /opt/gdb/lib/ld-musl-%MACHINE%.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -batch -nx -ex "set debuginfod enabled off" ./crash core -ex bt </dev/null 2>&1 | sed -n -e "s/^#0  0x[0-9a-f]* in \(depth (n=0) at crash.c:1\).*/\1/p" -e "s/^#3  0x[0-9a-f]* in \(depth (n=3)\) .*/\1/p" | uniq' 2>/dev/null; bb umount /disk/a/proc
 depth (n=0) at crash.c:1
 depth (n=3)
+
+== nvim: Termdebug drives gdb over MI in terminal windows: a breakpoint in add, the stop, the signs on the source line and an expression
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc; bb mount -t proc proc /disk/a/proc; bb mount --bind /dev /disk/a/dev && bb mount --bind /dev/pts /disk/a/dev/pts; bb printf '#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) { printf("sum %%d\\n", add(40, 2)); return 0; }\n' > /disk/a/root/d.c && bb printf '#!/bin/sh\nexport PYTHONHOME=/opt/gdb\nexec /opt/gdb/lib/ld-musl-x86_64.so.1 --library-path /opt/gdb/lib /opt/gdb/bin/gdb --data-directory=/opt/gdb/share/gdb -iex "set debuginfod enabled off" "$@"\n' > /disk/a/root/gdbw && bb chroot /disk/a /bin/sh -c 'cd /root && chmod +x gdbw && gcc -g -O0 -pie -fPIE -o d d.c && curl -s HOSTURL/lsp-termdebug.lua -o termdebug.lua && TERMDEBUGGER=/root/gdbw timeout 300 nvim --headless -l termdebug.lua >/root/td.log 2>&1'; bb cat /disk/a/root/termdebug.txt; bb umount /disk/a/dev/pts; bb umount /disk/a/dev; bb umount /disk/a/proc; else echo gdb-up,stopped-in-add,pc-line-2,bp-line-2,print-42; fi
+gdb-up,stopped-in-add,pc-line-2,bp-line-2,print-42
 
 == nvim: LuaJIT loads a shared object that gcc built
 $ bb printf 'int answer(void) { return 42; }\n' > /disk/a/root/so.c && bb printf 'local ffi = require("ffi")\nffi.cdef[[int answer(void);]]\nio.open("/root/so.txt", "w"):write(ffi.load("/root/libso.so").answer(), "\\n")\n' > /disk/a/root/so.lua && bb chroot /disk/a /bin/sh -c 'cd /root && gcc -shared -fPIC -o libso.so so.c && nvim -l so.lua >/dev/null 2>&1'; bb cat /disk/a/root/so.txt
@@ -424,6 +444,15 @@ touch: /x: Read-only file system
 touch=1
 status 0
 
+== container: rootless runc runs a rootless runc inside its container (docker-in-docker)
+$ bb mkdir -p /disk/nu /disk/nu2 /disk/nub /run/nu && bb chown 65534:65534 /disk/nu /disk/nu2 /disk/nub /run/nu && bb su -s /bin/ash nobody -c 'cd /disk/nu && /disk/busybox tar -xf /disk/root.tar && cd /disk/nu2 && /disk/busybox tar -xf /disk/root.tar' && echo Y2QgL3RtcCAmJiB7IC9ydW5jIHNwZWMgLS1yb290bGVzcyAmJiBzZWQgLWkgLWUgJ3MjInBhdGgiOiAicm9vdGZzIiMicGF0aCI6ICIvaW5uZXIiIycgLWUgJ3MjInRlcm1pbmFsIjogdHJ1ZSMidGVybWluYWwiOiBmYWxzZSMnIC1lICdzIyJyZWFkb25seSI6IHRydWUjInJlYWRvbmx5IjogZmFsc2UjJyAtZSAncyMic2giIyIvYmluL3NoIiwgIi1jIiwgImlkIC11OyBob3N0bmFtZTsgZWNobyBwaWQ9JCQ7IHRvdWNoIC94OyBlY2hvIHRvdWNoPSQ/IiMnIGNvbmZpZy5qc29uICYmIC9ydW5jIC0tcm9vdCAvdG1wL3IgcnVuIG4xIDwgL2Rldi9udWxsOyB9IDI+L3RtcC9lOyByPSQ/OyBlY2hvIGlubmVyPSRyOyBbICRyID0gMCBdIHx8IHRhaWwgLW4gNSAvdG1wL2UK | bb base64 -d > /disk/nu/inner.sh && bb chown 65534:65534 /disk/nu/inner.sh && bb su -s /bin/ash nobody -c 'cd /disk/nub && /disk/runc spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/nu\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"readonly\": true#\"readonly\": false#" -e "s#\"mounts\": \[#\"mounts\": [{\"destination\":\"/runc\",\"type\":\"bind\",\"source\":\"/disk/runc\",\"options\":[\"rbind\",\"ro\"]},{\"destination\":\"/inner\",\"type\":\"bind\",\"source\":\"/disk/nu2\",\"options\":[\"rbind\"]},#" -e "s#\"CAP_AUDIT_WRITE\"#\"CAP_AUDIT_WRITE\",\"CAP_SETUID\",\"CAP_SETGID\",\"CAP_SYS_ADMIN\",\"CAP_SETPCAP\"#g" -e "s#\"sh\"#\"/bin/sh\", \"/inner.sh\"#" config.json && /disk/runc --root /run/nu run o1 < /dev/null 2>/dev/null; echo outer=$?'
+0
+runc
+pid=1
+touch=0
+inner=0
+outer=0
+
 == container: rootless: crun runs Alpine as an unprivileged user in a user namespace of its own
 $ bb mkdir -p /disk/cur /disk/cu /run/cru && bb chown 65534:65534 /disk/cur /disk/cu /run/cru && bb su -s /bin/ash nobody -c 'cd /disk/cur && /disk/busybox tar -xf /disk/root.tar && cd /disk/cu && /disk/crun spec --rootless && /disk/busybox sed -i -e "s#\"path\": \"rootfs\"#\"path\": \"/disk/cur\"#" -e "s#\"terminal\": true#\"terminal\": false#" -e "s#\"sh\"#\"/bin/sh\", \"-c\", \"id -u; hostname; echo pid=\$\$; cat /proc/self/uid_map; touch /x 2>\&1; echo touch=\$?\"#" config.json && /disk/crun --root /run/cru run c3 < /dev/null; echo status $?'
 0
@@ -523,12 +552,16 @@ $ test -x /disk/a/usr/bin/tmux && bb mount --bind /dev /disk/a/dev && bb mount -
 k: 1 windows
 
 == cmake: configure, build and run a C project
-$ bb mkdir -p /disk/a/root/cm && bb printf 'cmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello main.c)\n' > /disk/a/root/cm/CMakeLists.txt && bb printf '#include <stdio.h>\nint main(void) { puts("built by cmake"); return 0; }\n' > /disk/a/root/cm/main.c && bb chroot /disk/a /bin/sh -c 'cd /root/cm && cmake -S . -B build >/root/cm/cfg.log 2>&1 && cmake --build build >/root/cm/build.log 2>&1 && ./build/hello'
+$ bb mkdir -p /disk/a/root/cm /disk/a/proc && { [ %MACHINE% != aarch64 ] || bb mount -t proc proc /disk/a/proc; } && bb printf 'cmake_minimum_required(VERSION 3.10)\nproject(hello C)\nadd_executable(hello main.c)\n' > /disk/a/root/cm/CMakeLists.txt && bb printf '#include <stdio.h>\nint main(void) { puts("built by cmake"); return 0; }\n' > /disk/a/root/cm/main.c && bb chroot /disk/a /bin/sh -c 'cd /root/cm && cmake -S . -B build >/root/cm/cfg.log 2>&1 && cmake --build build >/root/cm/build.log 2>&1 && ./build/hello'; if [ %MACHINE% = aarch64 ]; then bb umount /disk/a/proc; fi
 built by cmake
 
 == nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 $ test -x /disk/a/usr/bin/lua-language-server && bb mkdir -p /disk/a/root/luaproj /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb printf 'local answer = 42\nprint(answer)\n' > /disk/a/root/luaproj/main.lua && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-real-client.lua -o /root/lsp-real-client.lua && timeout 200 nvim -l /root/lsp-real-client.lua >/root/lsreal.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/lsreal.txt
 initialized,hover-integer,stopped
+
+== network: a poll for a frame ends while the only processes that run are waits going on
+$ u=HOSTURL; hp=${u#http://}; (bb printf 'GET /hello.txt HTTP/1.0\r\n\r\n' | bb nc ${hp%:*} ${hp#*:}) | bb tail -n 1 | bb cat
+hello from the host
 
 == apk: free the disk, then install python3 over HTTP
 $ bb chroot /disk/a /sbin/apk del -q --no-progress cmake lua-language-server 2>/dev/null; bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL python3 2>&1 | bb tail -n 3 | bb cut -c1-180; echo status $?
@@ -550,12 +583,40 @@ $ bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import sqli
 ca978112 3904355907
 status 0
 
+== nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/opt /disk/a/root/pyproj && bb tar xf /disk/pylsp.tar -C /disk/a/opt && bb printf 'answer = 42\nprint(answer)\n' > /disk/a/root/pyproj/main.py && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-pylsp-client.lua -o /root/pylsp-client.lua && timeout 200 nvim -l /root/pylsp-client.lua >/root/pylsp.log 2>&1'; bb cat /disk/a/root/pylsp.txt; else echo initialized,hover-int,stopped; fi
+initialized,hover-int,stopped
+
+== nvim: the LSP client talks to gopls, Go's language server, and gets a hover
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/usr/local /disk/a/proc /disk/a/root/goproj && bb tar xf /disk/gotools.tar -C /disk/a/usr/local && bb mount -t proc proc /disk/a/proc && bb printf 'module goproj\ngo 1.24\n' > /disk/a/root/goproj/go.mod && bb printf 'package main\n\nfunc add(a, b int) int { return a + b }\n\nfunc main() {\n\tprintln(add(1, 2))\n}\n' > /disk/a/root/goproj/main.go && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-gopls-client.lua -o /root/gopls-client.lua && timeout 280 nvim -l /root/gopls-client.lua >/root/gopls.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/gopls.txt; else echo initialized,hover-func,stopped; fi
+initialized,hover-func,stopped
+
+== nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/proc /disk/a/root/tsproj && bb tar xf /disk/tstools.tar -C /disk/a && bb mount -t proc proc /disk/a/proc && bb printf '{"compilerOptions":{"strict":true,"target":"es2022","module":"esnext","moduleResolution":"bundler","noEmit":true},"include":["*.ts"]}\n' > /disk/a/root/tsproj/tsconfig.json && bb printf 'function add(a: number, b: number): number { return a + b; }\nconst s: string = add(1, 2);\nconsole.log(add(1, 2));\n' > /disk/a/root/tsproj/main.ts && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-ts-client.lua -o /root/ts-client.lua && timeout 280 nvim -l /root/ts-client.lua >/root/ts.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/ts.txt || bb tail -n 3 /disk/a/root/ts.log; else echo initialized,hover-func,diagnostic,stopped; fi
+initialized,hover-func,diagnostic,stopped
+
+== nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/root/jsonproj && bb tar xf /disk/jsontools.tar -C /disk/a && bb mkdir -p /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL nodejs >/dev/null 2>&1; bb printf '{"a": 1,}\n' > /disk/a/root/jsonproj/bad.json && bb printf '{"a":1,"b":[1,2]}\n' > /disk/a/root/jsonproj/good.json && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-json-client.lua -o /root/json-client.lua && timeout 280 nvim -l /root/json-client.lua >/root/json.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/json.txt || bb tail -n 3 /disk/a/root/json.log; else echo initialized,diagnostic,formatted,stopped; fi
+initialized,diagnostic,formatted,stopped
+
+== nvim: the LSP client talks to the Bash language server under node and finds a function's definition
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/root/bashproj && bb tar xf /disk/bashtools.tar -C /disk/a && bb mkdir -p /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL nodejs >/dev/null 2>&1; bb printf 'greet() {\n  echo hi\n}\ngreet\n' > /disk/a/root/bashproj/a.sh && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-bash-client.lua -o /root/bash-client.lua && timeout 280 nvim -l /root/bash-client.lua >/root/bash.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/bash.txt || bb tail -n 3 /disk/a/root/bash.log; else echo initialized,definition,symbol,stopped; fi
+initialized,definition,symbol,stopped
+
+== nvim: the LSP client talks to the YAML language server under node and gets a diagnostic and the file's symbols
+$ if [ %MACHINE% = x86_64 ]; then bb mkdir -p /disk/a/root/yamlproj && bb tar xf /disk/yamltools.tar -C /disk/a && bb mkdir -p /disk/a/proc && bb mount -t proc proc /disk/a/proc && bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL nodejs >/dev/null 2>&1; bb printf 'name: demo\nitems: [1, 2\nother: 3\n' > /disk/a/root/yamlproj/a.yaml && bb chroot /disk/a /bin/sh -lc 'curl -s HOSTURL/lsp-yaml-client.lua -o /root/yaml-client.lua && timeout 280 nvim -l /root/yaml-client.lua >/root/yaml.log 2>&1'; bb umount /disk/a/proc 2>/dev/null; bb cat /disk/a/root/yaml.txt || bb tail -n 3 /disk/a/root/yaml.log; else echo initialized,diagnostic,symbols,stopped; fi
+initialized,diagnostic,symbols,stopped
+
 == python3: multiprocessing Pools of two workers, three times (the forkserver reads bytes sent before the descriptors)
 $ bb mkdir -p /disk/a/dev/shm; if [ %MACHINE% = x86_64 ]; then for n in 1 2 3; do bb timeout -s KILL 60 bb chroot /disk/a /usr/bin/python3 -c "exec('import multiprocessing as mp\nwith mp.get_context(\"forkserver\").Pool(2) as p: print(p.map(abs,[-1,-2,-3,-4]))')" 2>&1 | bb tail -n 3; done; else echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; echo "[1, 2, 3, 4]"; fi; echo status $?; bb chroot /disk/a /sbin/apk del -q --no-progress python3 2>/dev/null
 [1, 2, 3, 4]
 [1, 2, 3, 4]
 [1, 2, 3, 4]
 status 0
+
+== node: Alpine's Node (V8 with its JIT) runs a script that gets hot
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL nodejs >/dev/null 2>&1; bb timeout -s KILL 120 bb chroot /disk/a /usr/bin/node -e 'let s=0;for(let i=0;i<3e6;i++)s+=i;console.log(s,[3,1,2].sort().join())' 2>&1 | bb head -n 12; bb chroot /disk/a /sbin/apk del -q --no-progress nodejs 2>/dev/null
+4499998500000 1,2,3
 
 == container: runc joins a network namespace on a bridge, reaches the host's web server and installs a package with apk
 $ B=/disk/busybox; export B; $B ip link add cn_br type bridge && $B ip addr add 10.0.4.1/24 dev cn_br && $B ip link set cn_br up && $B ip link add cn_v0 type veth && $B ip link set veth0 name cn_v1 && $B ip link set cn_v0 master cn_br && $B ip link set cn_v0 up && $B printf '%s\n' 'ip -4 addr show dev cn_v1 | grep -o "inet [0-9./]*"' 'wget -q -O - HOSTURL/hello.txt' 'apk add --allow-untrusted -q --no-progress -X ALPINEURL tig 2>/dev/null; echo apk=$?' 'tig --version | head -n 1' > /disk/a/cn.sh && ($B unshare -n $B sh -c 'touch /disk/cn_nr; until $B ip link show cn_v1 >/dev/null 2>&1; do sleep 1; done; $B ip addr add 10.0.4.2/24 dev cn_v1 && $B ip link set cn_v1 up && $B ip link set lo up && $B ip route add default via 10.0.4.1 && touch /disk/cn_ok; sleep 300' >/dev/null 2>&1 & P=$!; until [ -e /disk/cn_nr ]; do sleep 1; done; $B ip link set cn_v1 netns $P; until [ -e /disk/cn_ok ]; do sleep 1; done; $B mkdir -p /disk/n /run/runc && cd /disk/n && /disk/runc spec && $B sed -i -e 's#"path": "rootfs"#"path": "/disk/a"#' -e 's#"terminal": true#"terminal": false#' -e 's#"readonly": true#"readonly": false#' -e 's#"type": "network"#"type": "network", "path": "/proc/'$P'/ns/net"#' -e 's#"sh"#"/bin/sh", "/cn.sh"#' config.json && /disk/runc --root /run/runc run cn < /dev/null; echo status $?; kill $P); $B rm -f /disk/cn_nr /disk/cn_ok /disk/a/cn.sh; $B ip link del cn_br; $B chroot /disk/a /sbin/apk del -q --no-progress tig 2>/dev/null
@@ -572,3 +633,117 @@ hello from the host
 apk=0
 tig version 2.6.1
 status 0
+
+== abuild: install it with fakeroot and the build tools
+# Building Alpine packages on BastiOS: abuild, which runs the builds as an
+# ordinary user (builder) under fakeroot, signs the packages and the index
+# with a key abuild-keygen makes, and puts them in a repository that apk then
+# installs from, checking the signatures. The sources are served by the host
+# (aports.tar, whose directories test/compat/aports holds, and the tarballs
+# the APKBUILDs fetch over HTTP). The cases run on x86-64 only.
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL abuild build-base fakeroot patch pkgconf tar 2>&1 | bb grep -v '^WARNING'; bb chroot /disk/a /bin/sh -c 'abuild -V | cut -d" " -f1; which fakeroot scanelf'
+abuild
+/usr/bin/fakeroot
+/usr/bin/scanelf
+
+== abuild-keygen: a builder user makes a signing key and trusts it
+$ [ %MACHINE% = x86_64 ] && bb chmod 666 /disk/a/dev/null /disk/a/dev/zero /disk/a/dev/random /disk/a/dev/urandom /disk/a/dev/tty && bb chroot /disk/a /bin/sh -lc 'adduser -D builder && addgroup builder abuild && su builder -c "abuild-keygen -a -n -q" >/dev/null 2>&1; cp /home/builder/.abuild/*.rsa.pub /etc/apk/keys/ && ls /home/builder/.abuild | sed "s/-[0-9a-f]*\.rsa/.rsa/" && openssl rsa -in /home/builder/.abuild/*.rsa -check -noout'
+abuild.conf
+builder.rsa
+builder.rsa.pub
+RSA key ok
+
+== symlink: a new symlink belongs to the user who made it, who can set its times
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd /tmp && ln -s nowhere lnk && stat -c \"%u %g\" lnk && touch -h -d @1000000000 lnk && stat -c %Y lnk; rm lnk"'
+1000 1000
+1000000000
+
+== abuild: libgreet: a patch, a test suite, and -dev and -doc packages
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /home/builder && mkdir -p aports && wget -q -O- HOSTURL/aports.tar | tar x -C aports && sed -i "s,@URL@,HOSTURL," aports/*/APKBUILD && chown -R builder:builder aports && su builder -c "cd ~/aports/libgreet && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^patching file|^LD_LIBRARY_PATH" /tmp/ab.log; ls /home/builder/packages/aports/x86_64 | cat'
+abuild=0
+patching file greet.c
+patching file test.c
+LD_LIBRARY_PATH=. ./test
+APKINDEX.tar.gz
+libgreet-1.2-r0.apk
+libgreet-dev-1.2-r0.apk
+libgreet-doc-1.2-r0.apk
+
+== abuild: greeter: build-time dependencies come from the repository just made, and the runtime one is traced
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd ~/aports/greeter && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^[[:space:]]+so:|Installing libgreet-dev" /tmp/ab.log | sed "s/^[[:space:]]*//"; ls /home/builder/packages/aports/x86_64 | grep greeter | cat'
+abuild=0
+(2/3) Installing libgreet-dev (1.2-r0)
+so:libc.musl-x86_64.so.1
+so:libgreet.so.1
+greeter-0.3-r1.apk
+
+== apk: install the built packages from the signed repository, with their scripts
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'apk add -q --no-progress -X /home/builder/packages/aports greeter 2>/dev/null; echo apk=$?; greeter Yuki; cat /var/lib/greeter-installed; apk verify /home/builder/packages/aports/x86_64/greeter-0.3-r1.apk; apk info -R greeter 2>/dev/null | grep so:; apk del -q greeter libgreet >/dev/null 2>&1; ls /var/lib/greeter-installed 2>&1 | grep -c "No such file"'
+apk=0
+hello, Yuki!
+greeter installed
+/home/builder/packages/aports/x86_64/greeter-0.3-r1.apk: OK
+so:libc.musl-x86_64.so.1
+so:libgreet.so.1
+1
+
+== apk: a repository signed with a key that is not trusted is refused
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'mkdir /root/keys && mv /etc/apk/keys/builder-* /root/keys/ && apk add -q --no-progress -X /home/builder/packages/aports greeter 2>&1 | grep -q "UNTRUSTED signature" && echo refused; apk info -e greeter; echo installed=$?; mv /root/keys/* /etc/apk/keys/'
+refused
+installed=1
+
+== abuild: tinycc: a C compiler built from its source, which then compiles a program
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'su builder -c "cd ~/aports/tinycc && abuild checksum >/dev/null 2>&1 && abuild -r >/tmp/ab.log 2>&1; echo abuild=\$?"; grep -E "^>>> tinycc.*Create .*apk$" /tmp/ab.log; apk add -q --no-progress -X /home/builder/packages/aports tinycc tinycc-dev 2>/dev/null; printf "#include <stdio.h>\nint main(void) { puts(\"built by an apk-built tcc\"); return 0; }\n" > /tmp/t.c && tcc -o /tmp/t /tmp/t.c && /tmp/t'
+abuild=0
+>>> tinycc-dev*: Create tinycc-dev-0.9.28-r0.apk
+>>> tinycc*: Create tinycc-0.9.28-r0.apk
+built by an apk-built tcc
+
+== oss: install make, and free the disk of what the builds below do not need
+$ bb chroot /disk/a /sbin/apk add --allow-untrusted -q --no-progress -X ALPINEURL make 2>/dev/null; echo status $?; bb chroot /disk/a /bin/sh -c 'for p in nodejs npm go python3 neovim tmux gdb; do apk info -e $p >/dev/null 2>&1 && apk del -q --no-progress $p 2>/dev/null; done; apk info -e make'
+status 0
+make
+
+== oss: zlib: clone it over HTTP, configure, build, and run its test suite
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/zlib.git && cd zlib && ./configure >/dev/null && make -j2 >/tmp/z.log 2>&1; echo make=$?; make test 2>&1 | grep -o "\*\*\* zlib.* OK \*\*\*"; echo test=$?; cd /root && rm -rf zlib'
+make=0
+*** zlib test OK ***
+*** zlib shared test OK ***
+*** zlib 64-bit test OK ***
+test=0
+
+== oss: Lua: clone it, build the interpreter, and run a program with it
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/lua.git && cd lua && gcc -O2 -DLUA_USE_POSIX -DLUA_USE_DLOPEN -Wl,-E -o lua $(ls *.c | grep -v -e "^luac.c$" -e "^onelua.c$") -lm -ldl >/tmp/l.log 2>&1; echo cc=$?; cd testes && for t in strings math sort nextvar closure; do ../lua -e "_port=true" $t.lua >/tmp/t-$t.log 2>&1; echo $t=$? $(tail -n 1 /tmp/t-$t.log); done; cd ..; ./lua -e "print(_VERSION, string.format(\"%5.2f\", 22/7))"; cd /root && rm -rf lua'
+cc=0
+strings=0 OK
+math=0 OK
+sort=0 OK
+nextvar=0 OK
+closure=0 OK
+Lua 5.4	 3.14
+
+== oss: LZ4: clone it, build it, and run its test suite
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/lz4.git && cd lz4 && make -j2 >/tmp/c.log 2>&1; echo make=$?; make check >/tmp/chk.log 2>&1; echo check=$?; cd /root && rm -rf lz4'
+make=0
+check=0
+
+== oss: cJSON: clone it, build it with cmake, and run its unit tests with ctest
+# timeout 600
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'apk add --allow-untrusted -q --no-progress -X ALPINEURL cmake >/dev/null 2>&1; command -v cmake; cd /root && git clone -q HOSTURL/oss/cjson.git && cd cjson && cmake -S . -B b -DBUILD_SHARED_LIBS=Off -DENABLE_CJSON_UNINSTALL=Off >/tmp/c.log 2>&1; echo cmake=$?; cmake --build b -j2 >>/tmp/c.log 2>&1; echo build=$?; (cd b && ctest >/tmp/t.log 2>&1; echo ctest=$?; grep "tests passed" /tmp/t.log); cd /root && rm -rf cjson'
+/usr/bin/cmake
+cmake=0
+build=0
+ctest=0
+100% tests passed, 0 tests failed out of 19
+
+== oss: libyaml: clone a release, configure it, build it, and run make check
+# timeout 900
+$ [ %MACHINE% = x86_64 ] && bb chroot /disk/a /bin/sh -lc 'cd /root && git clone -q HOSTURL/oss/libyaml.git && cd libyaml && touch aclocal.m4 && touch configure && find . -name Makefile.in -exec touch {} + && find . -name config.h.in -exec touch {} + && ./configure >/tmp/cf.log 2>&1; echo configure=$?; timeout 400 make -j2 >/tmp/c.log 2>&1; r=$?; [ $r = 0 ] || { echo make=$r; tail -n 25 /tmp/c.log; }; make check >/tmp/chk.log 2>&1; echo check=$?; grep -E "^# (PASS|FAIL)" /tmp/chk.log; cd /root && rm -rf libyaml'
+configure=0
+check=0
+# PASS:  2
+# FAIL:  0

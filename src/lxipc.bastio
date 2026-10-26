@@ -277,6 +277,29 @@ fn ipc_may(k: &Kernel, pid: u64, kind: u64, slot: u64, want: u64) -> bool
   return (want & 7) & (g & 7) == (want & 7);
 }
 
+/// How many message queues may exist: IPC_SETS, or less if /proc/sys/kernel/msgmni was written.
+fn msgmni_now(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= IPC_SETS
+{
+  let w = get(k.sys, SYS_MSGMNI);
+  if w == 0 {
+    return IPC_SETS;
+  }
+  return smaller(w - 1, IPC_SETS);
+}
+
+/// The value /proc/sys/kernel/msgmni reads as: what was written, or IPC_SETS.
+fn msgmni_shown(k: &Kernel) -> u64
+  requires kok(k)
+{
+  let w = get(k.sys, SYS_MSGMNI);
+  if w == 0 {
+    return IPC_SETS;
+  }
+  return w - 1;
+}
+
 /// Whether pid owns or created the set, or is root: IPC_SET and IPC_RMID.
 fn ipc_owner(k: &Kernel, pid: u64, kind: u64, slot: u64) -> bool
   requires kok(k) && pid < NPROC && slot < IPC_SETS
@@ -326,6 +349,21 @@ fn ipc_get(k: &mut Kernel, pid: u64, kind: u64, key: u64, flg: u64) -> Got
     if (want - 1) % IPC_SPAN < IPC_SETS && hget(k, kind, (want - 1) % IPC_SPAN, H_SEQ) == 0 && (want - 1) / IPC_SPAN < 65536 {
       f = (want - 1) % IPC_SPAN;
       seq = (want - 1) / IPC_SPAN;
+    }
+  }
+  if kind == KQ {
+    let mut used = 0;
+    let mut u = 0;
+    while u < IPC_SETS
+      invariant u <= IPC_SETS && used <= u && kok(k)
+    {
+      if hget(k, KQ, u, H_SEQ) != 0 {
+        used = used + 1;
+      }
+      u = u + 1;
+    }
+    if used >= msgmni_now(k) {
+      return Got { r: ENOSPC, slot: IPC_SETS, fresh: false };   // msgmni queues exist
     }
   }
   if f >= IPC_SETS {
@@ -1687,6 +1725,26 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
     return EACCES;
   }
   let g = tgid(k.procs, pid);
+  let pages = shm_pages(k, slot);
+  if pages == 0 {
+    return EINVAL;
+  }
+  if want >= USER_BASE && (want - USER_BASE) / 4096 <= STACK_FIRST && pages <= STACK_FIRST - (want - USER_BASE) / 4096 {
+    // Attaching over an earlier attachment (SHM_REMAP) replaces it: its
+    // record ends here, else repeated remaps used up the table.
+    let lo = (want - USER_BASE) / 4096;
+    let mut d = 0;
+    while d < SA_N
+      invariant d <= SA_N && kok(k) && g < NPROC
+    {
+      let f0 = get(k.ipc, sa_at(g, d) + 1);
+      let n0 = get(k.ipc, sa_at(g, d) + 2);
+      if get(k.ipc, sa_at(g, d)) != 0 && f0 >= lo && f0 <= WPAGES && n0 <= WPAGES - f0 && f0 + n0 <= lo + pages {
+        shm_detach(&mut k, g, d, false);
+      }
+      d = d + 1;
+    }
+  }
   let mut rec = SA_N;
   let mut a = 0;
   while a < SA_N
@@ -1700,22 +1758,26 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
   if rec >= SA_N {
     return EMFILE;
   }
-  let pages = shm_pages(k, slot);
-  if pages == 0 {
-    return EINVAL;
-  }
   let mut at = 0;
+  let mut from_hole = false;
   if want == 0 {
-    let brk = pget(k.procs, pid, F_BRK);
-    let low = pget(k.procs, pid, F_MMAP);
-    if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
-      return ENOMEM;
+    // Address space a munmap or an earlier shmdt left first, as mmap does;
+    // else below the lowest mapping. Without the hole, a process that
+    // attaches and detaches in a loop used up its window.
+    at = hole_take(&mut k, pid, pages);
+    from_hole = at < STACK_FIRST;
+    if !from_hole {
+      let brk = pget(k.procs, pid, F_BRK);
+      let low = pget(k.procs, pid, F_MMAP);
+      if low > STACK_FIRST * 4096 || brk > low || pages * 4096 > low - brk {
+        return ENOMEM;
+      }
+      at = (low - pages * 4096) / 4096;
+      if at * 4096 < brk {
+        return ENOMEM;
+      }
+      pset(&mut k.procs, pid, F_MMAP, at * 4096);
     }
-    at = (low - pages * 4096) / 4096;
-    if at * 4096 < brk {
-      return ENOMEM;
-    }
-    pset(&mut k.procs, pid, F_MMAP, at * 4096);
   } else {
     if want < USER_BASE || (want - USER_BASE) / 4096 > STACK_FIRST || pages > STACK_FIRST - (want - USER_BASE) / 4096 {
       return EINVAL;
@@ -1736,6 +1798,9 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
   }
   if !ok {
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at, at + pages, 0);
+    if from_hole {
+      hole_add(&mut k, pid, at, at + pages);
+    }
     return ENOMEM;
   }
   k.ipc = set(k.ipc, sa_at(g, rec), slot + 1);
@@ -1780,7 +1845,11 @@ fn lx_shmdt(k: &mut Kernel, pid: u64, addr: u64) -> u64
   {
     let first = get(k.ipc, sa_at(g, a) + 1);
     if get(k.ipc, sa_at(g, a)) != 0 && first <= WPAGES && addr == USER_BASE + first * 4096 {
+      let pages = get(k.ipc, sa_at(g, a) + 2);
       shm_detach(&mut k, g, a, true);
+      if pages <= WPAGES - first && first >= pget(k.procs, pid, F_MMAP) / 4096 {
+        hole_add(&mut k, pid, first, first + pages);   // address space shmat and mmap can use again
+      }
       return 0;
     }
     a = a + 1;
@@ -2058,7 +2127,9 @@ fn ipc_proc_text(k: &mut Kernel, pid: u64, i: u64, o: &mut Bytes) -> u64
     let mut v = shmmax_shown(k);
     if i == 1 {
       v = IPC_SETS * SHM_PAGES;
-    } else if i == 2 || i == 5 {
+    } else if i == 5 {
+      v = msgmni_shown(k);
+    } else if i == 2 {
       v = IPC_SETS;
     } else if i == 3 {
       v = MSGMAX;

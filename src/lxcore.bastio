@@ -24,8 +24,8 @@ const CORE_MAX: u64 = 48;                 // runs of pages in one core file
 const CORE_STEPS: u64 = 1048576;          // the page walk's cap
 const CORE_HDR: u64 = 4096;               // the headers, padded: XFER
 const CORE_N1: u64 = 2808;                // 64 + 56 * (CORE_MAX + 1): the notes start after the program headers
-const CORE_N2: u64 = 3164;                // CORE_N1 + 20 + 336 (NT_PRSTATUS)
-const CORE_N3: u64 = 3320;                // CORE_N2 + 20 + 136 (NT_PRPSINFO): NT_AUXV, 288 bytes at most
+const CORE_N2: u64 = CORE_N1 + 20 + 120 + USER_REGS_SIZE;  // NT_PRSTATUS: 336 bytes on x86-64, 392 on AArch64
+const CORE_N3: u64 = CORE_N2 + 20 + 136;                  // NT_PRPSINFO: NT_AUXV follows, 320 bytes at most
 
 /// Whether a default-action death by signal s leaves a core file.
 fn core_signal(s: u64) -> bool {
@@ -34,13 +34,13 @@ fn core_signal(s: u64) -> bool {
 
 /// v in n little-endian bytes at `at` of x.
 fn core_put(x: &mut Bytes, at: u64, v: u64, n: u64)
-  requires blen(x) == XFER && at <= XFER && n <= 8 && n <= XFER - at
-  ensures blen(x) == XFER
+  requires blen(x) == XBUF && at <= XFER && n <= 8 && n <= XFER - at
+  ensures blen(x) == XBUF
 {
   let mut i = 0;
   let mut w = v;
   while i < n
-    invariant i <= n && n <= 8 && at <= XFER && n <= XFER - at && blen(x) == XFER
+    invariant i <= n && n <= 8 && at <= XFER && n <= XFER - at && blen(x) == XBUF
   {
     bset(&mut x, at + i, cast[u8](w % 256));
     w = w / 256;
@@ -109,8 +109,8 @@ fn core_runs(k: &mut Kernel, g: u64, runs: &mut Bytes) -> u64
 /// The header of one note at `at` of x: the name "CORE", the type, and the
 /// length of the data that follows (the caller pads it to 4).
 fn core_note(x: &mut Bytes, at: u64, ty: u64, dlen: u64)
-  requires blen(x) == XFER && at <= XFER - 20
-  ensures blen(x) == XFER
+  requires blen(x) == XBUF && at <= XFER - 20
+  ensures blen(x) == XBUF
 {
   core_put(&mut x, at, 5, 4);
   core_put(&mut x, at + 4, dlen, 4);
@@ -129,8 +129,8 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
-  if !core_signal(s) || EM_NATIVE != 62 {
-    return false;                           // (the aarch64 notes are not written yet)
+  if !core_signal(s) {
+    return false;
   }
   let lim = rl_cur(k, p, RLIMIT_CORE);
   if lim == 0 {
@@ -141,7 +141,7 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
   let nrun = core_runs(&mut k, g, &mut runs);
   // What the notes carry, before the transfer buffer is used for the file.
   let mut aux = balloc(PROC_OUT);
-  let naux = smaller(proc_text(&mut k, p, PROC_DEV + 16 * p + 2, &mut aux), 288);
+  let naux = smaller(proc_text(&mut k, p, PROC_DEV + 16 * p + 2, &mut aux), 320);
   let mut cm = balloc(16);
   let nc = pr_comm(&mut k, p);
   let mut i = 0;
@@ -197,7 +197,7 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
     core_put(&mut k.fs.xfer, at + 44, p, 4);
     let mut r = 0;
     while r < USER_REGS
-      invariant r <= USER_REGS && blen(k.fs.xfer) == XFER && kok(k)
+      invariant r <= USER_REGS && blen(k.fs.xfer) == XBUF && kok(k)
     {
       core_put(&mut k.fs.xfer, at + 112 + 8 * r, ur_read(k, p, r), 8);
       r = r + 1;
@@ -213,7 +213,7 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
     core_put(&mut k.fs.xfer, at2 + 36, p, 4);
     let mut j = 0;
     while j < 15
-      invariant j <= 15 && blen(k.fs.xfer) == XFER && blen(cm) == 16
+      invariant j <= 15 && blen(k.fs.xfer) == XBUF && blen(cm) == 16
     {
       bset(&mut k.fs.xfer, at2 + 40 + j, bget(cm, j));
       bset(&mut k.fs.xfer, at2 + 56 + j, bget(cm, j));
@@ -223,7 +223,7 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
     core_note(&mut k.fs.xfer, CORE_N3, 6, naux);
     let mut a = 0;
     while a < naux
-      invariant a <= naux && naux <= 288 && blen(k.fs.xfer) == XFER && blen(aux) == PROC_OUT
+      invariant a <= naux && naux <= 320 && blen(k.fs.xfer) == XBUF && blen(aux) == PROC_OUT
     {
       bset(&mut k.fs.xfer, CORE_N3 + 20 + a, bget(aux, a));
       a = a + 1;
@@ -237,7 +237,7 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
     let mut off = CORE_HDR;
     let mut h = 0;
     while h < nrun
-      invariant h <= nrun && nrun <= CORE_MAX && blen(k.fs.xfer) == XFER && blen(runs) == CORE_MAX * 24 && off <= CORE_HDR + h * 549755813888
+      invariant h <= nrun && nrun <= CORE_MAX && blen(k.fs.xfer) == XBUF && blen(runs) == CORE_MAX * 24 && off <= CORE_HDR + h * 549755813888
     {
       let from = rd64(runs, h * 24);
       let to = rd64(runs, h * 24 + 8);

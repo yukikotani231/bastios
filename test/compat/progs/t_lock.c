@@ -70,7 +70,7 @@ int main(void) {
                close(p[0]);
                lk(fd, F_SETLK, F_WRLCK, 0, 10);
                write(p[1], "x", 1);
-               struct timespec t = {0, 200000000};
+               struct timespec t = {1, 0};   /* long enough that a slow parent still finds the lock held */
                nanosleep(&t, 0);
                _exit(0);                                    /* exiting drops the lock */
            }

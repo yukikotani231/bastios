@@ -5,12 +5,24 @@
 // (root has none until `passwd` sets one; the others cannot log in)
 // (whoami, ls -l, getpwuid). /etc/hosts names localhost (getaddrinfo).
 // /etc/shells lists the login shells (getusershell; an SSH server refuses
-// a user whose shell is not there).
-const NINIT: u64 = 8;
+// a user whose shell is not there). /etc/profile, which login shells read,
+// sets LANG to a UTF-8 locale.
+//
+// The installer image (docs/install.md) carries more: extra/initextra.bastio
+// names NEXTRA further files, which the Makefile writes for that build (the
+// installer program, its payload and a profile that starts it). Every
+// other build has none.
+import "extra/initextra.bastio";
+
+const NBASE: u64 = 9;
+const NINIT: u64 = NBASE + NEXTRA;
 
 fn init_name(i: u64) -> Str
   ensures slen(result) <= 16
 {
+  if i >= NBASE {
+    return extra_name(i - NBASE);
+  }
   if i == 0 {
     return "motd";
   }
@@ -32,10 +44,16 @@ fn init_name(i: u64) -> Str
   if i == 6 {
     return "etc/shells";
   }
+  if i == 7 {
+    return "etc/profile";
+  }
   return "elfdemo";
 }
 
 fn init_data(i: u64) -> Str {
+  if i >= NBASE {
+    return extra_data(i - NBASE);
+  }
   if i == 0 {
     return include_bytes("../../../files/motd");
   }
@@ -57,15 +75,21 @@ fn init_data(i: u64) -> Str {
   if i == 6 {
     return include_bytes("../../../files/shells");
   }
+  if i == 7 {
+    return include_bytes("../../../files/profile");
+  }
   return include_bytes("../../../build/user/elfpie.elf");
 }
 
 /// The permission bits of init file i.
 fn init_mode(i: u64) -> u64 {
+  if i >= NBASE {
+    return extra_mode(i - NBASE);
+  }
   if i == 5 {
     return 384;                           // 0600: password hashes are root's (docs/security.md)
   }
-  if i == NINIT - 1 {
+  if i == NBASE - 1 {
     return 493;                           // 0755: elfdemo, a program
   }
   return 420;                             // 0644

@@ -45,8 +45,7 @@ the real programs, and `script` (util-linux, only for `compat-host`).
 - `dev.txt`: building C on BastiOS, in the same format. tcc and GNU make
   run from a second disk (`devdisk.sh`, booted after everything else)
   with the headers `dev_headers.c` pulls in, the C runtime objects and
-  musl's `libc.so`, on a disk of its own (split out when the disk's
-  directory held only 64 entries; it now holds 1023). tcc (pinned by `TCC_REV`) is configured to find
+  musl's `libc.so`, on a disk of its own. tcc (pinned by `TCC_REV`) is configured to find
   them under `/disk/c` and builds dynamic PIEs, which the kernel runs
   with its built-in musl dynamic linker. Building make needs autoconf,
   automake, autopoint and texinfo for its bootstrap.
@@ -60,15 +59,21 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   `TCC_REV`; the patch modifies tcc, so it is under tcc's license,
   LGPL-2.1-or-later, not this repository's). The compiler's own sources are on the disk under `/disk/s`,
   but proving them needs more memory than a process gets.
+  bastiolang's developer tools (`tools/bastiofmt`, `tools/bastio-lsp`, built
+  here as static PIEs against musl) are on the disk too: the cases format a
+  line and the compiler's own parser, and drive the language server over
+  its standard input and output with the requests an editor sends (hover,
+  go to definition, formatting, a diagnostic from `bastioc1`).
 - `alpine.txt`: Alpine Linux 3.24, from a fourth disk (`alpinedisk.py`).
   The first case unpacks its minirootfs and enters it with `chroot`. Then
   `apk` installs packages from a repository on the same disk, and they run:
   git, curl, less, openssh-keygen, bash, make, jq, rsync, openssl, file
   and xmllint (`ALPINE_DISK_PKGS`, with what they depend on). These cases
   need no network.
-  - One case installs tig over HTTP from the host (`ALPINEURL`). The host
-    serves every package of the images, including gcc, python3 and vim,
-    which do not fit on the disk yet.
+  - Other cases install packages over HTTP from the host (`ALPINEURL`):
+    tig, neovim, gcc and musl-dev, ripgrep, fzf, tmux, cmake, python3. The
+    host serves every package of the images; these are the ones the cases
+    ask for.
   - The `bt-*` packages, made by `alpinedisk.py`, test apk itself:
     dependency resolution, a missing dependency, `apk upgrade` with a
     version constraint (version 2 is in a second repository, `/repo2`), the
@@ -84,7 +89,11 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   - `make ARCH=aarch64 compat` runs this group, `debian.txt` and `node.txt` on
     the AArch64 kernel from the images' arm64 layers (`COMPAT_ARCH=aarch64`;
     the pins are in `images.mk`). The Bastio toolchain and Dropbear are built
-    for x86-64 only, so the checks that use them do not pass there.
+    for x86-64 only, so the checks that use them do not pass there. Two
+    packages come from elsewhere for lack of an arm64 image: gdb is the
+    arm64 layers of the same Alpaquita image (`arch/aarch64/Makefile`), and
+    cmake is made from the `cmake` wheel on PyPI (`--cmake-wheel`, pinned by
+    SHA-256), which bundles its C++ runtime.
 - `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
   case unpacks Debian's root file system (the `debian:stable-slim` image,
   `DEBIAN_IMAGE`, without `/usr/share`, dpkg's file lists, gconv and Perl's
@@ -100,6 +109,39 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts threads and writes machine code at run time, so this lane boots the
   guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
   them on a copy.
+- `ruby.txt`: Ruby, from a disk (`rubydisk.py`): the root of the official
+  `ruby:3.4-alpine` image (`RUBY_IMAGE`), unpacked in the guest and entered with
+  `chroot`. The cases run `rbprogs/*.rb` (served at `HOSTURL/rbprogs/`; the
+  same scripts run on Linux with `ruby rbprogs/core.rb`) for the core
+  classes, threads and fibers, fork, pipes and signals, the standard library
+  (JSON, YAML, OpenSSL, zlib) and sockets, and the whole test suite of a real
+  project (rake's 598 tests). x86-64 only.
+- `python.txt`: Python development, from a seventh disk (`pythondisk.py`): the
+  root of the official `python:3.14-alpine` image (`PYTHON_IMAGE`: CPython,
+  pip and the headers in `/usr/local`), entered with `chroot`, with gcc
+  installed by apk from the Alpine repository over HTTP. The cases make a
+  venv, `pip install` packages from the host's web server (pinned by SHA-256
+  in `pythondeps.txt`, served at `HOSTURL/wheels/`; pip finds them through
+  `/etc/pip.conf`), build a C extension from source (MarkupSafe), run the
+  whole test suite of a real project (Jinja2's 784 tests, spread over two xdist workers), load binary musl
+  wheels (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson,
+  cffi) and run `pyprogs/stdlib.py`, which exercises the standard library on
+  top of the system calls: fork, threads, signals, sockets, mmap, pty,
+  sqlite3, ctypes, multiprocessing (fork, spawn and forkserver), asyncio and
+  TLS. `pyprogs/` is served at `HOSTURL/pyprogs/`, and the same script runs on
+  Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB. The
+  cases run in two lanes: `python` runs those before the binary wheels, and
+  `python2` repeats the set-up (the root, gcc, the venv, pytest) and runs the
+  rest. Their results come back as one group.
+- `go.txt`: the Go toolchain of the official `golang` image (`GO_IMAGE`), from
+  a seventh disk (`godisk.py`), entered with `chroot`: Go programs are
+  static, so the root holds only `/usr/local/go`. x86-64 only.
+- `ssh.txt`: Dropbear in the guest, with the host's Dropbear client logging
+  in over QEMU's port forward. `alpine_tty.txt`: programs driven by
+  keystrokes inside the Alpine root (tmux, Neovim, editing and building C).
+- The container cases (`runc` and `crun`) are in `alpine.txt`; the
+  per-area summary of what they check is in
+  [docs/linux.md](../../docs/linux.md#container-runtimes).
 
 `mkdisk.py` puts the programs and that BusyBox on a disk image in BastiOS's
 own disk format, so they appear as `/disk/NAME`. `run.py` boots the kernel
@@ -129,7 +171,7 @@ for that reason alone; the report shows them as ordinary failures.
 
 ## Pass or fail
 
-Most checks fail today, and that is the point: the suite is a measurement.
+The suite is a measurement: it counts what passes and ranks what is missing.
 `make compat` fails only when a check listed in `baseline.txt` (the checks
 that passed when it was last recorded) stops passing. After a change that
 makes more checks pass, run `make compat-baseline` and commit the new list.
@@ -176,6 +218,19 @@ pass, fail (`TFAIL`), broken (`TBROK`: it could not set itself up),
 unsupported (`TCONF`: it needs something this system does not claim to
 have, such as a kernel config or a block device), hang (interrupted after
 `--timeout` seconds) or crash. `--only REGEX` runs a subset by tag.
+
+`make compat-ltp` also runs LTP's file system stress tests (`runtest/fs`: growfiles,
+ftest, stream), the memory tests (`runtest/mm`: mmap stress, shared memory), direct I/O (`runtest/dio`), file permissions (`runtest/fs_perms_simple`), the pthread stress tests (`runtest/sched`), its pseudo-terminal, namespace (container) and
+CVE regression tests, and the Open POSIX Test Suite's conformance tests
+(`--suite posix`; about 1,600 programs named after an interface and an
+assertion, such as `posix-sigaction_1-1`). Those exit 0 for a pass, 1 for a
+failure, 2 when they could not set themselves up, 4 or 5 for something not
+supported here.
+
+`--suite libctest` runs musl's libc-test (`src/functional` and `src/regression`,
+built static against musl at the revision `LIBCTEST_REV` in the Makefile; tags
+are `libctest-functional-NAME` and `libctest-regression-NAME`). An executable
+that exits 0 passes.
 
 The report ranks missing system calls by how many tests they block, as
 `run.py` does, and lists every test that did not pass with its first
