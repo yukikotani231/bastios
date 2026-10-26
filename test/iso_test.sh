@@ -1104,11 +1104,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bfiles: deleted /tmp/rn/e", mark)
         print(("ok  " if good else "FAIL"), f"({name}) D twice in the bfiles list deletes the entry under the cursor")
         fails += not good
+        # F2 does what r does.
+        if good:
+            monitor("sendkey home", "sendkey down", "sendkey f2", "sendkey y", "sendkey ret")
+            good = until(b"bfiles: renamed /tmp/rn/a.txtx to /tmp/rn/a.txtxy", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) F2 in the bfiles list renames the entry under the cursor")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
         mark = len(out)
-        q.stdin.write(b"[ ! -e /tmp/rn/e ] && [ -f /tmp/rn/a.txtx ] && [ ! -e /tmp/rn/a.txt ] && [ -f /tmp/rn/b.txt ] && echo ok$((1+1))\r"); q.stdin.flush()
+        q.stdin.write(b"[ ! -e /tmp/rn/e ] && [ -f /tmp/rn/a.txtxy ] && [ ! -e /tmp/rn/a.txt ] && [ -f /tmp/rn/b.txt ] && echo ok$((1+1))\r"); q.stdin.flush()
         good = good and until(b"ok2", mark)
         print(("ok  " if good else "FAIL"), f"({name}) the renamed file is under its new name and the directory is gone")
         fails += not good
