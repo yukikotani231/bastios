@@ -1895,3 +1895,5 @@ ruby: ruby: the standard library: json, yaml, digest, zlib, openssl, time
 ruby: ruby: a real project (rake) tested with its own test suite
 ruby: ruby: a real project (rexml) tested with its own test suite
 ruby: ruby: a real project (kramdown) tested with its own test suite
+ruby: ruby: a real project (csv) tested with its own test suite
+ruby: ruby: a real project (optparse) tested with its own test suite
