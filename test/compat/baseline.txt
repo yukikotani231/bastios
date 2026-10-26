@@ -873,6 +873,16 @@ t_pidapi: waitid(P_PIDFD) reaps it
 t_pidapi: waitid(P_PIDFD, WNOHANG) of a running child returns 0 with si_pid 0
 t_pidapi: waitid(P_PIDFD, WNOWAIT) reads the status and leaves the zombie
 t_net: ping6 ::1 (raw ICMPv6 socket)
+t_nlveth: a child in a new network namespace
+t_nlveth: a peer in a namespace of no process is refused
+t_nlveth: a peer name that is taken is refused
+t_nlveth: a veth pair with its peer in another namespace
+t_nlveth: netlink socket
+t_nlveth: the child ended well
+t_nlveth: the child is ready
+t_nlveth: the host end is here
+t_nlveth: the peer is not here
+t_nlveth: the peer there: addressed, routes asked for
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
 t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
