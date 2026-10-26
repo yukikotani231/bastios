@@ -160,6 +160,9 @@ gv gjson https://github.com/tidwall/gjson v1.18.0
 gv gosemver https://github.com/Masterminds/semver v3.3.1
 gv mapstructure https://github.com/mitchellh/mapstructure v1.5.0
 gv cast https://github.com/spf13/cast v1.7.1
+gv errwrap https://github.com/hashicorp/errwrap v1.1.0
+gv gocmp https://github.com/google/go-cmp v0.6.0
+gv sjson https://github.com/tidwall/sjson v1.2.5
 
 # An npm package built on the host and shipped with its dependencies and one
 # test runner (or several, separated by spaces) installed beside it (node_modules), nothing else of its tooling.
