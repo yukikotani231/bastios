@@ -36,6 +36,7 @@ tests=(
   "multiboot fuzz|c|test/multiboot_test.sh"
   "acpi fuzz|c|test/acpi_test.sh"
   "sysfuzz_calls|c|test/sysfuzz_calls.sh"
+  "entry area|c|test/entry_area_test.sh"
   "aarch64|d|test/aarch64_test.sh --build"
   "aarch64 64 cpus|d|BOOT_ONLY=1 SMP=64 TIMEOUT=480 test/aarch64_test.sh"
   "aarch64 gicv2|d|GIC=2 SMP=2 test/aarch64_test.sh"
