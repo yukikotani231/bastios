@@ -635,11 +635,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         until(b"# ", mark)
         # A process for the System window's list to end.
         mark = len(out)
-        q.stdin.write(b"sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
+        q.stdin.write(b"sleep 302 & echo sq$((1+2))=$!; sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
         until(b"\nq7", mark)
         until(b"# ", mark)
         sleeper = re.search(rb"sp2=(\d+)", out[mark:])
         sleeper = int(sleeper.group(1)) if sleeper else 0
+        sleeper2 = re.search(rb"sq3=(\d+)", out[mark:])
+        sleeper2 = int(sleeper2.group(1)) if sleeper2 else 0
         # Ctrl-T starts a terminal window without a client on the command line.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
@@ -843,6 +845,26 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             else:
                 good = False
             print(("ok  " if good else "FAIL"), f"({name}) x ends the selected process")
+            fails += not good
+            # Delete does what x does.
+            monitor("sendkey g")
+            found = False
+            for _ in range(24):
+                if not good or found:
+                    break
+                monitor("sendkey j")
+                end = time.time() + 0.6
+                while time.time() < end:
+                    r, _, _ = select.select([q.stdout], [], [], 0.2)
+                    if r:
+                        out += q.stdout.read1(4096)
+                found = (b"bsys: select %d " % sleeper2) in out[mark:]
+            if found:
+                monitor("sendkey delete")
+                good = until(b"bsys: terminated %d" % sleeper2, mark)
+            else:
+                good = False
+            print(("ok  " if good else "FAIL"), f"({name}) Delete ends the selected process")
             fails += not good
             # G goes to the last process and g to the first.
             mark3 = len(out)
