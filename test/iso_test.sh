@@ -2663,30 +2663,43 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     print(f"---- {name} transcript ----")
     print(out.decode(errors="replace").replace("\r", "")[-1500:])
 
-run("BIOS", [])
-# The image `make usb` builds: the ISO, then a BastiOS partition. The
-# keyboard is on the same controller, so it is read through the disk.
-subprocess.run(["make", "-s", "build/bastios-usb.img", "USB_MIB=33"], check=True)
-stick = os.path.join(tmp.name, "stick.img")
-shutil.copy("build/bastios-usb.img", stick)
-run("BIOS, from a USB stick, USB keyboard", [], usb=True, stick=stick)
-if os.path.exists(ovmf) and os.path.exists(ovmf_vars):
+# ISO_PART names the runs to make (a, b, c; any mix, default all) so that
+# CI can give them runners of their own. Each run starts from a disk of its
+# own except "UEFI, USB keyboard, NVMe", which reads what "UEFI" wrote
+# through virtio: they stay in one part.
+parts = os.environ.get("ISO_PART", "abc")
+def part(x): return x in parts
+stick = None
+if part("a") or part("c"):
+    # The image `make usb` builds: the ISO, then a BastiOS partition. The
+    # keyboard is on the same controller, so it is read through the disk.
+    subprocess.run(["make", "-s", "build/bastios-usb.img", "USB_MIB=33"], check=True)
+    stick = os.path.join(tmp.name, "stick.img")
+    shutil.copy("build/bastios-usb.img", stick)
+if part("a"):
+    run("BIOS", [])
+    run("BIOS, from a USB stick, USB keyboard", [], usb=True, stick=stick)
+if not (part("b") or part("c")):
+    pass
+elif os.path.exists(ovmf) and os.path.exists(ovmf_vars):
     vars_copy = os.path.join(tmp.name, "vars.fd")
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                 "-drive", f"if=pflash,format=raw,file={vars_copy}"])
-    # The firmware drives the xHCI controller itself until it hands over.
-    # OVMF puts both controllers' 64-bit BARs far above 4 GiB, in the upper
-    # part of the device window.
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI, USB keyboard, NVMe", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                                     "-drive", f"if=pflash,format=raw,file={vars_copy}"], usb=True, nvme=True)
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI, from a USB stick", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                                   "-drive", f"if=pflash,format=raw,file={vars_copy}"], stick=stick)
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI, hardware report", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                                  "-drive", f"if=pflash,format=raw,file={vars_copy}"], diag=True)
+    if part("b"):
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                     "-drive", f"if=pflash,format=raw,file={vars_copy}"])
+        # The firmware drives the xHCI controller itself until it hands over.
+        # OVMF puts both controllers' 64-bit BARs far above 4 GiB, in the upper
+        # part of the device window.
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI, USB keyboard, NVMe", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                         "-drive", f"if=pflash,format=raw,file={vars_copy}"], usb=True, nvme=True)
+    if part("c"):
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI, from a USB stick", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                       "-drive", f"if=pflash,format=raw,file={vars_copy}"], stick=stick)
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI, hardware report", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                      "-drive", f"if=pflash,format=raw,file={vars_copy}"], diag=True)
 else:
     print(f"SKIP UEFI: no OVMF firmware at {ovmf}")
 print(f"---- {fails} failed ----")
