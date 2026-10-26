@@ -786,6 +786,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = tuple(px[at:at + 3]) != (45, 45, 60)
             print(("ok  " if good else "FAIL"), f"({name}) a click elsewhere closes it")
             fails += not good
+            # Alt-F1 opens the menu from the keyboard with the first entry lit, Down lights the next one, Escape closes it.
+            def lit_rows():
+                w, h, px = screendump()
+                return {y for y in range(560, 746) if tuple(px[(y * w + 1000) * 3:(y * w + 1000) * 3 + 3]) == (40, 90, 200)}
+            monitor("sendkey alt-f1")
+            time.sleep(0.7)
+            first = lit_rows()
+            monitor("sendkey down")
+            time.sleep(0.7)
+            second = lit_rows()
+            good = bool(first) and bool(second) and first.isdisjoint(second)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F1 opens the menu and Down lights the next entry")
+            fails += not good
+            monitor("sendkey esc")
+            time.sleep(0.7)
+            good = not lit_rows()
+            print(("ok  " if good else "FAIL"), f"({name}) Escape closes the keyboard menu")
+            fails += not good
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.7)

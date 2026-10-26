@@ -117,6 +117,7 @@ static void touch_bar(void);
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
+static int menu_sel = -1;                /* the entry the keys lit (Alt-F1, Up, Down), or -1 to follow the pointer */
 static struct win *sizing;               /* the window whose grip is held */
 static int sox, soy;                     /* from the pointer to the edge or corner of the frame it holds, when it was taken */
 static int size_edges;                   /* which: 1 left, 2 right, 4 top, 8 bottom */
@@ -548,6 +549,7 @@ static void menu_show(int x, int y)
     menu_x0 = x + MENU_ITEM_W > (int)W ? (int)W - MENU_ITEM_W : x;
     menu_y0 = y + h > (int)H - BAR_H ? (int)H - BAR_H - h : y;
     menu_open = 1;
+    menu_sel = -1;
 }
 
 /* Builds the menu: Terminal, Files and System, then a line "Label=command" of /etc/bwm.menu
@@ -590,7 +592,7 @@ static void draw_menu(void)
 {
     if (!menu_open)
         return;
-    int lit = menu_at(menu_mx, menu_my);
+    int lit = menu_sel >= 0 ? menu_sel : menu_at(menu_mx, menu_my);
     fill(scene, MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + menu_n * MENU_ITEM_H + 1, rgb(200, 200, 210));
     for (int i = 0; i < menu_n; i++) {
         int y = MENU_Y0 + i * MENU_ITEM_H;
@@ -1919,6 +1921,22 @@ int main(int argc, char **argv)
                         k_ctrl = down;
                     } else if (code == 56 || code == 100) {
                         k_alt = down;
+                    } else if (menu_open && down) {                /* the open menu takes the keys: Up and Down move, Enter chooses, Esc closes */
+                        int it = menu_sel;
+                        if (code == 103 || code == 108) {
+                            it = it < 0 ? (code == 108 ? 0 : menu_n - 1) : (it + menu_n + (code == 108 ? 1 : -1)) % menu_n;
+                            menu_sel = it;
+                        } else if (code == 28 || code == 96 || code == 1 || code == 59) {
+                            menu_open = 0;
+                            menu_sel = -1;
+                            if ((code == 28 || code == 96) && launch_entry(it))
+                                running = 0;
+                        }
+                        touch_all();
+                    } else if (code == 59 && down && k_alt) {      /* Alt-F1: open the launcher menu from the keyboard */
+                        menu_show((int)W - 4 - MENU_ITEM_W, (int)H - BAR_H - menu_n * MENU_ITEM_H);
+                        menu_sel = 0;
+                        touch_all();
                     } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
                         if (nz > 1) {
                             if (k_shift) {                              /* the other way: the top one goes to the bottom */
@@ -2043,6 +2061,7 @@ int main(int argc, char **argv)
                 if (menu_open && (dx || dy)) {
                     touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + menu_n * MENU_ITEM_H + 1);
                     menu_mx = mx; menu_my = my;
+                    menu_sel = -1;
                 }
                 if (down && !(buttons & 1) && menu_open) {
                     int it = menu_at(mx, my);            /* a click chooses an entry or, anywhere else, closes the menu */
