@@ -223,7 +223,7 @@ static int bsys_main(void)
             bs_esc = c == '[' ? 2 : 0;
             continue;
         }
-        if (bs_esc == 2 && (c == '5' || c == '6')) {          /* Page Up and Page Down are ESC [ 5 ~ and ESC [ 6 ~ */
+        if (bs_esc == 2 && (c == '5' || c == '6' || c == '3')) {   /* Page Up, Page Down and Delete are ESC [ 5 ~, ESC [ 6 ~ and ESC [ 3 ~ */
             bs_esc = c;
             continue;
         }
@@ -240,8 +240,8 @@ static int bsys_main(void)
             if (c != '~')
                 continue;
             c = 'r';
-        } else if (bs_esc == '5' || bs_esc == '6') {
-            c = c == '~' ? (bs_esc == '5' ? BS_PGUP : BS_PGDN) : 0;
+        } else if (bs_esc == '5' || bs_esc == '6' || bs_esc == '3') {
+            c = c == '~' ? (bs_esc == '5' ? BS_PGUP : bs_esc == '6' ? BS_PGDN : 'x') : 0;       /* Delete acts as x */
             bs_esc = 0;
         } else if (bs_esc == 2) {
             bs_esc = 0;

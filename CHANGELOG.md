@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- In the `bsys` process list Delete ends the selected process, as `x` does.
 - Alt-F10 in `bwm` maximizes the focused window and puts it back.
 - F5 in `bsys` reads the numbers again, as `r` does.
 - In the `bfiles` list F2 renames the entry under the cursor, as `r` does.
