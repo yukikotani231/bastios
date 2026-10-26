@@ -227,7 +227,20 @@ static int bsys_main(void)
             bs_esc = c;
             continue;
         }
-        if (bs_esc == '5' || bs_esc == '6') {
+        if (bs_esc == 2 && c == '1') {                        /* F5 is ESC [ 1 5 ~ */
+            bs_esc = 'a';
+            continue;
+        }
+        if (bs_esc == 'a') {
+            bs_esc = c == '5' ? 'b' : 0;
+            continue;
+        }
+        if (bs_esc == 'b') {
+            bs_esc = 0;
+            if (c != '~')
+                continue;
+            c = 'r';
+        } else if (bs_esc == '5' || bs_esc == '6') {
             c = c == '~' ? (bs_esc == '5' ? BS_PGUP : BS_PGDN) : 0;
             bs_esc = 0;
         } else if (bs_esc == 2) {

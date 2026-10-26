@@ -806,6 +806,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bsys: live", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the System window refreshes itself")
             fails += not good
+            # F5 does what r does.
+            if good:
+                mark = len(out)
+                monitor("sendkey f5")
+                good = until(b"bsys: refreshed", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) F5 refreshes the System window")
+            fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
             monitor("sendkey p")
