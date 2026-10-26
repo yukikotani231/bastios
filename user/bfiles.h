@@ -382,7 +382,13 @@ static void bf_paint(void)
             snprintf(t, sizeof t, "%s/", bf_ents[i].name);
         } else {
             bf_fit(bf_ents[i].name, 44, nm, sizeof nm);
-            snprintf(t, sizeof t, "%s %10lld", nm, (long long)bf_ents[i].size);
+            if (bf_sort == 2) {                      /* sorted by time: the date takes the place of the size */
+                struct tm tm;
+                time_t mt = bf_ents[i].mtime;
+                gmtime_r(&mt, &tm);
+                snprintf(t, sizeof t, "%s %04d-%02d-%02d", nm, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+            } else
+                snprintf(t, sizeof t, "%s %10lld", nm, (long long)bf_ents[i].size);
         }
         bf_put_row(r, t, strlen(t), bf_ents[i].dir ? 0x0080C0FF : fg, bf_sel == i ? 0x00203050 : bg);
     }
@@ -1308,6 +1314,18 @@ static void be_key(int c)
         } else if (c == '~' && num == 3) { for (size_t n = be_clen(bf_cur); n > 0; n--) be_delete(bf_cur); }
         else if (c == '~' && num == 5) be_move_rows(-page);
         else if (c == '~' && num == 6) be_move_rows(page);
+        else if (c == 'Z' && !num) {                         /* Shift-Tab: up to four blanks off the start of the line */
+            size_t s = bf_erow[be_row_of(bf_cur)], k = 0;
+            while (k < 4 && s + k < bf_vlen && bf_vtext[s + k] == ' ')
+                k++;
+            if (k) {
+                be_undo_push(3);
+                size_t at = bf_cur;
+                for (size_t i = 0; i < k; i++)
+                    be_delete(s);
+                bf_cur = at >= s + k ? at - k : s;
+            }
+        }
         return;
     }
     if (c != 27 && c != 3 && c != 22 && c != 23 && c != 127 && c != 8 && c != '\n' && c != '\r' &&
@@ -1377,6 +1395,28 @@ static void be_key(int c)
             for (size_t i = s; i < e; i++)
                 be_insert(bf_vtext[i]);
             bf_cur = e + 1 + col;
+        }
+    } else if (c == 2) {                        /* Ctrl-B: swaps the two characters around the cursor (before it, at a line end) */
+        size_t at = bf_cur;
+        if (at >= bf_vlen || bf_vtext[at] == '\n')
+            at--;
+        if (bf_cur > 0 && at > 0 && at < bf_vlen && bf_vtext[at - 1] != '\n' && bf_vtext[at] != '\n' &&
+            (unsigned char)bf_vtext[at - 1] < 128 && (unsigned char)bf_vtext[at] < 128) {
+            be_undo_push(3);
+            char t = bf_vtext[at - 1];
+            bf_vtext[at - 1] = bf_vtext[at];
+            bf_vtext[at] = t;
+            bf_cur = at + 1;
+            bf_modified = 1;
+        }
+    } else if (c == 15) {                       /* Ctrl-O: an empty line below the one under the cursor */
+        size_t e = bf_cur;
+        while (e < bf_vlen && bf_vtext[e] != '\n')
+            e++;
+        if (bf_vlen + 1 < BF_VIEWMAX) {
+            be_undo_push(3);
+            bf_cur = e;
+            be_insert('\n');
         }
     } else if (c == 11) {
         be_undo_push(3);
@@ -1692,8 +1732,15 @@ static int bfiles_main(int argc, char **argv)
                     continue;
                 }
                 if (bf_esc == 1) {
-                    bf_esc = c == '[' ? 2 : 0;
+                    bf_esc = c == '[' ? 2 : c == 'O' ? 5 : 0;
                     continue;
+                }
+                if (bf_esc == 5) {                         /* F2 is ESC O Q and acts as r */
+                    bf_esc = 0;
+                    if (c != 'Q')
+                        continue;
+                    c = 'r';
+                    goto dispatch;
                 }
                 if (bf_esc >= 2 && bf_esc <= 4) {
                     if (c == ';') {
@@ -1719,6 +1766,9 @@ static int bfiles_main(int argc, char **argv)
                     else if (c == '~' && num == 6) bf_move_sel(page);
                     else if (c == '~' && num == 3) {            /* Delete acts as D */
                         c = 'D';
+                        goto dispatch;
+                    } else if (c == '~' && num == 15) {         /* F5 acts as R */
+                        c = 'R';
                         goto dispatch;
                     } else
                         continue;
@@ -1787,7 +1837,7 @@ dispatch:;
                 printf("bfiles: sorted by %s\n", bf_sort == 1 ? "size" : bf_sort == 2 ? "time" : "name");
                 fflush(stdout);
                 bf_load_dir();
-            } else if (c == 'h' && !bf_viewing) {
+            } else if ((c == 'h' || c == '.') && !bf_viewing) {
                 bf_hidden = !bf_hidden;
                 printf("bfiles: dotfiles %s\n", bf_hidden ? "hidden" : "shown");
                 fflush(stdout);

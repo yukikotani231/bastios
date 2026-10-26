@@ -465,12 +465,17 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   if !full && !mnt_admin(k, pid) {
     return EPERM;
   }
+  let mut r = 0;
   if n == LX_MOUNT {
-    return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), full);
+    r = lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), full);
+  } else if n == LX_PIVOT_ROOT {
+    r = lx_pivot_root(&mut k, pid, a, b);   // src/lxns.bastio
+  } else {
+    xa_clear(&mut k);                      // what the unmounted file system held (src/lxxattr.bastio)
+    r = lx_umount2(&mut k, pid, a, b, full);
   }
-  if n == LX_PIVOT_ROOT {
-    return lx_pivot_root(&mut k, pid, a, b);  // src/lxns.bastio
+  if r == 0 {
+    k.sys = set(k.sys, SYS_MNTEV, sat_add(get(k.sys, SYS_MNTEV), 1));   // wakes pollers of /proc/mounts
   }
-  xa_clear(&mut k);                        // what the unmounted file system held (src/lxxattr.bastio)
-  return lx_umount2(&mut k, pid, a, b, full);
+  return r;
 }

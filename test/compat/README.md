@@ -109,6 +109,13 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts threads and writes machine code at run time, so this lane boots the
   guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
   them on a copy.
+- `ruby.txt`: Ruby, from a disk (`rubydisk.py`): the root of the official
+  `ruby:3.4-alpine` image (`RUBY_IMAGE`), unpacked in the guest and entered with
+  `chroot`. The cases run `rbprogs/*.rb` (served at `HOSTURL/rbprogs/`; the
+  same scripts run on Linux with `ruby rbprogs/core.rb`) for the core
+  classes, threads and fibers, fork, pipes and signals, the standard library
+  (JSON, YAML, OpenSSL, zlib) and sockets, and the whole test suite of a real
+  project (rake's 598 tests). x86-64 only.
 - `python.txt`: Python development, from a seventh disk (`pythondisk.py`): the
   root of the official `python:3.14-alpine` image (`PYTHON_IMAGE`: CPython,
   pip and the headers in `/usr/local`), entered with `chroot`, with gcc
@@ -122,7 +129,10 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   top of the system calls: fork, threads, signals, sockets, mmap, pty,
   sqlite3, ctypes, multiprocessing (fork, spawn and forkserver), asyncio and
   TLS. `pyprogs/` is served at `HOSTURL/pyprogs/`, and the same script runs on
-  Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB.
+  Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB. The
+  cases run in two lanes: `python` runs those before the binary wheels, and
+  `python2` repeats the set-up (the root, gcc, the venv, pytest) and runs the
+  rest. Their results come back as one group.
 - `go.txt`: the Go toolchain of the official `golang` image (`GO_IMAGE`), from
   a seventh disk (`godisk.py`), entered with `chroot`: Go programs are
   static, so the root holds only `/usr/local/go`. x86-64 only.

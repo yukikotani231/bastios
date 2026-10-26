@@ -1624,6 +1624,8 @@ rust: rust: a second real crate (fastrand) fetched from the host, built and test
 rust: rust: a third real crate (itoa) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a fourth real crate (either) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a fifth real crate (smallvec) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a sixth real crate (arrayvec) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a seventh real crate (fnv) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a compile error is reported
 rust: rust: rust-analyzer reports its version
 rust: rust: rust-analyzer finds a type error in a crate
@@ -1751,12 +1753,14 @@ t_time: TZ naming a zone file reads it
 t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
 t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
 java: java: Eclipse JDT LS, the language server, finds a type error and answers a hover
+java: java: a real library (Apache Commons Codec) with its test libraries, tested with the JUnit console launcher
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
 t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them
 t_ltp2: a tmpfs mounted nosymfollow reports it, refuses to follow a link under it (ELOOP) but reads the link, and remount clears it
+t_ltp2: poll and epoll report POLLPRI|POLLERR on /proc/self/mounts and mountinfo after a mount or umount, until the file is read
 alpine: nvim: the LSP client talks to the YAML language server under node and gets a diagnostic and the file's symbols
 t_ltp2: a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT
 t_ltp2: a unix stream socket that is bound to a name can still connect, and the connection carries data
@@ -1880,3 +1884,21 @@ go: go: UUIDs (google/uuid), tested with go test
 go: go: command-line flags (spf13/pflag), tested with go test
 go: go: an HTTP router (gorilla/mux), tested with go test over httptest
 go: go: a JSON path library (tidwall/gjson) with a vendored dependency, tested with go test -mod=vendor
+go: go: a semantic version library (Masterminds/semver) tested with go test -mod=vendor
+go: go: a map-to-struct decoder (mitchellh/mapstructure) tested with go test -mod=vendor
+go: go: a type conversion library (spf13/cast) tested with go test -mod=vendor
+busybox: dd one large read of a file
+java: java: a real library (Apache Commons Lang, its number, tuple, text and function packages) with its test libraries, tested with the JUnit console launcher
+java: java: a real library (Apache Commons Collections, its queue, comparator, functor, iterator and trie packages) with its test libraries, tested with the JUnit console launcher
+ruby: ruby: unpack the root, make the device nodes
+ruby: ruby: version
+ruby: ruby: sockets: TCP, UNIX, UDP and an HTTP client
+ruby: ruby: core classes, strings, hashes and blocks
+ruby: ruby: threads, a mutex, a queue and fibers
+ruby: ruby: fork, pipes, exit status and signals
+ruby: ruby: the standard library: json, yaml, digest, zlib, openssl, time
+ruby: ruby: a real project (rake) tested with its own test suite
+ruby: ruby: a real project (rexml) tested with its own test suite
+ruby: ruby: a real project (kramdown) tested with its own test suite
+ruby: ruby: a real project (csv) tested with its own test suite
+ruby: ruby: a real project (optparse) tested with its own test suite

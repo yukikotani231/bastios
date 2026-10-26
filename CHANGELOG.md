@@ -16,8 +16,29 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- A click on a process in the `bsys` list selects it.
+- Page Up and Page Down zoom the image in `bview` in and out, as `+` and `-` do.
+- The `bfiles` list shows the date of each file in place of its size while it is sorted by time.
+- In the `bsys` process list Delete ends the selected process, as `x` does.
+- Alt-F10 in `bwm` maximizes the focused window and puts it back.
+- F5 in `bsys` reads the numbers again, as `r` does.
+- In the `bfiles` list F2 renames the entry under the cursor, as `r` does.
+- End zooms the image in `bview` in all the way.
+- Alt-F9 in `bwm` minimizes the focused window.
+- Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
+- In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
+- The mouse wheel zooms the image in `bview`: up in, down out.
 - In the `bfiles` list the Delete key does what `D` does: twice deletes the entry under the cursor.
 - In the `bfiles` list `e` edits the file under the cursor without opening the viewer first.
+- In the `bfiles` list `.` shows and hides the names that start with a dot, as `h` does.
+- In the `bsys` process list Page Up and Page Down move a page at a time.
+- In the `bfiles` list F5 reads the directory again, as `R` does.
+- Shift-Tab in the `bfiles` editor takes up to four blanks off the start of the line.
+- In the `bsys` process list `n` sorts by name and back to newest first.
+- Home puts the zoom in `bview` back to the first size.
+- The mouse wheel walks the `bsys` process list, three processes a step.
+- The `bfiles` editor swaps the two characters before the cursor with Ctrl-B.
+- The `bfiles` editor opens an empty line below the cursor with Ctrl-O.
 - The `bfiles` editor copies the line under the cursor below it with Ctrl-D.
 - The title row of `bfiles` adds `[by size]` or `[by time]` when the list is not sorted by name.
 - In the `bfiles` list `-` goes back to the directory shown before the last change.
