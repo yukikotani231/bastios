@@ -176,7 +176,11 @@ build/user/font8x8.h: src/font8x8.bin | build/user
 # between their segments, no RELRO, no build id (about 4 KiB each; the code is the same).
 GUILD := -Wl,-z,noseparate-code,-z,norelro,--build-id=none
 
-build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
+# bwm's kanji conversion draws its dictionary and the kana with these glyphs of the console's font.
+build/user/imefont.h: tools/imefont.py src/font16.bin user/bwmdict.h | build/user
+	python3 tools/imefont.py src/font16.bin user/bwmdict.h > $@
+
+build/user/bwm.elf: user/bwm.c user/bwmproto.h user/bwmdict.h build/user/font8x8.h build/user/imefont.h | build/user
 	$(MUSLCC) -static-pie -O2 $(GUILD) -s -Ibuild/user -o $@ $<
 
 build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
