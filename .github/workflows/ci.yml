@@ -41,9 +41,10 @@ jobs:
           code=$(echo "$files" | grep -vE '^(CHANGELOG|CONTRIBUTING|SECURITY)\.md$|^LICENSE|^\.github/(pull_request_template\.md|ISSUE_TEMPLATE/)|^test/compat/README\.md$|^docs/' || true)
           guides=$(echo "$files" | grep -E '^docs/(getting-started|using)\.md$' || true)
           if [ -n "$code$guides" ]; then echo "code=true" >> "$GITHUB_OUTPUT"; else echo "code=false" >> "$GITHUB_OUTPUT"; fi
-  # test/all.sh in five parts that run on runners of their own (LANES, see
-  # test/all.sh): the x86-64 boots in four, the shell and network tests
-  # (a b), the lanes c, e and f, and the AArch64 kernel's. The x86-64
+  # test/all.sh in seven parts that run on runners of their own (LANES, see
+  # test/all.sh): the x86-64 boots in six, the shell and network tests
+  # (a b), the lanes c and e, the ISO boots in three (f g h), and the
+  # AArch64 kernel's. The x86-64
   # parts build the same kernel, so they share one proof cache; the AArch64
   # part keeps its own, since the caches are saved and restored whole.
   test:
@@ -67,6 +68,12 @@ jobs:
             cache: x86-64
           - part: x86-64 f
             lanes: f
+            cache: x86-64
+          - part: x86-64 g
+            lanes: g
+            cache: x86-64
+          - part: x86-64 h
+            lanes: h
             cache: x86-64
           - part: aarch64
             lanes: d
@@ -505,8 +512,8 @@ jobs:
   # space). Disk images and everything built from this repository are never
   # cached. The caches are saved only after the build step succeeded, so a
   # build that failed halfway is never kept.
-  # The suite runs in four parts on runners of their own (run.py --lanes):
-  # the programs and the Bastio compiler, Alpine with Go, Python, and the
+  # The suite runs in five parts on runners of their own (run.py --lanes):
+  # the programs and the Bastio compiler, Alpine with Go, Python (two), and the
   # other languages' toolchains. Each builds only the disks of its lanes and holds
   # to the baseline every check of the groups its lanes hold. The
   # third-party cache is kept per part; until a part has an entry of its own
@@ -531,10 +538,14 @@ jobs:
             lanes: debian,node,java,ruby,rust,podman,gitsuite
             disks: alpine.img debian.img node.img jdk.img ruby.img rust.img podman.img gitsuite.tar
           # The Python lane alone takes longer than all of the above (its
-          # test suites run for 25 minutes under emulation), so it has a
-          # runner of its own.
+          # test suites run for 25 minutes under emulation), so it has
+          # runners of its own, two: python2 repeats the set-up and runs the
+          # packages with extension modules.
           - part: python
             lanes: python
+            disks: alpine.img python.img
+          - part: python2
+            lanes: python2
             disks: alpine.img python.img
     env:
       # Raise it to drop every cache entry below (a bad entry is never

@@ -1726,8 +1726,15 @@ static int bfiles_main(int argc, char **argv)
                     continue;
                 }
                 if (bf_esc == 1) {
-                    bf_esc = c == '[' ? 2 : 0;
+                    bf_esc = c == '[' ? 2 : c == 'O' ? 5 : 0;
                     continue;
+                }
+                if (bf_esc == 5) {                         /* F2 is ESC O Q and acts as r */
+                    bf_esc = 0;
+                    if (c != 'Q')
+                        continue;
+                    c = 'r';
+                    goto dispatch;
                 }
                 if (bf_esc >= 2 && bf_esc <= 4) {
                     if (c == ';') {

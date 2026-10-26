@@ -182,7 +182,7 @@ static int bview_main(int argc, char **argv)
         if (esc == 1 && c == '[') { esc = 2; continue; }
         if (esc == 2) {
             esc = 0;
-            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : c == 'H' ? '0' : 0;   /* Home resets the zoom */
+            c = c == 'A' ? 'k' : c == 'B' ? 'j' : c == 'C' ? 'l' : c == 'D' ? 'h' : c == 'H' ? '0' : c == 'F' ? '9' : 0;   /* Home resets the zoom, End zooms in all the way */
         } else if (esc == 1) {
             break;
         }
@@ -191,6 +191,7 @@ static int bview_main(int argc, char **argv)
         else if (c == '+' || c == '=') dz = 1;
         else if (c == '-') dz = -1;
         else if (c == '0') reset = 1;
+        else if (c == '9') dz = 4 - ze;
         else if (c == 0) continue;
         else break;
         long nz = reset ? 0 : ze + dz;

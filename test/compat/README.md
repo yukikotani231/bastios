@@ -129,7 +129,10 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   top of the system calls: fork, threads, signals, sockets, mmap, pty,
   sqlite3, ctypes, multiprocessing (fork, spawn and forkserver), asyncio and
   TLS. `pyprogs/` is served at `HOSTURL/pyprogs/`, and the same script runs on
-  Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB.
+  Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB. The
+  cases run in two lanes: `python` runs those before the binary wheels, and
+  `python2` repeats the set-up (the root, gcc, the venv, pytest) and runs the
+  rest. Their results come back as one group.
 - `go.txt`: the Go toolchain of the official `golang` image (`GO_IMAGE`), from
   a seventh disk (`godisk.py`), entered with `chroot`: Go programs are
   static, so the root holds only `/usr/local/go`. x86-64 only.
