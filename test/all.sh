@@ -50,6 +50,7 @@ tests=(
   "aarch64 uefi|d|UEFI=/usr/share/qemu-efi-aarch64/QEMU_EFI.fd SMP=2 test/aarch64_test.sh"
   "aarch64 uefi acpi|d|UEFI=/usr/share/qemu-efi-aarch64/QEMU_EFI.fd ACPI=1 NVME=1 NIC=e1000 SMP=2 test/aarch64_test.sh"
   "fsck|c|test/fsck_test.py"
+  "diskfuzz|c|test/diskfuzz.py --rounds 30 --write"
   "crashsim|e|test/crashsim.py --runs 1 --boots 8 --every 8"
   "shell|a|test/shell_test.sh"
   "guide|c|test/guide_test.py"
