@@ -202,9 +202,12 @@ static int bsys_main(void)
         if (t < 0 || t == BWM_CLOSE)
             break;
         if (t == BWM_MOUSE && bs_tasks) {                     /* the wheel walks the list: three processes a step, negative is up */
-            int wheel = (signed char)((((struct bwm_mouse *)buf)->buttons >> 8) & 0xFF);
-            if (wheel) {
-                bs_move(wheel * 3);
+            struct bwm_mouse *mo = (struct bwm_mouse *)buf;
+            int wheel = (signed char)((mo->buttons >> 8) & 0xFF);
+            int row = (int)mo->y / BF_CH - 2;                  /* a click on a process selects it */
+            int hit = (mo->buttons & 1) && (int)mo->y >= 0 && row >= 0 && row < BS_LIST && bs_top + row < bs_nproc;
+            if (wheel || hit) {
+                bs_move(wheel ? wheel * 3 : bs_top + row - bs_sel);
                 bs_paint_tasks();
                 fflush(stdout);
                 if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
@@ -223,7 +226,7 @@ static int bsys_main(void)
             bs_esc = c == '[' ? 2 : 0;
             continue;
         }
-        if (bs_esc == 2 && (c == '5' || c == '6')) {          /* Page Up and Page Down are ESC [ 5 ~ and ESC [ 6 ~ */
+        if (bs_esc == 2 && (c == '5' || c == '6' || c == '3')) {   /* Page Up, Page Down and Delete are ESC [ 5 ~, ESC [ 6 ~ and ESC [ 3 ~ */
             bs_esc = c;
             continue;
         }
@@ -240,8 +243,8 @@ static int bsys_main(void)
             if (c != '~')
                 continue;
             c = 'r';
-        } else if (bs_esc == '5' || bs_esc == '6') {
-            c = c == '~' ? (bs_esc == '5' ? BS_PGUP : BS_PGDN) : 0;
+        } else if (bs_esc == '5' || bs_esc == '6' || bs_esc == '3') {
+            c = c == '~' ? (bs_esc == '5' ? BS_PGUP : bs_esc == '6' ? BS_PGDN : 'x') : 0;       /* Delete acts as x */
             bs_esc = 0;
         } else if (bs_esc == 2) {
             bs_esc = 0;

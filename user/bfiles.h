@@ -382,7 +382,13 @@ static void bf_paint(void)
             snprintf(t, sizeof t, "%s/", bf_ents[i].name);
         } else {
             bf_fit(bf_ents[i].name, 44, nm, sizeof nm);
-            snprintf(t, sizeof t, "%s %10lld", nm, (long long)bf_ents[i].size);
+            if (bf_sort == 2) {                      /* sorted by time: the date takes the place of the size */
+                struct tm tm;
+                time_t mt = bf_ents[i].mtime;
+                gmtime_r(&mt, &tm);
+                snprintf(t, sizeof t, "%s %04d-%02d-%02d", nm, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+            } else
+                snprintf(t, sizeof t, "%s %10lld", nm, (long long)bf_ents[i].size);
         }
         bf_put_row(r, t, strlen(t), bf_ents[i].dir ? 0x0080C0FF : fg, bf_sel == i ? 0x00203050 : bg);
     }

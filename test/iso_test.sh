@@ -635,11 +635,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         until(b"# ", mark)
         # A process for the System window's list to end.
         mark = len(out)
-        q.stdin.write(b"sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
+        q.stdin.write(b"sleep 302 & echo sq$((1+2))=$!; sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
         until(b"\nq7", mark)
         until(b"# ", mark)
         sleeper = re.search(rb"sp2=(\d+)", out[mark:])
         sleeper = int(sleeper.group(1)) if sleeper else 0
+        sleeper2 = re.search(rb"sq3=(\d+)", out[mark:])
+        sleeper2 = int(sleeper2.group(1)) if sleeper2 else 0
         # Ctrl-T starts a terminal window without a client on the command line.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
@@ -697,6 +699,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(1.5)
                 w, h, px = screendump()
                 return lambda x: tuple(px[(3 * w + x) * 3:(3 * w + x) * 3 + 3]) == (40, 90, 200)
+            # Alt-F10 maximizes the window and puts it back.
+            blue = snapped("alt-f10")
+            good = blue(300) and blue(800)
+            blue = snapped("alt-f10")
+            good = good and not blue(1000)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F10 maximizes the window and puts it back")
+            fails += not good
             blue = snapped("alt-left")
             good = blue(300) and not blue(800)
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Left puts the window on the left half of the screen")
@@ -836,6 +845,26 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             else:
                 good = False
             print(("ok  " if good else "FAIL"), f"({name}) x ends the selected process")
+            fails += not good
+            # Delete does what x does.
+            monitor("sendkey g")
+            found = False
+            for _ in range(24):
+                if not good or found:
+                    break
+                monitor("sendkey j")
+                end = time.time() + 0.6
+                while time.time() < end:
+                    r, _, _ = select.select([q.stdout], [], [], 0.2)
+                    if r:
+                        out += q.stdout.read1(4096)
+                found = (b"bsys: select %d " % sleeper2) in out[mark:]
+            if found:
+                monitor("sendkey delete")
+                good = until(b"bsys: terminated %d" % sleeper2, mark)
+            else:
+                good = False
+            print(("ok  " if good else "FAIL"), f"({name}) Delete ends the selected process")
             fails += not good
             # G goes to the last process and g to the first.
             mark3 = len(out)
@@ -989,6 +1018,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 -1")
             good = until(b"bsys: select", mark3)
         print(("ok  " if good else "FAIL"), f"({name}) the wheel walks the process list")
+        fails += not good
+        # A click on a process in the list selects it: the fourth row is what g followed by three j reaches.
+        clicked = keyed = b""
+        if good:
+            mark3 = len(out)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 150 %d" % (90 + 5 * 16 + 8), "mouse_button 1", "mouse_button 0")
+            good = until(b"bsys: select", mark3)
+            clicked = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey g", "sendkey j", "sendkey j", "sendkey j")
+            end = time.time() + 2
+            while time.time() < end:
+                r, _, _ = select.select([q.stdout], [], [], 0.2)
+                if r:
+                    out += q.stdout.read1(4096)
+            keyed = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if b"bsys: select" in out[mark3:] else b""
+            good = good and clicked == keyed and len(clicked) > 2
+        print(("ok  " if good else "FAIL"), f"({name}) a click on a process selects it ({clicked!r} {keyed!r})")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -1869,6 +1917,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print("\n".join(l for l in lines if l))
         print(("ok  " if good else "FAIL"), f"({name}) s twice in bfiles puts the newest file first")
         fails += not good
+        # In that order the date of each file stands where the size was.
+        if good:
+            good = re.search(r"^zz +\d{4}-\d\d-\d\d$", lines[2]) is not None
+            if not good:
+                print(repr(lines[2]))
+        print(("ok  " if good else "FAIL"), f"({name}) bfiles shows the date of each file when sorted by time")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
@@ -2007,6 +2062,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         else:
             r4 = 0
         print(("ok  " if good else "FAIL"), f"({name}) End zooms in all the way in bview ({r4} against {r0} pixels)")
+        fails += not good
+        # Page Up zooms in and Page Down out.
+        if good:
+            monitor("sendkey home")
+            time.sleep(2)
+            monitor("sendkey pgup")
+            time.sleep(2)
+            r5 = red()
+            monitor("sendkey pgdn")
+            time.sleep(2)
+            r6 = red()
+            good = r5 > r0 and abs(r6 - r0) < r0 // 20
+        else:
+            r5 = r6 = 0
+        print(("ok  " if good else "FAIL"), f"({name}) Page Up and Page Down zoom in and out in bview ({r5}, {r6} against {r0} pixels)")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
