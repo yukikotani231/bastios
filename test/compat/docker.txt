@@ -3,8 +3,9 @@
 # entered with chroot, as root. The Docker disk (dockerdisk.py) holds the
 # image's root as a tar file (/disk/root.tar) and a BusyBox at
 # /disk/busybox. The storage driver is vfs (no kernel overlay file system
-# for it), and there is no iptables and no bridge: containers run with
-# --network=none. The format is applets.txt's:
+# for it) and there is no iptables: the cases that name no network run on
+# the default bridge (docker0, without NAT), the rest with --network=none.
+# The format is applets.txt's:
 #
 #   == NAME
 #   $ COMMAND        (one line, run by ash in /)
@@ -14,7 +15,7 @@
 # of the same root.
 
 == docker: unpack the image root, start dockerd and wait for it
-$ bb() { /disk/busybox "$@"; }; bb mkdir -p /disk/p && cd /disk/p && bb tar -xf /disk/root.tar && bb mkdir -p dev proc sys tmp var/tmp run root dev/shm dev/pts var/lib/docker && for d in null:1:3 zero:1:5 full:1:7 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod -m 666 dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/p/proc; bb mount -t sysfs sysfs /disk/p/sys; bb mkdir -p /disk/p/sys/fs/cgroup; bb mount -t cgroup2 cgroup2 /disk/p/sys/fs/cgroup; bb mount -t tmpfs tmpfs /disk/p/dev/shm; bb mount -t devpts devpts /disk/p/dev/pts; bb chmod 1777 /disk/p/tmp; bb mount --make-rshared /; bb chroot /disk/p /bin/sh -c 'dockerd --iptables=false --ip6tables=false --bridge=none --storage-driver=vfs --feature containerd-snapshotter=false > /tmp/dockerd.log 2>&1 &'; n=0; until bb chroot /disk/p /usr/local/bin/docker version >/dev/null 2>&1 || [ $n -ge 90 ]; do bb sleep 2; n=$((n+1)); done; dc() { bb chroot /disk/p /usr/local/bin/docker "$@"; }; dc version --format '{{.Server.Os}}'
+$ bb() { /disk/busybox "$@"; }; bb mkdir -p /disk/p && cd /disk/p && bb tar -xf /disk/root.tar && bb mkdir -p dev proc sys tmp var/tmp run root dev/shm dev/pts var/lib/docker && for d in null:1:3 zero:1:5 full:1:7 random:1:8 urandom:1:9 tty:5:0 console:5:1; do set -- $(echo $d | bb tr : ' '); bb mknod -m 666 dev/$1 c $2 $3; done; cd /; bb mount -t proc proc /disk/p/proc; bb mount -t sysfs sysfs /disk/p/sys; bb mkdir -p /disk/p/sys/fs/cgroup; bb mount -t cgroup2 cgroup2 /disk/p/sys/fs/cgroup; bb mount -t tmpfs tmpfs /disk/p/dev/shm; bb mount -t devpts devpts /disk/p/dev/pts; bb chmod 1777 /disk/p/tmp; bb mount --make-rshared /; bb chroot /disk/p /bin/sh -c 'dockerd --iptables=false --ip6tables=false --storage-driver=vfs --feature containerd-snapshotter=false > /tmp/dockerd.log 2>&1 &'; n=0; until bb chroot /disk/p /usr/local/bin/docker version >/dev/null 2>&1 || [ $n -ge 90 ]; do bb sleep 2; n=$((n+1)); done; dc() { bb chroot /disk/p /usr/local/bin/docker "$@"; }; dc version --format '{{.Server.Os}}'
 linux
 
 == docker: import a root and run a container
@@ -37,3 +38,17 @@ logged
 == docker: a memory limit reaches the container's cgroup
 $ dc run --rm --network=none --memory 64m ctr cat /sys/fs/cgroup/memory.max 2>&1
 67108864
+
+== docker: a container on the default bridge has an address and a default route
+$ dc run --rm ctr /bin/busybox sh -c '/bin/busybox ip route | /bin/busybox sed "s/ *src.*//; s/ *$//"' 2>&1
+default via 172.17.0.1 dev eth0
+172.17.0.0/16 dev eth0 scope link
+
+== docker: a container reaches the bridge address
+$ dc run --rm ctr /bin/busybox ping -c 1 -W 5 172.17.0.1 2>&1 | bb grep -c '1 packets received'
+1
+
+== docker: two containers talk over the bridge, and the host reaches them
+$ dc run -d --name srv ctr /bin/busybox sh -c 'echo from-srv | /bin/busybox nc -l -p 8080' >/dev/null 2>&1; ip=$(dc inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' srv); dc run --rm ctr /bin/busybox nc -w 10 $ip 8080 2>&1; bb ping -c 1 -W 5 $ip 2>&1 | bb grep -c '1 packets received'; dc rm -f srv >/dev/null 2>&1
+from-srv
+1
