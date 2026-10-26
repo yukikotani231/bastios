@@ -1574,11 +1574,19 @@ fn ux_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if uc_get(k, rx, 1) > 0 {
     b = POLLIN;
   }
-  if uc_get(k, rx, 3) != 1 {
-    b = b | POLLIN | POLLHUP | POLLRDHUP;
-  }
-  if uc_get(k, rx, 2) != 1 {
-    b = b | POLLIN | POLLRDHUP;             // shut for reading here
+  // As on Linux, POLLRDHUP and the end of file mean the receive side is
+  // shut (the peer shut or closed its writing, or this end shut reading),
+  // and POLLHUP only that the send side is shut as well (a peer that closed,
+  // or this end shut writing too): a peer's shutdown(SHUT_WR) alone leaves
+  // this end able to write, and runtimes that watch for POLLHUP (Docker's
+  // attach) must not take it for a closed connection.
+  let rcv = uc_get(k, rx, 3) != 1 || uc_get(k, rx, 2) != 1;
+  let snd = uc_get(k, tx, 3) != 1 || uc_get(k, tx, 2) != 1;
+  if rcv {
+    b = b | POLLIN | POLLRDHUP;
+    if snd {
+      b = b | POLLHUP;
+    }
   }
   if uc_get(k, tx, 2) != 1 {
     b = b | POLLOUT;                        // as on Linux, a write is ready (and fails with EPIPE); no POLLERR

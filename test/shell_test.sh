@@ -412,6 +412,10 @@ steps = [
     # (and the caller's own stays the first one's).
     ("unshare -n sleep 5 & sleep 1; readlink /proc/$!/ns/net; nsenter -t $! -n readlink /proc/self/ns/net; readlink /proc/self/ns/net; kill $!; echo ns6",
      [b"\r\nnet:[40265320", b"\r\nnet:[40265320", b"\r\nnet:[4026531840]\r\n", b"ns6"], b"\n# "),
+    # A namespace link bound onto a file keeps the namespace after its last
+    # process (ip netns add, Docker): the file opens as a namespace handle.
+    ("touch /tmp/nsb; unshare -n sh -c 'mount --bind /proc/self/ns/net /tmp/nsb'; nsenter --net=/tmp/nsb readlink /proc/self/ns/net; umount /tmp/nsb; rm /tmp/nsb; echo ns7",
+     [b"\r\nnet:[40265320", b"ns7"], b"\n# "),
     ("unshare -u sh -c 'hostname inner; sleep 5' & sleep 1; nsenter -t $! -u hostname; readlink /proc/self/ns/uts; readlink /proc/$!/ns/uts; stat -L -c %i /proc/self/ns/mnt; ls /proc/self/ns; hostname; kill $!; echo ns5",
      [b"\r\ninner\r\nuts:[4026531838]\r\nuts:[40265320", b"\r\n4026531841\r\n", b"pid_for_children", b"\r\nbastios\r\n", b"ns5"], b"\n# "),
     # Owners and the umask (src/lxperm.bastio): a new file takes the umask,

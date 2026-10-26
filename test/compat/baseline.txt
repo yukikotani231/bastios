@@ -298,6 +298,11 @@ t_dns: name server binds UDP port 53
 t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
+t_dockerd: a mapping past the end of a growing file sees pwrite (tmpfs)
+t_dockerd: a peer's shutdown(SHUT_WR) is POLLRDHUP, not POLLHUP, and this end can still write
+t_dockerd: inotify_add_watch on /proc/self/status succeeds
+t_dockerd: oom_score_adj takes a number with a trailing NUL
+t_dockerd: readlinkat of an empty path on an O_PATH|O_NOFOLLOW handle of a /proc/self/fd link is its target
 t_fanotify: a child's event comes to its directory
 t_fanotify: the content classes are accepted, both at once are refused, and a permission mask is refused
 t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
