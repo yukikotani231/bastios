@@ -949,7 +949,12 @@ fn vfs_truncate(v: &mut Vfs, mem: &mut Mem, row: u64, size_to: u64) -> bool
     if was != NO_FILE && size_to > was {
       pc_zero_tail(&mut v.pc, f, was);
     }
-    pc_resize(&mut v.pc, &mut mem, f, size_to);
+    // Growing keeps the cached pages that lie past the new end: a mapping
+    // that reaches beyond the old end holds them (as zeros), and a page
+    // dropped from the cache here would stop seeing the file's writes.
+    if was == NO_FILE || size_to <= was {
+      pc_resize(&mut v.pc, &mut mem, f, size_to);
+    }
   }
   return ok;
 }

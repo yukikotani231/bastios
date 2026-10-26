@@ -547,6 +547,9 @@ jobs:
           - part: python2
             lanes: python2
             disks: alpine.img python.img
+          - part: containers
+            lanes: docker
+            disks: alpine.img docker.img
     env:
       # Raise it to drop every cache entry below (a bad entry is never
       # replaced: a key that hits is not saved again).
@@ -907,3 +910,11 @@ jobs:
             build/compat/ltp/report.md
             build/compat/ltp/results.json
           if-no-files-found: ignore
+  site:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install mdBook
+        run: curl -sSL https://github.com/rust-lang/mdBook/releases/download/v0.4.52/mdbook-v0.4.52-x86_64-unknown-linux-gnu.tar.gz | tar xz -C /usr/local/bin
+      - run: site/build.sh

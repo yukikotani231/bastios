@@ -24,6 +24,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - F5 in `bsys` reads the numbers again, as `r` does.
 - In the `bfiles` list F2 renames the entry under the cursor, as `r` does.
 - End zooms the image in `bview` in all the way.
+- In `bfiles`, a drag from an entry onto a directory entry moves it there (a click now acts when the button is released).
 - Alt-F9 in `bwm` minimizes the focused window.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
 - In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
@@ -112,6 +113,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bfiles` (`user/bfiles.h`, run by `bterm` when it is started under that name), a file browser and text viewer for `bwm`, started from the Files entry of the launcher menu: click a directory to enter it, a file to read its first 64 KiB, and scroll with j, k, Space and b. `test/iso_test.sh` opens it from the menu.
 - `/dev/input/event0` (`src/lxkeyev.bastio`) gives the PS/2 keyboard's key events as Linux's evdev does: 24-byte `input_event` records, an `EV_KEY` for each press (value 1) and release (value 0) with the key's Linux code, each followed by an `EV_SYN`. Shift, Ctrl and Alt are reported as keys of their own. There is no auto-repeat, no `EVIOCG*` ioctl answer and no USB keyboard yet.
 - `mount -t ext4 IMAGE DIR` (also `ext2` and `ext3` images without a journal to replay) reads an ext4 image, a file anywhere (on the disk too) or a loop device, into a read-only mount on an empty in-memory directory (`src/ext4.bastio`, `docs/design/ext4-readonly.md`). Files, directories, symbolic links, hard links, device nodes, pipes, modes, owners and times are shown; extents and classic block maps are read; holes stay holes. It is a snapshot held in memory: at most 32768 nodes, paths up to 255 bytes and files up to 1 GiB (the mount fails with `ENOSPC`, `ENAMETOOLONG` or `EFBIG` otherwise), and an image with a journal to replay, inline data or encryption is refused with `EINVAL`. `test/ext4img.py` makes images with `mke2fs -d` and `user/mext4.c` checks them in `make test`.
+
+### Documentation
+
+- A documentation website for BastiOS at <https://yukikotani231.github.io/bastios/>, built from `docs/` with mdBook (`site/build.sh`) and published by GitHub Actions on every push to `main`.
 
 ### Boot
 
