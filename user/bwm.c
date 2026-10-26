@@ -1552,6 +1552,14 @@ int main(int argc, char **argv)
         builtin = 0;
         a++;
     }
+    unsigned mode_w = 0, mode_h = 0;
+    if (a + 1 < argc && strcmp(argv[a], "-m") == 0) {                    /* -m WxH: ask the display for that mode */
+        char *end;
+        mode_w = strtoul(argv[a + 1], &end, 10);
+        if (*end == 'x')
+            mode_h = strtoul(end + 1, NULL, 10);
+        a += 2;
+    }
     unsigned want_w = 0, want_h = 0;
     if (a + 1 < argc && strcmp(argv[a], "-s") == 0) {
         char *end;
@@ -1576,6 +1584,12 @@ int main(int argc, char **argv)
     if (fb < 0 || ioctl(fb, 0x4600, &v) != 0 || ioctl(fb, 0x4602, &f) != 0 || v.bits_per_pixel != 32) {
         printf("bwm: no usable /dev/fb0 (errno %d)\n", errno);
         return 1;
+    }
+    if (mode_w && (mode_w != v.xres || mode_h != v.yres)) {
+        v.xres = v.xres_virtual = mode_w;
+        v.yres = v.yres_virtual = mode_h;
+        if (ioctl(fb, 0x4601, &v) != 0 || ioctl(fb, 0x4600, &v) != 0 || ioctl(fb, 0x4602, &f) != 0)
+            printf("bwm: cannot set the mode %ux%u (errno %d)\n", mode_w, mode_h, errno);
     }
     W = v.xres; H = v.yres; PITCH = f.line_length;
     if (want_w >= 320 && want_w < W && want_h >= 240 && want_h < H) {    /* pretend the screen is smaller */
