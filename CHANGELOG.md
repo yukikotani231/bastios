@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- F5 in `bsys` reads the numbers again, as `r` does.
 - In the `bfiles` list F2 renames the entry under the cursor, as `r` does.
 - End zooms the image in `bview` in all the way.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
