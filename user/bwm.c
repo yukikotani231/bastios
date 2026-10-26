@@ -117,6 +117,9 @@ static void touch_bar(void);
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
+static int run_on;                       /* the Alt-F2 prompt is showing in the task bar */
+static char run_buf[160];                /* what has been typed in it */
+static int run_n;
 static int menu_sel = -1;                /* the entry the keys lit (Alt-F1, Up, Down), or -1 to follow the pointer */
 static struct win *sizing;               /* the window whose grip is held */
 static int sox, soy;                     /* from the pointer to the edge or corner of the frame it holds, when it was taken */
@@ -522,6 +525,16 @@ static void draw_bar(void)
         char im[16];
         snprintf(im, sizeof im, "%s %.3s", ime_on == 2 ? "Kata" : "Kana", ime_buf);
         text(scene, ix + 4, y0 + 4, im, rgb(255, 255, 255));
+    }
+    if (run_on) {                                         /* the prompt covers the window buttons */
+        int x0 = BTN_X0, x1 = (int)W - MENU_W - 12 - CLOCK_W - (ime_on == 3 ? IME_W_KANJI : ime_on ? IME_W : 0) - 4;
+        fill(scene, x0, y0 + 3, x1, H - 3, rgb(30, 110, 70));
+        text(scene, x0 + 4, y0 + 4, "Run:", rgb(255, 255, 255));
+        int room = (x1 - x0 - 8) / CELL_W - 6;
+        const char *shown = run_n > room ? run_buf + (run_n - room) : run_buf;
+        text(scene, x0 + 4 + 5 * CELL_W, y0 + 4, shown, rgb(255, 255, 255));
+        int cx = x0 + 4 + (5 + (int)strlen(shown)) * CELL_W;
+        fill(scene, cx, y0 + 5, cx + 2, y0 + 19, rgb(255, 255, 255));
     }
     int hh, mm;
     clock_hm(&hh, &mm);
@@ -1921,6 +1934,31 @@ int main(int argc, char **argv)
                         k_ctrl = down;
                     } else if (code == 56 || code == 100) {
                         k_alt = down;
+                    } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
+                        char out[8];
+                        int m = key_bytes(code, out);
+                        for (int j = 0; j < m; j++) {
+                            unsigned char c = (unsigned char)out[j];
+                            if (c == 13 || c == 10) {
+                                run_on = 0;
+                                if (run_n > 0)
+                                    launch_command(run_buf);
+                            } else if (c == 27) {
+                                run_on = 0;
+                            } else if ((c == 127 || c == 8) && run_n > 0) {
+                                run_buf[--run_n] = 0;
+                            } else if (c >= 32 && c < 127 && run_n < (int)sizeof run_buf - 1) {
+                                run_buf[run_n++] = (char)c;
+                                run_buf[run_n] = 0;
+                            }
+                        }
+                        touch_bar();
+                    } else if (code == 60 && down && k_alt) {      /* Alt-F2: ask for a command to run in a terminal window */
+                        run_on = 1;
+                        run_n = 0;
+                        run_buf[0] = 0;
+                        menu_open = 0;
+                        touch_all();
                     } else if (menu_open && down) {                /* the open menu takes the keys: Up and Down move, Enter chooses, Esc closes */
                         int it = menu_sel;
                         if (code == 103 || code == 108) {
