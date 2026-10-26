@@ -224,6 +224,55 @@ fn nl_target(k: &Kernel, pid: u64, len: u64) -> u64
   return NS_UNSAID;
 }
 
+/// The namespace a veth's peer is made in: what the first IFLA_NET_NS_PID
+/// or IFLA_NET_NS_FD in the VETH_INFO_PEER of a new link names (the process's
+/// or descriptor's, as nl_target), NS_UNSAID if none does, NNET if it names
+/// none we can find.
+fn nl_peer_target(k: &Kernel, pid: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC && len <= XFER
+{
+  let mut at = 0;
+  while at < len && len - at >= 32
+    invariant kok(k) && at <= len && len <= XFER
+  {
+    let ml = rd32(k.fs.xfer, at);
+    if ml < 16 || ml > len - at {
+      return NS_UNSAID;
+    }
+    if rd16(k.fs.xfer, at + 4) == RTM_NEWLINK && ml >= 32 {
+      let li = nla_find(k.fs.xfer, at + 32, at + ml, IFLA_LINKINFO);
+      let ll = nla_len(k.fs.xfer, li);
+      if ll > 0 {
+        let data = nla_find(k.fs.xfer, li, li + ll, IFLA_INFO_DATA);
+        let dl = nla_len(k.fs.xfer, data);
+        if dl > 0 {
+          let pe = nla_find(k.fs.xfer, data, data + dl, VETH_INFO_PEER);
+          let pl = nla_len(k.fs.xfer, pe);
+          if pl >= 16 {
+            let p = nla_u32(k.fs.xfer, pe + 16, pe + pl, IFLA_NET_NS_PID, NO_IF);
+            if p != NO_IF {
+              if 1 <= p && p < NPROC && state(k.procs, p) != FREE && state(k.procs, p) != ZOMBIE {
+                return net_ns(k, p);
+              }
+              return NNET;
+            }
+            let fd = nla_u32(k.fs.xfer, pe + 16, pe + pl, IFLA_NET_NS_FD, NO_IF);
+            if fd != NO_IF {
+              return nl_fd_ns(k, pid, fd);
+            }
+          }
+        }
+      }
+    }
+    let step = (ml + 3) / 4 * 4;
+    if step > len - at {
+      return NS_UNSAID;
+    }
+    at = at + step;
+  }
+  return NS_UNSAID;
+}
+
 /// send on a netlink socket: the requests in buf[0..n], answered on the
 /// socket. Returns n.
 fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
@@ -239,7 +288,8 @@ fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
   netns_gc(&mut k);                          // a link whose namespace ended is gone
   let tgt = nl_target(k, pid, n);
   let admin = net_admin(k, pid);
-  nic_nl_request(&mut k.nic, q, k.fs.xfer, n, tgt, admin);
+  let ptgt = nl_peer_target(k, pid, n);
+  nic_nl_request(&mut k.nic, q, k.fs.xfer, n, tgt, ptgt, admin);
   return n;
 }
 
