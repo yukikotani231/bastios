@@ -1963,6 +1963,30 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"moved2", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the dragged file is in the directory and gone from the old place")
             fails += not good
+        # bwm -m asks the display for a smaller mode; the boot mode is back when bwm ends.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -m 800x600\r"); q.stdin.flush()
+        good = until(b"bwm: ready 800x600", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            good = (w, h) == (800, 600) and tuple(px[(3 * w + 400) * 3:(3 * w + 400) * 3 + 3]) != (0, 0, 0)
+            if not good:
+                print("mode seen:", w, h)
+        print(("ok  " if good else "FAIL"), f"({name}) bwm -m 800x600 puts the display in that mode")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(1.5)
+        w, h, px = screendump()
+        good = (w, h) == (1024, 768)
+        if not good:
+            print("mode after:", w, h)
+        print(("ok  " if good else "FAIL"), f"({name}) the boot mode is back after bwm ends")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # The desktop has an icon for each launcher entry; a click on one starts the program.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()

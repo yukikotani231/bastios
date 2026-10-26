@@ -1,0 +1,74 @@
+// The display mode of QEMU's standard VGA (and Bochs): its "dispi" registers,
+// a word-sized index at I/O port 0x1CE and a word-sized value at 0x1CF. The
+// boot loader (Limine under BIOS, OVMF's GOP under UEFI) has already set a
+// 32-bit linear mode through them; here a program that opened /dev/fb0
+// (src/lxfb.bastio) may pick a smaller one, and the boot mode comes back
+// when the last description closes. The pixels stay in the same block of
+// the device window, so a smaller mode needs no new mapping.
+//
+// Nothing is touched unless `vbe_probe` found these registers describing
+// the very mode the loader gave the console (same width and height, 32
+// bits a pixel, enabled): on a PC with another graphics adapter the ports
+// are never written.
+
+const VBE_PORT: u64 = 0x1CE;
+const VBE_PORTS: u64 = 3;             // the index word and the value word overlap at 0x1CF
+const VBE_ID: u64 = 0;
+const VBE_XRES: u64 = 1;
+const VBE_YRES: u64 = 2;
+const VBE_BPP: u64 = 3;
+const VBE_ENABLE: u64 = 4;
+const VBE_VIRT_WIDTH: u64 = 6;
+const VBE_X_OFF: u64 = 8;
+const VBE_Y_OFF: u64 = 9;
+const VBE_ENABLED: u64 = 1;
+const VBE_LFB: u64 = 0x40;            // linear framebuffer, not banked
+const VBE_ID_MIN: u64 = 0xB0C2;       // the first version with 32-bit pixels and a linear framebuffer
+const VBE_ID_MAX: u64 = 0xB0CF;
+
+fn vbe_get(io: &mut PortIo, r: u64) -> u64
+  requires port_count(io) == VBE_PORTS && r < 16
+  ensures port_count(io) == VBE_PORTS && result < 65536
+{
+  pio_out16(&mut io, 0, cast[u16](r));
+  return cast[u64](pio_in16(&mut io, 1));
+}
+
+fn vbe_put(io: &mut PortIo, r: u64, v: u64)
+  requires port_count(io) == VBE_PORTS && r < 16
+  ensures port_count(io) == VBE_PORTS
+{
+  pio_out16(&mut io, 0, cast[u16](r));
+  pio_out16(&mut io, 1, cast[u16](v % 65536));
+}
+
+/// Whether the registers are those of a Bochs display that is now in the
+/// mode w by h with 32 bits a pixel.
+fn vbe_probe(io: &mut PortIo, w: u64, h: u64) -> bool
+  requires port_count(io) == VBE_PORTS
+  ensures port_count(io) == VBE_PORTS
+{
+  let id = vbe_get(&mut io, VBE_ID);
+  if id < VBE_ID_MIN || id > VBE_ID_MAX {
+    return false;
+  }
+  return vbe_get(&mut io, VBE_ENABLE) % 2 == VBE_ENABLED && vbe_get(&mut io, VBE_BPP) == 32
+    && vbe_get(&mut io, VBE_XRES) == w && vbe_get(&mut io, VBE_YRES) == h;
+}
+
+/// Switches to the mode w by h, 32 bits a pixel, a line being w * 4 bytes.
+/// Turning the display off and on again makes it take the line length from
+/// the width; the screen is cleared.
+fn vbe_set(io: &mut PortIo, w: u64, h: u64)
+  requires port_count(io) == VBE_PORTS
+  ensures port_count(io) == VBE_PORTS
+{
+  vbe_put(&mut io, VBE_ENABLE, 0);
+  vbe_put(&mut io, VBE_XRES, w);
+  vbe_put(&mut io, VBE_YRES, h);
+  vbe_put(&mut io, VBE_BPP, 32);
+  vbe_put(&mut io, VBE_ENABLE, VBE_ENABLED + VBE_LFB);
+  vbe_put(&mut io, VBE_VIRT_WIDTH, w);
+  vbe_put(&mut io, VBE_X_OFF, 0);
+  vbe_put(&mut io, VBE_Y_OFF, 0);
+}

@@ -1323,6 +1323,12 @@ fn pump(t: &mut Term, s: &Lock[Sys], pend: &Atomic[u64])
     let gk = get_u64(gx, 0);
     if gk == GX_HOLD {
       screen_hold(&mut t.screen);
+    } else if gk == GX_MODE {
+      let gw = get_u64(gx, 8);
+      let gh = get_u64(gx, 16);
+      if gw <= 65535 && gh <= 65535 {
+        term_mode(&mut t, gw, gh);
+      }
     } else if gk == GX_RELEASE {
       screen_release(&mut t.screen);
     } else if gk == GX_BLIT {
@@ -1561,6 +1567,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   let mut pic = Pic { master: port_claim(&mut ports, PIC1, 2), slave: port_claim(&mut ports, PIC2, 2) };
   let mut pit = Pit { io: port_claim(&mut ports, PIT, 4) };
   let mut rtc = Rtc { io: port_claim(&mut ports, RTC, 2) };
+  let vbe = port_claim(&mut ports, VBE_PORT, VBE_PORTS);        // the display's mode registers (src/vbe.bastio)
   // Devices with memory-mapped registers claim them from the device window.
   // The HPET where the ACPI tables say it is (src/acpi.bastio).
   let mut hpet_at = acpi_hpet(cpu);
@@ -1613,7 +1620,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     fb_hi = fb_lo + fb_pitch * fb_h;
   }
   let screen = screen_new(&mut win, fb_lo, fb_hi, fb_pitch, fb_w, fb_h, boot_info(cpu, INFO_FB, 4), high_window(cpu));
-  let mut term = Term { uart: uart, screen: screen, kbd: kbd, usb: Usb::None };
+  let mut term = Term { uart: uart, screen: screen, kbd: kbd, usb: Usb::None, vbe: vbe };
   let mut con = con_new();
   pic_init(&mut pic);
   if term.kbd.aux_irq {
@@ -1859,6 +1866,9 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   ser_set_kind(&mut k, ser_on);
   if screen_on(term.screen) {
     gfx_screen(&mut k, fb_w, fb_h, fb_pitch, boot_info(cpu, INFO_FB, 4));   // /dev/fb0 (src/lxfb.bastio)
+    if term_vbe(&mut term, fb_w, fb_h) {
+      gfx_modes(&mut k);                      // a program may pick a smaller mode (src/vbe.bastio)
+    }
   }
   let mut hi = 0;
   while hi < hw_n
@@ -2006,6 +2016,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   port_release(&mut ports, sys.pic.master);
   port_release(&mut ports, sys.pic.slave);
   port_release(&mut ports, pit.io);
+  port_release(&mut ports, devices.vbe);
   pci_free(&mut ports, pci);
   screen_free(&mut win, devices.screen);
   mmio_release(&mut win, sys.clock.regs);

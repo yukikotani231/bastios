@@ -6,12 +6,13 @@ import "fb.bastio";
 import "kbd.bastio";
 import "xhci.bastio";
 import "console.bastio";
+import "vbe.bastio";
 
-struct Term { uart: Uart, screen: Screen, kbd: Kbd, usb: Usb }
-  invariant uart_ok(uart) && screen_ok(screen) && kbd_ok(kbd) && usb_ok(usb);
+struct Term { uart: Uart, screen: Screen, kbd: Kbd, usb: Usb, vbe: PortIo }
+  invariant uart_ok(uart) && screen_ok(screen) && kbd_ok(kbd) && usb_ok(usb) && port_count(vbe) == VBE_PORTS;
 
 spec fn term_ok(t: &Term) -> bool {
-  uart_ok(t.uart) && screen_ok(t.screen) && kbd_ok(t.kbd) && usb_ok(t.usb)
+  uart_ok(t.uart) && screen_ok(t.screen) && kbd_ok(t.kbd) && usb_ok(t.usb) && port_count(t.vbe) == VBE_PORTS
 }
 
 fn term_write(t: &mut Term, b: u8)
@@ -81,4 +82,21 @@ fn term_send(t: &mut Term, buf: &Bytes, n: u64)
     term_write(&mut t, bget(buf, i));
     i = i + 1;
   }
+}
+
+/// Whether the display is a Bochs one in the mode w by h (src/vbe.bastio),
+/// so that `term_mode` may change it.
+fn term_vbe(t: &mut Term, w: u64, h: u64) -> bool
+  requires term_ok(t)
+  ensures term_ok(t)
+{
+  return vbe_probe(&mut t.vbe, w, h);
+}
+
+/// Puts the display in the mode w by h.
+fn term_mode(t: &mut Term, w: u64, h: u64)
+  requires term_ok(t)
+  ensures term_ok(t)
+{
+  vbe_set(&mut t.vbe, w, h);
 }

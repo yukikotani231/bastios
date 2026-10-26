@@ -54,10 +54,11 @@ spec fn acpi_ok(a: &Acpi) -> bool {
 }
 
 /// The ports the kernel claims by number (src/main.bastio and the ATA
-/// driver), and the PCI configuration ports: the ACPI block keeps off them.
+/// driver), the PCI configuration ports and the display's mode registers
+/// (src/vbe.bastio): the ACPI block keeps off them.
 spec fn kernel_port(k: u64) -> bool {
   k < ACPI_LOW || (0x1F0 <= k && k < 0x1F8) || k == 0x3F6 || (0x3F8 <= k && k < 0x400)
-    || (0xCF8 <= k && k < 0xD00)
+    || (0xCF8 <= k && k < 0xD00) || (0x1CE <= k && k < 0x1D1)
 }
 
 /// Byte `off` of table `sig`, or 256.
@@ -241,7 +242,7 @@ fn acpi_new(ports: &mut Ports, cpu: &Cpu) -> Acpi
     if tmr + 4 > hi { hi = tmr + 4; }
   }
   let mut clear = lo >= ACPI_LOW && hi <= 65536 && lo < hi && hi - lo <= ACPI_SPAN;
-  clear = clear && (hi <= 0x1F0 || lo >= 0x1F8) && (hi <= 0x3F6 || lo >= 0x3F7)
+  clear = clear && (hi <= 0x1CE || lo >= 0x1D1) && (hi <= 0x1F0 || lo >= 0x1F8) && (hi <= 0x3F6 || lo >= 0x3F7)
     && (hi <= 0x3F8 || lo >= 0x400) && (hi <= 0xCF8 || lo >= 0xD00);
   if !clear {
     let none = port_claim(&mut ports, 0, 0);
