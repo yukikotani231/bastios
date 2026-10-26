@@ -1606,6 +1606,26 @@ static void bf_edit_selected(void)
     be_start();
 }
 
+/* A press on one entry and a release on a directory entry moves the first into the directory
+ * (never over a name that is taken). */
+static void bf_drag_move(int from, int to)
+{
+    char src[PATH_MAX], dir[PATH_MAX], dst[PATH_MAX];
+    if (from <= 0 || from >= bf_nent || to < 0 || to >= bf_nent || !bf_ents[to].dir)
+        return;
+    struct stat st;
+    bf_path_of(bf_ents[from].name, src, sizeof src);
+    bf_path_of(bf_ents[to].name, dir, sizeof dir);
+    snprintf(dst, sizeof dst, "%s/%s", dir, bf_ents[from].name);
+    if (lstat(dst, &st) == 0 || rename(src, dst) != 0) {
+        printf("bfiles: cannot move %s\n", src);
+    } else {
+        printf("bfiles: moved %s to %s\n", src, dst);
+        bf_load_dir();
+    }
+    fflush(stdout);
+}
+
 static void bf_click(int row)
 {
     if (bf_viewing) {
@@ -1697,6 +1717,7 @@ static int bfiles_main(int argc, char **argv)
     fflush(stdout);
     static unsigned char buf[BWM_MAX_PAYLOAD];
     unsigned prev = 0;
+    int press_row = -1;
     for (;;) {
         int t = bwm_event(fd, buf);
         if (t < 0 || t == BWM_CLOSE)
@@ -1901,15 +1922,27 @@ dispatch:;
             }
             int pressed = (m->buttons & 1) && !(prev & 1);
             int dragging = (m->buttons & 1) && (prev & 1);
+            int released = !(m->buttons & 1) && (prev & 1);
             prev = m->buttons & 0xFF;
             if (dragging && bf_editing)
                 be_click((int)m->y, (int)m->x, 1);
-            else if (!pressed)
-                continue;
-            else if (bf_editing)
+            else if (bf_editing) {
+                if (!pressed)
+                    continue;
                 be_click((int)m->y, (int)m->x, 0);
-            else
-                bf_click(m->y / BF_CH);
+            } else if (pressed)
+                press_row = (int)m->y < 0 ? -1 : (int)m->y / BF_CH;              /* the list acts on the release: a click opens, a drag moves */
+            else if (released && press_row >= 0) {
+                int row = (int)m->y < 0 ? -1 : (int)m->y / BF_CH, from = press_row;
+                press_row = -1;
+                if (bf_viewing || row == from)
+                    bf_click(from);
+                else if (from >= 1 && row >= 1)
+                    bf_drag_move(bf_top + from - 1, bf_top + row - 1);
+                else
+                    continue;
+            } else
+                continue;
         } else {
             continue;
         }
