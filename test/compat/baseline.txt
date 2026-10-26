@@ -1885,3 +1885,11 @@ go: go: a type conversion library (spf13/cast) tested with go test -mod=vendor
 busybox: dd one large read of a file
 java: java: a real library (Apache Commons Lang, its number, tuple, text and function packages) with its test libraries, tested with the JUnit console launcher
 java: java: a real library (Apache Commons Collections, its queue, comparator, functor, iterator and trie packages) with its test libraries, tested with the JUnit console launcher
+ruby: ruby: unpack the root, make the device nodes
+ruby: ruby: version
+ruby: ruby: sockets: TCP, UNIX, UDP and an HTTP client
+ruby: ruby: core classes, strings, hashes and blocks
+ruby: ruby: threads, a mutex, a queue and fibers
+ruby: ruby: fork, pipes, exit status and signals
+ruby: ruby: the standard library: json, yaml, digest, zlib, openssl, time
+ruby: ruby: a real project (rake) tested with its own test suite
