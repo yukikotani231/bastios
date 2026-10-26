@@ -804,6 +804,27 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = not lit_rows()
             print(("ok  " if good else "FAIL"), f"({name}) Escape closes the keyboard menu")
             fails += not good
+            # Alt-F2 asks for a command in the task bar (green); Enter runs it in a terminal window, Escape cancels.
+            def run_prompt():
+                w, h, px = screendump()
+                return tuple(px[(763 * w + 62) * 3:(763 * w + 62) * 3 + 3]) == (30, 110, 70)
+            monitor("sendkey alt-f2")
+            monitor(*[f"sendkey {c}" for c in "xy"], "sendkey esc")
+            time.sleep(0.7)
+            good = not run_prompt()
+            print(("ok  " if good else "FAIL"), f"({name}) Escape cancels the Run prompt")
+            fails += not good
+            monitor("sendkey alt-f2")
+            time.sleep(0.7)
+            good = run_prompt()
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F2 shows the Run prompt in the task bar")
+            fails += not good
+            mark = len(out)
+            monitor(*[f"sendkey {c}" for c in "true"], "sendkey ret")
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Enter in the Run prompt starts the command in a terminal window")
+            fails += not good
+            mark = len(out)
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(0.7)
