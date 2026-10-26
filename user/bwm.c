@@ -1751,6 +1751,13 @@ int main(int argc, char **argv)
                             struct bwm_key sk = { (uint32_t)top->id, code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN };
                             to_client(top->cli, BWM_KEY, &sk, sizeof sk);
                         }
+                    } else if (code == 68 && down && k_alt) {      /* Alt-F10: maximize the focused window, or put it back */
+                        struct win *t = focus();
+                        if (t && t->resizable) {
+                            raise_win(t);
+                            toggle_max(t);
+                            touch_all();
+                        }
                     } else if (code == 62 && down && k_alt) {      /* Alt-F4: close the focused window */
                         struct win *t = focus();
                         if (t)
