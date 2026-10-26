@@ -1468,11 +1468,13 @@ fn bus_shrink(k: &mut Kernel, f: u64)
 /// A page fault of process p on a page that bus_mark made inaccessible:
 /// 0 if it is not such a page, 1 if the file has grown to cover it (it is
 /// accessible again: run the instruction again), 2 if it still lies past
-/// the end of the file (SIGBUS).
+/// the end of the file (SIGBUS), 3 if the file has grown to cover it but a
+/// processor runs the space (another thread of the process), so the page
+/// cannot be changed now: the thread tries again.
 fn bus_fault(k: &mut Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
   ensures kok(k)
-  ensures result <= 2
+  ensures result <= 3
 {
   let va = pget(k.procs, p, reg_word(R_FAULT));
   if va < USER_BASE || va - USER_BASE >= USER_SIZE {
@@ -1509,7 +1511,13 @@ fn bus_fault(k: &mut Kernel, p: u64) -> u64
       acc = 2;
     }
   }
-  win_op(&mut k.mem, &mut k.spaces, p, WOP_PROTECT, q, q + 1, acc);
+  let r = win_op(&mut k.mem, &mut k.spaces, p, WOP_PROTECT, q, q + 1, acc);
+  if r > WPAGES {
+    return 3;
+  }
+  if r == 0 {
+    return 0;                               // no page there to open: the fault is not this one's
+  }
   return 1;
 }
 

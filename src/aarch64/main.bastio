@@ -426,6 +426,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       bus = bus_fault(&mut s.k, p);
     }
     is_bus = bus == 2;
+    if bus == 3 {
+      return (p + 1) % NPROC;               // a processor runs its space: it faults again and tries again
+    }
     if bus == 1 {
       pset(&mut s.k.procs, p, F_FAULT_RIP, brip);
       pset(&mut s.k.procs, p, F_FAULT_VA, bva);

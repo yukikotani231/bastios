@@ -805,10 +805,17 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     let bva = pget(s.k.procs, p, reg_word(R_FAULT));
     let brip = pget(s.k.procs, p, F_REGS + R_RIP) % 4611686018427387904 + 1;
     let mut bus = 0;
-    if pget(s.k.procs, p, F_FAULT_RIP) != brip || pget(s.k.procs, p, F_FAULT_VA) != bva {
+    // (A fault on a page that is not there at all, error bit 0 clear, is a
+    // new one even at the place of the last: the file was mapped again, or
+    // cut, since, as a loop over a mapping that grows finds out.)
+    if pget(s.k.procs, p, F_FAULT_RIP) != brip || pget(s.k.procs, p, F_FAULT_VA) != bva
+       || pget(s.k.procs, p, F_REGS + 18) % 2 == 0 {
       bus = bus_fault(&mut s.k, p);
     }
     is_bus = bus == 2;
+    if bus == 3 {
+      return (p + 1) % NPROC;               // a processor runs its space: it faults again and tries again
+    }
     if bus == 1 {
       pset(&mut s.k.procs, p, F_FAULT_RIP, brip);
       pset(&mut s.k.procs, p, F_FAULT_VA, bva);

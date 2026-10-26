@@ -547,6 +547,9 @@ jobs:
           - part: python2
             lanes: python2
             disks: alpine.img python.img
+          - part: containers
+            lanes: docker
+            disks: alpine.img docker.img
     env:
       # Raise it to drop every cache entry below (a bad entry is never
       # replaced: a key that hits is not saved again).
