@@ -1898,6 +1898,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print("\n".join(l for l in lines if l))
         print(("ok  " if good else "FAIL"), f"({name}) s twice in bfiles puts the newest file first")
         fails += not good
+        # In that order the date of each file stands where the size was.
+        if good:
+            good = re.search(r"^zz +\d{4}-\d\d-\d\d$", lines[2]) is not None
+            if not good:
+                print(repr(lines[2]))
+        print(("ok  " if good else "FAIL"), f"({name}) bfiles shows the date of each file when sorted by time")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
