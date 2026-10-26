@@ -4,7 +4,8 @@
 # image's root as a tar file (/disk/root.tar) and a BusyBox at
 # /disk/busybox. The storage driver is vfs (no kernel overlay file system
 # for it) and there is no iptables: the cases that name no network run on
-# the default bridge (docker0, without NAT), the rest with --network=none.
+# the default bridge (docker0; the kernel masquerades for it, and -p goes
+# through docker-proxy), the rest with --network=none.
 # The format is applets.txt's:
 #
 #   == NAME
@@ -52,3 +53,11 @@ $ dc run --rm ctr /bin/busybox ping -c 1 -W 5 172.17.0.1 2>&1 | bb grep -c '1 pa
 $ dc run -d --name srv ctr /bin/busybox sh -c 'echo from-srv | /bin/busybox nc -l -p 8080' >/dev/null 2>&1; ip=$(dc inspect -f '{{.NetworkSettings.Networks.bridge.IPAddress}}' srv); dc run --rm ctr /bin/busybox nc -w 10 $ip 8080 2>&1; bb ping -c 1 -W 5 $ip 2>&1 | bb grep -c '1 packets received'; dc rm -f srv >/dev/null 2>&1
 from-srv
 1
+
+== docker: a container on the bridge reaches the host's network
+$ dc run --rm ctr /bin/busybox wget -q -O - -T 10 HOSTURL/hello.txt 2>&1
+hello from the host
+
+== docker: a published port reaches the container
+$ dc run -d --name pub -p 8082:8080 ctr /bin/busybox sh -c 'echo from-pub | /bin/busybox nc -l -p 8080' >/dev/null 2>&1; bb sleep 2; bb nc -w 5 127.0.0.1 8082 </dev/null | bb head -1; dc rm -f pub >/dev/null 2>&1
+from-pub
