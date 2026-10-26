@@ -92,5 +92,17 @@ hello
 
 == ruby: a real project (rake) tested with its own test suite
 # timeout 900
-$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/rake.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/rake && ruby -Ilib -Itest -e "Dir[%q(test/test_*.rb)].sort.each { |f| require %q(./) + f }" 2>&1' | bb grep -E '^[0-9]+ tests, |^(Failure|Error):'
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/rake.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/rake && ruby -Ilib -Itest -rhelper -e "Dir[%q(test/test_*.rb)].sort.each { |f| require %q(./) + f }" 2>&1' | bb grep -E '^[0-9]+ tests, |^(Failure|Error):' | bb cut -c1-200
 598 tests, 1460 assertions, 0 failures, 0 errors, 0 pendings, 1 omissions, 0 notifications
+
+== ruby: a real project (rexml) tested with its own test suite
+# The parse/ tests need core_assertions, a helper of Ruby's own test tree that no gem carries: left out.
+# timeout 900
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/rexml.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/rexml && ruby -Ilib -Itest -rhelper -e "Dir[%q(test/**/test_*.rb)].sort.reject { |f| File.read(f).include?(%q(core_assertions)) }.each { |f| require %q(./) + f }" 2>&1' | bb grep -E '^[0-9]+ tests, |^(Failure|Error):' | bb cut -c1-200
+619 tests, 1813 assertions, 0 failures, 0 errors, 0 pendings, 0 omissions, 0 notifications
+
+== ruby: a real project (kramdown) tested with its own test suite
+# The cases that need rouge, coderay or stringex (gems the image does not carry) are left out.
+# timeout 900
+$ rb() { bb chroot /disk/r /usr/bin/env PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp "$@"; }; bb rm -rf /disk/r/work/*; bb wget -q -O - HOSTURL/oss/kramdown.tar.gz | bb tar -xz -C /disk/r/work && rb sh -c 'cd /work/kramdown && ruby -Ilib -Itest test/test_files.rb -n "/\A(?!.*(highlighting|guess_lang|options3|normal-css-class|rouge|with_auto_ids))/" 2>&1' | bb grep -E '^[0-9]+ runs, |^ +[0-9]+\) (Failure|Error)' | bb cut -c1-160
+1609 runs, 174047 assertions, 0 failures, 0 errors, 0 skips
