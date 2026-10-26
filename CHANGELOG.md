@@ -28,6 +28,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bwm -m WxH` (FBIOPUT_VSCREENINFO on `/dev/fb0`) puts QEMU's standard VGA in a smaller mode; the boot mode comes back when the last description of `/dev/fb0` closes. The I/O ports 0x1CE to 0x1D0 are claimed for the mode registers (`src/vbe.bastio`); no C or assembly was added.
 - In `bfiles`, a drag from an entry onto a directory entry moves it there (a click now acts when the button is released).
 - Alt-F9 in `bwm` minimizes the focused window.
+- Alt-F1 in `bwm` opens the launcher menu from the keyboard: Up and Down move the lit entry, Enter chooses it and Escape closes the menu.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
 - In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
 - The mouse wheel zooms the image in `bview`: up in, down out.
