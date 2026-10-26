@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Page Up and Page Down zoom the image in `bview` in and out, as `+` and `-` do.
 - The `bfiles` list shows the date of each file in place of its size while it is sorted by time.
 - In the `bsys` process list Delete ends the selected process, as `x` does.
 - Alt-F10 in `bwm` maximizes the focused window and puts it back.
