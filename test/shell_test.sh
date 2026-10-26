@@ -2866,7 +2866,11 @@ fails += not good
 # processor beyond that needs x2APIC mode, which QEMU emulates without KVM
 # only from 9.0, so the 256th is out of reach of this test): every one
 # starts and reports itself, and every page comes back at power off.
-ok, code = report_boot(["-m", "512M", "-smp", "255"], "255 processors", 0)
+# QEMU runs the processors on one host thread (thread=single): with a host
+# thread each, 255 processors spin on the kernel's lock against a few host
+# cores, the holder is descheduled and the boot made no progress in 800 s on
+# a build whose code layout was unlucky (about 8 s this way).
+ok, code = report_boot(["-accel", "tcg,thread=single", "-m", "512M", "-smp", "255"], "255 processors", 0)
 good = ok and b"pages of memory, 255 processors" in out
 print(("ok  " if good else "FAIL"), "(255 processors) all 255 start")
 fails += not good
