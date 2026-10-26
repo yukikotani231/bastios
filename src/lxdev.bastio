@@ -1,6 +1,7 @@
 // Device files for Linux programs: /dev/null, /dev/zero, /dev/random,
 // /dev/urandom and /dev/tty, the loop devices (src/lxloop.bastio), /dev/dsp
 // (src/lxsnd.bastio), /dev/input/mice and /dev/psaux (src/lxmouse.bastio),
+// /dev/ttyUSB0 and /dev/ttyACM0 (src/lxserial.bastio),
 // and /dev
 // itself as a directory to stat.
 // Opening one makes an open file description of kind OF_DEV whose x is the
@@ -20,7 +21,7 @@ const DEV_DIR: u64 = 5;             // /dev itself
 /// The device the n-byte path in the transfer buffer ("dev/null", from
 /// lx_path_in) names, or DEV_NONE.
 fn dev_at(x: &Bytes, n: u64) -> u64
-  requires blen(x) == XFER && n <= FNAME_MAX
+  requires blen(x) == XBUF && n <= FNAME_MAX
 {
   if xfer_is(x, 0, n, "dev") {
     return DEV_DIR;
@@ -45,6 +46,12 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   }
   if xfer_is(x, 0, n, "dev/input/mice") || xfer_is(x, 0, n, "dev/psaux") {
     return DEV_MICE;                        // src/lxmouse.bastio
+  }
+  if xfer_is(x, 0, n, "dev/input/event0") {
+    return DEV_KEYEV;                       // src/lxkeyev.bastio
+  }
+  if xfer_is(x, 0, n, "dev/ttyUSB0") || xfer_is(x, 0, n, "dev/ttyACM0") {
+    return DEV_SER;                         // src/lxserial.bastio
   }
   if xfer_is(x, 0, n, "dev/fb0") {
     return DEV_FB;                          // src/lxfb.bastio
@@ -79,6 +86,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_TTY {
     return 0x500;
   }
+  if d == DEV_PTMX {
+    return 0x502;                           // 5:2
+  }
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return 0x700 + d - DEV_LOOP;            // block major 7
   }
@@ -88,8 +98,14 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_FB {
     return 0x1D00;                          // 29:0, /dev/fb0
   }
+  if d == DEV_KEYEV {
+    return 0xD40;                           // 13:64, /dev/input/event0
+  }
   if d == DEV_MICE {
     return 0xD3F;                           // 13:63, /dev/input/mice
+  }
+  if d == DEV_SER {
+    return 0xBC00;                          // 188:0, /dev/ttyUSB0 (an ACM port is 166:0)
   }
   return 0;
 }
@@ -111,6 +127,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev == 0x500 || rdev == 0x501 {
     return DEV_TTY;
   }
+  if rdev == 0x502 {
+    return DEV_PTMX;                        // a /dev/ptmx made by mknod, in a chroot
+  }
   if rdev >= 0x700 && rdev < 0x700 + LOOP_N {
     return DEV_LOOP + rdev - 0x700;
   }
@@ -120,8 +139,14 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev == 0x1D00 {
     return DEV_FB;
   }
+  if rdev == 0xD40 {
+    return DEV_KEYEV;
+  }
   if rdev == 0xD3F || rdev == 0xA01 {
     return DEV_MICE;                        // /dev/input/mice, /dev/psaux (10:1)
+  }
+  if rdev == 0xBC00 || rdev == 0xA600 {
+    return DEV_SER;                         // /dev/ttyUSB0 (188:0), /dev/ttyACM0 (166:0)
   }
   return DEV_NONE;
 }

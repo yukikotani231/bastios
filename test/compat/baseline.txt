@@ -23,6 +23,7 @@ alpine: git: commit, log and diff
 alpine: jq: query JSON
 alpine: less: copies a pipe through
 alpine: make: rebuild only what is out of date
+alpine: node: Alpine's Node (V8 with its JIT) runs a script that gets hot
 alpine: openssl: a digest and random bytes
 alpine: rsync: copy a tree
 alpine: ssh-keygen: an ed25519 key
@@ -283,6 +284,7 @@ t_dir: stat /tmp
 t_dir: stat file in directory
 t_dir: stat new directory
 t_dir: statvfs
+t_dir: statvfs names up to 255 bytes, as NAME_MAX says
 t_dir: unlink file in directory
 t_dns: connect to a looked-up name
 t_dns: getaddrinfo AF_INET
@@ -297,7 +299,7 @@ t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
 t_fanotify: a child's event comes to its directory
-t_fanotify: a class other than notification is refused
+t_fanotify: the content classes are accepted, both at once are refused, and a permission mask is refused
 t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
 t_fanotify: a mark on a missing file is ENOENT
 t_fanotify: a mark with no operation is EINVAL
@@ -321,17 +323,32 @@ t_fanotify: remove the mark
 t_fanotify: the event says who did it
 t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
+t_fdlock: memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC
+t_fdlock: 200 separate byte-range locks on one file
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
 t_fdlock: O_ASYNC on a pipe signals its owner when input arrives
 t_fdlock: a lock needs the matching access mode; bad requests are EINVAL
+t_fdshare: a descriptor the child closes is closed in the parent
+t_fdshare: a descriptor the child opens is open in the parent
+t_fdshare: after unshare(CLONE_FILES) the child's changes stay with it
+t_fdshare: close_range with CLOSE_RANGE_UNSHARE closes only the caller's copy
+t_fdshare: execve gives the program a table of its own
+t_fdshare: kcmp(KCMP_FILES) tells sharing processes from the rest
+t_fdshare: /proc/PID/fd/N of a process that shares the table reads the shared descriptors
+t_fdshare: unshare(CLONE_FILES) is EMFILE past nr_open
+t_fdshare: a working directory the child sets is the parent's
+t_fdshare: a umask the child sets is the parent's
+t_fdshare: after unshare(CLONE_FS) the child's chdir stays with it
+t_fdshare: kcmp(KCMP_FS) says processes that share a working directory do
 t_file: /dev/null write
 t_file: /dev/urandom read
 t_file: /dev/zero read
 t_file: 12 open descriptors
 t_file: O_APPEND
 t_file: O_EXCL on existing
+t_file: O_EXCL on a dangling symbolic link is EEXIST and makes nothing
 t_file: O_RDONLY refuses write
 t_file: XATTR_CREATE of an existing name is EEXIST
 t_file: XATTR_REPLACE changes the value
@@ -394,12 +411,20 @@ t_file: they follow a rename
 t_file: they stay while a name is left
 t_file: tmpfile
 t_file: truncate
+t_file: two hundred attributes on one file
 t_file: unlink
 t_file: unlink an open file, then read it
 t_file: utime
 t_file: write
 t_file: writev
 t_file: a write of many unaligned blocks is not short
+t_file: read across a hole into unaligned buffers
+t_file: read into untouched anonymous memory
+t_file: read into a copy-on-write buffer leaves the parent's own
+t_file: read into a buffer that ends at an unmapped page returns what fits
+t_file: read into a read-only buffer is EFAULT
+t_file: read into an unmapped buffer is EFAULT
+t_file: read sees a store through a shared mapping
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
@@ -436,9 +461,11 @@ t_inotify: rmdir: delete-self, ignored, then delete in the directory
 t_inotify: two equal events in a row coalesce
 t_inotify: unlink: attrib, ignored, then delete in the directory
 t_inotify: thirty-two epoll instances
-t_inotify: sixty timerfds at once
+t_inotify: two hundred and fifty timerfds at once
 t_inotify: thirty inotify instances at once
 t_inotify: thirty named pipes open at once
+t_inotify: a writer far ahead of its reader loses no IN_DELETE: 3000 files made and removed are 3000 events
+t_inotify: a watch nobody reads does not hold its writer back: 2000 files made and removed take at most 3 s longer than with no watch
 t_ioprio: a child inherits it
 t_ioprio: a failed set changes nothing
 t_ioprio: an unknown class is EINVAL
@@ -575,9 +602,17 @@ t_ltp2: tkill and tgkill reject a zero or negative id
 t_ltp2: unshare: files and cwd succeed, bad flags EINVAL
 t_ltp2: waitpid with bad options is EINVAL
 t_ltp2: waitpid(0) waits only for the caller's group
+t_ltp2: mqueue: queues_max reads 256; at its limit an unprivileged mq_open that creates fails with ENOSPC, root is exempt
+t_ltp2: madvise: a range with a munmapped page in it is ENOMEM, one without is not
 t_ltp2: SIGBUS: a mapped page past the end of the file is a bus error
 t_ltp2: SIGBUS: the same page is ordinary memory once the file has grown
 t_ltp2: SIGBUS: a forked child gets it too
+t_ltp2: SIGBUS: a file cut under a mapping takes the pages past the new end
+t_ltp2: rename: a directory moved from under the working directory leaves it in the moved directory
+t_ltp2: locked pages: msync(MS_INVALIDATE) is EBUSY and madvise(MADV_DONTNEED) EINVAL, until munlock
+t_ltp2: locked pages: unmapping or mapping over them unlocks them
+t_ltp2: splice from a pipe into a Unix socket and into a TCP connection delivers the bytes
+t_ltp2: IPv4 multicast: leaving a group never joined is EADDRNOTAVAIL, a join then a leave works
 t_ltp3: O_PATH|O_NOFOLLOW opens the link itself
 t_ltp3: a directory has a handle too
 t_ltp3: a handle of no bytes is EINVAL
@@ -640,6 +675,9 @@ t_ltp3: the window size keeps its pixel fields
 t_ltp3: TIOCGETD reports N_TTY
 t_ltp3: /proc/self/fd lists the open descriptors
 t_ltp3: readlink with a zero-size buffer is EINVAL
+t_ltp3: a loop device's queue/ files give the sector size and DMA alignment
+t_ltp3: statx(STATX_DIOALIGN) of a block device gives its alignment
+t_ltp3: statx(STATX_DIOALIGN) of a directory leaves the bit clear
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
@@ -670,6 +708,8 @@ t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
 t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do
 t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
+t_mem: mprotect makes 300 MiB of a PROT_NONE reservation readable, writable and executable (a JIT's code range), more than the machine has: only touched pages count, and code written there runs
+t_mem: mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the machine has: only touched pages count
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space
@@ -679,6 +719,9 @@ t_mem: munmap gives address space back
 t_mem: pages come when first touched: 640 MiB of mmap, system calls and fork on pages never touched
 t_mem: read(2) sees a store into a MAP_SHARED mapping
 t_mem: writable MAP_SHARED of a read-only file is EACCES
+t_mem: a page touched before munmap faults after it
+t_mem: a page written before mprotect(PROT_READ) faults on the next write
+t_mem: a page read before munmap and mapped again at its address is a fresh zero page
 t_misc: /etc/passwd
 t_misc: /proc/diskstats opens
 t_misc: /proc/diskstats has the disk's line with its counts
@@ -692,9 +735,11 @@ t_misc: /proc/net/route lists the default route
 t_misc: /proc/net/tcp lists a listening socket
 t_misc: /proc/net/udp lists a bound socket
 t_misc: /proc/net/unix lists a bound socket
+t_misc: /proc/partitions lists the disk that /proc/diskstats counts, with its size in 1 KiB blocks
 t_misc: /proc/self/exe
 t_misc: /proc/self/limits shows the open-files limit
 t_misc: /proc/self/mountinfo lists the root and /proc
+t_misc: /proc/self/smaps_rollup sums the resident pages, as psutil's uss reads them
 t_misc: /proc/self/statm counts the pages and io has its counters
 t_misc: core_pattern and nr_open read, drop_caches takes 3 and refuses 9
 t_misc: /proc/stat has cpu lines
@@ -707,6 +752,14 @@ t_misc: prctl PR_SET_NAME
 t_misc: printf %f
 t_misc: qsort
 t_misc: sched_getaffinity
+t_misc: sched_getaffinity names every processor /proc/stat lists, as sysconf counts them
+t_misc: sched_setaffinity to a processor that is not there is EINVAL
+t_misc: sched_getaffinity returns the mask sched_setaffinity set
+t_misc: a zombie's cmdline is empty and its exe link is gone, while its stat still says Z
+t_misc: /proc/self/smaps gives each map of /proc/self/maps its sizes in kB
+t_misc: getcpu names a processor the affinity mask allows
+t_misc: voluntary_ctxt_switches counts the sleeps, and /proc/stat ctxt and getrusage count them too
+t_misc: /proc/self/io counts the read and write calls and their characters
 t_misc: seccomp filter denies getpid
 t_misc: forty stacked seccomp filters
 t_misc: statfs
@@ -732,6 +785,11 @@ t_more: fstatat with AT_SYMLINK_NOFOLLOW
 t_more: fstatfs
 t_more: futimens
 t_more: getrusage children
+t_more: getrusage self reports a maximum resident size
+t_more: mbind and set_mempolicy succeed; get_mempolicy says MPOL_DEFAULT
+t_more: /proc/PID/status has VmRSS and the context switch counts
+t_more: /proc/meminfo has Active, Inactive and Shmem
+t_more: SIOCETHTOOL on a socket is EOPNOTSUPP
 t_more: ioctl FIOCLEX and FIONCLEX
 t_more: ioctl FIONBIO makes a read EAGAIN
 t_more: memfd_create
@@ -746,6 +804,7 @@ t_more: readdir counts the files
 t_more: renameat2 RENAME_NOREPLACE
 t_more: sched_getcpu
 t_more: sem_open in /dev/shm
+t_more: sem_open past 64 mappings: mapping one again by name gives the same page
 t_more: sendfile file to file
 t_more: sendfile needs a readable source
 t_more: sendfile to a pipe
@@ -759,6 +818,7 @@ t_more: utimensat
 t_more: utimensat and llistxattr act on a dangling link itself
 t_more: vfork + _exit
 t_more: vmsplice into a pipe, EAGAIN on an empty tee
+t_more: what a mapping wrote past the end of a file reads as zeros
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -778,6 +838,35 @@ t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd
+t_pidapi: waitid(P_PIDFD) on it reports the child's status
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL
+t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at two addresses fill both
+t_pidapi: a child killed by the signal is reported as CLD_KILLED with its signal
+t_pidapi: a second waitid(P_PIDFD) is ECHILD
+t_pidapi: clone3 with CLONE_PIDFD returns a pidfd
+t_pidapi: clone3 with a size below 64 is EINVAL
+t_pidapi: clone3 with an exit signal above 255 is EINVAL
+t_pidapi: epoll on the pidfd of an ended child
+t_pidapi: pidfd_getfd copies the child's descriptor, close-on-exec
+t_pidapi: pidfd_getfd of a closed descriptor is EBADF
+t_pidapi: pidfd_getfd with flags is EINVAL
+t_pidapi: pidfd_open of a pid with no process is ESRCH
+t_pidapi: pidfd_open of a zombie works and waitid reaps it
+t_pidapi: pidfd_open of pid 0 is EINVAL
+t_pidapi: pidfd_open with PIDFD_NONBLOCK sets O_NONBLOCK
+t_pidapi: pidfd_open with PIDFD_THREAD on the caller works
+t_pidapi: pidfd_send_signal to the reaped child is ESRCH
+t_pidapi: pidfd_send_signal with PIDFD_SIGNAL_THREAD and PIDFD_SIGNAL_PROCESS_GROUP together is EINVAL
+t_pidapi: pidfd_send_signal with PIDFD_SIGNAL_THREAD_GROUP to itself
+t_pidapi: pidfd_send_signal with a siginfo of the right signal
+t_pidapi: poll on a running child's pidfd says nothing
+t_pidapi: poll on the pidfd of a child that exits says POLLIN
+t_pidapi: the pidfd is close-on-exec
+t_pidapi: waitid on a non-blocking pidfd with nothing to report is EAGAIN
+t_pidapi: waitid(P_PIDFD) reaps it
+t_pidapi: waitid(P_PIDFD, WNOHANG) of a running child returns 0 with si_pid 0
+t_pidapi: waitid(P_PIDFD, WNOWAIT) reads the status and leaves the zombie
 t_net: ping6 ::1 (raw ICMPv6 socket)
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
@@ -874,6 +963,7 @@ t_nx: code on the stack does not run
 t_nx: code runs from a read-write-execute mapping
 t_nx: mprotect back to read-write stops the code
 t_nx: mprotect to read-write-execute keeps the code running
+t_nx: a read-write-execute page emptied with MADV_DONTNEED still runs code
 t_nx: mprotect(PROT_EXEC) after writing makes the code run
 t_nx: mprotect(PROT_EXEC) on a shared mapping makes the code run
 t_openat2: /proc/self/exe opens the program
@@ -927,6 +1017,7 @@ t_ovpivot: stat finds /bin/sh as a regular file
 t_ovpivot: lstat sees the link
 t_path: O_NOFOLLOW, O_NOATIME, EISDIR, rmdir of . and mkdir over a name
 t_path: a loop of links through a long path is ELOOP
+t_path: a name below a directory, a file or a link that replaced a directory
 t_path: a name ending in / or /. must be a directory
 t_path: a path in unmapped memory is EFAULT
 t_path: a set-group-ID bit at create is kept only for a member of the group
@@ -954,7 +1045,10 @@ t_perm: setgroups and getgroups keep supplementary groups
 t_perm: the disk keeps owners
 t_perm: umask applies to new files and directories
 t_perm: without the group, the group's bits do not apply
+t_proc: /proc/PID/cwd and root are links: the working directory, and /
 t_proc: /proc/PID/stat of an ended process is ESRCH
+t_proc: /proc/self/environ holds the environment execve passed
+t_proc: sixteen forks after a process ended do not reuse its id
 t_proc: #! naming a missing interpreter is ENOENT
 t_proc: #! naming no interpreter is ENOEXEC
 t_proc: child's getppid is the parent
@@ -1026,6 +1120,7 @@ t_proc: an eventfd shows its count
 t_proc: an inotify instance lists its watches
 t_proc: a pidfd shows the process
 t_proc: fdinfo lists the open descriptors
+t_proc: fdinfo of a closed descriptor does not open
 t_proc: /proc/self lists fdinfo
 t_proc: maps lists an anonymous mapping
 t_proc: maps lists a shared mapping with s
@@ -1077,6 +1172,37 @@ t_ptrace: PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only
 t_ptrace: a buffer that is too small gets what fits, and the full size is the result
 t_ptrace: and at its exit the result, as an error
 t_ptrace: the tracee goes on to its end
+t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH
+t_ptrace2: PTRACE_DETACH with a signal delivers it
+t_ptrace2: PTRACE_GETFPREGS gives the SSE state
+t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer
+t_ptrace2: PTRACE_GETSIGINFO at a fault: SIGSEGV, SEGV_MAPERR and the address
+t_ptrace2: PTRACE_GETSIGINFO at a signal stop gives the signal and its sender
+t_ptrace2: PTRACE_LISTEN keeps a group-stopped tracee stopped; SIGCONT then wakes it
+t_ptrace2: PTRACE_O_EXITKILL kills the tracee when the tracer dies
+t_ptrace2: PTRACE_O_TRACECLONE reports a new thread, which is traced
+t_ptrace2: PTRACE_O_TRACEEXIT stops the tracee at exit with the status as the event message
+t_ptrace2: PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop
+t_ptrace2: PTRACE_O_TRACEFORK: the event message is the new child's pid
+t_ptrace2: PTRACE_O_TRACESYSGOOD marks a system call stop with SIGTRAP | 0x80
+t_ptrace2: PTRACE_O_TRACEVFORK and PTRACE_O_TRACEVFORKDONE report the vfork and its end
+t_ptrace2: PTRACE_PEEKDATA of an unmapped address is EIO
+t_ptrace2: PTRACE_POKEDATA of an unmapped address is EIO
+t_ptrace2: PTRACE_SEIZE reports a group-stop as PTRACE_EVENT_STOP
+t_ptrace2: PTRACE_SETOPTIONS with an unknown option is EINVAL
+t_ptrace2: PTRACE_SINGLESTEP from a signal stop inside raise() stops with SIGTRAP one instruction on, though SIGTRAP is blocked
+t_ptrace2: SIGKILL ends a tracee in a signal stop
+t_ptrace2: a request on a process that is not a tracee of the caller is ESRCH
+t_ptrace2: a signal the tracee blocks does not stop it
+t_ptrace2: a tracee runs on when its tracer dies
+t_ptrace2: a tracee stopped when its tracer dies runs again
+t_ptrace2: a tracer attaching to a stopped process sees it stop
+t_ptrace2: a tracer can wait for a tracee that is not its child
+t_ptrace2: an unknown request is EIO
+t_ptrace2: changing orig_rax to -1 at the entry skips the call; rax at the exit is the result
+t_ptrace2: changing the arguments at the entry changes the call
+t_ptrace2: resuming with another signal delivers that one
+t_ptrace2: resuming with no signal drops it
 t_pty: /dev/tty in the child's session is its pty
 t_pty: Ctrl-C sends SIGINT to the foreground group
 t_pty: Ctrl-D on an empty line reads as end of file
@@ -1155,6 +1281,73 @@ t_sig2: a PROT_NONE MAP_SHARED page is still shared after mprotect
 t_sig2: a forked child keeps a page PROT_NONE
 t_sig2: mmap of a file with fd -1 is EBADF
 t_sig2: mmap of length 0 with fd -1 is EBADF
+t_sig3: SA_NOCLDWAIT: wait is ECHILD once the children are gone
+t_sig3: SA_NODEFER lets the handler nest
+t_sig3: SA_RESTART restarts a blocking read
+t_sig3: SA_RESTART restarts waitpid
+t_sig3: SIGCHLD arrives for a stop without it
+t_sig3: SIGCHLD does not arrive for a stop with SA_NOCLDSTOP
+t_sig3: SIGCHLD ignored: children are reaped and wait is ECHILD
+t_sig3: SIGCONT discards pending stop signals
+t_sig3: SIGCONT is reported with WCONTINUED
+t_sig3: SIGFPE on an integer division by zero: FPE_INTDIV
+t_sig3: SIGKILL and SIGSTOP cannot be blocked
+t_sig3: SIGKILL and SIGSTOP cannot be caught
+t_sig3: SIGKILL ends a stopped process
+t_sig3: SIGPIPE ends a writer; with SIGPIPE ignored it is EPIPE
+t_sig3: SIGPIPE with the default action kills
+t_sig3: SIGRTMIN is at least 32 and SIGRTMAX 64
+t_sig3: SIGSEGV on a PROT_NONE page: SEGV_ACCERR
+t_sig3: SIGSEGV on a write to a read-only page: SEGV_ACCERR
+t_sig3: SIGSEGV on an unmapped address: SEGV_MAPERR and si_addr
+t_sig3: SIGTERM to a stopped process waits for SIGCONT
+t_sig3: SIGTSTP stops a process by default
+t_sig3: SS_ONSTACK shows inside a handler that runs on the alternate stack
+t_sig3: WNOHANG with a running child returns 0
+t_sig3: WNOWAIT leaves the child to be waited for again
+t_sig3: a fresh alternate stack reads back SS_DISABLE
+t_sig3: a handler for SIGCONT runs even when SIGCONT is blocked, on the resume
+t_sig3: a handler may change the blocked set through uc_sigmask
+t_sig3: a handler may clobber SSE registers: the interrupted code does not notice
+t_sig3: a handler starts with the stack aligned as the ABI says
+t_sig3: a handler without SA_ONSTACK stays on the normal stack
+t_sig3: a partial read is not EINTR
+t_sig3: a periodic timer that was not served counts overruns
+t_sig3: a process-directed signal goes to a thread that does not block it
+t_sig3: a real-time signal sent three times while blocked arrives three times
+t_sig3: a signal ignored while pending is dropped
+t_sig3: a standard signal sent twice while blocked arrives once
+t_sig3: a stop is reported once
+t_sig3: a stop signal discards a pending SIGCONT
+t_sig3: a stopped child is seen with WUNTRACED, as WIFSTOPPED
+t_sig3: an invalid ss_flags is EINVAL
+t_sig3: changing the alternate stack while on it is EPERM
+t_sig3: exec keeps an ignored signal and resets a handled one
+t_sig3: kill with signal 65 is EINVAL, and signal 0 only probes
+t_sig3: kill(-pgrp) reaches every member
+t_sig3: kill(pid) of a zombie succeeds, and of a reaped child is ESRCH
+t_sig3: pending signals are taken lowest number first
+t_sig3: queued real-time signals keep their values, in the order sent
+t_sig3: real-time signals are taken after the standard ones, lowest first
+t_sig3: rt_sigqueueinfo with SI_USER to another process is EPERM
+t_sig3: sa_mask holds signals back until the handler returns
+t_sig3: signalfd gives a queued value
+t_sig3: signalfd is readable only while a signal is pending
+t_sig3: signalfd reads a blocked signal with its sender
+t_sig3: sigqueue gives the handler si_value and SI_QUEUE
+t_sig3: sigsuspend returns EINTR and puts the mask back
+t_sig3: sigtimedwait times out with EAGAIN
+t_sig3: tgkill reaches the named thread only
+t_sig3: the SIGCHLD handler sees si_pid, si_status and si_code
+t_sig3: the child inherits the mask and the handlers
+t_sig3: the child of a fork has no pending signals
+t_sig3: the mask comes back after the handler
+t_sig3: the signal is blocked while its own handler runs
+t_sig3: timer_create with SIGEV_SIGNAL queues sigev_value
+t_sig3: waitid reports CLD_EXITED with the status
+t_sig3: waitid reports CLD_KILLED for a child ended by a signal
+t_sig3: waitid reports CLD_STOPPED and CLD_CONTINUED
+t_sig3: without SA_RESTART a blocking read is EINTR
 t_signal: SA_SIGINFO
 t_signal: SIGCHLD on child exit
 t_signal: SIG_IGN
@@ -1205,10 +1398,14 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_sock2: a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once
+t_sock2: TCP listeners that set SO_REUSEPORT share a port; one that did not is refused
 t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
 t_sys: a cgroup namespace roots the tree
+t_sys: cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there
+t_sys: pids.events counts the forks pids.max refused
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
 t_sys: memory.max kills the biggest process of a group that passes it
@@ -1219,6 +1416,7 @@ t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
+t_sysv: shmat over its own address with SHM_REMAP replaces the attachment
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
 t_sysv: 32 queues, semaphore sets and segments at once, the 33rd of each is ENOSPC
@@ -1245,12 +1443,15 @@ t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their f
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
 t_thread: 4 threads, mutex
 t_thread: condition variable
+t_thread: fork while another thread writes copies one moment of the parent
 t_thread: exit_group while another thread runs keeps its code
 t_thread: gettid differs in a thread
 t_thread: pthread_create + join
 t_thread: pthread_detach
 t_thread: thread-local storage
 t_thread: threads that ended and began one after another have different ids
+t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
+t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
 t_thread: timed condition wait, signalled early (monotonic)
 t_thread: timed condition wait, signalled early (realtime)
 t_time: clock_getres
@@ -1279,6 +1480,7 @@ t_timens: the first namespace's offsets are frozen
 t_timens: the offsets are frozen once a process is in the namespace
 t_timens: the time links name the first namespace, and NS_GET_NSTYPE says CLONE_NEWTIME
 t_timens: unshare moves the children only: they read the written offsets
+t_timens: an offset that overflows the clock is ERANGE
 t_userns: /dev/full reads zeros and writes ENOSPC
 t_userns: a process may chown its own pipe to itself, not to others
 t_userns: an unprivileged process may raise its hard descriptor limit
@@ -1299,6 +1501,7 @@ t_userns: nor mounts in a mount namespace that another user namespace made
 t_userns: nor sets the hostname of a UTS namespace that another user namespace made
 t_userns: a user namespace made inside one mounts in a mount namespace of its own
 tty: kilo: edit and save a file
+tty: job control: Ctrl-Z stops the foreground group, not the shell
 tty: micropython: Ctrl-C at the REPL is KeyboardInterrupt
 tty: micropython: REPL line editing and history
 tty: python: the REPL, and Ctrl-C is KeyboardInterrupt
@@ -1332,6 +1535,11 @@ alpine-tty: tmux: attach on the console, run a command in the session, detach an
 alpine-tty: tmux: Neovim in a pane takes keys through tmux and saves the file
 alpine-tty: nvim: :terminal runs a shell in a window, takes typed keys, and the shell's exit closes it
 node: node: a hot loop is compiled and gives the right sum
+node: node: a real package (nanoid) fetched from the host, tested with node --test
+node: node: a real package with its installed dependencies (mri, tape), tested with tape
+node: node: a real package (debug) with its installed dependencies, tested with mocha and sinon
+node: node: a web framework (express) with its installed dependencies, tested with mocha and supertest over the loopback
+node: node: a WebSocket library (ws) tested with mocha over the loopback (but one test that depends on the Node.js version's header limit)
 node: node: a script with arrays and JSON
 node: node: an expression
 node: node: exit status and uncaught exceptions
@@ -1343,11 +1551,52 @@ go: go: a program that panics dies with status 2
 go: go: build a program and run it, and its exit status
 go: go: files, directories and the clock
 go: go: go test
+go: go: fetch a real project from the host
+go: go: a real project (BurntSushi/toml), built with go build
+go: go: a real project (BurntSushi/toml), tested with go test
+go: go: a Go module with vendored dependencies (stretchr/testify), tested with go test -mod=vendor
+go: go: a real command-line program (junegunn/fzf) with vendored dependencies, tested with go test -mod=vendor
+go: go: a WebSocket library (gorilla/websocket), tested with go test over the loopback
 go: go: gofmt rewrites a program
+go: go: gopls finds the definition of a function
+go: go: gopls formats a file
+go: go: gopls reports a type error
 go: go: goroutines, channels and the collector
 go: go: make the device nodes
 go: go: run a program
 go: go: version
+python: python: unpack the root, chroot into it, run python3
+python: apk: install gcc, musl-dev, binutils and make over HTTP
+python: gcc: build a C program and run it
+python: python: venv and pip
+python: pip: install pytest and its dependencies from the host's web server
+python: pip: build a C extension from source (setuptools, gcc) and import it
+python: pytest: the whole test suite of a real project (Jinja2's)
+python: pytest: the whole test suite of a second real project (Click's, without its pager tests)
+python: pytest: the whole test suite of a third real project (Flask's, without two tests that fail on Linux too)
+python: python: the test suite of a fourth real project (Tornado's socket tests: event loop, TCP client and server, child processes, HTTP server and client, WebSockets)
+python: pytest: pytest's own tests for capture, temporary directories, paths and conftest files (without one test of a 250-byte name)
+python: pytest: psutil's own tests for processes, the system and the utilities (without the ones that need affinity, utmp or disk statistics)
+python: pytest: numpy's own tests for memmap, .npy and .npz files, text files and the file formats (the big-array tests, which need more memory than the guest has, are left out)
+python: pytest: numpy's own tests for array arithmetic, indexing, stacking and record arrays (the big-array tests are left out)
+python: pytest: the whole test suite of a fifth real project (attrs's)
+python: pytest: the whole test suite of a sixth real project (PyYAML's)
+python: pytest: greenlet's own tests (the quick modules; the memory-measuring leak tests take minutes and are left out)
+python: pytest: lxml's own tests for the tree, the ElementTree interface, XPath and input and output (without the abstract base classes pytest collects by mistake)
+python: pytest: cffi's own tests for the C declarations, dlopen, the out-of-line modules and the generated sources (module by module, without the C++ and the slowest ones)
+python: pytest: lxml's own tests for HTML, objectify, XSLT, schemas, SAX and class lookup (module by module)
+python: pytest: Pillow's own tests for images, resizing, filters, drawing, PNG and JPEG (module by module)
+python: pytest: orjson's own tests for dumps, loads, datetimes, dataclasses, enums, UUIDs and errors (module by module)
+python: pytest: Pillow's own tests for pixel access, conversion, transforms, palettes and more image file formats (module by module)
+python: pytest: Jinja2's own tests: templates, filters, loaders, the compiler and the sandbox (file by file)
+python: pytest: Click's own tests: arguments, options, commands, the shell completion and the terminal helpers (file by file)
+python: pytest: Werkzeug's own tests: routing, the request and response objects, datastructures, the test client, the debugger and the reloader (file by file)
+python: pytest: MarkupSafe's own tests (file by file)
+python: pytest: itsdangerous' own tests: signing, serializers and encodings (file by file)
+python: pytest: Blinker's own tests: signals and their receivers (file by file)
+python: pytest: pytest's own test suite, which starts pytest inside pytest (file by file, without the tests that need xdist, bash, xmlschema or a plugin-free venv)
+python: python: the standard library on top of the system calls (pyprogs/stdlib.py)
+python: pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)
 java: java: unpack the root, make the device nodes
 java: java: version
 java: java: compile and run a program
@@ -1366,7 +1615,16 @@ rust: rust: exit status and a panic
 rust: rust: files and directories
 rust: rust: cargo builds and runs a project
 rust: rust: cargo test
+rust: rust: a real crate (semver) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a second real crate (fastrand) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a third real crate (itoa) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a fourth real crate (either) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a fifth real crate (smallvec) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a sixth real crate (arrayvec) fetched from the host, built and tested with cargo, dependencies vendored
+rust: rust: a seventh real crate (fnv) fetched from the host, built and tested with cargo, dependencies vendored
 rust: rust: a compile error is reported
+rust: rust: rust-analyzer reports its version
+rust: rust: rust-analyzer finds a type error in a crate
 podman: podman: unpack the image root and set it up
 podman: podman: version
 podman: podman: import a root and run a container as root
@@ -1386,6 +1644,7 @@ t_sys: aio: bad context, bad descriptor, bad pointer, and an empty pipe finishes
 t_thread: a thread keeps its descriptors while another spawns a child
 t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
 t_thread: clone3: a fork child
+t_thread: the process's CPU time counts its threads, those that ended too
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
@@ -1444,8 +1703,16 @@ alpine: nvim: :grep with ripgrep fills the quickfix list
 alpine: cmake: configure, build and run a C project
 alpine: nvim: the LSP client talks to lua-language-server, a real server, and gets a hover
 alpine: nvim: the LSP client talks to python-lsp-server on python3, a real server, and gets a hover
+alpine: nvim: the LSP client talks to gopls, Go's language server, and gets a hover
 alpine: proc: /proc/self/exe is named from the reader's root (chroot), as on Linux
+alpine: network: a poll for a frame ends while the only processes that run are waits going on
 alpine: apk: free the disk, then install python3 over HTTP
+alpine: oss: install make, and free the disk of what the builds below do not need
+alpine: oss: zlib: clone it over HTTP, configure, build, and run its test suite
+alpine: oss: Lua: clone it, build the interpreter, and run a program with it
+alpine: oss: LZ4: clone it, build it, and run its test suite
+alpine: oss: cJSON: clone it, build it with cmake, and run its unit tests with ctest
+alpine: oss: libyaml: clone a release, configure it, build it, and run make check
 alpine: python3: asyncio talks over a socketpair
 alpine: python3: asyncio runs a subprocess
 alpine: python3: sqlite3, zlib and hashlib
@@ -1462,6 +1729,9 @@ t_gai: AF_INET UDP connect to 0.0.0.0 reads back 127.0.0.1
 t_gai: AF_INET6 UDP connect to :: reads back ::1
 t_gai: AF_INET6 UDP connect to a sockaddr_in reads back ::ffff:127.0.0.1
 t_gai: getaddrinfo(NULL, port, AI_PASSIVE) with AF_UNSPEC
+t_gai: a dual-stack listener names an AF_INET client ::ffff:127.0.0.1
+t_gai: getpeername and getsockname of that connection read ::ffff:127.0.0.1 too
+t_gai: a dual-stack listener names an AF_INET6 client ::1
 t_pty: IUTF8 can be set
 t_pty: erasing a wide character echoes whole erasures
 t_pty: erasing a two-byte character takes back one cell
@@ -1476,3 +1746,155 @@ t_time: TZ with a DST rule
 t_time: and outside the DST period
 t_time: a zone file is written
 t_time: TZ naming a zone file reads it
+t_ltp2: pwrite and writev: a file takes the whole count, however far the file grows
+t_ltp2: F_SETSIG: the siginfo of O_ASYNC input on a pipe says POLL_IN and the descriptor
+java: java: Eclipse JDT LS, the language server, finds a type error and answers a hover
+java: java: a real library (Apache Commons Codec) with its test libraries, tested with the JUnit console launcher
+alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
+alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
+t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
+alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
+t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them
+t_ltp2: a tmpfs mounted nosymfollow reports it, refuses to follow a link under it (ELOOP) but reads the link, and remount clears it
+t_ltp2: poll and epoll report POLLPRI|POLLERR on /proc/self/mounts and mountinfo after a mount or umount, until the file is read
+alpine: nvim: the LSP client talks to the YAML language server under node and gets a diagnostic and the file's symbols
+t_ltp2: a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT
+t_ltp2: a unix stream socket that is bound to a name can still connect, and the connection carries data
+t_ltp2: utimensat on a directory sets its access and modification times apart
+t_ltp2: sched_getaffinity of a negative pid is ESRCH, of a pid that is not there too
+t_ltp2: the console keeps a window size set with TIOCSWINSZ
+t_ltp2: getsockname of a UDP socket bound to 127.0.0.1 reads that address, of one bound to none 0.0.0.0
+t_ltp2: MSG_PEEK on a UDP socket leaves the datagram queued
+t_ltp2: a UDP datagram longer than the buffer sets MSG_TRUNC in recvmsg, and recv with MSG_TRUNC returns its length
+t_ltp2: TCP getsockname reads the bound address, and a connected or accepted socket's local address
+t_ltp2: SO_REUSEADDR, SO_REUSEPORT and SO_KEEPALIVE read back as set, and clear again
+t_ltp2: an IPV6_V6ONLY listener takes a connection to ::1, and names it ::1
+apps: cpython: tests of its own: select, selectors, poll, timeout, fcntl
+apps: cpython: tests of its own: os, stat, file, fileio, mmap, pipes
+apps: cpython: tests of its own: signal, wait3, wait4, time, resource
+apps: cpython: tests of its own: threading, posix and pty
+t_ltp2: send(MSG_DONTWAIT) on a blocking TCP socket with a full send buffer is EAGAIN, not a wait
+gitsuite: t0006
+gitsuite: t0012
+gitsuite: t0019
+gitsuite: t0030
+gitsuite: t0040
+gitsuite: t0041
+gitsuite: t0060
+gitsuite: t0061
+gitsuite: t0063
+gitsuite: t0066
+gitsuite: t0070
+gitsuite: t0091
+gitsuite: t0095
+gitsuite: t0300
+gitsuite: t0302
+gitsuite: t0303
+gitsuite: t0500
+gitsuite: t1007
+gitsuite: t1014
+gitsuite: t1305
+gitsuite: t1306
+gitsuite: t1307
+gitsuite: t1308
+gitsuite: t1402
+gitsuite: t1406
+gitsuite: t1451
+gitsuite: t1501
+gitsuite: t1502
+gitsuite: t1504
+gitsuite: t1506
+gitsuite: t1508
+gitsuite: t1800
+gitsuite: t2000
+gitsuite: t2004
+gitsuite: t2204
+gitsuite: t3000
+gitsuite: t3001
+gitsuite: t3011
+gitsuite: t3013
+gitsuite: t3101
+gitsuite: t3103
+gitsuite: t3105
+gitsuite: t3203
+gitsuite: t3300
+gitsuite: t3422
+gitsuite: t3901
+gitsuite: t4022
+gitsuite: t4026
+gitsuite: t4051
+gitsuite: t4052
+gitsuite: t4054
+gitsuite: t4063
+gitsuite: t4100
+gitsuite: t4115
+gitsuite: t4139
+gitsuite: t4201
+gitsuite: t4209
+gitsuite: t4254
+gitsuite: t5000
+gitsuite: t5001
+gitsuite: t5002
+gitsuite: t5003
+gitsuite: t5100
+gitsuite: t5573
+gitsuite: t6006
+gitsuite: t6021
+gitsuite: t6102
+gitsuite: t6135
+gitsuite: t6403
+gitsuite: t7006
+gitsuite: t7030
+gitsuite: t7031
+gitsuite: t7061
+gitsuite: t7101
+gitsuite: t7102
+gitsuite: t7301
+gitsuite: t7510
+gitsuite: t7528
+gitsuite: t7609
+gitsuite: t7612
+gitsuite: t7812
+gitsuite: t7815
+gitsuite: t7816
+gitsuite: t8007
+python: pytest: pluggy's own tests: the plugin manager, hook calls and tracing (file by file)
+python: pytest: sqlparse's own tests: the lexer, the parser, formatting and splitting (file by file)
+python: pytest: tabulate's own tests: the output formats, alignment and number handling (file by file)
+python: pytest: pathspec's own tests: gitignore patterns and path matching (file by file)
+python: pytest: more-itertools' own tests: the recipes and the more module (file by file)
+python: pytest: packaging's own tests: versions, specifiers, markers, requirements, tags and metadata (file by file)
+python: pytest: toolz' own tests: the iterator, function and dictionary tools (file by file)
+python: pytest: h11's own tests: the HTTP/1.1 state machine, events, headers and the buffer (file by file)
+python: pytest: Markdown's own tests: the syntax test files, the extensions and the API (file by file)
+python: pytest: idna's own tests: the codec, UTS 46 mapping, errors and the command line (file by file)
+node: node: a small option parser (minimist) tested with tape
+node: node: a query string library (qs) with its installed dependencies, tested with tape
+node: node: the cookie parser (cookie) tested with mocha
+node: node: a static file sender (send) with its installed dependencies, tested with mocha and supertest over the loopback
+node: node: the request body parsers (body-parser) with their installed dependencies, tested with mocha and supertest over the loopback
+node: node: the control-flow helpers (async) with babel-register and their installed dependencies, tested with mocha
+node: node: the media type matcher (type-is) with its installed dependencies, tested with mocha
+node: node: the time string converter (ms) tested with mocha and expect.js
+go: go: UUIDs (google/uuid), tested with go test
+go: go: command-line flags (spf13/pflag), tested with go test
+go: go: an HTTP router (gorilla/mux), tested with go test over httptest
+go: go: a JSON path library (tidwall/gjson) with a vendored dependency, tested with go test -mod=vendor
+go: go: a semantic version library (Masterminds/semver) tested with go test -mod=vendor
+go: go: a map-to-struct decoder (mitchellh/mapstructure) tested with go test -mod=vendor
+go: go: a type conversion library (spf13/cast) tested with go test -mod=vendor
+busybox: dd one large read of a file
+java: java: a real library (Apache Commons Lang, its number, tuple, text and function packages) with its test libraries, tested with the JUnit console launcher
+java: java: a real library (Apache Commons Collections, its queue, comparator, functor, iterator and trie packages) with its test libraries, tested with the JUnit console launcher
+ruby: ruby: unpack the root, make the device nodes
+ruby: ruby: version
+ruby: ruby: sockets: TCP, UNIX, UDP and an HTTP client
+ruby: ruby: core classes, strings, hashes and blocks
+ruby: ruby: threads, a mutex, a queue and fibers
+ruby: ruby: fork, pipes, exit status and signals
+ruby: ruby: the standard library: json, yaml, digest, zlib, openssl, time
+ruby: ruby: a real project (rake) tested with its own test suite
+ruby: ruby: a real project (rexml) tested with its own test suite
+ruby: ruby: a real project (kramdown) tested with its own test suite
+ruby: ruby: a real project (csv) tested with its own test suite
+ruby: ruby: a real project (optparse) tested with its own test suite

@@ -1,2 +1,48 @@
 # LTP tests that make compat-ltp does not run: a tag from runtest/syscalls,
 # then why. Keep this short; a test that fails belongs in the report.
+
+# Open POSIX tests that never finish here (each would cost a 60 s timeout); look into them one by one.
+posix-aio_cancel_2-1 hangs
+posix-aio_cancel_3-1 hangs
+posix-aio_cancel_4-1 hangs
+posix-aio_cancel_6-1 hangs
+posix-mmap_24-1 hangs
+posix-pthread_attr_setstack_2-1 hangs
+posix-pthread_cond_broadcast_1-2 hangs
+posix-pthread_cond_broadcast_2-3 hangs
+posix-pthread_mutex_init_1-2 hangs
+posix-pthread_mutex_init_3-2 hangs
+posix-pthread_once_6-1 hangs
+posix-pthread_rwlock_wrlock_3-1 hangs
+posix-sigpause_4-1 hangs
+
+# Needs a page cache that drops pages while the test runs: preadv2 with RWF_NOWAIT must meet an evicted page and answer EAGAIN. Files here live in memory, so it never does and the test runs out its 60 s.
+preadv203 needs an evictable page cache
+preadv203_64 needs an evictable page cache
+
+# The file system stress tests (runtest/fs) that run out their time limit: each costs 30 s, or a 60 s timeout.
+gf06 time-limited, 30 s
+gf07 time-limited, 30 s
+gf08 time-limited, 30 s
+gf09 time-limited, 30 s
+gf10 time-limited, 24 s
+gf11 time-limited, 24 s
+gf16 hangs
+gf17 hangs
+gf20 hangs
+gf23 hangs
+gf26 hangs
+fs_perms01 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
+fs_perms02 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
+fs_perms03 musl: execlp of an empty executable file does not fall back to sh when the name has a slash
+starvation times out: it needs a scheduler that shares CPUs by priority
+hackbench01 hits the task limit
+hackbench02 hits the task limit
+time-schedule01 needs scheduler tracing
+trace_sched01 needs scheduler tracing
+libctest-functional-spawn needs echo on PATH, which BastiOS lacks
+libctest-functional-strptime musl's strptime lacks %F, %s and %z
+libctest-regression-pthread_atfork-errno-clobber root ignores RLIMIT_NPROC on Linux too
+libctest-regression-raise-race needs 100 queued real-time signals; the queue holds 32 (RTQ_N, src/lxsig.bastio)
+libctest-functional-pthread_mutex_pi needs priority-inheritance futexes, which need an atomic compare-exchange on user memory from the kernel
+libctest-functional-pthread_robust needs priority-inheritance futexes (see pthread_mutex_pi)

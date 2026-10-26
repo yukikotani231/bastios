@@ -60,6 +60,279 @@ fn fd_set_k(k: &mut Kernel, pid: u64, fd: u64, v: u64)
   fd_set(&mut k.lxfd, pid, fd, v);
 }
 
+// ---------------------------------------------------------------- shared tables
+//
+// Processes that share one descriptor table (the threads of a group, and
+// clone with CLONE_FILES) are a ring through F_FDNEXT. The table is linear,
+// so it is in one member's row, the one with F_FDHOLD set, and moves to the
+// member whose call is being handled (fd_take, from group_take) before the
+// call runs; the other members' rows are empty meanwhile. A member that ends,
+// or unshares, leaves the ring (fd_leave); the last one to end closes the
+// descriptors.
+
+/// Swaps the descriptor rows of a and b. Every non-zero word of a row is
+/// below fd_hi.
+fn fd_swap(k: &mut Kernel, a: u64, b: u64)
+  requires kok(k) && a < NPROC && b < NPROC
+  ensures kok(k)
+{
+  if a == b || (a + 1) * LXNFD > len(k.lxfd) || (b + 1) * LXNFD > len(k.lxfd) {
+    return;                                 // a process past the table's end has none
+  }
+  let hi = smaller(k.fd_hi, LXNFD);
+  let mut i = 0;
+  while i < hi
+    invariant i <= hi && hi <= LXNFD && kok(k) && (a + 1) * LXNFD <= len(k.lxfd) && (b + 1) * LXNFD <= len(k.lxfd)
+  {
+    let x = fd_get(k.lxfd, a, i);
+    fd_set(&mut k.lxfd, a, i, fd_get(k.lxfd, b, i));
+    fd_set(&mut k.lxfd, b, i, x);
+    i = i + 1;
+  }
+}
+
+/// The member after p in its ring, or 0 if p has a table of its own.
+fn fd_next(procs: &Buf, p: u64) -> u64
+  requires ptab_ok(procs) && p < NPROC
+  ensures result < NPROC
+{
+  let n = pget(procs, p, F_FDNEXT);
+  if n >= NPROC {
+    return 0;
+  }
+  return n;
+}
+
+/// The row that holds p's descriptors: p, or the member of its ring that
+/// holds them now.
+fn fd_home(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < NPROC
+{
+  if fd_next(k.procs, p) == 0 || pget(k.procs, p, F_FDHOLD) == 1 {
+    return p;
+  }
+  let mut q = fd_next(k.procs, p);
+  let mut n = 0;
+  while q != 0 && q != p && n < NPROC
+    invariant n <= NPROC && q < NPROC
+  {
+    if pget(k.procs, q, F_FDHOLD) == 1 {
+      return q;
+    }
+    q = fd_next(k.procs, q);
+    n = n + 1;
+  }
+  return p;
+}
+
+/// Brings the shared descriptors to p's row.
+fn fd_take(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let h = fd_home(k, p);
+  if h != p {
+    fd_swap(&mut k, h, p);
+    pset(&mut k.procs, h, F_FDHOLD, 0);
+    pset(&mut k.procs, p, F_FDHOLD, 1);
+  }
+}
+
+/// Process c, which has an empty row of its own, shares p's descriptors.
+fn fd_join(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  if p == c {
+    return;
+  }
+  fd_take(&mut k, p);
+  let n = fd_next(k.procs, p);
+  pset(&mut k.procs, c, F_FDHOLD, 0);
+  if n == 0 {
+    pset(&mut k.procs, p, F_FDHOLD, 1);
+    pset(&mut k.procs, p, F_FDNEXT, c);
+    pset(&mut k.procs, c, F_FDNEXT, p);
+  } else {
+    pset(&mut k.procs, c, F_FDNEXT, n);
+    pset(&mut k.procs, p, F_FDNEXT, c);
+  }
+}
+
+/// Process p stops sharing: the descriptors stay with the rest of its ring,
+/// and p's row is left empty.
+fn fd_leave(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = fd_next(k.procs, p);
+  if n == 0 {
+    return;
+  }
+  if pget(k.procs, p, F_FDHOLD) == 1 {
+    fd_swap(&mut k, p, n);
+    pset(&mut k.procs, n, F_FDHOLD, 1);
+  }
+  // The member before p now skips it.
+  let mut q = n;
+  let mut i = 0;
+  while q != 0 && fd_next(k.procs, q) != p && i < NPROC
+    invariant i <= NPROC && q < NPROC && kok(k)
+  {
+    q = fd_next(k.procs, q);
+    i = i + 1;
+  }
+  if q != 0 && fd_next(k.procs, q) == p {
+    if q == n {
+      // Only n is left: its table is its own again.
+      pset(&mut k.procs, n, F_FDNEXT, 0);
+      pset(&mut k.procs, n, F_FDHOLD, 0);
+    } else {
+      pset(&mut k.procs, q, F_FDNEXT, n);
+    }
+  }
+  pset(&mut k.procs, p, F_FDNEXT, 0);
+  pset(&mut k.procs, p, F_FDHOLD, 0);
+}
+
+// ---------------------------------------------------------------- shared working directory
+//
+// The same ring for clone with CLONE_FS between processes (not threads,
+// which share theirs through group_move): the working directory, root and
+// umask are in the row of the member whose call is being handled.
+
+/// Swaps the working directory, root and umask of a and b.
+fn fs_swap(k: &mut Kernel, a: u64, b: u64)
+  requires kok(k) && a < NPROC && b < NPROC
+  ensures kok(k)
+{
+  if a == b || (a + 1) * CWD_STRIDE > len(k.cwd) || (b + 1) * CWD_STRIDE > len(k.cwd)
+     || (a + 1) * CWD_STRIDE > len(k.croot) || (b + 1) * CWD_STRIDE > len(k.croot) {
+    return;
+  }
+  let mut i = 0;
+  while i < CWD_STRIDE
+    invariant i <= CWD_STRIDE && kok(k) && (a + 1) * CWD_STRIDE <= len(k.cwd) && (b + 1) * CWD_STRIDE <= len(k.cwd) && (a + 1) * CWD_STRIDE <= len(k.croot) && (b + 1) * CWD_STRIDE <= len(k.croot)
+  {
+    let x = wget(k.cwd, a * CWD_STRIDE + i);
+    wset(&mut k.cwd, a * CWD_STRIDE + i, wget(k.cwd, b * CWD_STRIDE + i));
+    wset(&mut k.cwd, b * CWD_STRIDE + i, x);
+    let y = wget(k.croot, a * CWD_STRIDE + i);
+    wset(&mut k.croot, a * CWD_STRIDE + i, wget(k.croot, b * CWD_STRIDE + i));
+    wset(&mut k.croot, b * CWD_STRIDE + i, y);
+    i = i + 1;
+  }
+  swap_spill(&mut k.cwdx, a, b);
+  swap_spill(&mut k.crootx, a, b);
+  let u = pget(k.procs, a, F_UMASK);
+  pset(&mut k.procs, a, F_UMASK, pget(k.procs, b, F_UMASK));
+  pset(&mut k.procs, b, F_UMASK, u);
+}
+
+/// The member after p in its working-directory ring, or 0 if p has its own.
+fn fs_next(procs: &Buf, p: u64) -> u64
+  requires ptab_ok(procs) && p < NPROC
+  ensures result < NPROC
+{
+  let n = pget(procs, p, F_FSNEXT);
+  if n >= NPROC {
+    return 0;
+  }
+  return n;
+}
+
+/// The row that holds p's working directory, root and umask.
+fn fs_home(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < NPROC
+{
+  if fs_next(k.procs, p) == 0 || pget(k.procs, p, F_FSHOLD) == 1 {
+    return p;
+  }
+  let mut q = fs_next(k.procs, p);
+  let mut n = 0;
+  while q != 0 && q != p && n < NPROC
+    invariant n <= NPROC && q < NPROC
+  {
+    if pget(k.procs, q, F_FSHOLD) == 1 {
+      return q;
+    }
+    q = fs_next(k.procs, q);
+    n = n + 1;
+  }
+  return p;
+}
+
+/// Brings the shared working directory to p's row.
+fn fs_take(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let h = fs_home(k, p);
+  if h != p {
+    fs_swap(&mut k, h, p);
+    pset(&mut k.procs, h, F_FSHOLD, 0);
+    pset(&mut k.procs, p, F_FSHOLD, 1);
+  }
+}
+
+/// Process c shares p's working directory, root and umask.
+fn fs_join(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  if p == c {
+    return;
+  }
+  fs_take(&mut k, p);
+  let n = fs_next(k.procs, p);
+  pset(&mut k.procs, c, F_FSHOLD, 0);
+  if n == 0 {
+    pset(&mut k.procs, p, F_FSHOLD, 1);
+    pset(&mut k.procs, p, F_FSNEXT, c);
+    pset(&mut k.procs, c, F_FSNEXT, p);
+  } else {
+    pset(&mut k.procs, c, F_FSNEXT, n);
+    pset(&mut k.procs, p, F_FSNEXT, c);
+  }
+}
+
+/// Process p stops sharing: they stay with the rest of its ring.
+fn fs_leave(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = fs_next(k.procs, p);
+  if n == 0 {
+    return;
+  }
+  if pget(k.procs, p, F_FSHOLD) == 1 {
+    fs_swap(&mut k, p, n);
+    pset(&mut k.procs, n, F_FSHOLD, 1);
+  }
+  // The member before p now skips it.
+  let mut q = n;
+  let mut i = 0;
+  while q != 0 && fs_next(k.procs, q) != p && i < NPROC
+    invariant i <= NPROC && q < NPROC && kok(k)
+  {
+    q = fs_next(k.procs, q);
+    i = i + 1;
+  }
+  if q != 0 && fs_next(k.procs, q) == p {
+    if q == n {
+      // Only n is left: its table is its own again.
+      pset(&mut k.procs, n, F_FSNEXT, 0);
+      pset(&mut k.procs, n, F_FSHOLD, 0);
+    } else {
+      pset(&mut k.procs, q, F_FSNEXT, n);
+    }
+  }
+  pset(&mut k.procs, p, F_FSNEXT, 0);
+  pset(&mut k.procs, p, F_FSHOLD, 0);
+}
+
 fn of_get(t: &Buf, h: u64, f: u64) -> u64
   requires len(t) == OFD_LEN && h < OFD_N && f < OFD_STRIDE
 {
@@ -433,11 +706,15 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
   } else if kind == OF_NETLINK {
     nic_nl_close(&mut k.nic, x);           // src/rtnl.bastio
   } else if kind == OF_TCP && x < TCBS {
-    tcp_close(&mut k.nic, x);               // sends the FIN after what is buffered
+    if sock_linger0(k, h) {
+      tcp_reset_close(&mut k.nic, x);       // SO_LINGER {1, 0}: a reset, and the buffered data is dropped
+    } else {
+      tcp_close(&mut k.nic, x);             // sends the FIN after what is buffered
+    }
   } else if kind == OF_TIMER && x < TFD_N {
-    k.evt = set(k.evt, x * TFD_STRIDE, 0);  // the timer is free again
+    evs(&mut k, x * TFD_STRIDE, 0);  // the timer is free again
   } else if kind == OF_EPOLL && x < EP_N {
-    k.evt = set(k.evt, EP_AT + x * EP_STRIDE, 0);
+    evs(&mut k, EP_AT + x * EP_STRIDE, 0);
   } else if kind == OF_PTY {
     pty_drop(&mut k, x);                    // src/lxpty.bastio
   } else if kind == OF_PQ && x < PQ_N {
@@ -467,6 +744,93 @@ fn lx_fd_fork(k: &mut Kernel, parent: u64, child: u64)
   }
 }
 
+/// Process p gets a working directory, root and umask of its own, copies of
+/// the ones it shared.
+fn fs_unshare(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = fs_next(k.procs, p);
+  if n == 0 {
+    return;
+  }
+  fs_take(&mut k, p);
+  fs_leave(&mut k, p);
+  let c1 = cwd_fork(&mut k.cwd, &mut k.cwdx, n, p);
+  let c2 = cwd_fork(&mut k.croot, &mut k.crootx, n, p);
+  pset(&mut k.procs, p, F_UMASK, pget(k.procs, n, F_UMASK));
+}
+
+/// Process p gets descriptors of its own, a copy of the ones it shared.
+fn fd_unshare(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = fd_next(k.procs, p);
+  if n == 0 {
+    return;
+  }
+  fd_take(&mut k, p);
+  fd_leave(&mut k, p);
+  lx_fd_fork(&mut k, n, p);
+}
+
+/// One more than the highest descriptor process p has open, 0 for none:
+/// where the descriptors it shares begin to matter to nr_open.
+fn fd_top(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result <= LXNFD
+{
+  let r = fd_home(k, p);
+  let mut fd = smaller(k.fd_hi, LXNFD);
+  while fd > 0 && fd_get(k.lxfd, r, fd - 1) == 0
+    invariant fd <= LXNFD
+  {
+    fd = fd - 1;
+  }
+  return fd;
+}
+
+/// The lowest id in the ring p belongs to: the same for every member.
+fn fd_ring_id(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < NPROC
+{
+  let mut best = p;
+  let mut q = fd_next(k.procs, p);
+  let mut n = 0;
+  while q != 0 && q != p && n < NPROC
+    invariant n <= NPROC && q < NPROC && best < NPROC
+  {
+    if q < best {
+      best = q;
+    }
+    q = fd_next(k.procs, q);
+    n = n + 1;
+  }
+  return best;
+}
+
+/// The lowest id in the ring p belongs to: the same for every member.
+fn fs_ring_id(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures result < NPROC
+{
+  let mut best = p;
+  let mut q = fs_next(k.procs, p);
+  let mut n = 0;
+  while q != 0 && q != p && n < NPROC
+    invariant n <= NPROC && q < NPROC && best < NPROC
+  {
+    if q < best {
+      best = q;
+    }
+    q = fs_next(k.procs, q);
+    n = n + 1;
+  }
+  return best;
+}
+
 /// Closes Linux descriptor fd. Returns false if it was not open.
 fn lx_fd_close(k: &mut Kernel, pid: u64, fd: u64) -> bool
   requires kok(k) && pid < NPROC
@@ -485,21 +849,25 @@ fn lx_fd_close(k: &mut Kernel, pid: u64, fd: u64) -> bool
       lock_drop(&mut k.locks, tgid(k.procs, pid), f, LKC_FCNTL);
     }
   }
+  pq_flush(&mut k, pid, fd);                // src/lxmq.bastio
   fd_set_k(&mut k, pid, fd, 0);
   unref_value(&mut k, v);
   return true;
 }
 
 /// close_range(first, last, flags): closes the descriptors first..=last
-/// (or, with CLOSE_RANGE_CLOEXEC, marks them close-on-exec). The descriptor
-/// table is not shared between processes here, so CLOSE_RANGE_UNSHARE has
-/// nothing to do and is accepted.
+/// (or, with CLOSE_RANGE_CLOEXEC, marks them close-on-exec). With
+/// CLOSE_RANGE_UNSHARE a table shared with other processes is copied first,
+/// so only the caller's copy changes.
 fn lx_close_range(k: &mut Kernel, pid: u64, first: u64, last: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
   if flags % 0x100000000 & !6 != 0 || flags > 0xFFFFFFFF || first > last {
     return EINVAL;
+  }
+  if flags / 2 % 2 == 1 {
+    fd_unshare(&mut k, pid);
   }
   if first >= LXNFD {
     return 0;
@@ -530,6 +898,16 @@ fn lx_fd_close_all(k: &mut Kernel, pid: u64, only_cloexec: bool)
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if !only_cloexec {
+    fs_leave(&mut k, pid);                  // the process ends: it stops sharing its working directory
+  }
+  if fd_next(k.procs, pid) != 0 {
+    if !only_cloexec {
+      fd_leave(&mut k, pid);                // the others still use them
+      return;
+    }
+    fd_unshare(&mut k, pid);                // execve gives the program a table of its own
+  }
   let hi = smaller(k.fd_hi, LXNFD);         // past it every descriptor is closed
   let mut fd = 0;
   while fd < hi
@@ -688,14 +1066,23 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if flags & LO_NOFOLLOW != 0 && flags & LO_PATH == 0 {
-    // O_NOFOLLOW: a symbolic link at the end is ELOOP, as on Linux.
+  let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
+  if (flags & LO_NOFOLLOW != 0 || excl) && flags & LO_PATH == 0 {
+    // O_NOFOLLOW: a symbolic link at the end is ELOOP, as on Linux. With
+    // O_CREAT | O_EXCL the link is never followed, even a dangling one:
+    // the name exists, so EEXIST (git apply --reject relies on it).
     let m = lx_path_at_nf(&mut k, pid, dirfd, path);
     if m == NO_RESULT {
       return k.perr;
     }
     let f = vfs_lookup(&mut k.fs, m);
-    if (f != NO_FILE && vfs_is_link(&mut k.fs, f)) || is_exe_file(proc_node(k, m)) {
+    if f != NO_FILE && vfs_is_link(&mut k.fs, f) {
+      if excl {
+        return EEXIST;
+      }
+      return ELOOP;
+    }
+    if flags & LO_NOFOLLOW != 0 && is_exe_file(proc_node(k, m)) {
       return ELOOP;
     }
   }
@@ -772,7 +1159,8 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   // Permissions (src/lxperm.bastio): on the file, for what the flags
   // ask; on its directory, for a new name.
-  let kept = kept_meta(&mut k, n);
+  let fh0 = vfs_lookup(&mut k.fs, n);
+  let kept = kept_meta_f(&mut k, n, fh0);
   if kept && flags & LO_NOATIME != 0 {
     let nm = meta_keep(&mut k, n, n);
     if nm.ok && !owns(k.procs, pid, nm.own) {
@@ -800,7 +1188,7 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
       return e;
     }
   }
-  return lx_open_tail(&mut k, pid, n, flags, mode);
+  return lx_open_tail(&mut k, pid, n, flags, mode, fh0);
 }
 
 /// open of /proc/PID/fd/N, which Linux follows to the file the descriptor
@@ -834,7 +1222,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       bset(&mut k.fs.xfer, i, base_byte(k, t, h, i));
       i = i + 1;
     }
-    dpath_keep(&mut k.dpath, hd, k.fs.xfer, l);
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.fs.xfer, l);
     return fd_install(&mut k, pid, hd);
   }
   if d.kind == K_FILE {
@@ -844,7 +1232,7 @@ fn lx_open_fd_link(k: &mut Kernel, pid: u64, t: u64, tfd: u64, flags: u64, mode:
       if nm == 0 && f < NFILES {
         return lx_open_orphan(&mut k, pid, f, flags);   // unlinked while open: no name to open, only the file
       }
-      if nm != NO_FILE && nm <= FNAME_MAX && nm <= XFER {
+      if nm != NO_FILE && nm <= FNAME_MAX && nm <= XBUF {
         return lx_open_n(&mut k, pid, nm, flags, mode);
       }
     }
@@ -896,10 +1284,68 @@ fn lx_open_orphan(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
   return fd;
 }
 
+/// open of the built-in program "bin/NAME" (the first n bytes of the transfer
+/// buffer) for reading: a RAM file without a name that holds the program's
+/// bytes, so open, read and mmap see what exec runs. It is a copy; a write
+/// to /bin stays ENOENT.
+fn lx_open_bin(k: &mut Kernel, pid: u64, n: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && 4 < n && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let prog = bin_prog(k.fs.xfer, n);
+  if prog >= NPROGS {
+    return ENOENT;
+  }
+  if fd_free(k, pid, 0) >= LXNFD || !row_free(k, pid) {
+    return EMFILE;
+  }
+  let img = prog_image(prog);
+  let total = slen(img);
+  let t = sat_add(k.ns, prog);
+  let nm = memfd_name(&mut k, pid, t);
+  if vfs_lookup(&mut k.fs, nm) != NO_FILE {
+    return EAGAIN;                          // a name in use: try again
+  }
+  let row = vfs_open(&mut k.fs, &mut k.mem, 0, FD_POOL, O_READ + O_WRITE + O_CREATE, nm);
+  if row == NO_FD || row >= FD_POOL {
+    return ENOSPC;
+  }
+  let f = vfs_row_file(k.fs, row);
+  let n2 = memfd_name(&mut k, pid, t);
+  vfs_unlink(&mut k.fs, &mut k.mem, n2);    // the file lives as long as a row holds it
+  let mut off = 0;
+  let mut ok = f < NFILES;
+  while ok && off < total
+    invariant off <= total && kok(k)
+  {
+    let mut c = total - off;
+    if c > XFER {
+      c = XFER;
+    }
+    let mut i = 0;
+    while i < c
+      invariant i <= c && c <= XFER && off + c <= total && kok(k)
+    {
+      bset(&mut k.fs.xfer, i, sget(img, off + i));
+      i = i + 1;
+    }
+    if vfs_write(&mut k.fs, &mut k.mem, row, c) != c {
+      ok = false;
+    }
+    off = off + c;
+  }
+  let mut fd = ENOMEM;
+  if ok && f < NFILES {
+    fd = lx_open_orphan(&mut k, pid, f, flags);
+  }
+  vfs_close(&mut k.fs, &mut k.mem, row);
+  return fd;
+}
+
 /// lx_open_n, once the permission checks are done: /proc files, devices
 /// and nodes.
-fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
-  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX && (fh < HFILES || fh == NO_FILE)
   ensures kok(k)
 {
   let pf = proc_node(k, n);
@@ -918,6 +1364,9 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
     if is_ns_file(pf) {
       nsf_open(&mut k, hp, pf);             // it keeps the namespace (src/lxnsk.bastio)
+    }
+    if is_mounts_dev(pf) {
+      mnt_catch_up(&mut k, hp);             // a poll reports changes from now on
     }
     ofd_access(&mut k, hp, flags);
     return fd_install(&mut k, pid, hp);
@@ -963,7 +1412,7 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if dev != DEV_NONE && dev != DEV_DIR {
     return lx_open_dev(&mut k, pid, dev, flags);
   }
-  return lx_open_node(&mut k, pid, n, flags, mode);
+  return lx_open_node(&mut k, pid, n, flags, mode, fh);
 }
 
 
@@ -973,18 +1422,24 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if dev == DEV_KEYEV {
+    return keyev_open(&mut k, pid, flags);  // src/lxkeyev.bastio
+  }
   if dev == DEV_MICE {
     return mice_open(&mut k, pid, flags);   // src/lxmouse.bastio
   }
   if dev == DEV_FB {
     return fb_open(&mut k, pid, flags);     // src/lxfb.bastio
   }
+  if dev == DEV_SER {
+    return ser_open(&mut k, pid, flags);    // src/lxserial.bastio
+  }
   let hv = ofd_new(&mut k, OF_DEV, dev);
   if hv >= OFD_N {
     return ENFILE;
   }
   if dev == DEV_PTSDIR {
-    dpath_keep(&mut k.dpath, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
   }
   ofd_access(&mut k, hv, flags);
   return fd_install(&mut k, pid, hv);
@@ -1010,11 +1465,13 @@ fn console_may(procs: &Buf, pid: u64, flags: u64) -> bool
 
 /// lx_open_n for a path that names no /proc file and no device path:
 /// a node in a file system (split off to keep each proof small).
-fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
-  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX && (fh < HFILES || fh == NO_FILE)
   ensures kok(k)
 {
-  let fh = vfs_lookup(&mut k.fs, n);
+  if fh == NO_FILE && n > 4 && xfer_bin(k.fs.xfer) && flags % 4 == 0 && flags & (LO_CREAT + LO_TRUNC + LO_PATH + LO_DIRECTORY) == 0 {
+    return lx_open_bin(&mut k, pid, n, flags);
+  }
   let fm = vfs_meta(&mut k.fs, fh);
   if fh != NO_FILE && fm.ok && fm.mode % 65536 / 4096 * 4096 == 0xC000 && flags & LO_PATH == 0 {
     return 18446744073709551610;            // ENXIO: a socket file is not opened (src/lxunix.bastio); O_PATH holds it, and connect follows /proc/self/fd/N to it
@@ -1033,6 +1490,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     return fifo_open(&mut k, pid, ff, flags);
   }
   let nt = vfs_node_type(&mut k.fs, fh);
+  if fh != NO_FILE && (nt == T_CHR || nt == T_BLK) && flags & LO_PATH == 0 && vfs_path_mflags(&mut k.fs, n) / 4 % 2 == 1 {
+    return EACCES;                          // a nodev mount
+  }
   if fh != NO_FILE && (nt == T_CHR || nt == T_BLK || nt == T_SOCK) && flags & LO_PATH == 0 {
     // (O_PATH holds the node itself, not its device: crun changes a node
     // it made through /proc/self/fd/N.)
@@ -1051,6 +1511,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if nd == DEV_TTY {
       return fd_install_console(&mut k, pid);
     }
+    if nd == DEV_PTMX {
+      return pty_open_master(&mut k, pid, flags);   // a /dev/ptmx made by mknod in a chroot
+    }
     if nd == DEV_NONE {
       return ENXIO;
     }
@@ -1063,7 +1526,8 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     }
     return fd_install(&mut k, pid, hn);
   }
-  let dir = dir_at(&mut k, n);
+  let dl = dir_look_with(&mut k, n, true, fh);
+  let dir = dl.d;
   let excl = flags & LO_CREAT != 0 && flags & LO_EXCL != 0;
   if excl && (dir != NO_FILE || vfs_lookup(&mut k.fs, n) != NO_FILE) {
     return EEXIST;
@@ -1083,7 +1547,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
     if hd >= OFD_N {
       return ENFILE;
     }
-    dpath_keep(&mut k.dpath, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
+    dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;

@@ -5,6 +5,7 @@
 #   make iso        build/bastios.iso: bootable from CD or USB, BIOS or UEFI
 #   make usb        build/bastios-usb.img: the ISO plus a partition for the files
 #   make run-usb    boot that image from a USB stick in QEMU
+#   make installer  build/bastios-installer.iso: installs BastiOS and Alpine on a disk (docs/install.md)
 #   make run-iso    boot the ISO in QEMU (run-uefi: under UEFI firmware)
 #   make test       boot it in QEMU and drive the shell over the serial line
 #   make fuzz       fuzz the system calls (SEED, SEEDS, CALLS, SMP)
@@ -69,7 +70,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb bwm bhello bterm mhog mpc mext4
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb mkeyev bwm bhello bterm mhog mpc mext4 mserial mtlb
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 # Which backend built the kernel and the user programs, rewritten only when it
@@ -86,7 +87,7 @@ build/user/%.c: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/u
 	$(BASTIOC) --lib $(BASTIOLIB) --target user -o $@ $<
 
 build/user/%.s: user/%.bastio $(wildcard user/lib/*.bastio) $(BASTIOC) | build/user
-	$(BASTIOC) --lib $(BASTIOLIB) --target user --backend native --emit-asm -o $@ $<
+	$(BASTIOC) --lib $(BASTIOLIB) --target user --backend native-ir --emit-asm -o $@ $<
 
 build/user/%.o: build/user/%.c
 	$(CC) $(UCFLAGS) -c -o $@ $<
@@ -164,21 +165,25 @@ build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf build/user/mhog.elf build/user/mpc.elf build/user/mext4.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf build/user/mkeyev.elf build/user/mhog.elf build/user/mpc.elf build/user/mext4.elf build/user/mserial.elf build/user/mtlb.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # bwm draws text with the console's font.
 build/user/font8x8.h: src/font8x8.bin | build/user
 	(echo 'static const unsigned char font8x8[] = {'; od -An -v -tu1 -w16 $< | sed 's/ \+/,/g; s/^,//; s/$$/,/'; echo '};') > $@
 
+# The GUI programs are embedded in the kernel image, which the memory test keeps small: no page padding
+# between their segments, no RELRO, no build id (about 4 KiB each; the code is the same).
+GUILD := -Wl,-z,noseparate-code,-z,norelro,--build-id=none
+
 build/user/bwm.elf: user/bwm.c user/bwmproto.h build/user/font8x8.h | build/user
-	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+	$(MUSLCC) -static-pie -O2 $(GUILD) -s -Ibuild/user -o $@ $<
 
 build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
-	$(MUSLCC) -static-pie -O2 -o $@ $<
+	$(MUSLCC) -static-pie -O2 $(GUILD) -s -o $@ $<
 
-build/user/bterm.elf: user/bterm.c user/bwmlib.h user/bwmproto.h build/user/font8x8.h | build/user
-	$(MUSLCC) -static-pie -O2 -Ibuild/user -o $@ $<
+build/user/bterm.elf: user/bterm.c user/font16.h user/bfiles.h user/bsys.h user/bview.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h src/font16.bin | build/user
+	$(MUSLCC) -static-pie -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections $(GUILD) -s -Ibuild/user -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
 # also /lib/ld-musl-x86_64.so.1) that the kernel loads as its interpreter.
@@ -221,12 +226,12 @@ build/user/%.bin: build/user/%.elf
 	objcopy -O binary $< $@
 
 # 2. Prove the kernel and translate it to freestanding C.
-KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio) src/font8x8.bin src/font16.bin
+KSRCS := $(wildcard src/*.bastio src/x86_64/arch/*.bastio src/x86_64/default/extra/*.bastio) src/font8x8.bin src/font16.bin
 KFILES := $(wildcard files/*)
 
 # src/main.bastio imports the rest.
 build/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
 
 build/bastioc1.c: $(BASTIOC0) $(wildcard $(BASTIOLIB)/stage1/*.bastio) | build
 	$(BASTIOC0) --emit-c -o $@ $(BASTIOLIB)/stage1/bastioc1.bastio
@@ -235,7 +240,7 @@ build/bastioc1: build/bastioc1.c
 	cc -O2 -o $@ $<
 
 build/kernel.s: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) | build
-	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64 --lib src --target kernel --backend native --emit-asm -o $@ src/main.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel --backend native-ir --emit-asm -o $@ src/main.bastio
 
 # build/kernel.backend is defined with the user programs' rules (the kernel and
 # the user programs are built the same way).
@@ -327,6 +332,63 @@ build/bastios-usb.img: build/bastios-gpt.iso tools/mkusb.py
 	build/limine/limine bios-install --quiet --no-gpt-to-mbr-isohybrid-conversion $@
 
 usb: build/bastios-usb.img
+
+# The installer image (docs/install.md): the same kernel with the installer
+# and everything it installs built in as files (/install), booted by a menu
+# entry with the boot option `install`. It is written to a CD or a USB stick
+# like the live ISO. The payload (tools/mkinstall.py) holds Limine and the
+# plain kernel as they go on the new disk's EFI system partition; Alpine
+# Linux's root file system and a fuller BusyBox come from the compat suite's
+# sources. Needs mkfs.fat and mcopy (dosfstools, mtools) besides xorriso.
+INSTALL_DIR := build/installer
+INSTALL_FILES := $(INSTALL_DIR)/binstall.elf build/compat/busybox $(INSTALL_DIR)/pay $(INSTALL_DIR)/root.tgz installer/run.sh installer/profile
+ALPINE_BASE_IMAGE ?= $(ALPINE_BASE)
+
+$(INSTALL_DIR):
+	mkdir -p $@
+
+$(INSTALL_DIR)/binstall.elf: user/binstall.c | $(INSTALL_DIR)
+	$(MUSLCC) -static-pie -O2 -Wall -Wextra -Werror -o $@ $<
+
+$(INSTALL_DIR)/pay: tools/mkinstall.py tools/mkusb.py build/bastios.elf boot/limine.conf build/limine/limine | $(INSTALL_DIR)
+	tools/mkinstall.py $@ --kernel build/bastios.elf --limine build/limine --conf boot/limine.conf
+
+$(INSTALL_DIR)/root.tgz: tools/alpineroot.py test/compat/alpinedisk.py | $(INSTALL_DIR)
+	tools/alpineroot.py $@ $(ALPINE_BASE_IMAGE) $(ALPINE_CACHE)
+
+$(INSTALL_DIR)/lib/extra/initextra.bastio: tools/mkinitextra.py $(INSTALL_FILES) | $(INSTALL_DIR)
+	tools/mkinitextra.py $@ install/binstall=$(INSTALL_DIR)/binstall.elf:755 install/busybox=build/compat/busybox:755 \
+	  install/pay=$(INSTALL_DIR)/pay install/root.tgz=$(INSTALL_DIR)/root.tgz install/run=installer/run.sh:755 etc/profile=installer/profile
+
+# Proved and compiled again with the installer's files; the proof cache
+# makes that only the file table.
+$(INSTALL_DIR)/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) $(INSTALL_DIR)/lib/extra/initextra.bastio
+	$(BASTIOC) --lib $(BASTIOLIB) --lib $(INSTALL_DIR)/lib --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
+
+$(INSTALL_DIR)/kernel.o: $(INSTALL_DIR)/kernel.c
+	$(CC) $(CFLAGS) -c -o $@ $<
+
+$(INSTALL_DIR)/bastios64.elf: $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS)) boot/linker.ld
+	$(CC) $(LDFLAGS) -o $@ $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS))
+
+$(INSTALL_DIR)/bastios.elf: $(INSTALL_DIR)/bastios64.elf
+	objcopy -O elf32-i386 $< $@
+
+build/bastios-installer.iso: $(INSTALL_DIR)/bastios.elf boot/limine-installer.conf build/limine/limine
+	rm -rf $(INSTALL_DIR)/iso
+	mkdir -p $(INSTALL_DIR)/iso/boot/limine $(INSTALL_DIR)/iso/EFI/BOOT
+	cp $(INSTALL_DIR)/bastios.elf $(INSTALL_DIR)/iso/boot/bastios.elf
+	cp boot/limine-installer.conf $(INSTALL_DIR)/iso/boot/limine/limine.conf
+	cp build/limine/limine-bios.sys build/limine/limine-bios-cd.bin build/limine/limine-uefi-cd.bin build/limine/LICENSE \
+	  $(INSTALL_DIR)/iso/boot/limine/
+	cp build/limine/BOOTX64.EFI $(INSTALL_DIR)/iso/EFI/BOOT/
+	xorriso -as mkisofs -quiet -R -r -J -b boot/limine/limine-bios-cd.bin \
+	  -no-emul-boot -boot-load-size 4 -boot-info-table -hfsplus -apm-block-size 2048 \
+	  --efi-boot boot/limine/limine-uefi-cd.bin -efi-boot-part --efi-boot-image \
+	  --protective-msdos-label $(INSTALL_DIR)/iso -o $@ 2>/dev/null
+	build/limine/limine bios-install --quiet $@
+
+installer: build/bastios-installer.iso
 
 # The disk: a raw image, here as a virtio block device. BastiOS formats it
 # the first time it boots, and the files under disk/ live there across
@@ -477,7 +539,7 @@ CRUN_SHA256   ?= eaa2408dee92432d142d58317127b5974d39a8ad48689ba8b2eff8f74614f4b
 DROPBEAR_GIT  ?= https://github.com/mkj/dropbear
 DROPBEAR_TAG  ?= DROPBEAR_2024.86
 COMPAT_APPS   := build/compat/lua build/compat/qjs build/compat/sqlite3 build/compat/micropython build/compat/kilo \
-                 build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll \
+                 build/compat/git build/compat/perl build/compat/python build/compat/ttyepoll build/compat/ttysusp \
                  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/rg
 APP_CFLAGS    := -static-pie -fPIE -O2 -w -s
 
@@ -497,7 +559,7 @@ build/compat/rg: | build/compat/src
 # the static amd64 binary of the upstream release, checked against a pinned
 # SHA-256. It runs on BastiOS only; nothing here links against it.
 build/compat/runc: | build/compat/src
-	curl -fsSL -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.amd64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/opencontainers/runc/releases/download/v$(RUNC_VER)/runc.amd64
 	echo "$(RUNC_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
@@ -506,7 +568,7 @@ build/compat/runc: | build/compat/src
 # release, checked against a pinned SHA-256. Like runc it runs on BastiOS
 # only.
 build/compat/crun: | build/compat/src
-	curl -fsSL -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-amd64
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part https://github.com/containers/crun/releases/download/$(CRUN_VER)/crun-$(CRUN_VER)-linux-amd64
 	echo "$(CRUN_SHA256)  $@.part" | sha256sum -c - >/dev/null
 	chmod +x $@.part && mv $@.part $@
 
@@ -516,11 +578,61 @@ build/compat/crun: | build/compat/src
 # parser/c.so; the C queries come with neovim). It runs on BastiOS only.
 # (The version is in test/compat/images.mk, which arch/aarch64/Makefile shares.)
 build/compat/tree-sitter-c.so: | build/compat/src
-	curl -fsSL -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/tree-sitter-c.tgz https://registry.npmjs.org/tree-sitter-c/-/tree-sitter-c-$(TREESITTER_C_VER).tgz
 	echo "$(TREESITTER_C_SHA256)  build/compat/src/tree-sitter-c.tgz" | sha256sum -c - >/dev/null
 	rm -rf build/compat/src/tree-sitter-c && mkdir build/compat/src/tree-sitter-c
 	tar xzf build/compat/src/tree-sitter-c.tgz -C build/compat/src/tree-sitter-c --strip-components=1 package/src
 	$(MUSLCC) -shared -fPIC -O2 -Wl,-s -I build/compat/src/tree-sitter-c/src -o $@.part build/compat/src/tree-sitter-c/src/parser.c
+	mv $@.part $@
+
+# TypeScript 7's compiler and language server (one static Go program, lib/tsc)
+# with the declaration files it reads, as a tar file to unpack under the Alpine
+# root (opt/typescript/lib), for the case that runs it with Neovim's LSP client.
+# x86-64 only.
+build/compat/tstools.tar: | build/compat/src
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/tsc.tgz https://registry.npmjs.org/@typescript/typescript-linux-x64/-/typescript-linux-x64-$(TSC_VER).tgz
+	echo "$(TSC_SHA256)  build/compat/src/tsc.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/tsc && mkdir build/compat/src/tsc
+	tar xzf build/compat/src/tsc.tgz -C build/compat/src/tsc --strip-components=1 package/lib
+	tar -cf $@.part -C build/compat/src/tsc lib --transform 's,^lib,opt/typescript/lib,' --owner=0 --group=0
+	mv $@.part $@
+
+# The JSON language server from VS Code (vscode-langservers-extracted), with the
+# JavaScript packages it loads, as a tar file to unpack under the Alpine root
+# (opt/jsonls/node_modules), for the case that runs it with Neovim's LSP client
+# under Alpine's node. The versions and SHA-512 hashes are pinned by
+# test/compat/lsp/json/package-lock.json; the other servers of the package, and
+# the TypeScript they bundle, are left out. x86-64 only.
+build/compat/jsontools.tar: test/compat/lsp/json/package.json test/compat/lsp/json/package-lock.json | build/compat/src
+	rm -rf build/compat/src/json && mkdir build/compat/src/json
+	cp test/compat/lsp/json/package.json test/compat/lsp/json/package-lock.json build/compat/src/json/
+	cd build/compat/src/json && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null
+	cd build/compat/src/json/node_modules && rm -rf .bin typescript vscode-css-languageservice vscode-html-languageservice vscode-markdown-languageservice
+	tar -cf $@.part -C build/compat/src/json node_modules --transform 's,^node_modules,opt/jsonls/node_modules,' --owner=0 --group=0
+	mv $@.part $@
+
+# The Bash language server (bash-language-server) with the JavaScript packages
+# it loads, as a tar file to unpack under the Alpine root (opt/bashls/node_modules)
+# for the case that runs it under Alpine's node with Neovim's LSP client. Pinned
+# by test/compat/lsp/bash/package-lock.json, like jsontools.tar. x86-64 only.
+build/compat/bashtools.tar: test/compat/lsp/bash/package.json test/compat/lsp/bash/package-lock.json | build/compat/src
+	rm -rf build/compat/src/bash && mkdir build/compat/src/bash
+	cp test/compat/lsp/bash/package.json test/compat/lsp/bash/package-lock.json build/compat/src/bash/
+	cd build/compat/src/bash && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null
+	rm -rf build/compat/src/bash/node_modules/.bin
+	tar -cf $@.part -C build/compat/src/bash node_modules --transform 's,^node_modules,opt/bashls/node_modules,' --owner=0 --group=0
+	mv $@.part $@
+
+# The YAML language server (yaml-language-server) with the JavaScript packages
+# it loads, as a tar file to unpack under the Alpine root (opt/yamlls/node_modules)
+# for the case that runs it under Alpine's node with Neovim's LSP client. Pinned
+# by test/compat/lsp/yaml/package-lock.json, like jsontools.tar. x86-64 only.
+build/compat/yamltools.tar: test/compat/lsp/yaml/package.json test/compat/lsp/yaml/package-lock.json | build/compat/src
+	rm -rf build/compat/src/yaml && mkdir build/compat/src/yaml
+	cp test/compat/lsp/yaml/package.json test/compat/lsp/yaml/package-lock.json build/compat/src/yaml/
+	cd build/compat/src/yaml && npm ci --omit=dev --ignore-scripts --no-audit --no-fund >/dev/null
+	rm -rf build/compat/src/yaml/node_modules/.bin
+	tar -cf $@.part -C build/compat/src/yaml node_modules --transform 's,^node_modules,opt/yamlls/node_modules,' --owner=0 --group=0
 	mv $@.part $@
 
 # python-lsp-server and the pure-Python packages it needs, as a tar file for
@@ -530,14 +642,18 @@ build/compat/tree-sitter-c.so: | build/compat/src
 build/compat/pylsp.tar: test/compat/pylsp.py | build/compat/src
 	test/compat/pylsp.py $@ build/compat/src/pylsp-wheels
 
+# The Go toolchain of the golang image (godisk.py's selection) and gopls, as a
+# tar file to unpack under the Alpine root's /usr/local, for the case that runs
+# gopls with Neovim's LSP client. x86-64 only.
+build/compat/gotools.tar: test/compat/gotools.py test/compat/godisk.py test/compat/alpinedisk.py build/compat/gopls
+	test/compat/gotools.py $@ $(GO_IMAGE) build/compat/gopls --cache $(ALPINE_CACHE)
+
 # strace, for the cases that trace a program on the Alpine disk (ptrace). Alpine's
 # package is not on the disk's repository, so this is the layer of the stagex/strace
 # image on Docker Hub (musl, linked to Alpine's libc), pinned by the layer's SHA-256.
 STRACE_LAYER := sha256:1380bf046ab307e9340c2273fdcd2b1f224d019544a8db326d5776eeac5c5525
 build/compat/strace: | build/compat/src
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:stagex/strace:pull" | jq -r .token) && \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/strace.tgz https://registry-1.docker.io/v2/stagex/strace/blobs/$(STRACE_LAYER)
-	echo "$(patsubst sha256:%,%,$(STRACE_LAYER))  build/compat/src/strace.tgz" | sha256sum -c - >/dev/null
+	test/compat/hubblob.sh stagex/strace $(STRACE_LAYER) build/compat/src/strace.tgz
 	rm -rf build/compat/src/strace && mkdir build/compat/src/strace
 	tar xzf build/compat/src/strace.tgz -C build/compat/src/strace usr/bin/strace
 	strip -o $@.part build/compat/src/strace/usr/bin/strace
@@ -557,10 +673,8 @@ GDB_LAYERS := sha256:0b9b7727f90001f8d1eaeff1db88899575254b37875d1ab6fd10af2703e
 GDB_LIBS := libexpat.so.1 liblzma.so.5 libreadline.so.8 libz.so.1 libzstd.so.1 libncursesw.so.6 libpython3.14.so.1.0 libmpfr.so.6 libgmp.so.10 libdebuginfod.so.1 libstdc++.so.6 libgcc_s.so.1 libcurl.so.4 libelf.so.1 libfts.so.0 libjson-c.so.5 libbrotlicommon.so.1 libbrotlidec.so.1 libcares.so.2 libidn2.so.0 libnghttp2.so.14 libpsl.so.5 libssl.so.3 libcrypto.so.3 libunistring.so.5
 build/compat/gdb.tar: | build/compat/src
 	rm -rf build/compat/src/gdb && mkdir -p build/compat/src/gdb/all build/compat/src/gdb/gdb/bin build/compat/src/gdb/gdb/lib
-	tok=$$(curl -fsSL "https://auth.docker.io/token?service=registry.docker.io&scope=repository:$(GDB_REPO):pull" | jq -r .token) && \
 	for d in $(GDB_LAYERS); do \
-	  curl -fsSL -H "Authorization: Bearer $$tok" -o build/compat/src/gdb/layer.tgz https://registry-1.docker.io/v2/$(GDB_REPO)/blobs/$$d && \
-	  echo "$${d#sha256:}  build/compat/src/gdb/layer.tgz" | sha256sum -c - >/dev/null && \
+	  test/compat/hubblob.sh $(GDB_REPO) $$d build/compat/src/gdb/layer.tgz && \
 	  tar xzf build/compat/src/gdb/layer.tgz -C build/compat/src/gdb/all --exclude='dev/*' --no-same-owner || exit 1; \
 	done
 	cd build/compat/src/gdb && cp all/usr/bin/gdb gdb/bin/gdb && cp all/lib/ld-musl-x86_64.so.1 gdb/lib/ld-musl-x86_64.so.1 && ln -s ld-musl-x86_64.so.1 gdb/lib/libc.musl-x86_64.so.1 && \
@@ -627,6 +741,10 @@ build/compat/micropython: | build/compat/src
 build/compat/ttyepoll: test/compat/progs/ttyepoll.c | build/compat
 	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
 
+# A job-control shell in miniature: Ctrl-Z stops its child (test/compat/tty.txt).
+build/compat/ttysusp: test/compat/progs/ttysusp.c | build/compat
+	$(MUSLCC) $(APP_CFLAGS) -o $@ $<
+
 # kilo, a small editor that puts the terminal in raw mode (test/compat/tty.txt).
 build/compat/kilo: | build/compat/src
 	rm -rf build/compat/src/kilo && mkdir build/compat/src/kilo
@@ -648,6 +766,25 @@ build/compat/git: | build/compat/src
 	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_ICONV=1 NO_REGEX=NeedsStartEnd \
 	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates git >/dev/null
 	cp build/compat/src/git/git $@
+
+# git's own test suite (t/) with the build it tests, for the gitsuite lane of
+# test/compat/run.py (the scripts it runs are listed in test/compat/gitsuite.txt).
+# A tree of its own: the tests want every program git builds (the dashed
+# commands, the test helpers, the scripts), and a build with iconv, which
+# musl provides, for the tests of commit encodings; build/compat/git is the
+# smaller program apps.txt checks. test/compat/gitsuite.sh packs it.
+build/compat/gitsuite.tar: test/compat/gitsuite.sh | build/compat/src
+	rm -rf build/compat/src/zlib-suite build/compat/src/zlib-suite-out build/compat/src/git-suite
+	git clone -q --depth 1 --branch $(ZLIB_TAG) $(ZLIB_GIT) build/compat/src/zlib-suite
+	cd build/compat/src/zlib-suite && CC=$(MUSLCC) CFLAGS="-O2 -fPIE" ./configure --static --prefix=$(CURDIR)/build/compat/src/zlib-suite-out >/dev/null
+	$(MAKE) -C build/compat/src/zlib-suite -s install >/dev/null
+	git clone -q --depth 1 --branch $(GIT_TAG) $(GIT_GIT) build/compat/src/git-suite
+	$(MAKE) -C build/compat/src/git-suite -s CC=$(MUSLCC) CFLAGS="-O2 -fPIE -I$(CURDIR)/build/compat/src/zlib-suite-out/include" \
+	  LDFLAGS="-static-pie -L$(CURDIR)/build/compat/src/zlib-suite-out/lib" NO_OPENSSL=1 NO_CURL=1 NO_EXPAT=1 \
+	  NO_GETTEXT=1 NO_TCLTK=1 NO_PERL=1 NO_PYTHON=1 NO_REGEX=NeedsStartEnd \
+	  prefix=/disk gitexecdir=/disk template_dir=/disk/git-templates \
+	  all t/helper/test-tool t/helper/test-fake-ssh bin-wrappers/git GIT-BUILD-OPTIONS >/dev/null
+	test/compat/gitsuite.sh $@ build/compat/src/git-suite
 
 # perl, statically linked with its XS modules, and the pure-Perl modules
 # test/compat/apps.txt uses (with what they load) in build/compat/perllib,
@@ -796,10 +933,10 @@ ALPINE_BASE_DIGEST = $(word 2,$(subst @sha256:, ,$(ALPINE_BASE)))
 # over SSH.
 build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/compat/bastiotools.sh \
     build/compat/bastioc1 build/compat/z3 build/compat/tcc \
-    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh | build/compat
+    build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar build/compat/jsontools.tar build/compat/bashtools.tar build/compat/yamltools.tar tools/ocipull.sh | build/compat
 	test/compat/alpinedisk.py $@ build/compat/alpine $(ALPINE_BASE) $(ALPINE_PKGS) $(ALPINE_X86_PKGS) --disk $(ALPINE_DISK_PKGS) --cache $(ALPINE_CACHE) \
 	  --extra "$$(test/compat/bastiotools.sh build/compat/bastioc1 build/compat/bastioc1.c build/compat/z3 build/compat/tcc $(CURDIR)/$(TCC_SRC) $(MUSL_INC) $(MUSL_LIB)) \
-	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar tools/ocipull.sh"
+	  build/compat/dropbear build/compat/ssh_host_key build/compat/ssh_authorized_keys build/compat/runc build/compat/crun build/compat/tree-sitter-c.so build/compat/strace build/compat/gdb.tar build/compat/pylsp.tar build/compat/gotools.tar build/compat/tstools.tar build/compat/jsontools.tar build/compat/bashtools.tar build/compat/yamltools.tar tools/ocipull.sh"
 
 # Debian on BastiOS, on a fifth disk (test/compat/debiandisk.py) for
 # test/compat/debian.txt: Debian's root file system, whose programs are
@@ -810,8 +947,29 @@ build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/co
 build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) test/compat/mkdisk.py
-	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py
+# Modules of CPython's own regression tests (Lib/test of the source the python
+# above is built from; CI restores the python without its source, so it is
+# fetched again, just that directory), with the helper modules and data they import, in
+# build/compat/cpytests, which goes on the disk as /disk/cpytests
+# (test/compat/cpytest.py runs them). test_subprocess and test_socket also
+# run on BastiOS but take minutes.
+CPYTEST_MODS := select selectors poll timeout fcntl os stat file fileio mmap pipes signal wait3 wait4 time resource threading posix pty
+
+build/compat/cpytests: test/compat/cpytest.py build/compat/python Makefile
+	rm -rf $@ && mkdir -p $@/test
+	set -e; L=build/compat/src/cpython/Lib/test; \
+	if [ ! -d $$L ]; then \
+	  rm -rf build/compat/src/cpython-lib; \
+	  git clone -q --depth 1 --filter=blob:none --sparse --branch $(CPYTHON_TAG) $(CPYTHON_GIT) build/compat/src/cpython-lib; \
+	  git -C build/compat/src/cpython-lib sparse-checkout set Lib/test; L=build/compat/src/cpython-lib/Lib/test; \
+	fi; \
+	for f in $$L/*.py; do case $$(basename $$f) in test_*) ;; *) cp $$f $@/test/;; esac; done; \
+	cp -r $$L/support $$L/subprocessdata $@/test/; $(CPYTEST_MODS:%=cp $$L/test_%.py $@/test/;) \
+	find $@ -name __pycache__ -prune -exec rm -rf {} +
+	cp test/compat/cpytest.py $@/run.py
+
+build/compat/disk.img: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests test/compat/mkdisk.py
+	test/compat/mkdisk.py $@ $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) perllib=build/compat/perllib py=build/compat/py cpytests=build/compat/cpytests
 
 # Node.js, on a sixth disk (test/compat/nodedisk.py) for test/compat/node.txt:
 # the node binary of the official node:22-alpine image and the libraries it
@@ -824,20 +982,66 @@ build/compat/node.img: test/compat/nodedisk.py test/compat/alpinedisk.py test/co
 # The Go toolchain of the official golang:alpine image (static programs), as a
 # root under /disk/g, for go.txt. Pinned by digest, its layers kept in
 # ALPINE_CACHE like the others'. x86-64 only.
-build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/go.img: test/compat/godisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/gopls
+	test/compat/godisk.py $@ $(GO_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --gopls build/compat/gopls
+
+# gopls, Go's language server, as a static program built on the host from the
+# pinned release (the module proxy checks every module against the checksum
+# database), for the cases that ask it about a Go program. It goes into the Go
+# disk as /usr/local/bin/gopls. x86-64 only. (The version is in
+# test/compat/images.mk.)
+build/compat/gopls: | build/compat/src
+	GOTOOLCHAIN=local GOBIN=$(CURDIR)/build/compat/src/gopls-bin CGO_ENABLED=0 GOOS=linux GOARCH=amd64 GOFLAGS=-trimpath \
+	  go install -ldflags='-s -w' golang.org/x/tools/gopls@$(GOPLS_VER)
+	mv build/compat/src/gopls-bin/gopls $@
+
+# Python development, on a seventh disk (test/compat/pythondisk.py) for
+# python.txt: the root of the official python:alpine image (CPython, pip and
+# the headers in /usr/local on Alpine), entered with chroot, with gcc from the
+# Alpine repository over HTTP and the packages of pythondeps.txt (from PyPI,
+# pinned by SHA-256) served by the web server. x86-64 only.
+build/compat/python.img: test/compat/pythondisk.py test/compat/pythondeps.txt test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/pythondisk.py $@ $(PYTHON_IMAGE) build/compat/alpine/disk/busybox build/compat/pythonwheels --cache $(ALPINE_CACHE)
 
 # The JDK of the official eclipse-temurin alpine image, as a tar file the cases
 # unpack, for java.txt. Pinned by digest, its layers kept in ALPINE_CACHE like
 # the others'. x86-64 only.
-build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/jdtls.tgz
+	test/compat/jdkdisk.py $@ $(JDK_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --jdtls build/compat/jdtls.tgz
+
+# The root of the official ruby:alpine image, as a tar file the cases unpack,
+# for ruby.txt. Pinned by digest, its layers kept in ALPINE_CACHE like the
+# others'. x86-64 only.
+build/compat/ruby.img: test/compat/rubydisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
+	test/compat/rubydisk.py $@ $(RUBY_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+
+# Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
+# Java disk as /opt/jdtls.
+build/compat/jdtls.tgz: | build/compat/src
+	curl -fsSL --retry 3 --retry-all-errors -o $@ $(JDTLS_URL)
+	echo "$(JDTLS_SHA256)  $@" | sha256sum -c - >/dev/null
 
 # The Rust toolchain of the official rust:alpine image (rustc, cargo, Alpine's
 # gcc and musl), as a tar file the cases unpack, for rust.txt. Pinned by
 # digest, its layers kept in ALPINE_CACHE like the others'. x86-64 only.
-build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
-	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
+build/compat/rust.img: test/compat/rustdisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/rust-analyzer build/compat/rust-src.tgz
+	test/compat/rustdisk.py $@ $(RUST_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE) --rust-analyzer build/compat/rust-analyzer --rust-src build/compat/rust-src.tgz
+
+# The standard library's source, pinned by the SHA-256 of its tar.gz in the Rust
+# release's manifest; the Rust disk unpacks it where rust-analyzer looks for it.
+build/compat/rust-src.tgz: | build/compat/src
+	curl -fsSL --retry 3 --retry-all-errors -o $@.part $(RUST_SRC_URL)
+	echo "$(RUST_SRC_SHA256)  $@.part" | sha256sum -c - >/dev/null
+	mv $@.part $@
+
+# rust-analyzer, Rust's language server (a static musl program), for the Rust
+# disk: it goes in as /usr/local/cargo/bin/rust-analyzer. x86-64 only.
+build/compat/rust-analyzer: | build/compat/src
+	curl -fsSL --retry 3 --retry-all-errors -o build/compat/src/rust-analyzer.tgz $(RUST_ANALYZER_URL)
+	echo "$(RUST_ANALYZER_SHA256)  build/compat/src/rust-analyzer.tgz" | sha256sum -c - >/dev/null
+	rm -rf build/compat/src/rust-analyzer && mkdir build/compat/src/rust-analyzer
+	tar xzf build/compat/src/rust-analyzer.tgz -C build/compat/src/rust-analyzer --strip-components=3 --wildcards '*/rust-analyzer-preview/bin/rust-analyzer'
+	mv build/compat/src/rust-analyzer/rust-analyzer $@
 
 # Rootless-capable Podman (the static mgoltzsche/podman image), as a tar file
 # the cases unpack, for podman.txt. Pinned by digest, its layers kept in
@@ -850,21 +1054,27 @@ build/compat/podman.img: test/compat/podmandisk.py test/compat/alpinedisk.py tes
 # made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
 # COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
 # and run a part of the suite: the images of its lanes, and those lanes.
-COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/rust.img build/compat/podman.img
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/ruby.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/gitsuite.tar
 
+GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
+
+# Real open-source projects (zlib, Lua, LZ4, toml, semver, fastrand, itoa, either, testify, fzf, nanoid, debug, express, Tornado) as git repositories the web
+# server serves, for alpine.txt to clone, build and test.
+build/compat/oss: test/compat/ossrepos.sh
+	test/compat/ossrepos.sh $@
 
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
-compat: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
+compat: build/bastios.elf $(COMPAT_DISKS) build/compat/oss
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --jdk-disk build/compat/jdk.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC)
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # The same checks on this Linux machine: are the expectations right?
-compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS)
+compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests
 	test/compat/run.py --host build/compat --out build/compat/host $(COMPAT_PROGS)
 
 # Power cuts on a disk with a write cache, at every point of two crashme
@@ -880,6 +1090,24 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
+# Besides runtest/syscalls: the file system stress tests, the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
+LTP_SUITES ?= --suite fs --suite mm --suite dio --suite fs_perms_simple --suite sched --suite pty --suite containers --suite cve --suite posix --suite libctest
+
+# musl's libc-test (MIT, not part of this repository), fetched at a pinned
+# revision of a mirror and built as static executables against musl.
+LIBCTEST_GIT ?= https://github.com/kraj/libc-test
+LIBCTEST_REV ?= b7ec467969a53756258778fa7d9b045f912d1c93
+
+build/libc-test/.built: | build
+	rm -rf build/libc-test && mkdir -p build/libc-test
+	cd build/libc-test && git init -q && git fetch -q --depth 1 $(LIBCTEST_GIT) $(LIBCTEST_REV) && git checkout -q FETCH_HEAD
+	printf '%s\n' 'CFLAGS += -pipe -std=c99 -D_POSIX_C_SOURCE=200809L -Wall -Wno-unused-function -Wno-missing-braces -Wno-unused -Wno-overflow' \
+	  'CFLAGS += -Wno-unknown-pragmas -fno-builtin -frounding-math -O1' \
+	  'CFLAGS += -Werror=implicit-function-declaration -Werror=implicit-int -Werror=pointer-sign -Werror=pointer-arith' \
+	  'LDLIBS += -lpthread -lm -lrt' > build/libc-test/config.mak
+	cd build/libc-test && $(MAKE) -k -s CC=$(MUSLCC) LDFLAGS=-static src/common/libtest.a \
+	  $$(ls src/functional/*.c src/regression/*.c | sed 's/\.c$$/-static.exe/') >/dev/null 2>&1 || true
+	touch $@
 
 build/ltp/configure: | build
 	rm -rf build/ltp
@@ -901,16 +1129,30 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/lib -s
 	$(MAKE) -C build/ltp/libs -s
 	$(MAKE) -C build/ltp/testcases/kernel/syscalls -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/pty -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/fs -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/mem -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/io -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/sched -s -k || true
+	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
+	$(MAKE) -C build/ltp/testcases/cve -s -k || true
+	# The Open POSIX Test Suite is configured on its own; a few tests do not
+	# build against musl (they check _POSIX_SPORADIC_SERVER and the like).
+	cd build/ltp/testcases/open_posix_testsuite && ./configure -q CC="$(MUSLCC)" \
+	  CFLAGS="-O2 -fPIE" LDFLAGS=-static-pie >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite generate-makefiles >/dev/null
+	$(MAKE) -C build/ltp/testcases/open_posix_testsuite/conformance/interfaces -s -k -j4 >/dev/null 2>&1 || true
 	touch $@
 
 # Not part of `make test`: a full run boots the kernel once per 63 programs
 # (25 boots, three at a time; about 10 minutes on four processors). Fails
-# only if a test in ltp_baseline.txt stops passing.
-compat-ltp: build/bastios.elf build/ltp/.built
-	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+# only if a test in ltp_baseline.txt stops passing. LTP_SHARD=K/N runs a share
+# of it (ltp.py --shard), which CI gives to a machine each.
+compat-ltp: build/bastios.elf build/ltp/.built build/libc-test/.built
+	test/compat/ltp.py --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES) $(if $(LTP_SHARD),--shard $(LTP_SHARD))
 
-compat-ltp-baseline: build/bastios.elf build/ltp/.built
-	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp
+compat-ltp-baseline: build/bastios.elf build/ltp/.built build/libc-test/.built
+	test/compat/ltp.py --update-baseline --kernel build/bastios.elf --ltp build/ltp --out build/compat/ltp $(LTP_SUITES)
 
 # Not part of `make test`: the same micro-benchmarks (bench/osbench.c) on
 # BastiOS and on Linux in the same QEMU machine, side by side; see
@@ -921,7 +1163,7 @@ bench: build/bastios.elf
 
 # Not part of `make test`: whole-program workloads (bench/workloads.py), the
 # same Alpine gcc, make, apk, tar and gzip on BastiOS and on Linux. The disk
-# is the compat suite's Alpine disk cut down to gcc, make and musl-dev, plus
+# is the compat suite's Alpine disk cut down to gcc, make, musl-dev, git and python3, plus
 # the guest script and a generated C project (bench/workloads/).
 BENCH_GCC_IMAGE ?= alpinelinux/alpine-gitlab-ci@sha256:4bce54b0b246967f6ab51476d5511245ba35a49f30b2e63102ca294ab488add9
 build/bench/wl/proj.tar: bench/workloads/mkproj.py | build/bench/wl
@@ -931,8 +1173,8 @@ build/bench/wl/wl.sh: bench/workloads/wl.sh | build/bench/wl
 build/bench/wl:
 	mkdir -p $@
 build/bench/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py build/bench/wl/proj.tar build/bench/wl/wl.sh
-	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) \
-	  --disk gcc,musl-dev,make --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
+	MKDISK_FREE_MB=700 test/compat/alpinedisk.py $@ build/bench/alpine $(ALPINE_BASE) $(BENCH_GCC_IMAGE) $(filter alpine/git@% alpine/ansible@%,$(ALPINE_PKGS)) \
+	  --disk gcc,musl-dev,make,git,python3 --cache $(ALPINE_CACHE) --extra "wl.sh=build/bench/wl/wl.sh proj.tar=build/bench/wl/proj.tar"
 bench-workloads: build/bastios.elf build/bench/alpine.img
 	bench/workloads.py $(WORKLOAD_ARGS)
 
@@ -981,6 +1223,6 @@ clean:
 .PRECIOUS: build/user/%.c build/user/%.s build/user/%.o build/user/%.elf
 FORCE:
 
-.PHONY: FORCE all run disk usb run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
+.PHONY: FORCE all run disk usb installer run-usb test crashsim fuzz bench bench-workloads bench-net bench-compare smpbench buildbench threadbench forkbench diskbench iobench netbench compat compat-disks compat-baseline compat-host compat-ltp compat-ltp-baseline clean
 
 endif

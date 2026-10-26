@@ -380,7 +380,7 @@ def check_range(args):
             if key not in seen:
                 seen.add(key)
                 states += 1
-                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5"):
+                if bytes(img[0:8]) in (b"BSTDISK2", b"BSTDISK3", b"BSTDISK4", b"BSTDISK5", b"BSTDISK6"):
                     errors, _, _ = fsck.check(img)
                     if not errors:
                         bad = mpc_check(img) if workload == "mpc" else crashme_check(img)

@@ -35,7 +35,17 @@ static int crash(const char *dir, rlim_t lim, pid_t *pid) {
     return st;
 }
 
-/* The core file's x86-64 view of it: 1 if every check on its contents held. */
+#ifdef __x86_64__
+#define CORE_MACHINE EM_X86_64
+#define CORE_NREGS 27          /* struct user_regs_struct, in 8-byte words */
+#define CORE_PC_WORD 16        /* rip */
+#else
+#define CORE_MACHINE EM_AARCH64
+#define CORE_NREGS 34          /* struct user_pt_regs: x0-x30, sp, pc, pstate */
+#define CORE_PC_WORD 32        /* pc */
+#endif
+
+/* The core file's view of it: 1 if every check on its contents held. */
 static int inspect(const char *path, pid_t pid, const char **why) {
     int fd = open(path, O_RDONLY);
     if (fd < 0) { *why = "open"; return 0; }
@@ -43,7 +53,7 @@ static int inspect(const char *path, pid_t pid, const char **why) {
     if (read(fd, &eh, sizeof eh) != sizeof eh || memcmp(eh.e_ident, ELFMAG, SELFMAG) != 0) {
         *why = "no ELF header"; return 0;
     }
-    if (eh.e_type != ET_CORE || eh.e_machine != EM_X86_64) { *why = "type or machine"; return 0; }
+    if (eh.e_type != ET_CORE || eh.e_machine != CORE_MACHINE) { *why = "type or machine"; return 0; }
     if (eh.e_phentsize != sizeof(Elf64_Phdr) || eh.e_phnum < 2 || eh.e_phnum > 100) {
         *why = "program headers"; return 0;
     }
@@ -65,14 +75,14 @@ static int inspect(const char *path, pid_t pid, const char **why) {
             size_t d = at + sizeof *nh + ((nh->n_namesz + 3) & ~3u);
             if (d + nh->n_descsz > n)
                 break;
-            if (nh->n_type == NT_PRSTATUS && nh->n_descsz >= 112 + 27 * 8) {
+            if (nh->n_type == NT_PRSTATUS && nh->n_descsz >= 112 + CORE_NREGS * 8) {
                 int32_t signo, cursig, ppid;
                 int32_t id;
                 memcpy(&signo, buf + d, 4);
                 cursig = *(uint16_t *)(buf + d + 12);
                 memcpy(&id, buf + d + 32, 4);
                 memcpy(&ppid, buf + d + 36, 4);
-                memcpy(&rip, buf + d + 112 + 16 * 8, 8);
+                memcpy(&rip, buf + d + 112 + CORE_PC_WORD * 8, 8);
                 if (signo == SIGSEGV && cursig == SIGSEGV && id == pid)
                     saw_sig = 1;
             }
@@ -114,7 +124,6 @@ int main(void) {
     pid_t pid;
     int st = crash("co_a", 1 << 26, &pid);
     EXPECT("a null write ends the child with SIGSEGV", WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV);
-#ifdef __x86_64__
     struct stat sb;
     if (plain_pattern()) {
         EXPECT("RLIMIT_CORE above 0 leaves a core file, and the wait status says so", stat("co_a/core", &sb) == 0 && sb.st_size > 4096 && WCOREDUMP(st));
@@ -124,6 +133,5 @@ int main(void) {
         st = crash("co_b", 0, &pid);
         EXPECT("RLIMIT_CORE 0 leaves no core file, and the status has no core flag", WIFSIGNALED(st) && !WCOREDUMP(st) && stat("co_b/core", &sb) != 0);
     }
-#endif
     return done();
 }

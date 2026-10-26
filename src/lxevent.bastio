@@ -247,6 +247,7 @@ fn sfd_read(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
         stop = true;
       } else {
         pset(&mut k.procs, pid, F_SIGPEND, pend & !sbit(s));
+        rtq_refill(&mut k, pid, s);
         done = done + SFD_INFO;
       }
     }
@@ -264,11 +265,11 @@ fn sfd_read(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
 fn tfd_due(k: &Kernel, t: u64) -> u64
   requires kok(k) && t < TFD_N
 {
-  let dl = get(k.evt, t * TFD_STRIDE + 2);
+  let dl = evg(k, t * TFD_STRIDE + 2);
   if dl == 0 || k.ns < dl {
     return 0;
   }
-  let iv = get(k.evt, t * TFD_STRIDE + 3);
+  let iv = evg(k, t * TFD_STRIDE + 3);
   if iv == 0 {
     return 1;
   }
@@ -278,13 +279,12 @@ fn tfd_due(k: &Kernel, t: u64) -> u64
 /// Timer t's next deadline once the expirations so far are taken (0: none).
 fn tfd_next(k: &Kernel, t: u64) -> u64
   requires kok(k) && t < TFD_N
-  ensures result <= FOREVER || result == get(k.evt, t * TFD_STRIDE + 2)
 {
-  let dl = get(k.evt, t * TFD_STRIDE + 2);
+  let dl = evg(k, t * TFD_STRIDE + 2);
   if dl == 0 || k.ns < dl {
     return dl;
   }
-  let iv = get(k.evt, t * TFD_STRIDE + 3);
+  let iv = evg(k, t * TFD_STRIDE + 3);
   if iv == 0 {
     return 0;
   }
@@ -323,9 +323,9 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
   if x >= TFD_N {
     return EBADF;
   }
-  let w0 = get(k.evt, x * TFD_STRIDE);
+  let w0 = evg(k, x * TFD_STRIDE);
   if w0 / TFD_CANCELED % 2 == 1 {
-    k.evt = set(k.evt, x * TFD_STRIDE, w0 % TFD_CANCELED);
+    evs(&mut k, x * TFD_STRIDE, w0 % TFD_CANCELED);
     return ECANCELED;
   }
   let due = tfd_due(k, x);
@@ -336,7 +336,7 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 8) != 8 {
     return EFAULT;
   }
-  k.evt = set(k.evt, x * TFD_STRIDE + 2, tfd_next(k, x));
+  evs(&mut k, x * TFD_STRIDE + 2, tfd_next(k, x));
   return 8;
 }
 
@@ -352,7 +352,7 @@ fn lx_timerfd_create(k: &mut Kernel, pid: u64, clk: u64, flags: u64) -> u64
     return EINVAL;
   }
   let mut t = 0;
-  while t < TFD_N && get(k.evt, t * TFD_STRIDE) != 0
+  while t < TFD_N && evg(k, t * TFD_STRIDE) != 0
     invariant t <= TFD_N && kok(k)
   {
     t = t + 1;
@@ -364,10 +364,10 @@ fn lx_timerfd_create(k: &mut Kernel, pid: u64, clk: u64, flags: u64) -> u64
   if fd >= LXNFD {
     return fd;                              // -EMFILE or -ENFILE: the timer stays free
   }
-  k.evt = set(k.evt, t * TFD_STRIDE, 1);
-  k.evt = set(k.evt, t * TFD_STRIDE + 1, clk);
-  k.evt = set(k.evt, t * TFD_STRIDE + 2, 0);
-  k.evt = set(k.evt, t * TFD_STRIDE + 3, 0);
+  evs(&mut k, t * TFD_STRIDE, 1);
+  evs(&mut k, t * TFD_STRIDE + 1, clk);
+  evs(&mut k, t * TFD_STRIDE + 2, 0);
+  evs(&mut k, t * TFD_STRIDE + 3, 0);
   return fd;
 }
 
@@ -380,8 +380,8 @@ fn tfd_out(k: &mut Kernel, pid: u64, t: u64, va: u64) -> u64
   if va > VA_LAST {
     return EFAULT;
   }
-  let dl = get(k.evt, t * TFD_STRIDE + 2);
-  let iv = get(k.evt, t * TFD_STRIDE + 3);
+  let dl = evg(k, t * TFD_STRIDE + 2);
+  let iv = evg(k, t * TFD_STRIDE + 3);
   let mut left = 0;
   if dl != 0 && k.ns < dl {
     left = dl - k.ns;
@@ -437,7 +437,7 @@ fn lx_timerfd_settime(k: &mut Kernel, pid: u64, fd: u64, flags: u64, nv: u64, ov
   }
   let mut dl = 0;
   if val.ns != 0 {
-    let now = clock_now(k, pid, get(k.evt, t * TFD_STRIDE + 1));
+    let now = clock_now(k, pid, evg(k, t * TFD_STRIDE + 1));
     if flags & TFD_TIMER_ABSTIME == 0 {
       dl = sat_add(k.ns, val.ns);
     } else if val.ns <= now || now == FOREVER {
@@ -449,13 +449,13 @@ fn lx_timerfd_settime(k: &mut Kernel, pid: u64, fd: u64, flags: u64, nv: u64, ov
       dl = 1;                               // 0 means disarmed
     }
   }
-  k.evt = set(k.evt, t * TFD_STRIDE + 2, dl);
-  k.evt = set(k.evt, t * TFD_STRIDE + 3, iv.ns);
+  evs(&mut k, t * TFD_STRIDE + 2, dl);
+  evs(&mut k, t * TFD_STRIDE + 3, iv.ns);
   let mut w0 = 1;
-  if flags == (TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) && get(k.evt, t * TFD_STRIDE + 1) == CLOCK_REALTIME {
+  if flags == (TFD_TIMER_ABSTIME | TFD_TIMER_CANCEL_ON_SET) && evg(k, t * TFD_STRIDE + 1) == CLOCK_REALTIME {
     w0 = 1 + TFD_MAYCANCEL;
   }
-  k.evt = set(k.evt, t * TFD_STRIDE, w0);
+  evs(&mut k, t * TFD_STRIDE, w0);
   return 0;
 }
 
@@ -469,9 +469,9 @@ fn tfd_clock_set(k: &mut Kernel)
   while t < TFD_N
     invariant t <= TFD_N && kok(k)
   {
-    let w0 = get(k.evt, t * TFD_STRIDE);
+    let w0 = evg(k, t * TFD_STRIDE);
     if w0 % TFD_CANCELED == 1 + TFD_MAYCANCEL {
-      k.evt = set(k.evt, t * TFD_STRIDE, 1 + TFD_MAYCANCEL + TFD_CANCELED);
+      evs(&mut k, t * TFD_STRIDE, 1 + TFD_MAYCANCEL + TFD_CANCELED);
     }
     t = t + 1;
   }
@@ -493,7 +493,7 @@ fn lx_epoll_create(k: &mut Kernel, pid: u64, cloexec: bool) -> u64
   ensures kok(k)
 {
   let mut e = 0;
-  while e < EP_N && get(k.evt, EP_AT + e * EP_STRIDE) != 0
+  while e < EP_N && evg(k, EP_AT + e * EP_STRIDE) != 0
     invariant e <= EP_N && kok(k)
   {
     e = e + 1;
@@ -505,12 +505,12 @@ fn lx_epoll_create(k: &mut Kernel, pid: u64, cloexec: bool) -> u64
   if fd >= LXNFD {
     return fd;
   }
-  k.evt = set(k.evt, EP_AT + e * EP_STRIDE, 1);
+  evs(&mut k, EP_AT + e * EP_STRIDE, 1);
   let mut j = 0;
   while j < EP_FDS
     invariant j <= EP_FDS && e < EP_N && kok(k)
   {
-    k.evt = set(k.evt, ep_at(e, j, 0), 0);
+    evs(&mut k, ep_at(e, j, 0), 0);
     j = j + 1;
   }
   return fd;
@@ -526,7 +526,7 @@ fn ep_find(k: &Kernel, e: u64, w: u64) -> u64
   while j < EP_FDS
     invariant j <= EP_FDS && e < EP_N
   {
-    if get(k.evt, ep_at(e, j, 0)) == w {
+    if evg(k, ep_at(e, j, 0)) == w {
       return j;
     }
     j = j + 1;
@@ -545,7 +545,47 @@ fn no_poll_dev(x: u64) -> bool {
   if DEV_LOOP <= x && x < DEV_LOOP + LOOP_N {
     return true;                            // DEV_LOOP + N (the pseudo-terminals above them poll)
   }
-  return 256 <= x && x - 256 < 16 * NPROC && x % 16 != 1;   // PROC_DEV + 16 * pid + PF_*, but PF_MOUNTS
+  return PROC_DEV <= x && x - PROC_DEV < 16 * NPROC && !is_mounts_dev(x);   // PROC_DEV + 16 * pid + PF_*, but the mount tables
+}
+
+/// Whether OF_DEV device x is /proc/mounts or /proc/PID/mounts (PF_MOUNTS)
+/// or /proc/PID/mountinfo (PF_MOUNTINFO; pid 0's slot 13 is loadavg): the
+/// files whose poll reports a change of the mount table.
+fn is_mounts_dev(x: u64) -> bool {
+  if x < PROC_DEV || x - PROC_DEV >= 16 * NPROC {
+    return false;
+  }
+  return x % 16 == 1 || (x % 16 == 13 && x - PROC_DEV >= 16);
+}
+
+/// How many times the mount table changed, modulo 2^32.
+fn mnt_events(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result < 4294967296
+{
+  return get(k.sys, SYS_MNTEV) % 4294967296;
+}
+
+/// The mount table changes description h of a mounts file has seen (they
+/// ride in the eights of the word k.inet6 keeps, which only a socket uses
+/// otherwise).
+fn mnt_seen(k: &Kernel, h: u64) -> u64
+  requires kok(k)
+{
+  if h < len(k.inet6) {
+    return get(k.inet6, h) / 8;
+  }
+  return 0;
+}
+
+/// Description h has now seen every change of the mount table.
+fn mnt_catch_up(k: &mut Kernel, h: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if h < len(k.inet6) {
+    k.inet6 = set(k.inet6, h, 8 * mnt_events(k));
+  }
 }
 
 /// epoll_ctl(epfd, op, fd, event).
@@ -576,12 +616,12 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   }
   let h = fd_ofd(k, pid, fd);
   let mut j = ep_find(k, e, fd + 1);
-  let live = j < EP_FDS && get(k.evt, ep_at(e, j, 1)) == h;
+  let live = j < EP_FDS && evg(k, ep_at(e, j, 1)) == h;
   if op == EPOLL_CTL_DEL {
     if !live {
       return ENOENT;
     }
-    k.evt = set(k.evt, ep_at(e, j, 0), 0);
+    evs(&mut k, ep_at(e, j, 0), 0);
     return 0;
   }
   if op != EPOLL_CTL_ADD && op != EPOLL_CTL_MOD {
@@ -604,10 +644,10 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
       return ENOSPC;
     }
   }
-  k.evt = set(k.evt, ep_at(e, j, 0), fd + 1);
-  k.evt = set(k.evt, ep_at(e, j, 1), h);
-  k.evt = set(k.evt, ep_at(e, j, 2), events);
-  k.evt = set(k.evt, ep_at(e, j, 3), data);
+  evs(&mut k, ep_at(e, j, 0), fd + 1);
+  evs(&mut k, ep_at(e, j, 1), h);
+  evs(&mut k, ep_at(e, j, 2), events);
+  evs(&mut k, ep_at(e, j, 3), data);
   return 0;
 }
 
@@ -616,12 +656,12 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
 fn ep_entry_bits(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
   requires kok(k) && pid < NPROC && e < EP_N && j < EP_FDS
 {
-  let w = get(k.evt, ep_at(e, j, 0));
+  let w = evg(k, ep_at(e, j, 0));
   if w == 0 || w > LXNFD {
     return 0;
   }
-  let events = get(k.evt, ep_at(e, j, 2));
-  if events & EP_OFF != 0 || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1)) {
+  let events = evg(k, ep_at(e, j, 2));
+  if events & EP_OFF != 0 || fd_ofd(k, pid, w - 1) != evg(k, ep_at(e, j, 1)) {
     return 0;
   }
   return leaf_bits(k, pid, w - 1) & (events | POLLERR | POLLHUP) & 0xFFFF;
@@ -643,8 +683,8 @@ fn ep_target(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
   requires kok(k) && pid < NPROC && e < EP_N && j < EP_FDS
   ensures result <= EP_N
 {
-  let w = get(k.evt, ep_at(e, j, 0));
-  if w == 0 || w > LXNFD || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1)) {
+  let w = evg(k, ep_at(e, j, 0));
+  if w == 0 || w > LXNFD || fd_ofd(k, pid, w - 1) != evg(k, ep_at(e, j, 1)) {
     return EP_N;
   }
   let f = fd_look(k, pid, w - 1);
@@ -772,10 +812,10 @@ fn ep_ready(k: &Kernel, pid: u64) -> u64
     while j < EP_FDS
       invariant j <= EP_FDS && e < EP_N && m < EP_MASK && len(wants) == EP_N
     {
-      if get(k.evt, ep_at(e, j, 0)) != 0 {
+      if evg(k, ep_at(e, j, 0)) != 0 {
         let t = ep_target(k, pid, e, j);
         if t < EP_N {
-          if get(k.evt, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
+          if evg(k, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
             wants = set(wants, e, (get(wants, e) | (1 << t)) % EP_MASK);
             any = true;
           }
@@ -814,7 +854,7 @@ fn ep_entry_ready(k: &Kernel, pid: u64, e: u64, j: u64, m: u64) -> u64
   if t >= EP_N {
     return ep_entry_bits(k, pid, e, j);
   }
-  if (m >> t) % 2 == 1 && get(k.evt, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
+  if (m >> t) % 2 == 1 && evg(k, ep_at(e, j, 2)) & (POLLIN + EP_OFF) == POLLIN {
     return POLLIN;
   }
   return 0;
@@ -849,7 +889,7 @@ fn ev_bits(k: &Kernel, kind: u64, x: u64) -> u64
     }
     return b;
   }
-  if kind == K_TIMER && x < TFD_N && (tfd_due(k, x) > 0 || get(k.evt, x * TFD_STRIDE) / TFD_CANCELED % 2 == 1) {
+  if kind == K_TIMER && x < TFD_N && (tfd_due(k, x) > 0 || evg(k, x * TFD_STRIDE) / TFD_CANCELED % 2 == 1) {
     return POLLIN;
   }
   return 0;
@@ -873,11 +913,15 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     return KEEP;
   }
   let e = ep.x;
-  let ready = ep_ready(k, pid);
+  // Which instances are ready only matters to an entry that watches another
+  // instance, and working it out looks at every entry of every instance
+  // (an epoll_wait with a timeout of 0 must come back in a millisecond), so
+  // it waits until the scan meets such an entry.
+  let mut ready = EP_MASK;
   let most = smaller(maxevents, EP_FDS);
   // Scanning starts where the last call stopped, so a few events per call
   // still reach every ready entry in turn, as Linux's ready list does.
-  let cur = get(k.evt, EP_AT + e * EP_STRIDE);
+  let cur = evg(k, EP_AT + e * EP_STRIDE);
   let mut start = 0;
   if cur > 0 && cur <= EP_FDS {
     start = cur - 1;
@@ -886,25 +930,28 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
   let mut t = 0;
   let mut last = EP_FDS;
   while t < EP_FDS && got < most
-    invariant t <= EP_FDS && got <= t && got <= most && most <= EP_FDS && e < EP_N && start < EP_FDS && last <= EP_FDS && kok(k)
+    invariant t <= EP_FDS && got <= t && got <= most && most <= EP_FDS && e < EP_N && ready <= EP_MASK && start < EP_FDS && last <= EP_FDS && kok(k)
   {
     let j = (start + t) % EP_FDS;
-    let mut w = get(k.evt, ep_at(e, j, 0));
-    if w != 0 && (w > LXNFD || fd_ofd(k, pid, w - 1) != get(k.evt, ep_at(e, j, 1))) {
-      k.evt = set(k.evt, ep_at(e, j, 0), 0);  // its descriptor was closed
+    let mut w = evg(k, ep_at(e, j, 0));
+    if w != 0 && (w > LXNFD || fd_ofd(k, pid, w - 1) != evg(k, ep_at(e, j, 1))) {
+      evs(&mut k, ep_at(e, j, 0), 0);  // its descriptor was closed
       w = 0;
     }
     let mut bits = 0;
     if w != 0 {
+      if ready == EP_MASK && ep_target(k, pid, e, j) < EP_N {
+        ready = ep_ready(k, pid);
+      }
       bits = ep_entry_ready(k, pid, e, j, ready);
     }
     if bits != 0 {
       let at = got * EPOLL_EVENT;
       xfer_u64(&mut k.fs.xfer, at, bits % 65536);                     // events, and the padding if the structure has some
-      xfer_u64(&mut k.fs.xfer, at + EPOLL_DATA_AT, get(k.evt, ep_at(e, j, 3)));
-      let events = get(k.evt, ep_at(e, j, 2));
+      xfer_u64(&mut k.fs.xfer, at + EPOLL_DATA_AT, evg(k, ep_at(e, j, 3)));
+      let events = evg(k, ep_at(e, j, 2));
       if events & EPOLLONESHOT != 0 {
-        k.evt = set(k.evt, ep_at(e, j, 2), events | EP_OFF);   // until EPOLL_CTL_MOD
+        evs(&mut k, ep_at(e, j, 2), events | EP_OFF);   // until EPOLL_CTL_MOD
       }
       got = got + 1;
       last = j;
@@ -912,7 +959,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
     t = t + 1;
   }
   if got > 0 && last < EP_FDS {
-    k.evt = set(k.evt, EP_AT + e * EP_STRIDE, (last + 1) % EP_FDS + 1);
+    evs(&mut k, EP_AT + e * EP_STRIDE, (last + 1) % EP_FDS + 1);
   }
   if got == 0 {
     let dl = deadline(k, was, wait);
@@ -935,7 +982,7 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
 fn fifo_busy(k: &Kernel, f: u64) -> bool
   requires kok(k) && f < FIFO_N
 {
-  let w = get(k.evt, FIFO_AT + f * FIFO_STRIDE + 1);
+  let w = evg(k, FIFO_AT + f * FIFO_STRIDE + 1);
   if w == 0 || w - 1 >= NPIPES {
     return false;
   }
@@ -957,7 +1004,7 @@ fn fifo_slot(k: &mut Kernel, h: u64) -> u64
   while f < FIFO_N
     invariant f <= FIFO_N && kok(k)
   {
-    if get(k.evt, FIFO_AT + f * FIFO_STRIDE) == h + 1 {
+    if evg(k, FIFO_AT + f * FIFO_STRIDE) == h + 1 {
       return f;
     }
     f = f + 1;
@@ -966,9 +1013,9 @@ fn fifo_slot(k: &mut Kernel, h: u64) -> u64
   while f < FIFO_N
     invariant f <= FIFO_N && kok(k)
   {
-    if get(k.evt, FIFO_AT + f * FIFO_STRIDE) == 0 || !fifo_busy(k, f) {
-      k.evt = set(k.evt, FIFO_AT + f * FIFO_STRIDE, h + 1);
-      k.evt = set(k.evt, FIFO_AT + f * FIFO_STRIDE + 1, 0);
+    if evg(k, FIFO_AT + f * FIFO_STRIDE) == 0 || !fifo_busy(k, f) {
+      evs(&mut k, FIFO_AT + f * FIFO_STRIDE, h + 1);
+      evs(&mut k, FIFO_AT + f * FIFO_STRIDE + 1, 0);
       return f;
     }
     f = f + 1;
@@ -1046,8 +1093,8 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, dev: u64
   while f < FIFO_N
     invariant f <= FIFO_N && kok(k)
   {
-    if h != NO_FILE && get(k.evt, FIFO_AT + f * FIFO_STRIDE) == h + 1 {
-      k.evt = set(k.evt, FIFO_AT + f * FIFO_STRIDE, 0);
+    if h != NO_FILE && evg(k, FIFO_AT + f * FIFO_STRIDE) == h + 1 {
+      evs(&mut k, FIFO_AT + f * FIFO_STRIDE, 0);
     }
     f = f + 1;
   }
@@ -1068,7 +1115,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     return EMFILE;
   }
   let base = FIFO_AT + f * FIFO_STRIDE;
-  let w = get(k.evt, base + 1);
+  let w = evg(k, base + 1);
   let mut q = NPIPES;
   if w >= 1 && w - 1 < NPIPES {
     let c = w - 1;
@@ -1092,7 +1139,7 @@ fn fifo_open(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     pi_set(&mut k.pipes, q, 5, 0);
     pi_set(&mut k.pipes, q, 6, pipe_birth_cap(k, pid));
     pi_set(&mut k.pipes, q, 7, 0);
-    k.evt = set(k.evt, base + 1, q + 1);
+    evs(&mut k, base + 1, q + 1);
   }
   let nb = flags / LO_NONBLOCK % 2;
   let ce = flags / LO_CLOEXEC % 2 == 1;

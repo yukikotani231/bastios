@@ -32,6 +32,8 @@ const LX_MOUNT: u64 = 165;
 const LX_UMOUNT2: u64 = 166;
 const MS_RDONLY: u64 = 1;
 const MS_REMOUNT: u64 = 32;
+const MS_KEPT: u64 = 3086;            // MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_NOATIME | MS_NODIRATIME: kept for a tmpfs mount, reported by statfs, and the first three enforced
+const MS_NOSYMFOLLOW: u64 = 256;      // kept as ST_NOSYMFOLLOW (8192): lx_follow refuses the links under the mount
 const UMOUNT_OK_FLAGS: u64 = 11;      // MNT_FORCE | MNT_DETACH | UMOUNT_NOFOLLOW
 const UMOUNT_NOFOLLOW: u64 = 8;
 
@@ -42,6 +44,14 @@ const FST_EXT4: u64 = 3;                // ext4, and ext2 and ext3 images withou
 const FST_NS: u64 = 16;                 // FST_NS + MK_*: mounted per namespace (src/lxns.bastio)
 const MS_BIND: u64 = 4096;
 const MS_PROPAGATION: u64 = 0x1E0000;   // MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED
+
+/// The mount flags a tmpfs or image mount keeps, as statfs reports them
+/// (ST_*): MS_KEPT's, and MS_NOSYMFOLLOW as ST_NOSYMFOLLOW.
+fn kept_flags(flags: u64) -> u64
+  ensures result < 65536
+{
+  return (flags & MS_KEPT) + (flags & MS_NOSYMFOLLOW) * 32;
+}
 
 /// Is the NUL-terminated string at user address va s?
 fn type_is(k: &mut Kernel, pid: u64, va: u64, s: Str) -> bool
@@ -326,6 +336,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
       return EROFS;                         // an ext4 image is only read
     }
     vfs_set_ro(&mut k.fs, s, flags & MS_RDONLY != 0);
+    vfs_set_mflags(&mut k.fs, s, kept_flags(flags));
     return 0;
   }
   if s < MNT_N || i + 1 == k.fs.lo_at || vfs_ram_has_children(&mut k.fs, n) {
@@ -350,6 +361,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
       return ext_errno(r);
     }
     vfs_set_ext(&mut k.fs, ms);
+    vfs_set_mflags(&mut k.fs, ms, kept_flags(flags));
     return 0;
   }
   if t == FST_BSTDISK {
@@ -367,6 +379,10 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   }
   if !vfs_mount(&mut k.fs, i, flags & MS_RDONLY != 0) {
     return ENOMEM;                          // MNT_N mounts already
+  }
+  let ns = vfs_mount_slot(k.fs, i);
+  if ns < MNT_N {
+    vfs_set_mflags(&mut k.fs, ns, kept_flags(flags));
   }
   return 0;
 }
@@ -449,12 +465,17 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   if !full && !mnt_admin(k, pid) {
     return EPERM;
   }
+  let mut r = 0;
   if n == LX_MOUNT {
-    return lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), full);
+    r = lx_mount(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), full);
+  } else if n == LX_PIVOT_ROOT {
+    r = lx_pivot_root(&mut k, pid, a, b);   // src/lxns.bastio
+  } else {
+    xa_clear(&mut k);                      // what the unmounted file system held (src/lxxattr.bastio)
+    r = lx_umount2(&mut k, pid, a, b, full);
   }
-  if n == LX_PIVOT_ROOT {
-    return lx_pivot_root(&mut k, pid, a, b);  // src/lxns.bastio
+  if r == 0 {
+    k.sys = set(k.sys, SYS_MNTEV, sat_add(get(k.sys, SYS_MNTEV), 1));   // wakes pollers of /proc/mounts
   }
-  xa_clear(&mut k);                        // what the unmounted file system held (src/lxxattr.bastio)
-  return lx_umount2(&mut k, pid, a, b, full);
+  return r;
 }

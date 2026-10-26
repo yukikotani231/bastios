@@ -112,6 +112,88 @@ static int nested_userns(void) {
     return getuid() == 7 && strstr(t, "         7          0          1") != NULL;
 }
 
+/* The root of a user namespace has the capabilities over the namespaces of
+ * the user namespaces made inside it: it joins the UTS and network
+ * namespaces a child user namespace made and sets the hostname there. */
+static int parent_over_child_namespaces(void) {
+    int up[2], down[2];
+    if (pipe(up) || pipe(down)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b, name[64];
+        if (unshare(CLONE_NEWUSER) != 0) _exit(10);
+        if (write_trunc("/proc/self/setgroups", "deny", 4) != 4) _exit(11);
+        if (write_trunc("/proc/self/uid_map", "0 0 1\n", 6) != 6) _exit(12);
+        if (write_trunc("/proc/self/gid_map", "0 0 1\n", 6) != 6) _exit(13);
+        if (unshare(CLONE_NEWUTS | CLONE_NEWNET) != 0) _exit(14);
+        if (sethostname("inner", 5) != 0) _exit(15);
+        if (write(up[1], "x", 1) != 1 || read(down[0], &b, 1) != 1) _exit(16);
+        _exit(0);
+    }
+    char b;
+    int ok = read(up[0], &b, 1) == 1;
+    char path[64];
+    snprintf(path, sizeof path, "/proc/%d/ns/uts", (int)c);
+    int fu = open(path, O_RDONLY);
+    snprintf(path, sizeof path, "/proc/%d/ns/net", (int)c);
+    int fn = open(path, O_RDONLY);
+    ok = ok && fu >= 0 && fn >= 0;
+    pid_t j = ok ? fork() : -1;
+    if (j == 0) {
+        char name[64];
+        if (setns(fu, CLONE_NEWUTS) != 0) _exit(1);
+        if (gethostname(name, sizeof name) != 0 || strcmp(name, "inner") != 0) _exit(2);
+        if (sethostname("outer2", 6) != 0) _exit(3);
+        if (setns(fn, CLONE_NEWNET) != 0) _exit(4);
+        _exit(0);
+    }
+    int jst = 0;
+    ok = ok && j > 0 && waitpid(j, &jst, 0) == j && WIFEXITED(jst) && WEXITSTATUS(jst) == 0;
+    if (!ok && j > 0 && WIFEXITED(jst)) errno = 1000 + WEXITSTATUS(jst);
+    ok = write(down[1], "y", 1) == 1 && ok;
+    int st = 0;
+    ok = waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && ok;
+    if (fu >= 0) close(fu);
+    if (fn >= 0) close(fn);
+    return ok;
+}
+
+/* And the reverse: a user namespace made inside another has no capability
+ * over the UTS, mount and network namespaces of the one around it, even
+ * when its root is the only one there. */
+static int child_not_over_parent_namespaces(void) {
+    if (unshare(CLONE_NEWUTS | CLONE_NEWNS | CLONE_NEWNET) != 0) return 0;
+    mkdir("/tmp/ud_cm", 0755);
+    pid_t c = fork();
+    if (c == 0) {
+        if (unshare(CLONE_NEWUSER) != 0) _exit(10);
+        if (write_trunc("/proc/self/setgroups", "deny", 4) != 4) _exit(11);
+        if (write_trunc("/proc/self/uid_map", "0 0 1\n", 6) != 6) _exit(12);
+        if (write_trunc("/proc/self/gid_map", "0 0 1\n", 6) != 6) _exit(13);
+        if (sethostname("x", 1) != -1 || errno != EPERM) _exit(1);
+        if (mount("t", "/tmp/ud_cm", "tmpfs", 0, 0) != -1 || errno != EPERM) _exit(2);
+        _exit(0);
+    }
+    int st = 0;
+    int ok = waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    if (!ok && WIFEXITED(st)) errno = 1000 + WEXITSTATUS(st);
+    rmdir("/tmp/ud_cm");
+    return ok;
+}
+
+/* ps prints the owner of /proc/PID: in a user namespace that maps the
+ * caller to 0, the directory and the files in it read as owned by 0, not as
+ * the host user the overflow id stands for. */
+static int proc_owner_mapped(void) {
+    const char *paths[] = {"/proc/self", "/proc/self/status", "/proc/self/stat", "/proc/self/cmdline", "/proc/self/fd", "/proc/self/exe"};
+    for (int i = 0; i < 6; i++) {
+        struct stat st;
+        if (stat(paths[i], &st) != 0) { printf("stat %s %d\n", paths[i], errno), fflush(stdout); return 0; }
+        if (st.st_uid != 0 || st.st_gid != 0) { printf("%s owner %u:%u\n", paths[i], st.st_uid, st.st_gid), fflush(stdout); return 0; }
+    }
+    return 1;
+}
+
 /* After pivot_root, on a directory of the disk, runc's check that a directory descriptor reads back as
  * the path it opened (/proc/self/fd/N names the path from the new root). */
 static char pivot_dir[256];
@@ -157,20 +239,24 @@ static int fdlink_after_pivot(void) {
     return 1;
 }
 
-/* Root of a user namespace goes back into a mount, UTS or network namespace
- * that it made (runc's way into a container), and not into the first one. */
+/* Root of a user namespace goes back into a mount, UTS, IPC or network
+ * namespace that it made (runc's way into a container), and not into the first
+ * mount or IPC one. */
 static int setns_own_kinds(void) {
     int m = open("/proc/self/ns/mnt", O_RDONLY);
     int first = open("/proc/1/ns/mnt", O_RDONLY);
-    if (unshare(CLONE_NEWUTS | CLONE_NEWNET) != 0) return 0;
+    int first_ipc = open("/proc/1/ns/ipc", O_RDONLY);
+    if (unshare(CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWIPC) != 0) return 0;
     int u = open("/proc/self/ns/uts", O_RDONLY);
     int n = open("/proc/self/ns/net", O_RDONLY);
-    if (m < 0 || first < 0 || u < 0 || n < 0) return 0;
+    int i = open("/proc/self/ns/ipc", O_RDONLY);
+    if (m < 0 || first < 0 || first_ipc < 0 || u < 0 || n < 0 || i < 0) return 0;
     if (setns(first, CLONE_NEWNS) != -1 || errno != EPERM) return 0;
+    if (setns(first_ipc, CLONE_NEWIPC) != -1 || errno != EPERM) return 0;
     pid_t c = fork();
     if (c == 0) {
-        if (unshare(CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET) != 0) _exit(1);
-        if (setns(m, CLONE_NEWNS) != 0 || setns(u, CLONE_NEWUTS) != 0 || setns(n, CLONE_NEWNET) != 0) _exit(2);
+        if (unshare(CLONE_NEWNS | CLONE_NEWUTS | CLONE_NEWNET | CLONE_NEWIPC) != 0) _exit(1);
+        if (setns(m, CLONE_NEWNS) != 0 || setns(u, CLONE_NEWUTS) != 0 || setns(n, CLONE_NEWNET) != 0 || setns(i, CLONE_NEWIPC) != 0) _exit(2);
         _exit(0);
     }
     int st;
@@ -181,9 +267,9 @@ static int setns_own_kinds(void) {
  * is already in (LTP setns01 relies on it). */
 static int setns_unprivileged(void) {
     if (!as_nobody()) return 0;
-    const char *names[] = {"mnt", "uts", "net"};
-    int types[] = {CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWNET};
-    for (int i = 0; i < 3; i++) {
+    const char *names[] = {"mnt", "uts", "ipc", "net", "pid"};
+    int types[] = {CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWNET, CLONE_NEWPID};
+    for (int i = 0; i < 5; i++) {
         char path[32];
         snprintf(path, sizeof path, "/proc/self/ns/%s", names[i]);
         int f = open(path, O_RDONLY);
@@ -225,6 +311,53 @@ static int setns_child_mntns(void) {
     waitpid(c, &st, 0);
     errno = err;
     return ok;
+}
+
+/* The root of a user namespace joins a PID namespace it made, so that its
+ * children start there (crun exec's way into a container); a user outside
+ * is refused. */
+static int pidns_join_by_owner(void) {
+    int up[2], down[2], gdown[2];
+    if (pipe(up) || pipe(down) || pipe(gdown)) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        char b;
+        if (!as_nobody() || unshare(CLONE_NEWUSER) != 0) _exit(10);
+        char map[32];
+        int n = snprintf(map, sizeof map, "0 %d 1\n", NOBODY);
+        if (write_trunc("/proc/self/setgroups", "deny", 4) != 4 || write_trunc("/proc/self/uid_map", map, n) != n
+            || write_trunc("/proc/self/gid_map", map, n) != n) _exit(11);
+        if (unshare(CLONE_NEWPID) != 0) _exit(12);
+        int rd[2];
+        if (pipe(rd)) _exit(13);
+        pid_t g = fork();
+        if (g == 0) {
+            if (getpid() != 1) _exit(1);
+            if (write(rd[1], "x", 1) != 1 || read(gdown[0], &b, 1) != 1) _exit(2);
+            _exit(0);
+        }
+        if (g < 0 || read(rd[0], &b, 1) != 1) _exit(14);
+        if (write(up[1], &g, sizeof g) != sizeof g || read(down[0], &b, 1) != 1) _exit(15);
+        char path[64];
+        snprintf(path, sizeof path, "/proc/%d/ns/pid", (int)g);
+        int f = open(path, O_RDONLY);
+        if (f < 0 || setns(f, CLONE_NEWPID) != 0) _exit(16);
+        pid_t h = fork();
+        if (h == 0) _exit(getpid() == 2 ? 0 : 1);
+        int st;
+        if (h < 0 || waitpid(h, &st, 0) != h || !WIFEXITED(st) || WEXITSTATUS(st) != 0) _exit(17);
+        if (write(gdown[1], "z", 1) != 1) _exit(18);
+        _exit(0);
+    }
+    pid_t g;
+    char path[64];
+    int ok = as_nobody() && read(up[0], &g, sizeof g) == sizeof g;
+    snprintf(path, sizeof path, "/proc/%d/ns/pid", (int)g);
+    int f = ok ? open(path, O_RDONLY) : -1;
+    ok = ok && f >= 0 && setns(f, CLONE_NEWPID) == -1 && errno == EPERM;
+    ok = ok && write(down[1], "y", 1) == 1;
+    int st;
+    return waitpid(c, &st, 0) == c && ok && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
 /* The user who made a user namespace joins it again with setns (rootless
@@ -411,9 +544,13 @@ int main(void) {
     EXPECT("a process maps the user namespace it has just made itself", in_child(map_own_after_unshare));
     EXPECT("a user namespace is made inside another and mapped through it", in_child(nested_userns));
     EXPECT("whoever made a user namespace joins it with setns, and not the first one", in_child(join_userns));
+    EXPECT("the root of a user namespace joins a PID namespace it made and its children start there, an outsider cannot", in_child(pidns_join_by_owner));
     EXPECT("an unprivileged user cannot setns, not even into the namespaces it is in", in_child(setns_unprivileged));
-    EXPECT("root of a user namespace joins the mount, UTS and network namespaces it made, not the first mount one", in_userns(setns_own_kinds, 1));
+    EXPECT("root of a user namespace joins the mount, UTS, IPC and network namespaces it made, not the first mount or IPC one", in_userns(setns_own_kinds, 1));
     EXPECT("and the mount namespace of a process in a user namespace it made", in_userns(setns_child_mntns, 0));
+    EXPECT("the root of a user namespace joins the UTS and network namespaces a user namespace inside it made", in_userns(parent_over_child_namespaces, 0));
+    EXPECT("and a user namespace inside has none over the UTS and mount namespaces of the one around it", in_userns(child_not_over_parent_namespaces, 0));
+    EXPECT("/proc/PID and the files in it belong to the mapped user of their process", in_userns(proc_owner_mapped, 0));
     EXPECT("a directory descriptor reads back from the new root after pivot_root", in_userns(fdlink_after_pivot, 1));
     EXPECT("the root of a user namespace brings loopback up in a network namespace of its own", in_userns(lo_up_in_own_netns, 0));
     EXPECT("and not in the first one", in_userns(lo_up_in_first_netns, 0));

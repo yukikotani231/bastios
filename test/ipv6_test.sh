@@ -119,6 +119,8 @@ class Wire:
                 self.send(ip6(58, target, src, na, hops=255, at=2))
         elif kind == 136:
             self.got.append(("na", p[8:24], p[26:32] if len(p) >= 32 else b"", hops))
+        elif kind == 1:
+            self.got.append(("unreach", src, dst, p[1], p[8:]))
         elif kind == 129:
             self.got.append(("echo-reply", src, dst, p[4:]))
         elif kind == 128 and dst in OURS:   # a ping from the guest
@@ -266,6 +268,11 @@ check(ready, "the servers are listening")
 u = struct.pack("!HHHH", 4000, 9001, 8 + 5, 0) + b"hello"
 wire.send(ip6(17, ON_LINK, GUEST_GL, u, at=6))
 check(until(lambda: any(g[0] == "udp-back" for g in wire.got), 5), "a dual-stack UDP socket answers an IPv6 peer")
+u = struct.pack("!HHHH", 4002, 9999, 8 + 3, 0) + b"abc"
+wire.send(ip6(17, ON_LINK, GUEST_GL, u, at=6))
+check(until(lambda: any(g[0] == "unreach" and g[1] == GUEST_GL and g[2] == ON_LINK and g[3] == 4
+                        and g[4][40:46] == u[:6] for g in wire.got), 5),
+      "a datagram to a closed port is answered with destination unreachable (port) quoting it")
 def tseg(fl, s, a, body=b""):
     t = struct.pack("!HHIIBBHHH", 4001, 9002, s, a, 5 << 4, fl, 65535, 0, 0) + body
     wire.send(ip6(6, ON_LINK, GUEST_GL, t, at=16))

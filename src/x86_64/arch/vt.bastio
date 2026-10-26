@@ -216,6 +216,29 @@ fn vt_msix(t: &mut Vt, queues: u64) -> bool
   }
 }
 
+/// Does the device offer feature bit `bit` (a power of two below 2^32)?
+/// Asked before vt_start, which accepts what it is told to.
+fn vt_offers(t: &mut Vt, bit: u64) -> bool
+  requires vt_ok(t) && bit > 0 && bit <= 2147483648
+  ensures vt_ok(t)
+  ensures forall k: u64 :: vt_holds(t, k) == old(vt_holds(t, k))
+  ensures forall a: u64 :: vt_claims(t, a) == old(vt_claims(t, a))
+{
+  match t {
+    Vt::Port(mut io) => {
+      let offered = cast[u64](pio_in32(&mut io, VIO_HOST_FEATURES));
+      t = Vt::Port(io);
+      return offered != 0xFFFFFFFF && offered / bit % 2 == 1;
+    },
+    Vt::Mem(mut d) => {
+      mmio_write32(&mut d.regs, VM_FEAT_SEL, 0);
+      let offered = cast[u64](mmio_read32(&mut d.regs, VM_FEAT));
+      t = Vt::Mem(d);
+      return offered / bit % 2 == 1;
+    },
+  }
+}
+
 /// Starts the handshake: reset, then "I see you" and "I can drive you".
 /// Accepts feature bit `want` (a power of two, or 0 for none) if the device
 /// offers it, and returns false if nothing answers (or, on a modern

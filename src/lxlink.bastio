@@ -24,7 +24,7 @@ const LX_SYMLINK: u64 = 88;
 const LX_LINKAT: u64 = 265;
 const LX_SYMLINKAT: u64 = 266;
 const LINK_HOPS: u64 = 8;
-const SPLICE: u64 = 1024;             // 2 * PATH_OUT: a link's directory, its target and the rest
+const SPLICE: u64 = 16384;            // 2 * PATH_OUT: a link's directory, its target and the rest
 const AT_SYMLINK_FOLLOW: u64 = 0x400;
 
 /// Normalizes src[..sl] into dst: empty parts and "." dropped, ".." going
@@ -104,7 +104,12 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
     k.perr = ENAMETOOLONG;
     return NO_RESULT;
   }
-  let mut p = balloc(PATH_OUT);
+  let mut p = k.lexb;                        // borrowed, not allocated: see Kernel.lexb
+  k.lexb = balloc(0);
+  if blen(p) != PATH_OUT {
+    bfree(p);
+    p = balloc(PATH_OUT);
+  }
   let mut q = balloc(1);                    // grown to SPLICE at the first link: most names have none
   bytes_copy_span(&mut p, 0, k.fs.xfer, 0, n);
   let ns = ns_of(k, pid);
@@ -112,6 +117,21 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   let mut e = 0;                            // where the component being looked at starts
   let mut hops = 0;
   let mut bad = false;
+  // A name that exists and is not a link has only directories above it (a
+  // file is created through its parent, which this very function resolves;
+  // a directory or a link is not replaced while it has entries). So when no
+  // mount covers the path, and the whole name is a file in the file layer,
+  // the walk down its components would find directories and no link and
+  // end here: the lookups above the last component are skipped.
+  if last && pl > 0 && ns_find(k, ns, p, pl) >= MT_N {
+    let tl = ns_tr(&mut k, ns, p, pl);
+    if tl != NO_RESULT && magic_link(&mut k, pid, tl) == NO_RESULT {
+      let f = vfs_lookup(&mut k.fs, tl);
+      if f != NO_FILE && !vfs_is_link(&mut k.fs, f) {
+        e = pl;
+      }
+    }
+  }
   while e < pl && !bad
     invariant e <= pl && pl <= FNAME_MAX && blen(p) == PATH_OUT && (blen(q) == SPLICE || blen(q) == 1) && kok(k)
   {
@@ -123,9 +143,11 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
     }
     let mut f = NO_FILE;
     let mut mt = NO_RESULT;                 // the target of a /proc/PID/fd/N link, in the transfer buffer
+    let mut tn = NO_RESULT;                 // the length of the name looked up, in the transfer buffer
     if c < pl || last {
       // Looked up where the mount namespace maps it (src/lxns.bastio).
       let tl = ns_tr(&mut k, ns, p, c);
+      tn = tl;
       if tl == NO_RESULT {
         bad = true;
       } else {
@@ -138,13 +160,17 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
     if bad {
       // the name is too long where the mount namespace maps it
     } else if mt != NO_RESULT || (f != NO_FILE && vfs_is_link(&mut k.fs, f)) {
+      let mut nsf = false;                  // a link under a mount made with MS_NOSYMFOLLOW (before the read below takes the transfer buffer)
+      if mt == NO_RESULT && tn <= XBUF && vfs_path_mflags(&mut k.fs, tn) / 8192 % 2 == 1 {
+        nsf = true;
+      }
       let mut t = mt;
       if mt == NO_RESULT {
         t = vfs_read_at(&mut k.fs, f, 0, FNAME_MAX);
       }
-      if hops >= LINK_HOPS {
+      if hops >= LINK_HOPS || nsf {
         bad = true;
-        k.perr = ELOOP;
+        k.perr = ELOOP;                     // too many links, or MS_NOSYMFOLLOW
       } else if t == NO_FD || t == 0 || t > FNAME_MAX {
         bad = true;
         k.perr = ENOENT;
@@ -196,6 +222,14 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
       if f != NO_FILE && !vfs_is_dir(&mut k.fs, f) {
         bad = true;                         // a file with something under it
         k.perr = ENOTDIR;
+      } else if f == NO_FILE && mt == NO_RESULT && tn <= FNAME_MAX {
+        // A device node or a built-in program is not in the file layer, but
+        // is no directory either: "/dev/null/x" is ENOTDIR, not ENOENT.
+        let sm = path_meta(&mut k, tn);
+        if sm.ok && sm.mode % 65536 / 4096 * 4096 != S_IFMT_DIR {
+          bad = true;
+          k.perr = ENOTDIR;
+        }
       }
       e = c + 1;
     } else {
@@ -204,7 +238,8 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   }
   bfree(q);
   if bad {
-    bfree(p);
+    bfree(k.lexb);
+    k.lexb = p;
     return NO_RESULT;
   }
   // The logical path is kept (for a working directory, an open
@@ -212,7 +247,8 @@ fn lx_follow(k: &mut Kernel, pid: u64, n: u64, last: bool, floor: u64) -> u64
   // buffer.
   ns_keep(&mut k, p, pl);
   let tl = ns_tr_final(&mut k, ns, p, pl);
-  bfree(p);
+  bfree(k.lexb);
+  k.lexb = p;
   if tl == NO_RESULT {
     return NO_RESULT;
   }
@@ -269,7 +305,7 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
   let mut tb = balloc(FNAME_MAX);
   let mut i = 0;
   while i < tl
-    invariant i <= tl && tl <= FNAME_MAX && tl <= XFER && blen(tb) == FNAME_MAX && kok(k)
+    invariant i <= tl && tl <= FNAME_MAX && tl <= XBUF && blen(tb) == FNAME_MAX && kok(k)
   {
     bset(&mut tb, i, bget(k.fs.xfer, i));
     i = i + 1;

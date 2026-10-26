@@ -37,6 +37,8 @@ const FUTEX_PRIVATE: u64 = 128;
 const FUTEX_PHYS: u64 = 0x8000000000000000;   // keys of futexes on shared pages          // the rest: FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME
 const ETIMEDOUT: u64 = 18446744073709551506;   // 2^64 - 110
 
+const CLONE_FS: u64 = 0x200;
+const CLONE_FILES: u64 = 0x400;
 const CLONE_SIGHAND: u64 = 0x800;
 const CLONE_SETTLS: u64 = 0x80000;
 const CLONE_PARENT_SETTID: u64 = 0x100000;
@@ -108,7 +110,8 @@ fn quieting(procs: &Buf, q: u64) -> bool
 {
   let st = state(procs, q);
   let n = pget(procs, q, F_REGS + R_LXNR);       // the call it will run again (lx_retry)
-  let remap = n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MREMAP || n == LX_MMAP;
+  let remap = n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MREMAP || n == LX_MMAP
+    || n == LX_FORK || n == LX_VFORK || n == LX_CLONE || n == LX_CLONE3;   // copies_space (src/linux.bastio)
   return pget(procs, q, F_QUIET) != 0 && pget(procs, q, F_RESTART) != 0 && remap && (st == READY || st == RUNNING);
 }
 
@@ -185,7 +188,7 @@ fn swap_words(t: &mut Buf, a: u64, b: u64, n: u64)
 }
 
 /// Moves what the threads of a group share from member h to member p:
-/// the address space, descriptors, working directory, signal actions,
+/// the address space, working directory, signal actions,
 /// alarm, and the break and mmap floor. False, with nothing moved, if h
 /// has no space or p already has one.
 fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
@@ -207,18 +210,17 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   pset(&mut k.procs, p, F_MMAP, pget(k.procs, h, F_MMAP));
   pset(&mut k.procs, p, F_PROG, pget(k.procs, h, F_PROG));
   pset(&mut k.procs, p, F_ARGS, pget(k.procs, h, F_ARGS));
-  if (h + 1) * LXNFD <= len(k.lxfd) && (p + 1) * LXNFD <= len(k.lxfd) {
-    swap_words(&mut k.lxfd, h * LXNFD, p * LXNFD, smaller(k.fd_hi, LXNFD));   // past fd_hi both rows are zero
-  }
   // The working directory and root are shared (CLONE_FS) unless the threads
   // are in different mount namespaces, which only setns and unshare make
   // them: then each keeps its own. Namespaces belong to the thread.
   if get(k.mns, h) == get(k.mns, p) {
     if (h + 1) * CWD_STRIDE <= len(k.cwd) && (p + 1) * CWD_STRIDE <= len(k.cwd) {      // live processes have rows
       swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+      swap_spill(&mut k.cwdx, h, p);
     }
     if (h + 1) * CWD_STRIDE <= len(k.croot) && (p + 1) * CWD_STRIDE <= len(k.croot) {
       swap_words(&mut k.croot, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
+      swap_spill(&mut k.crootx, h, p);
     }
   }
   if (h + 1) * SIGACT_ROW <= len(k.sigact) && (p + 1) * SIGACT_ROW <= len(k.sigact) {
@@ -240,6 +242,8 @@ fn group_take(k: &mut Kernel, mmu: &Mmu, p: u64)
   requires kok(k) && p < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  fd_take(&mut k, p);                       // threads, and processes cloned with CLONE_FILES
+  fs_take(&mut k, p);                       // and with CLONE_FS
   if pget(k.procs, p, F_TGID) == 0 || has_space(&mut k.spaces, p) {
     return;
   }
@@ -271,10 +275,14 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
     c = c + 1;
   }
   pr_clear(&mut k, q);
+  if g < NPROC {
+    td_fold(&mut k, q, g);                // its CPU times stay with the process (src/lxrlimit.bastio)
+  }
   pset(&mut k.procs, q, F_TGID, 0);
   pset(&mut k.procs, q, F_CTID, 0);
   pset(&mut k.procs, q, F_FUTEX, 0);
   pset(&mut k.procs, q, F_SIGPEND, 0);
+  rtq_clear(&mut k, q);
   pset(&mut k.procs, q, F_RESTART, 0);
   pset(&mut k.procs, q, F_STATE, FREE);
 }
@@ -364,12 +372,15 @@ fn put_user_u32(k: &mut Kernel, pid: u64, va: u64, v: u64) -> bool
 /// clone(flags, stack, ptid, ctid, tls) with CLONE_THREAD: a new thread
 /// of pid's group, running pid's code on `stack`. Returns its id, or
 /// -errno.
-fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64
+fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, pfdp: u64, ctid: u64, tls: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
   ensures kok(k)
 {
   if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 || flags & CLONE_VFORK != 0 {
     return EINVAL;
+  }
+  if fs_next(k.procs, pid) != 0 {
+    return EAGAIN;                          // its working directory is shared with another process: threads would move it with their group
   }
   if !cow_break_all(&mut k, pid) {
     return ENOMEM;                          // its copy-on-write pages need copies first (src/lxcow.bastio)
@@ -377,12 +388,21 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if !pn_open_for_new(k, nsk_of(k, NSK_PID, pid)) {
     return ENOMEM;                          // the init of its PID namespace has ended
   }
-  if !cg_fork_ok(k, pid) {
+  if !cg_fork_ok(&mut k, pid) {
     return EAGAIN;                          // a control group's pids.max (src/lxcgroup.bastio)
+  }
+  if flags & CLONE_PIDFD != 0 && (fd_free(k, pid, 0) >= LXNFD || (flags & CLONE_PARENT_SETTID != 0 && ptid == pfdp)) {
+    if flags & CLONE_PARENT_SETTID != 0 && ptid == pfdp {
+      return EINVAL;                        // both want the same word
+    }
+    return EMFILE;
   }
   let c = new_tid(&mut k);
   if c == 0 {
     return EAGAIN;
+  }
+  if !cwd_reserve(&mut k, pid, c) {
+    return ENOMEM;
   }
   pidfd_reuse(&mut k, c);                   // pidfds on the slot's last process (src/lxpidfd.bastio)
   keys_fork(&mut k, pid, c);                // its session keyring is the parent's (src/lxkeys.bastio)
@@ -409,9 +429,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   let g = tgid(k.procs, pid);
   pset(&mut k.procs, g, F_TGID, g);
   wcopy(&mut k.procs, c * STRIDE, pid * STRIDE, STRIDE);
+  pset(&mut k.procs, c, F_FDNEXT, 0);      // the copy of the row says who shares with the creator
+  pset(&mut k.procs, c, F_FDHOLD, 0);
+  fd_join(&mut k, pid, c);                  // the group's descriptors
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
+  pset(&mut k.procs, c, F_TDUSER, 0);      // nor any of ended threads (src/lxrlimit.bastio)
+  pset(&mut k.procs, c, F_TDSYS, 0);
   pset(&mut k.procs, c, F_START, k.ns / 10000000 + 1);
   pset(&mut k.procs, c, F_PARENT, 0);       // threads are nobody's children
   pr_fork(&mut k, pid, c);
@@ -428,10 +453,11 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
     pset(&mut k.procs, c, F_REGS + R_FSBASE, tls);
   }
   pset(&mut k.procs, c, F_SIGPEND, 0);
+  rtq_clear(&mut k, c);
   pset(&mut k.procs, c, F_RESTART, 0);
   pset(&mut k.procs, c, F_TGID, g);
-  cwd_fork(&mut k.cwd, pid, c);             // starts where the creator is: a row of a thread that ended holds its old root
-  cwd_fork(&mut k.croot, pid, c);
+  let c1 = cwd_fork(&mut k.cwd, &mut k.cwdx, pid, c);             // starts where the creator is: a row of a thread that ended holds its old root
+  let c2 = cwd_fork(&mut k.croot, &mut k.crootx, pid, c);
   k.mns = set(k.mns, c, get(k.mns, pid));   // the group's namespaces (src/lxns.bastio, src/lxnsk.bastio)
   nsk_fork(&mut k.mns, pid, c);
   nsk_set(&mut k, NSK_TIME, c, nsk_of(k, NSK_TIME, pid));   // a thread shares its creator's time namespace, whatever its children get
@@ -449,6 +475,10 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if flags & CLONE_CHILD_SETTID != 0 {
     let ok = put_user_u32(&mut k, pid, ctid, vpid_of(k, pid, c));
   }
+  if flags & CLONE_PIDFD != 0 {
+    let pfd = ev_install(&mut k, pid, OF_PIDFD, c, 2, true);     // a pidfd on the thread
+    let w = put_user_u32(&mut k, pid, pfdp, pfd % 0x100000000);
+  }
   pset(&mut k.procs, c, F_STATE, READY);
   return c;
 }
@@ -456,12 +486,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
 /// The clone flags a new process (not a thread, not a vfork) may carry:
 /// the exit signal, CLONE_PARENT, CLONE_PIDFD, the tid and TLS flags, and the ones
 /// that change nothing here (CLONE_SYSVSEM, CLONE_DETACHED, CLONE_IO).
+/// CLONE_FILES, which shares the descriptor table (fd_join), and CLONE_FS,
+/// which shares the working directory, root and umask (fs_join).
 /// CLONE_NEWNS, CLONE_NEWUTS, CLONE_NEWIPC, CLONE_NEWCGROUP and CLONE_NEWNET give the
-/// child a mount, UTS, IPC, cgroup or network namespace of its own. Sharing files, the cwd, signal handlers or
+/// child a mount, UTS, IPC, cgroup or network namespace of its own. Sharing the cwd, signal handlers or
 /// memory with a separate process, and the other namespaces, are not
 /// supported.
 fn clone_proc_flags(flags: u64) -> bool {
-  let known = 0xff + CLONE_PARENT + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID + CLONE_PIDFD
+  let known = 0xff + CLONE_PARENT + CLONE_FS + CLONE_FILES + CLONE_SYSVSEM + CLONE_SETTLS + CLONE_PARENT_SETTID + CLONE_PIDFD
     + CLONE_CHILD_CLEARTID + CLONE_DETACHED + CLONE_CHILD_SETTID + CLONE_IO + CLONE_NEWNS
     + CLONE_NEWUTS + CLONE_NEWIPC + CLONE_NEWPID + CLONE_NEWUSER + CLONE_NEWCGROUP + CLONE_NEWNET;
   return flags & known == flags;
@@ -471,11 +503,14 @@ fn clone_proc_flags(flags: u64) -> bool {
 /// then the child starts on `stack` (if not 0) with the flags' extras.
 /// With CLONE_PARENT the child is its parent's sibling. Returns the
 /// child's pid, or -errno.
-fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, ptid: u64, ctid: u64, tls: u64) -> u64
+fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, ptid: u64, pfdp: u64, ctid: u64, tls: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
   let mut par = pid;
+  if flags & CLONE_FS != 0 && (pget(k.procs, pid, F_TGID) != 0 || flags & CLONE_NEWNS != 0) {
+    return EINVAL;                          // a thread group keeps its working directory in its own way (group_move)
+  }
   if flags & CLONE_PARENT != 0 {
     par = pget(k.procs, tgid(k.procs, pid), F_PARENT);
     if par == 0 || par >= NPROC {
@@ -486,7 +521,7 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
     // The descriptor is the parent's, so one must be free; it cannot share
     // the word that CLONE_PARENT_SETTID writes the id to, and a detached
     // child has no one to wait for it.
-    if flags & (CLONE_PARENT_SETTID + CLONE_DETACHED) != 0 {
+    if flags & CLONE_DETACHED != 0 || (flags & CLONE_PARENT_SETTID != 0 && ptid == pfdp) {
       return EINVAL;
     }
     if fd_free(k, pid, 0) >= LXNFD {
@@ -522,6 +557,13 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   }
   if flags % 256 != SIGCHLD {
     pset(&mut k.procs, c, F_XSIG, flags % 256 + 1);   // the exit signal the parent gets
+  }
+  if flags & CLONE_FS != 0 {
+    fs_join(&mut k, pid, c);                // the copy fork made is not used
+  }
+  if flags & CLONE_FILES != 0 {
+    lx_fd_close_all(&mut k, c, false);      // the copy fork made: the child has the parent's table instead
+    fd_join(&mut k, pid, c);
   }
   if flags & CLONE_NEWNS != 0 {
     let e = ns_unshare(&mut k, c);          // cannot fail: ns_room said so
@@ -560,19 +602,18 @@ fn lx_clone_proc(k: &mut Kernel, mmu: &Mmu, pid: u64, flags: u64, stack: u64, pt
   }
   if flags & CLONE_PIDFD != 0 {
     let pfd = ev_install(&mut k, pid, OF_PIDFD, c, 0, true);
-    let w = put_user_u32(&mut k, pid, ptid, pfd % 0x100000000);   // only the parent's copy of the word
+    let w = put_user_u32(&mut k, pid, pfdp, pfd % 0x100000000);   // only the parent's copy of the word
   }
   return c;
 }
 
-const CLONE_FS: u64 = 0x200;
-const CLONE_FILES: u64 = 0x400;
 // CLONE_NEWNS, NEWCGROUP, NEWUTS, NEWIPC, NEWUSER, NEWPID, NEWNET and
 // NEWTIME: the namespaces.
 const CLONE_NEWALL: u64 = 0x7e020080;
 
-/// unshare(flags). A process (not a thread group) shares nothing with
-/// another one here, so unsharing its files, cwd, memory, signal handlers
+/// unshare(flags). CLONE_FILES gives the caller a copy of the descriptor
+/// table it shares. A process (not a thread group) shares nothing else with
+/// another one here, so unsharing its cwd, memory, signal handlers
 /// or semaphore undo list changes nothing. CLONE_NEWNS, CLONE_NEWUTS and
 /// CLONE_NEWIPC give it a mount, UTS or IPC namespace of its own
 /// (src/lxns.bastio, src/lxnsk.bastio). The other namespaces are not
@@ -600,8 +641,14 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
   }
   // A thread keeps its own working directory and root even when cloned with
   // CLONE_FS, so unsharing those has nothing left to do.
-  if flags != ns && flags != ns + CLONE_FS && pget(k.procs, pid, F_TGID) != 0 {
+  if flags & !(ns + CLONE_FS + CLONE_FILES) != 0 && pget(k.procs, pid, F_TGID) != 0 {
     return EINVAL;                          // threads that share them: not supported
+  }
+  if flags & CLONE_FS != 0 || ns & CLONE_NEWNS != 0 {
+    fs_unshare(&mut k, pid);                // a new mount namespace takes a working directory of its own too
+  }
+  if flags & CLONE_FILES != 0 && fd_next(k.procs, pid) != 0 && fd_top(k, pid) > nr_open(k) {
+    return EMFILE;                          // the copy would hold a descriptor past /proc/sys/fs/nr_open
   }
   if ns & CLONE_NEWNS != 0 && ns & (CLONE_NEWNET + CLONE_NEWUTS + CLONE_NEWIPC) != 0 && !ns_room(&mut k, pid) {
     return ENOMEM;                          // so the others are not made alone
@@ -628,6 +675,9 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
     if e != 0 {
       return e;
     }
+  }
+  if flags & CLONE_FILES != 0 {
+    fd_unshare(&mut k, pid);
   }
   let e = nsk_unshare(&mut k, pid, ns);     // src/lxnsk.bastio
   if e == 0 && ns & CLONE_NEWNS != 0 {
@@ -1072,7 +1122,7 @@ fn robust_exit(k: &mut Kernel, pid: u64)
 }
 
 /// The arguments of clone3(args, size) in the form clone takes them.
-struct Clone3 { err: u64, clear: bool, flags: u64, sp: u64, ptid: u64, ctid: u64, tls: u64 }
+struct Clone3 { err: u64, clear: bool, flags: u64, sp: u64, ptid: u64, ctid: u64, tls: u64, pfd: u64 }
 
 /// Reads struct clone_args (flags, pidfd, child_tid, parent_tid,
 /// exit_signal, stack, stack_size, tls, then set_tid and later fields)
@@ -1084,12 +1134,12 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  let none = Clone3 { err: EINVAL, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+  let none = Clone3 { err: EINVAL, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
   if size < 64 || size > 4096 {
     return none;
   }
   if va >= 0x8000000000000000 {
-    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
   }
   let flags = user_u64(&mut k.spaces, pid, va);
   let pidfd = user_u64(&mut k.spaces, pid, va + 8);
@@ -1100,7 +1150,7 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   let stack_size = user_u64(&mut k.spaces, pid, va + 48);
   let tls = user_u64(&mut k.spaces, pid, va + 56);
   if !flags.ok || !pidfd.ok || !child_tid.ok || !parent_tid.ok || !exit_signal.ok || !stack.ok || !stack_size.ok || !tls.ok {
-    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+    return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
   }
   let low = flags.v % 0x100000000;
   let clear = flags.v / 0x100000000;
@@ -1112,18 +1162,13 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   if (low & CLONE_SIGHAND != 0 && low & 0x100 == 0) || (low & 0x10000 != 0 && low & CLONE_SIGHAND == 0) || (low & 0x200 != 0 && low & CLONE_NEWNS != 0) {
     return none;
   }
-  let mut parent_word = parent_tid.v;
   if low & CLONE_PIDFD != 0 {
-    // CLONE_PIDFD: the descriptor's number goes to *pidfd, which clone
-    // takes as the parent_tid word (the two flags exclude each other).
+    // CLONE_PIDFD: the descriptor's number goes to *pidfd, a word of its
+    // own (clone takes it from parent_tid, and the flags exclude each other).
     let pf = user_u64(&mut k.spaces, pid, pidfd.v);
     if !pf.ok {
-      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
-    if low & CLONE_PARENT_SETTID != 0 || low & CLONE_THREAD != 0 {
-      return none;
-    }
-    parent_word = pidfd.v;
   }
   if (stack.v == 0) != (stack_size.v == 0) || stack.v >= 0x8000000000000000 || stack_size.v >= 0x8000000000000000 {
     return none;
@@ -1133,7 +1178,7 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
     // namespace (EPERM); with it the field is still unsupported (E2BIG below).
     let tsz = user_u64(&mut k.spaces, pid, va + 72);
     if tsz.ok && tsz.v != 0 && !ns_cap(k, pid, CAP_SYS_ADMIN) {
-      return Clone3 { err: EPERM, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: EPERM, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
   }
   let mut j = 64;
@@ -1142,12 +1187,12 @@ fn lx_clone3_read(k: &mut Kernel, pid: u64, va: u64, size: u64) -> Clone3
   {
     let w = user_u64(&mut k.spaces, pid, va + j);
     if !w.ok {
-      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: EFAULT, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
     if w.v != 0 {
-      return Clone3 { err: E2BIG, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0 };
+      return Clone3 { err: E2BIG, clear: false, flags: 0, sp: 0, ptid: 0, ctid: 0, tls: 0, pfd: 0 };
     }
     j = j + 8;
   }
-  return Clone3 { err: 0, clear: clear == 1, flags: low + exit_signal.v, sp: stack.v + stack_size.v, ptid: parent_word, ctid: child_tid.v, tls: tls.v };
+  return Clone3 { err: 0, clear: clear == 1, flags: low + exit_signal.v, sp: stack.v + stack_size.v, ptid: parent_tid.v, ctid: child_tid.v, tls: tls.v, pfd: pidfd.v };
 }

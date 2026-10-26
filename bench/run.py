@@ -113,6 +113,7 @@ exec setsid cttyhack sh
 
 def linux_initrd(osbench, tmp):
     root = os.path.join(tmp, "root")
+    shutil.rmtree(root, ignore_errors=True)         # a second boot in the same directory
     for d in ("bin", "proc", "sys", "dev", "tmp", "disk"):
         os.makedirs(os.path.join(root, d))
     bb = shutil.which("busybox") or "/bin/busybox"
@@ -136,6 +137,7 @@ class Guest:
     def __init__(self, cmd, prompt, logpath):
         self.prompt = prompt
         self.log = open(logpath, "wb")
+        self.t0 = time.monotonic()
         self.q = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         self.out = b""
         self.marks = []                     # (offset in out, host time)
@@ -208,9 +210,17 @@ def boot(osname, args, osbench, tmp):
         cmd = ["qemu-system-x86_64", "-kernel", args.kernel,
                "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
                "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"] + common
+        if getattr(args, "append", ""):
+            cmd += ["-append", args.append]
         g = Guest(cmd, "# ", log)
-        if not g.until(rb"bastios> ", 0, 300):
+        m = g.until(rb"bastios> ", 0, 300)
+        if not m:
             raise SystemExit("bench: BastiOS gave no prompt")
+        g.boot_ns = (g.time_at(m.start()) - g.t0) * 1e9
+        print("boot stages (s after starting QEMU): " + ", ".join(
+            f"{name} {g.time_at(g.out.find(pat)) - g.t0:.3f}"
+            for name, pat in (("banner", b"BastiOS 0.2:"), ("acpi", b"acpi:"), ("disk", b"disk:"), ("net", b"net:"), ("prompt", b"bastios> "))
+            if g.out.find(pat) >= 0), file=sys.stderr, flush=True)
         at = len(g.out)
         g.send("ash")
         if not g.until(rb"# ", at, 60):
@@ -222,8 +232,10 @@ def boot(osname, args, osbench, tmp):
                "-append", "console=ttyS0 quiet panic=-1 mitigations=off transparent_hugepage=never rdinit=/init",
                "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"] + common
         g = Guest(cmd, "# ", log)
-        if not g.until(rb"READY", 0, 600):
+        m = g.until(rb"READY", 0, 600)
+        if not m:
             raise SystemExit("bench: Linux did not reach its shell")
+        g.boot_ns = (g.time_at(m.start()) - g.t0) * 1e9
         g.until(rb"# ", len(g.out) - 1, 30)
         g.send("stty -echo 2>/dev/null; PS1='# '")
         time.sleep(1)
@@ -241,7 +253,15 @@ def qemu_cpu(g):
 def measure(g, test, d):
     """One run: (host ns per op, guest ns per op, ops) or a skip reason.
     For "idle", "host" is instead the host CPU QEMU used, in percent of
-    the time the guest slept."""
+    the time the guest slept, less what starting the program cost."""
+    base = 0.0
+    if test == "idle":
+        # The program's own start (reading it from the disk) costs CPU too,
+        # more on some systems than the sleep: a run that sleeps 1 ms is
+        # that cost alone, and is taken off.
+        c = qemu_cpu(g)
+        g.run(f"{g.exe} -d {d} idle=1")
+        base = qemu_cpu(g) - c
     cpu0 = qemu_cpu(g)
     at, text = g.run(f"{g.exe} -d {d} {'filewrite fileread' if test == 'fileread' else test}")
     if text is None:
@@ -260,8 +280,8 @@ def measure(g, test, d):
     ops, guest = int(e.group(1)), int(e.group(2))
     host = (t1 - t0) * 1e9
     if test == "idle":
-        # Taken over the whole command, so starting the program counts too.
-        return {"host": 100 * (qemu_cpu(g) - cpu0) * 1e9 / guest, "guest": guest, "ops": ops}
+        # Taken over the whole command, less the start-up cost measured above.
+        return {"host": 100 * max(qemu_cpu(g) - cpu0 - base, 0) * 1e9 / guest, "guest": guest, "ops": ops}
     # Lines that came in one read have one host time; a run that short is
     # timed by the guest.
     if host < 50e6 or ICOUNT:
@@ -280,6 +300,7 @@ def main():
     ap.add_argument("--linux", default=os.environ.get("LINUX_KERNEL", ""))
     ap.add_argument("--accel", default=accel())
     ap.add_argument("--cpu", default="")
+    ap.add_argument("--append", default="", help="the BastiOS kernel's command line (for example pcid)")
     ap.add_argument("--icount", action="store_true",
                     help="TCG with -icount shift=0: the guest clock counts instructions (one per ns), so a figure does not depend on the host's load")
     ap.add_argument("--out", default=os.path.join(B, "results.json"))
@@ -294,8 +315,17 @@ def main():
                "host_cpus": os.cpu_count(), "date": time.strftime("%Y-%m-%d %H:%M:%S"), "os": {}}
     with tempfile.TemporaryDirectory() as tmp:
         for osname in args.os.split(","):
-            g = boot(osname, args, osbench, tmp)
             res = results["os"][osname] = {}
+            if args.smp > 1:
+                # One processor: what the extra ones cost to start (the delays of boot/smp.c)
+                a1 = argparse.Namespace(**vars(args))
+                a1.smp = 1
+                boot(osname, a1, osbench, tmp).stop()     # the first boot of a system reads its files cold
+                g1 = boot(osname, a1, osbench, tmp)
+                res["boot1"] = {"host": g1.boot_ns, "guest": g1.boot_ns, "runs": [round(g1.boot_ns / 1e6, 1)]}
+                g1.stop()
+            g = boot(osname, args, osbench, tmp)
+            res["boot"] = {"host": g.boot_ns, "guest": g.boot_ns, "runs": [round(g.boot_ns / 1e6, 1)]}
             try:
                 for test, unit, scale, isfile in TESTS:
                     if want and test not in want:
@@ -332,7 +362,7 @@ def table(results):
              f"median of {results['runs']} runs, {'instruction count (--icount)' if ICOUNT else 'host time'} ({results['date']}, {results['host_cpus']} host CPUs).", "",
              "| Test | Unit | " + " | ".join(oses) + (" | BastiOS / Linux |" if len(oses) == 2 else " |"),
              "|---|---|" + "---:|" * len(oses) + ("---:|" if len(oses) == 2 else "")]
-    for test, unit, scale, isfile in TESTS:
+    for test, unit, scale, isfile in [("boot", "ms", 1e-6, False), ("boot1", "ms", 1e-6, False)] + TESTS:
         for where in (("tmp", "disk") if isfile else ("tmp",)):
             key = f"{test}@{where}" if isfile else test
             cells, vals = [], []
@@ -351,7 +381,7 @@ def table(results):
             row = f"| {key} | {unit} | " + " | ".join(cells) + " |"
             if len(oses) == 2:
                 # A slowdown factor either way: higher is worse for BastiOS.
-                row += f" {vals[0] / vals[1]:.2f}x |" if None not in vals else " |"
+                row += f" {vals[0] / vals[1]:.2f}x |" if None not in vals and vals[1] else " |"
             lines.append(row)
     return "\n".join(lines)
 

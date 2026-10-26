@@ -4,12 +4,13 @@ toolchain of the official golang:alpine image, as a root file system under
 /disk/g, next to a BusyBox at /disk/busybox. The checks make the device
 nodes, chroot into it and build and run Go programs.
 
-    godisk.py OUT.img IMAGE BUSYBOX --cache DIR
+    godisk.py OUT.img IMAGE BUSYBOX --cache DIR [--gopls FILE]
 
 IMAGE is a Docker Hub image, NAME@sha256:DIGEST (the Makefile pins
 golang:1.24-alpine). Its layers are fetched and cached as alpinedisk.py does
 it (in DIR, checked against their digests each time they are used). The Go
-tools are static programs, so the root holds only /usr/local/go; what a
+tools are static programs, so the root holds only /usr/local/go (and gopls, in
+/usr/local/bin, when --gopls names a build of it); what a
 build never reads (the tests, the documentation, the test data of the
 standard library) is left out to keep the disk small.
 """
@@ -37,6 +38,10 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
+    gopls = None
+    if "--gopls" in args:
+        gopls = args[args.index("--gopls") + 1]
+        del args[args.index("--gopls"):args.index("--gopls") + 2]
     out, image, busybox = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "go")
     cache = cache or work
@@ -62,6 +67,10 @@ def main():
             os.symlink(ti.linkname, path)
     if not os.path.exists(os.path.join(root, GO, "bin", "go")):
         sys.exit(f"godisk: {image} has no {GO}bin/go")
+    if gopls:
+        os.makedirs(os.path.join(root, "usr/local/bin"), exist_ok=True)
+        shutil.copyfile(gopls, os.path.join(root, "usr/local/bin/gopls"))
+        os.chmod(os.path.join(root, "usr/local/bin/gopls"), 0o755)
     for d in ("dev", "proc", "tmp", "etc"):
         os.makedirs(os.path.join(root, d), exist_ok=True)
     open(os.path.join(root, "etc", "hosts"), "w").write("127.0.0.1 localhost\n")
@@ -69,4 +78,5 @@ def main():
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
                                f"busybox={busybox}", f"g={root}"], env)
 
-main()
+if __name__ == "__main__":
+    main()

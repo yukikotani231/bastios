@@ -196,8 +196,10 @@ PKGINFO = [("P", "pkgname"), ("V", "pkgver"), ("T", "pkgdesc"), ("U", "url"),
 LISTS = [("D", "depend"), ("p", "provides"), ("r", "replaces"), ("i", "install_if")]
 
 def gz(b):
+    # Level 6, not gzip's default 9: on the 1.7 GB the images' packages
+    # hold, 9 takes about 3.5 times as long for 1% less.
     o = io.BytesIO()
-    with gzip.GzipFile(fileobj=o, mode="wb", mtime=0) as f:
+    with gzip.GzipFile(fileobj=o, mode="wb", mtime=0, compresslevel=6) as f:
         f.write(b)
     return o.getvalue()
 
@@ -536,8 +538,9 @@ def main():
     for r in (repo, repo2):
         args += [f"a/{os.path.basename(r)}/{ARCH}/{f}={os.path.join(r, f)}" for f in sorted(os.listdir(r))]
     # Room for the unpacked root and what apk installs (neovim, gcc and git
-    # together are about 350 MB; cmake, tmux and lua-language-server add about 60 MB).
-    env = dict(os.environ, MKDISK_FREE_MB="700")
+    # together are about 350 MB; cmake, tmux and lua-language-server add about 60 MB). The x86-64 disk also holds
+    # the Go toolchain and gopls as a tar file (140 MB), which a case unpacks (140 MB more).
+    env = dict(os.environ, MKDISK_FREE_MB="700" if ARCH != "x86_64" else "850")
     subprocess.run([os.path.join(HERE, "mkdisk.py"), out] + args, check=True, env=env)
 
 if __name__ == "__main__":

@@ -1,0 +1,943 @@
+// Swap: a file on the disk holds the pages of anonymous memory that do not
+// fit in RAM.
+//
+// swapon(2) takes a file made by mkswap (the "SWAPSPACE2" signature in the
+// last bytes of its first page); its other pages are the slots. When a page
+// fault finds no free page and the page cache has nothing to give back
+// (src/oom.bastio), swap_out writes private, writable pages of the biggest
+// processes to free slots, frees their frames and leaves in their place a
+// reference to one kernel page (the marker, slot 511 of the program store
+// k.txt) mapped with no access. A process that touches such a page faults;
+// swap_fault reads the slot back into a fresh page and maps it where the
+// marker was. Every other way the page is reached sees a page that is
+// there but may not be touched, so none can mistake it for one that reads
+// as zeros.
+//
+// k.swp holds the bookkeeping, laid out from the number of slots ns: a
+// header (SW_*), a count of swapped pages for each process, then a hash index
+// of (process, window page) -> slot (the heads of NB chains, the key and the
+// next link of every slot). A slot's key is 0 when it is free. Everything is
+// keyed by the thread group's leader, so the threads of a process share
+// their pages.
+//
+// What the kernel does for a system call whose arguments point at swapped
+// pages: swap_args brings in the page each argument names and the swapped
+// pages that follow it, before the call runs. Memory reached through a
+// pointer inside a structure (an iovec's buffers) is not: the call finds the
+// page not there and fails with EFAULT, as the kernel's own reads of code
+// pages not run yet do (src/lazy.bastio). A process that forks first gets
+// every page of its parent back (swap_reach), so fork shares no slot.
+//
+// Pages mlock or mlockall locked (src/lxrlimit.bastio) are not taken.
+//
+// What is trusted: nothing new. The frames come and go through the page
+// tables with the same capabilities every munmap uses; the disk is read and
+// written through the file system's own functions.
+
+import "oom.bastio";
+import "lxrlimit.bastio";
+
+const SW_MAX: u64 = 65536;               // slots a swap area may have (256 MiB)
+const SW_NONE: u64 = 18446744073709551615;
+const SW_HDR: u64 = 16;                  // header words
+const SW_HOLD: u64 = 0;                  // the swap file's hold + 1 (vfs_hold), so removing its name changes nothing
+const SW_NODE: u64 = 1;                  // its index on the disk + 1
+const SW_NS: u64 = 2;                    // slots
+const SW_USED: u64 = 3;                  // slots with a page in them
+const SW_HAND: u64 = 4;                  // where the search for a free slot goes on
+const SW_RPID: u64 = 5;                  // the process swap_out took pages from last
+const SW_RPAGE: u64 = 6;                 // and the window page it stopped at
+const SW_IN: u64 = 7;                    // pages read back (pswpin)
+const SW_OUT: u64 = 8;                   // pages written (pswpout)
+const SW_MARK: u64 = 9;                  // the marker page's id + 1
+const SW_SLOT: u64 = 511;                // the marker's slot in the program store
+const SW_SCAN: u64 = 8192;               // pages swap_out looks at in a call, at most
+
+// What swap_in reports.
+const SW_NO: u64 = 0;                    // not a swapped page (or no swap)
+const SW_OK: u64 = 1;                    // the page is back: run the instruction again
+const SW_NOMEM: u64 = 2;                 // there is no page to read it into
+const SW_BUSY: u64 = 3;                  // a processor runs the space, or it has no window
+
+fn sw_nb(ns: u64) -> u64
+  requires ns <= SW_MAX
+  ensures result >= 1 && result <= SW_MAX
+{
+  return ns / 2 + 1;
+}
+
+/// Where the swap structure ends for ns slots, in words.
+fn sw_len(ns: u64) -> u64
+  requires ns <= SW_MAX
+  ensures result <= SW_HDR + NPROC + 3 * SW_MAX + 1
+{
+  return SW_HDR + NPROC + sw_nb(ns) + 2 * ns;
+}
+
+fn sw_get(b: &Buf, i: u64) -> u64
+{
+  if i < len(b) {
+    return get(b, i);
+  }
+  return 0;
+}
+
+fn sw_set(b: &mut Buf, i: u64, v: u64)
+{
+  if i < len(b) {
+    b = set(b, i, v);
+  }
+}
+
+/// Is a swap area on?
+fn swap_on(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return len(k.swp) != 0;
+}
+
+/// The slot count, 0 with no swap area.
+fn sw_ns(b: &Buf) -> u64
+  ensures result <= SW_MAX
+{
+  let ns = sw_get(b, SW_NS);
+  if ns > SW_MAX || len(b) < sw_len(ns) {
+    return 0;
+  }
+  return ns;
+}
+
+fn sw_head_at(ns: u64, b: u64) -> u64
+  requires ns <= SW_MAX && b <= SW_MAX
+  ensures result <= SW_HDR + NPROC + SW_MAX
+{
+  return SW_HDR + NPROC + b;
+}
+
+fn sw_key_at(ns: u64, s: u64) -> u64
+  requires ns <= SW_MAX && s <= SW_MAX
+  ensures result <= SW_HDR + NPROC + 3 * SW_MAX
+{
+  return SW_HDR + NPROC + sw_nb(ns) + s;
+}
+
+fn sw_next_at(ns: u64, s: u64) -> u64
+  requires ns <= SW_MAX && s <= SW_MAX
+  ensures result <= SW_HDR + NPROC + 3 * SW_MAX
+{
+  return SW_HDR + NPROC + sw_nb(ns) + ns + s;
+}
+
+/// Slots, free slots, and the pages read and written, for /proc.
+fn swap_total(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SW_MAX
+{
+  return sw_ns(k.swp);
+}
+
+fn swap_free(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SW_MAX
+{
+  let ns = sw_ns(k.swp);
+  let u = sw_get(k.swp, SW_USED);
+  if u >= ns {
+    return 0;
+  }
+  return ns - u;
+}
+
+fn swap_used(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= SW_MAX
+{
+  return smaller(sw_get(k.swp, SW_USED), sw_ns(k.swp));
+}
+
+fn swap_pin(k: &Kernel) -> u64
+  requires kok(k)
+{
+  return sw_get(k.swp, SW_IN);
+}
+
+fn swap_pout(k: &Kernel) -> u64
+  requires kok(k)
+{
+  return sw_get(k.swp, SW_OUT);
+}
+
+/// The key of window page q of process g (never 0).
+fn sw_key(g: u64, q: u64) -> u64
+  requires g < NPROC && q < WPAGES
+  ensures result != 0
+{
+  return g * 268435456 + q + 1;
+}
+
+/// How many pages of process g are swapped out.
+fn swap_count(k: &Kernel, g: u64) -> u64
+  requires kok(k)
+{
+  if len(k.swp) == 0 || g >= NPROC {
+    return 0;
+  }
+  return sw_get(k.swp, SW_HDR + g);
+}
+
+/// The slot holding window page q of process g, or SW_NONE.
+fn sw_find(b: &Buf, g: u64, q: u64) -> u64
+  requires g < NPROC && q < WPAGES
+  ensures result == SW_NONE || result < SW_MAX
+{
+  let ns = sw_ns(b);
+  if ns == 0 {
+    return SW_NONE;
+  }
+  let key = sw_key(g, q);
+  let mut s1 = sw_get(b, sw_head_at(ns, key % sw_nb(ns)));
+  let mut steps = 0;
+  while s1 != 0 && s1 <= ns && steps <= ns
+    invariant steps <= ns + 1 && ns <= SW_MAX
+  {
+    if sw_get(b, sw_key_at(ns, s1 - 1)) == key {
+      return s1 - 1;
+    }
+    s1 = sw_get(b, sw_next_at(ns, s1 - 1));
+    steps = steps + 1;
+  }
+  return SW_NONE;
+}
+
+/// Takes a free slot for window page q of process g and indexes it, or
+/// SW_NONE if every slot is in use.
+fn sw_put(b: &mut Buf, g: u64, q: u64) -> u64
+  requires g < NPROC && q < WPAGES
+  ensures result == SW_NONE || result < SW_MAX
+{
+  let ns = sw_ns(b);
+  if ns == 0 || sw_get(b, SW_USED) >= ns {
+    return SW_NONE;
+  }
+  let hand = sw_get(b, SW_HAND) % ns;
+  let mut i = 0;
+  while i < ns
+    invariant i <= ns && ns <= SW_MAX && hand < ns
+  {
+    let s = (hand + i) % ns;
+    if sw_get(b, sw_key_at(ns, s)) == 0 {
+      let key = sw_key(g, q);
+      let hd = sw_head_at(ns, key % sw_nb(ns));
+      sw_set(&mut b, sw_key_at(ns, s), key);
+      sw_set(&mut b, sw_next_at(ns, s), sw_get(b, hd));
+      sw_set(&mut b, hd, s + 1);
+      sw_set(&mut b, SW_HDR + g, wrap_add(sw_get(b, SW_HDR + g), 1));
+      sw_set(&mut b, SW_USED, wrap_add(sw_get(b, SW_USED), 1));
+      sw_set(&mut b, SW_HAND, s + 1);
+      return s;
+    }
+    i = i + 1;
+  }
+  return SW_NONE;
+}
+
+/// Frees slot s: out of its chain, and off its process's count.
+fn sw_drop(b: &mut Buf, s: u64)
+{
+  let ns = sw_ns(b);
+  if s >= ns {
+    return;
+  }
+  let key = sw_get(b, sw_key_at(ns, s));
+  if key == 0 {
+    return;
+  }
+  let hd = sw_head_at(ns, key % sw_nb(ns));
+  if sw_get(b, hd) == s + 1 {
+    sw_set(&mut b, hd, sw_get(b, sw_next_at(ns, s)));
+  } else {
+    let mut j = sw_get(b, hd);
+    let mut steps = 0;
+    while j != 0 && j <= ns && steps <= ns
+      invariant steps <= ns + 1 && ns <= SW_MAX
+    {
+      if sw_get(b, sw_next_at(ns, j - 1)) == s + 1 {
+        sw_set(&mut b, sw_next_at(ns, j - 1), sw_get(b, sw_next_at(ns, s)));
+        j = 0;
+      } else {
+        j = sw_get(b, sw_next_at(ns, j - 1));
+      }
+      steps = steps + 1;
+    }
+  }
+  let g = (key - 1) / 268435456;
+  if g < NPROC && sw_get(b, SW_HDR + g) > 0 {
+    sw_set(&mut b, SW_HDR + g, wrap_sub(sw_get(b, SW_HDR + g), 1));
+  }
+  sw_set(&mut b, sw_key_at(ns, s), 0);
+  sw_set(&mut b, sw_next_at(ns, s), 0);
+  if sw_get(b, SW_USED) > 0 {
+    sw_set(&mut b, SW_USED, wrap_sub(sw_get(b, SW_USED), 1));
+  }
+}
+
+/// Forgets the slots of window pages from .. to of process g (the pages are
+/// being unmapped, or replaced).
+fn swap_forget(k: &mut Kernel, g: u64, from: u64, to: u64)
+  requires kok(k) && g < NPROC
+  ensures kok(k)
+{
+  if swap_count(k, g) == 0 {
+    return;
+  }
+  let ns = sw_ns(k.swp);
+  let mut s = 0;
+  while s < ns
+    invariant s <= ns && ns <= SW_MAX && kok(k)
+  {
+    let key = sw_get(k.swp, sw_key_at(ns, s));
+    if key != 0 && (key - 1) / 268435456 == g {
+      let q = (key - 1) % 268435456;
+      if q >= from && q < to {
+        sw_drop(&mut k.swp, s);
+      }
+    }
+    s = s + 1;
+  }
+}
+
+/// Process g's address space is gone (exit, execve): so are its slots.
+fn swap_drop_all(k: &mut Kernel, g: u64)
+  requires kok(k) && g < NPROC
+  ensures kok(k)
+{
+  swap_forget(&mut k, g, 0, WPAGES);
+}
+
+// ---------------------------------------------------------------- page tables
+
+/// Level 1: window page i's private frame goes back to the pool (unless it is
+/// a page the program may run code from) and the marker (page 0 of marker
+/// table `mt`) takes its place, with no access.
+fn sw_out_l1(l1: &mut PageTable, m: &mut Mem, mt: &mut PageTable, i: u64) -> bool
+  requires pt_level(l1) == 1 && mem_ok(m) && i < 512 && pt_leases(l1) == 0 && pt_level(mt) == 1 && pt_leases(mt) == 0
+  ensures pt_level(l1) == 1 && mem_ok(m) && pt_leases(l1) == 0 && pt_level(mt) == 1 && pt_leases(mt) == 0
+{
+  if !pt_has(l1, i) || pt_shared(l1, i) || !pt_has(mt, 0) || !pt_shared(mt, 0) {
+    return false;
+  }
+  let f = pt_take_frame(&mut l1, i);
+  if is_x_frame(m, f) {
+    // A page the program may both write and run (a program's text): it comes
+    // back as a plain data page, which cannot run code, so it stays.
+    pt_put_frame(&mut l1, i, f, false);
+    pt_set_access(&mut l1, i, 2);
+    return false;
+  }
+  give_page(&mut m, f);
+  pt_put_shared(&mut l1, i, pt_dup_shared(mt, 0), false);
+  pt_set_access(&mut l1, i, 0);
+  return true;
+}
+
+fn out_l2(l2: &mut PageTable, m: &mut Mem, mt: &mut PageTable, p: u64) -> bool
+  requires pt_level(l2) == 2 && mem_ok(m) && p < L2_PAGES && pt_leases(l2) == 0 && pt_level(mt) == 1 && pt_leases(mt) == 0
+  ensures pt_level(l2) == 2 && mem_ok(m) && pt_leases(l2) == 0 && pt_level(mt) == 1 && pt_leases(mt) == 0
+{
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  let mut l1 = pt_take(&mut l2, t);
+  let r = sw_out_l1(&mut l1, &mut m, &mut mt, p % 512);
+  pt_put(&mut l2, t, l1);
+  return r;
+}
+
+fn out_l3(l3: &mut PageTable, m: &mut Mem, mt: &mut PageTable, q: u64) -> bool
+  requires pt_level(l3) == 3 && mem_ok(m) && q < WPAGES && pt_leases(l3) == 0 && pt_level(mt) == 1 && pt_leases(mt) == 0
+  ensures pt_level(l3) == 3 && mem_ok(m) && pt_leases(l3) == 0 && pt_level(mt) == 1 && pt_leases(mt) == 0
+{
+  let t = q / L2_PAGES;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let mut l2 = pt_take(&mut l3, t);
+  let r = out_l2(&mut l2, &mut m, &mut mt, q % L2_PAGES);
+  pt_put(&mut l3, t, l2);
+  return r;
+}
+
+/// Level 1: if window page i holds the marker (page id `mark`), a fresh
+/// page filled from buf replaces it, writable. False if it is not the
+/// marker, or no page is free (nothing changed).
+fn sw_in_l1(l1: &mut PageTable, m: &mut Mem, i: u64, buf: &Bytes, mark: u64) -> bool
+  requires pt_level(l1) == 1 && mem_ok(m) && i < 512 && pt_leases(l1) == 0 && blen(buf) >= 4096
+  ensures pt_level(l1) == 1 && mem_ok(m) && pt_leases(l1) == 0
+{
+  let sh = l1_shared(&mut l1, i);
+  if sh != mark || !pt_has(l1, i) || !pt_shared(l1, i) {
+    return false;
+  }
+  let b = find_free(&mut m);
+  if b >= NPAGES {
+    return false;
+  }
+  let mut f = take_page(&mut m, b);
+  bytes_to_frame(&mut f, 0, buf, 0, 4096);
+  drop_shared(&mut m, pt_take_shared(&mut l1, i));
+  pt_put_frame(&mut l1, i, f, true);
+  return true;
+}
+
+fn in_l2(l2: &mut PageTable, m: &mut Mem, p: u64, buf: &Bytes, mark: u64) -> bool
+  requires pt_level(l2) == 2 && mem_ok(m) && p < L2_PAGES && pt_leases(l2) == 0 && blen(buf) >= 4096
+  ensures pt_level(l2) == 2 && mem_ok(m) && pt_leases(l2) == 0
+{
+  let t = p / 512;
+  if !pt_has(l2, t) {
+    return false;
+  }
+  let mut l1 = pt_take(&mut l2, t);
+  let r = sw_in_l1(&mut l1, &mut m, p % 512, buf, mark);
+  pt_put(&mut l2, t, l1);
+  return r;
+}
+
+fn in_l3(l3: &mut PageTable, m: &mut Mem, q: u64, buf: &Bytes, mark: u64) -> bool
+  requires pt_level(l3) == 3 && mem_ok(m) && q < WPAGES && pt_leases(l3) == 0 && blen(buf) >= 4096
+  ensures pt_level(l3) == 3 && mem_ok(m) && pt_leases(l3) == 0
+{
+  let t = q / L2_PAGES;
+  if !pt_has(l3, t) {
+    return false;
+  }
+  let mut l2 = pt_take(&mut l3, t);
+  let r = in_l2(&mut l2, &mut m, q % L2_PAGES, buf, mark);
+  pt_put(&mut l3, t, l2);
+  return r;
+}
+
+/// Is window page q of l3 a swapped page (the marker, id `mark`)?
+fn marked(l3: &mut PageTable, q: u64, mark: u64) -> bool
+  requires pt_level(l3) == 3 && q < WPAGES
+{
+  return l3_shared(&mut l3, q * 4096) == mark;
+}
+
+/// Is window page q of l3 a page swap_out may take: private (not shared
+/// with another process, not a cached or program page), writable?
+fn evictable(l3: &mut PageTable, q: u64) -> bool
+  requires pt_level(l3) == 3 && q < WPAGES
+{
+  return l3_writable(&mut l3, q * 4096) && l3_shared(&mut l3, q * 4096) == NO_RESULT;
+}
+
+// ---------------------------------------------------------------- swapping
+
+/// The row that holds process g's address space now, or 0.
+fn swap_row(k: &mut Kernel, g: u64) -> u64
+  requires kok(k) && g < NPROC
+  ensures kok(k) && result < NPROC
+{
+  if has_space(&mut k.spaces, g) {
+    return g;
+  }
+  return holder(&mut k, g);
+}
+
+/// Window page q of process g (its space in row r) is swapped out: reads it
+/// back. SW_NO if it is not, SW_OK if the page is there again, SW_NOMEM, or
+/// SW_BUSY if a processor runs the space (a page cannot change under it).
+fn swap_in(k: &mut Kernel, g: u64, r: u64, q: u64) -> u64
+  requires kok(k) && g < NPROC && r < NPROC && q < WPAGES
+  ensures kok(k)
+{
+  let slot = sw_find(k.swp, g, q);
+  if slot == SW_NONE {
+    return SW_NO;
+  }
+  let node = sw_get(k.swp, SW_NODE);
+  let mark = sw_get(k.swp, SW_MARK);
+  if node == 0 || node > DSLOTS || mark == 0 {
+    return SW_NO;
+  }
+  match take_space(&mut k.spaces, r) {
+    Space::Empty => {
+      return SW_BUSY;
+    },
+    Space::Mapped(mut root) => {
+      if pt_lease_count(&mut root) != 0 || !pt_has(root, 1) {
+        put_space(&mut k.spaces, r, Space::Mapped(root));
+        return SW_BUSY;
+      }
+      let got = disk_read_wait(&mut k.fs.disk, node - 1, (slot + 1) * 4096, &mut k.fs.xfer, 4096);
+      let mut res = SW_NO;
+      if got == 4096 {
+        let mut l3 = pt_take(&mut root, 1);
+        if in_l3(&mut l3, &mut k.mem, q, k.fs.xfer, mark - 1) {
+          res = SW_OK;
+        } else {
+          res = SW_NOMEM;
+        }
+        pt_put(&mut root, 1, l3);
+      }
+      put_space(&mut k.spaces, r, Space::Mapped(root));
+      if res == SW_OK {
+        sw_drop(&mut k.swp, slot);
+        sw_set(&mut k.swp, SW_IN, wrap_add(sw_get(k.swp, SW_IN), 1));
+      }
+      return res;
+    },
+  }
+}
+
+/// A page fault of process p: if the page is swapped out, reads it back.
+fn swap_fault(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if !swap_on(k) {
+    return SW_NO;
+  }
+  let va = pget(k.procs, p, reg_word(R_FAULT));
+  if va >= USER_SIZE {
+    return SW_NO;
+  }
+  return swap_in(&mut k, tgid(k.procs, p), p, va / 4096);
+}
+
+/// Brings back the swapped pages that the n bytes at va of process p's
+/// space touch (a signal frame the kernel is about to write).
+fn swap_touch(k: &mut Kernel, p: u64, va: u64, n: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if !swap_on(k) || va >= USER_SIZE || n > USER_SIZE || va + n > USER_SIZE || n == 0 {
+    return;
+  }
+  let g = tgid(k.procs, p);
+  let mut q = va / 4096;
+  let last = (va + n - 1) / 4096;
+  while q <= last && q < WPAGES
+    invariant q <= WPAGES + 1 && kok(k)
+  {
+    swap_in(&mut k, g, p, q);
+    q = q + 1;
+  }
+}
+
+/// Brings back every swapped page of window pages from .. to of process g
+/// (its space in row r): for the calls that change or move pages, and for
+/// fork. False if one could not be (no memory, or a processor runs the space).
+fn swap_reach(k: &mut Kernel, g: u64, r: u64, from: u64, to: u64) -> bool
+  requires kok(k) && g < NPROC && r < NPROC && to <= WPAGES
+  ensures kok(k)
+{
+  if swap_count(k, g) == 0 {
+    return true;
+  }
+  let ns = sw_ns(k.swp);
+  let mut ok = true;
+  let mut s = 0;
+  while s < ns
+    invariant s <= ns && ns <= SW_MAX && kok(k)
+  {
+    let key = sw_get(k.swp, sw_key_at(ns, s));
+    if key != 0 && (key - 1) / 268435456 == g {
+      let q = (key - 1) % 268435456;
+      if q >= from && q < to && q < WPAGES {
+        let res = swap_in(&mut k, g, r, q);
+        if res != SW_OK && res != SW_NO {
+          ok = false;
+        }
+      }
+    }
+    s = s + 1;
+  }
+  return ok;
+}
+
+/// The pages the call process p is making names in its arguments: each
+/// argument that points at a swapped page brings it back, and the swapped
+/// pages after it (up to 512), before the call runs.
+fn swap_args(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let g = tgid(k.procs, p);
+  if swap_count(k, g) == 0 {
+    return;
+  }
+  let mut a = 0;
+  while a < 6
+    invariant a <= 6 && kok(k)
+  {
+    let mut va = 0;
+    if a == 0 {
+      va = pget(k.procs, p, F_REGS + R_RDI);
+    } else if a == 1 {
+      va = pget(k.procs, p, F_REGS + R_RSI);
+    } else if a == 2 {
+      va = pget(k.procs, p, F_REGS + R_RDX);
+    } else if a == 3 {
+      va = pget(k.procs, p, F_REGS + R_R10);
+    } else if a == 4 {
+      va = pget(k.procs, p, F_REGS + R_R8);
+    } else {
+      va = pget(k.procs, p, F_REGS + R_R9);
+    }
+    if va < USER_SIZE {
+      let mut q = va / 4096;
+      let mut n = 0;
+      while n < 512 && q < WPAGES && swap_in(&mut k, g, p, q) == SW_OK
+        invariant n <= 512 && kok(k)
+      {
+        q = q + 1;
+        n = n + 1;
+      }
+    }
+    a = a + 1;
+  }
+}
+
+/// Writes up to `want` pages of process g (its space in row r), from window
+/// page `from` on, to free slots and frees their frames. Returns how many;
+/// `stop` is the window page it stopped at.
+fn swap_out_space(k: &mut Kernel, g: u64, r: u64, from: u64, want: u64, stop: &mut u64) -> u64
+  requires kok(k) && g < NPROC && r < NPROC && from <= WPAGES
+  ensures kok(k)
+  ensures result <= want
+{
+  let node = sw_get(k.swp, SW_NODE);
+  let mut done = 0;
+  stop = from;
+  if node == 0 || node > DSLOTS || sw_ns(k.swp) == 0 {
+    return 0;
+  }
+  match take_space(&mut k.spaces, r) {
+    Space::Empty => {
+      return 0;
+    },
+    Space::Mapped(mut root) => {
+      match k.txt {
+        Store::None => {
+          k.txt = Store::None;
+        },
+        Store::Table(t) => {
+          let mut st = t;
+          if pt_lease_count(&mut root) == 0 && pt_has(root, 1) && pt_has(st, SW_SLOT) {
+            let mut mt = pt_take(&mut st, SW_SLOT);
+            let mut l3 = pt_take(&mut root, 1);
+            let mut p = from;
+            let mut seen = 0;
+            while p < WPAGES && done < want && seen < SW_SCAN
+              invariant p <= WPAGES && done <= want && seen <= SW_SCAN && kok(k) && pt_level(l3) == 3 && pt_leases(l3) == 0
+              invariant pt_level(mt) == 1 && pt_leases(mt) == 0 && g < NPROC
+            {
+              let q = w_next(&mut l3, p);
+              if q >= WPAGES {
+                p = WPAGES;
+              } else {
+                seen = seen + 1;
+                p = q + 1;
+                if evictable(&mut l3, q) && lr_covered_in(k.sys, k.procs, g, q, q + 1) == 0 {
+                  let slot = sw_put(&mut k.swp, g, q);
+                  if slot != SW_NONE {
+                    let mut ok = w_read(&mut l3, q * 4096, &mut k.fs.xfer, 0, 4096);
+                    if ok {
+                      ok = disk_write_at_wait(&mut k.fs.disk, node - 1, (slot + 1) * 4096, k.fs.xfer, 4096, k.fs.now) == 4096;
+                    }
+                    if ok {
+                      ok = out_l3(&mut l3, &mut k.mem, &mut mt, q);
+                    }
+                    if ok {
+                      done = done + 1;
+                      sw_set(&mut k.swp, SW_OUT, wrap_add(sw_get(k.swp, SW_OUT), 1));
+                    } else {
+                      sw_drop(&mut k.swp, slot);
+                    }
+                  }
+                }
+              }
+            }
+            stop = p;
+            pt_put(&mut root, 1, l3);
+            pt_put(&mut st, SW_SLOT, mt);
+          }
+          k.txt = Store::Table(st);
+        },
+      }
+      put_space(&mut k.spaces, r, Space::Mapped(root));
+      return done;
+    },
+  }
+}
+
+/// Memory is short: swaps out up to `want` pages of the process that holds
+/// the most memory in RAM it may take (not counting what mlock locked). Returns how many it freed.
+fn swap_out(k: &mut Kernel, want: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  if !swap_on(k) || sw_get(k.swp, SW_USED) >= sw_ns(k.swp) {
+    return 0;
+  }
+  let mut v = 0;
+  let mut vr = 0;
+  let mut best = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && v < NPROC && vr < NPROC && kok(k)
+  {
+    if cg_live(k, q) && tgid(k.procs, q) == q {
+      let r = swap_row(&mut k, q);
+      if r != 0 {
+        let c = cg_resident(&mut k, r);
+        let sw = swap_count(k, q);
+        let lk = lr_covered(k, q, 0, WPAGES);                    // mlock'd pages stay
+        if c > sw {
+          let rest = c - sw;
+          if rest > lk && rest - lk > best && cg_swap_room(k, q) > 0 {   // memory.swap.max
+            best = rest - lk;
+            v = q;
+            vr = r;
+          }
+        }
+      }
+    }
+    q = q + 1;
+  }
+  if v == 0 {
+    return 0;
+  }
+  let mut from = 0;
+  let hand = sw_get(k.swp, SW_RPAGE);
+  if sw_get(k.swp, SW_RPID) == v && hand <= WPAGES {
+    from = hand;
+  }
+  let mut stop = from;
+  let room = smaller(want, cg_swap_room(k, v));            // memory.swap.max
+  let mut n = swap_out_space(&mut k, v, vr, from, room, &mut stop);
+  if n == 0 && from > 0 {
+    n = swap_out_space(&mut k, v, vr, 0, room, &mut stop);   // the hand wrapped
+  }
+  sw_set(&mut k.swp, SW_RPID, v);
+  sw_set(&mut k.swp, SW_RPAGE, stop);
+  return n;
+}
+
+// ---------------------------------------------------------------- swapon, swapoff
+
+const LX_SWAPON: u64 = 167;
+const LX_SWAPOFF: u64 = 168;
+
+fn is_swap_call(n: u64) -> bool {
+  return n == LX_SWAPON || n == LX_SWAPOFF;
+}
+
+/// The little-endian u32 at i of the transfer buffer.
+fn sw_u32(k: &Kernel, i: u64) -> u64
+  requires kok(k) && i + 4 <= XFER
+  ensures result < 4294967296
+{
+  return cast[u64](bget(k.fs.xfer, i)) + 256 * cast[u64](bget(k.fs.xfer, i + 1))
+    + 65536 * cast[u64](bget(k.fs.xfer, i + 2)) + 16777216 * cast[u64](bget(k.fs.xfer, i + 3));
+}
+
+/// The disk file index of the file path va names (it must be on the disk),
+/// or an errno.
+fn swap_file(k: &mut Kernel, pid: u64, va: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let n = lx_path_in(&mut k, pid, va);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  if dir_at(&mut k, n) != NO_FILE {
+    return EISDIR;
+  }
+  let f = vfs_lookup(&mut k.fs, n);
+  if f == NO_FILE {
+    return ENOENT;
+  }
+  if f < NFILES || f >= NFILES + DSLOTS {
+    return EINVAL;                          // a swap file lives on the disk: memory is what it is for
+  }
+  return f;
+}
+
+/// swapon(path, flags): the file's pages become slots. EINVAL for a file
+/// that mkswap did not make (the "SWAPSPACE2" signature, version 1) or one
+/// not on the disk, EBUSY if an area is on already (there is one).
+fn lx_swapon(k: &mut Kernel, pid: u64, path: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  if swap_on(k) {
+    return EBUSY;
+  }
+  let f = swap_file(&mut k, pid, path);
+  if f >= NFILES && f < NFILES + DSLOTS {
+    let node = f - NFILES;
+    let size = disk_size(k.fs.disk, node);
+    if size == NO_DISK_FILE || size < 8192 {
+      return EINVAL;
+    }
+    if disk_read_wait(&mut k.fs.disk, node, 0, &mut k.fs.xfer, 4096) != 4096 {
+      return EIO;
+    }
+    let sig = bget(k.fs.xfer, 4086) == 83 && bget(k.fs.xfer, 4087) == 87 && bget(k.fs.xfer, 4088) == 65
+      && bget(k.fs.xfer, 4089) == 80 && bget(k.fs.xfer, 4090) == 83 && bget(k.fs.xfer, 4091) == 80
+      && bget(k.fs.xfer, 4092) == 65 && bget(k.fs.xfer, 4093) == 67 && bget(k.fs.xfer, 4094) == 69
+      && bget(k.fs.xfer, 4095) == 50;       // SWAPSPACE2
+    if !sig || sw_u32(k, 1024) != 1 {
+      return EINVAL;
+    }
+    let last = sw_u32(k, 1028);
+    if last < 1 || (last + 1) * 4096 > size {
+      return EINVAL;
+    }
+    let ns = smaller(last, SW_MAX);
+    // The marker: one page every swapped page maps, in the program store.
+    let mut have = false;
+    match k.txt {
+      Store::None => {
+        k.txt = Store::None;
+      },
+      Store::Table(t) => {
+        let mut st = t;
+        if pt_has(st, SW_SLOT) || chunk_fill(&mut k.mem, &mut st, SW_SLOT, 1) {
+          have = true;
+        }
+        k.txt = Store::Table(st);
+      },
+    }
+    if !have {
+      return ENOMEM;
+    }
+    let mark = swap_marker_id(&mut k);
+    if mark == NO_RESULT {
+      return ENOMEM;
+    }
+    let hold = vfs_hold(&mut k.fs, f);
+    if hold >= HOLD_N {
+      return ENOMEM;
+    }
+    let t = try_alloc(sw_len(ns));
+    if len(t) == 0 {
+      free(t);
+      vfs_unhold(&mut k.fs, &mut k.mem, hold);
+      return ENOMEM;
+    }
+    free(k.swp);
+    k.swp = t;
+    sw_set(&mut k.swp, SW_HOLD, hold + 1);
+    sw_set(&mut k.swp, SW_NODE, node + 1);
+    sw_set(&mut k.swp, SW_NS, ns);
+    sw_set(&mut k.swp, SW_MARK, mark + 1);
+    return 0;
+  }
+  return f;
+}
+
+/// The id of the marker page (the program store's slot SW_SLOT, page 0), or
+/// NO_RESULT.
+fn swap_marker_id(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut id = NO_RESULT;
+  match k.txt {
+    Store::None => {
+      k.txt = Store::None;
+    },
+    Store::Table(t) => {
+      let mut st = t;
+      if pt_has(st, SW_SLOT) {
+        let mut mt = pt_take(&mut st, SW_SLOT);
+        let m = l1_shared(&mut mt, 0);
+        if m < NPAGES {
+          id = m;
+        }
+        pt_put(&mut st, SW_SLOT, mt);
+      }
+      k.txt = Store::Table(st);
+    },
+  }
+  return id;
+}
+
+/// swapoff(path): every swapped page comes back, then the area goes.
+/// ENOMEM if there is no room for them all (what came back stays back), EBUSY
+/// if a processor runs the space of a process that has pages out.
+fn lx_swapoff(k: &mut Kernel, pid: u64, path: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  let f = swap_file(&mut k, pid, path);
+  if f < NFILES || f >= NFILES + DSLOTS {
+    return f;
+  }
+  if !swap_on(k) || sw_get(k.swp, SW_NODE) != f - NFILES + 1 {
+    return EINVAL;
+  }
+  pc_shrink(&mut k.fs.pc, &mut k.mem, PC_N);
+  let ns = sw_ns(k.swp);
+  let mut busy = false;
+  let mut nomem = false;
+  let mut s = 0;
+  while s < ns
+    invariant s <= ns && ns <= SW_MAX && kok(k)
+  {
+    let key = sw_get(k.swp, sw_key_at(ns, s));
+    if key != 0 {
+      let g = (key - 1) / 268435456;
+      let q = (key - 1) % 268435456;
+      if g < NPROC && q < WPAGES {
+        let r = swap_row(&mut k, g);
+        let mut res = SW_BUSY;
+        if r != 0 {
+          res = swap_in(&mut k, g, r, q);
+        }
+        if res == SW_NOMEM {
+          nomem = true;
+        } else if res == SW_BUSY {
+          busy = true;
+        }
+      }
+    }
+    s = s + 1;
+  }
+  if nomem {
+    return ENOMEM;
+  }
+  if busy || sw_get(k.swp, SW_USED) != 0 {
+    return EBUSY;
+  }
+  vfs_unhold(&mut k.fs, &mut k.mem, wrap_sub(sw_get(k.swp, SW_HOLD), 1));
+  free(k.swp);
+  k.swp = alloc(0);
+  return 0;
+}
+
+fn lx_swap_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = EINVAL;
+  if n == LX_SWAPON {
+    r = lx_swapon(&mut k, pid, a, b);
+  } else {
+    r = lx_swapoff(&mut k, pid, a);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}

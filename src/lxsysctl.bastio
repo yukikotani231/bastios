@@ -7,8 +7,8 @@
 
 import "proc.bastio";
 
-const SCT_NUM: u64 = 40;
-const SCT_N: u64 = 44;
+const SCT_NUM: u64 = 43;
+const SCT_N: u64 = 47;
 
 fn sct_name(i: u64) -> Str {
   if i == 0 {
@@ -132,15 +132,24 @@ fn sct_name(i: u64) -> Str {
     return "sys/kernel/keys/maxbytes";
   }
   if i == 40 {
-    return "sys/net/ipv4/ip_local_port_range";
+    return "sys/fs/mqueue/queues_max";
   }
   if i == 41 {
-    return "sys/fs/file-nr";
+    return "sys/fs/mqueue/msg_max";
   }
   if i == 42 {
-    return "sys/kernel/random/entropy_avail";
+    return "sys/fs/mqueue/msgsize_max";
   }
   if i == 43 {
+    return "sys/net/ipv4/ip_local_port_range";
+  }
+  if i == 44 {
+    return "sys/fs/file-nr";
+  }
+  if i == 45 {
+    return "sys/kernel/random/entropy_avail";
+  }
+  if i == 46 {
     return "sys/kernel/random/poolsize";
   }
   return "sys/kernel/tainted";
@@ -268,21 +277,30 @@ fn sct_default(i: u64) -> u64 {
   if i == 39 {
     return 20000;                       // kernel/keys/maxbytes
   }
+  if i == 40 {
+    return 256;                         // fs/mqueue/queues_max
+  }
+  if i == 41 {
+    return 10;                          // fs/mqueue/msg_max
+  }
+  if i == 42 {
+    return 8192;                        // fs/mqueue/msgsize_max
+  }
   return 0;
 }
 
 /// The text of entry i, for the entries after the numbers.
 fn sct_text(i: u64) -> Str {
-  if i == 40 {
+  if i == 43 {
     return "32768\t60999\n";
   }
-  if i == 41 {
+  if i == 44 {
     return "0\t0\t1048576\n";
   }
-  if i == 42 {
+  if i == 45 {
     return "256\n";
   }
-  if i == 43 {
+  if i == 46 {
     return "256\n";
   }
   return "\n";
@@ -293,7 +311,7 @@ fn sct_text(i: u64) -> Str {
 // directory). Every file the kernel serves under /proc/sys is a child of
 // its parent; t_proc lists each directory and opens what it lists.
 
-const SYSD_N: u64 = 13;
+const SYSD_N: u64 = 14;
 
 fn sysd_path(j: u64) -> Str {
   if j == 0 {
@@ -335,6 +353,9 @@ fn sysd_path(j: u64) -> Str {
   if j == 12 {
     return "sys/kernel/keys";
   }
+  if j == 13 {
+    return "sys/fs/mqueue";
+  }
   return "sys";
 }
 
@@ -343,7 +364,7 @@ fn sysd_count(j: u64) -> u64 {
     return 4;
   }
   if j == 1 {
-    return 9;
+    return 10;
   }
   if j == 2 {
     return 3;
@@ -377,6 +398,9 @@ fn sysd_count(j: u64) -> u64 {
   }
   if j == 12 {
     return 4;
+  }
+  if j == 13 {
+    return 3;
   }
   return 0;
 }
@@ -625,6 +649,18 @@ fn sysd_child(j: u64, i: u64) -> Str {
   if j == 12 && i == 3 {
     return "root_maxkeys";
   }
+  if j == 1 && i == 9 {
+    return "mqueue";
+  }
+  if j == 13 && i == 0 {
+    return "msg_max";
+  }
+  if j == 13 && i == 1 {
+    return "msgsize_max";
+  }
+  if j == 13 && i == 2 {
+    return "queues_max";
+  }
   return "";
 }
 
@@ -665,6 +701,9 @@ fn sysd_child_dir(j: u64, i: u64) -> bool {
   if j == 3 && i == 6 {
     return true;
   }
+  if j == 1 && i == 9 {
+    return true;
+  }
   return false;
 }
 
@@ -673,7 +712,7 @@ fn sysd_child_dir(j: u64, i: u64) -> bool {
 // kills for memory here, so the scores stay 0; the numbers are what Linux
 // reports for a process nobody has tuned.
 
-const PXF_N: u64 = 11;
+const PXF_N: u64 = 14;
 
 fn px_name(w: u64) -> Str {
   if w == 0 {
@@ -708,6 +747,15 @@ fn px_name(w: u64) -> Str {
   }
   if w == 10 {
     return "timens_offsets";
+  }
+  if w == 11 {
+    return "smaps_rollup";
+  }
+  if w == 12 {
+    return "environ";
+  }
+  if w == 13 {
+    return "smaps";
   }
   return "oom_score";
 }
