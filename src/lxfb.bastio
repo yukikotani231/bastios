@@ -27,7 +27,7 @@
 
 import "linux.bastio";
 
-const GFX_HDR: u64 = 80;
+const GFX_HDR: u64 = 128;
 const GFX_SLOTS: u64 = 32;
 const GFX_SLOT: u64 = 4112;             // offset (8), count (8), then XFER bytes
 const G_PRESENT: u64 = 0;
@@ -39,6 +39,11 @@ const G_HEAD: u64 = 40;
 const G_COUNT: u64 = 48;
 const G_OPEN: u64 = 56;
 const G_HELD: u64 = 64;                 // 1 once the pump has told the screen to hold off the console
+const G_BW: u64 = 72;                   // the mode the boot loader set: width, height, pitch (G_W, G_H and G_PITCH are the mode now)
+const G_BH: u64 = 80;
+const G_BPITCH: u64 = 88;
+const G_VBE: u64 = 96;                  // 1 if the display can change its mode (src/vbe.bastio)
+const G_MODE: u64 = 104;                // a mode waiting for the pump: width + 65536 * height, or 0
 
 /// What `gfx_take` hands the pump: a kind (GX_NONE, GX_HOLD, GX_RELEASE or
 /// GX_BLIT), for a blit the position and count, then the pixels.
@@ -47,6 +52,13 @@ const GX_NONE: u64 = 0;
 const GX_HOLD: u64 = 1;
 const GX_RELEASE: u64 = 2;
 const GX_BLIT: u64 = 3;
+const GX_MODE: u64 = 4;                 // the display takes the mode width (at 8) by height (at 16)
+
+// The modes a program may ask for with FBIOPUT_VSCREENINFO (when the display
+// can change its mode): at least this big, and no bigger than the screen
+// the boot loader gave, which is all that is mapped.
+const MODE_MIN_W: u64 = 320;
+const MODE_MIN_H: u64 = 240;
 
 // fbdev requests.
 const FBIOGET_VSCREENINFO: u64 = 0x4600;
@@ -79,8 +91,20 @@ fn gfx_screen(k: &mut Kernel, w: u64, h: u64, pitch: u64, rgb: u64)
   put_u64(&mut k.gfx, G_W, w);
   put_u64(&mut k.gfx, G_H, h);
   put_u64(&mut k.gfx, G_PITCH, pitch);
+  put_u64(&mut k.gfx, G_BW, w);
+  put_u64(&mut k.gfx, G_BH, h);
+  put_u64(&mut k.gfx, G_BPITCH, pitch);
   put_u64(&mut k.gfx, G_RGB, rgb);
   put_u64(&mut k.gfx, G_PRESENT, 1);
+}
+
+/// Says the display can change its mode (the registers of src/vbe.bastio
+/// describe the mode of `gfx_screen`).
+fn gfx_modes(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  put_u64(&mut k.gfx, G_VBE, 1);
 }
 
 fn gfx_present(k: &Kernel) -> bool
@@ -109,6 +133,9 @@ fn gfx_pending(k: &Kernel) -> u64
   if c > 0 {
     return c;
   }
+  if get_u64(k.gfx, G_MODE) != 0 {
+    return 1;
+  }
   let open = get_u64(k.gfx, G_OPEN) > 0;
   let held = get_u64(k.gfx, G_HELD) == 1;
   if open != held {
@@ -130,6 +157,18 @@ fn gfx_take(k: &mut Kernel, gx: &mut Bytes) -> bool
   put_u64(&mut gx, 0, GX_NONE);
   let open = get_u64(k.gfx, G_OPEN) > 0;
   let held = get_u64(k.gfx, G_HELD) == 1;
+  // A mode asked for goes first: the pixels written after the request are
+  // for it, those before it are lost with the old mode.
+  let mode = get_u64(k.gfx, G_MODE);
+  if mode != 0 && !open && !held {
+    put_u64(&mut k.gfx, G_MODE, 0);           // nobody is left to want it
+  } else if mode != 0 && held {
+    put_u64(&mut k.gfx, G_MODE, 0);
+    put_u64(&mut gx, 0, GX_MODE);
+    put_u64(&mut gx, 8, mode % 65536);
+    put_u64(&mut gx, 16, mode / 65536 % 65536);
+    return true;
+  }
   if open && !held {
     put_u64(&mut k.gfx, G_HELD, 1);
     put_u64(&mut gx, 0, GX_HOLD);
@@ -155,6 +194,19 @@ fn gfx_take(k: &mut Kernel, gx: &mut Bytes) -> bool
     return true;
   }
   if !open && held {
+    // The boot mode comes back before the console is drawn again.
+    let bw = smaller(get_u64(k.gfx, G_BW), 65535);
+    let bh = smaller(get_u64(k.gfx, G_BH), 65535);
+    if get_u64(k.gfx, G_W) != bw || get_u64(k.gfx, G_H) != bh {
+      put_u64(&mut k.gfx, G_W, bw);
+      put_u64(&mut k.gfx, G_H, bh);
+      put_u64(&mut k.gfx, G_PITCH, get_u64(k.gfx, G_BPITCH));
+      put_u64(&mut k.gfx, G_MODE, 0);
+      put_u64(&mut gx, 0, GX_MODE);
+      put_u64(&mut gx, 8, bw);
+      put_u64(&mut gx, 16, bh);
+      return true;
+    }
     put_u64(&mut k.gfx, G_HELD, 0);
     put_u64(&mut gx, 0, GX_RELEASE);
     return true;
@@ -280,11 +332,37 @@ fn fbpair(a: u64, b: u64) -> u64 {
   return a % 4294967296 + (b % 4294967296) * 4294967296;
 }
 
-/// ioctl(2) on /dev/fb0.
+/// ioctl(2) on /dev/fb0. FBIOPUT_VSCREENINFO picks the mode when the display
+/// can change it (src/vbe.bastio): the geometry that FBIOGET_VSCREENINFO and
+/// FBIOGET_FSCREENINFO give changes at once, the display when the pump gets
+/// to it; the boot mode comes back with the last close.
 fn fb_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if req == FBIOPUT_VSCREENINFO && get_u64(k.gfx, G_VBE) == 1 {
+    // struct fb_var_screeninfo: xres and yres first. The display takes a
+    // mode no bigger than the boot one (by bytes), as 32 bits a pixel.
+    if arg > 0xFFFFFFFFFFFF {
+      return EFAULT;
+    }
+    let xr = user_u32(&mut k, pid, arg);
+    let yr = user_u32(&mut k, pid, arg + 4);
+    if !xr.ok || !yr.ok {
+      return EFAULT;
+    }
+    let size = smaller(get_u64(k.gfx, G_BPITCH), 1048576) * smaller(get_u64(k.gfx, G_BH), 65535);
+    if xr.v < MODE_MIN_W || yr.v < MODE_MIN_H || xr.v > 65535 || yr.v > 65535 || xr.v * 4 * yr.v > size {
+      return EINVAL;
+    }
+    if xr.v != get_u64(k.gfx, G_W) || yr.v != get_u64(k.gfx, G_H) {
+      put_u64(&mut k.gfx, G_W, xr.v);
+      put_u64(&mut k.gfx, G_H, yr.v);
+      put_u64(&mut k.gfx, G_PITCH, xr.v * 4);
+      put_u64(&mut k.gfx, G_MODE, xr.v + 65536 * yr.v);
+    }
+    return 0;
+  }
   if req == FBIOPUT_VSCREENINFO || req == FBIOPAN_DISPLAY || req == FBIOBLANK {
     return 0;                           // one fixed mode: nothing to change
   }

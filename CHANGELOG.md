@@ -24,6 +24,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - F5 in `bsys` reads the numbers again, as `r` does.
 - In the `bfiles` list F2 renames the entry under the cursor, as `r` does.
 - End zooms the image in `bview` in all the way.
+- Kanji conversion in `bwm`: Alt-Shift-Space (marked "Kj" in the task bar) keeps the typed kana in the task bar, Space cycles the candidates of a built-in dictionary of about 150 words (`user/bwmdict.h`) then the hiragana and the katakana, Enter puts the one shown in the window. The glyphs come from the console's font through `tools/imefont.py`.
+- `bwm -m WxH` (FBIOPUT_VSCREENINFO on `/dev/fb0`) puts QEMU's standard VGA in a smaller mode; the boot mode comes back when the last description of `/dev/fb0` closes. The I/O ports 0x1CE to 0x1D0 are claimed for the mode registers (`src/vbe.bastio`); no C or assembly was added.
 - In `bfiles`, a drag from an entry onto a directory entry moves it there (a click now acts when the button is released).
 - Alt-F9 in `bwm` minimizes the focused window.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.

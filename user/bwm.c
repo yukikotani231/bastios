@@ -37,6 +37,8 @@
 
 #include "bwmproto.h"
 #include "font8x8.h"
+#include "imefont.h"
+#include "bwmdict.h"
 
 struct bitfield { uint32_t offset, length, msb_right; };
 struct var_info {
@@ -167,6 +169,61 @@ static void text(uint32_t *buf, int x, int y, const char *s, uint32_t fg)
 {
     for (; *s; s++, x += CELL_W)
         glyph(buf, x, y, *s, fg);
+}
+
+/* One cell of a glyph of ime_font (HALF is 1 for the right cell of a wide one). */
+static void glyph_ja(uint32_t *buf, int x, int y, const unsigned char *g, int wide, int half, uint32_t fg)
+{
+    for (int r = 0; r < CELL_H; r++) {
+        unsigned bits = wide ? g[r * 2 + half] : g[r];
+        for (int p = 0; p < CELL_W; p++, bits >>= 1) {
+            int px = x + p, py = y + r;
+            if ((bits & 1) && px >= 0 && py >= 0 && px < (int)W && py < (int)H)
+                buf[py * W + px] = fg;
+        }
+    }
+}
+
+/* Like text, for the UTF-8 text of the kanji conversion (ASCII, kana and what the dictionary uses); stops before X1.
+ * Returns where the next character would go. */
+static int text_ja(uint32_t *buf, int x, int y, const char *s, uint32_t fg, int x1)
+{
+    while (*s) {
+        unsigned char c = (unsigned char)*s;
+        unsigned cp = c;
+        int len = 1;
+        if (c >= 0xe0 && s[1] && s[2]) {
+            cp = (c & 0x0f) << 12 | ((unsigned char)s[1] & 0x3f) << 6 | ((unsigned char)s[2] & 0x3f);
+            len = 3;
+        } else if (c >= 0x80) {
+            cp = '?';
+            len = c >= 0xc0 ? 2 : 1;
+        }
+        const unsigned char *g = 0;
+        int wide = 0;
+        if (cp >= 128) {
+            for (size_t i = 0; i < sizeof ime_font / sizeof ime_font[0]; i++)
+                if (ime_font[i].cp == cp) {
+                    g = ime_font[i].g;
+                    wide = ime_font[i].wide;
+                    break;
+                }
+            if (!g)
+                cp = '?';
+        }
+        if (x + (wide ? 2 : 1) * CELL_W > x1)
+            break;
+        if (g) {
+            glyph_ja(buf, x, y, g, wide, 0, fg);
+            if (wide)
+                glyph_ja(buf, x + CELL_W, y, g, 1, 1, fg);
+        } else {
+            glyph(buf, x, y, (int)cp, fg);
+        }
+        x += (wide ? 2 : 1) * CELL_W;
+        s += len;
+    }
+    return x;
 }
 
 static int cw_of(const struct win *w) { return w->w - 2 * BORDER; }
@@ -408,8 +465,17 @@ static void clock_hm(int *h, int *m)
 
 static char ime_buf[6];                   /* the romaji letters typed that do not make a kana yet, shown in the task bar */
 static int ime_n;
-static int ime_on;                        /* Alt-Space: 0 off, 1 romaji typed becomes hiragana, 2 katakana */
+static int ime_on;                        /* Alt-Space: 0 off, 1 romaji typed becomes hiragana, 2 katakana; Alt-Shift-Space: 3 kanji conversion */
 #define IME_W 76
+#define IME_W_KANJI 300
+#define IME_PRE 160
+#define IME_CANDS 12
+static char ime_pre[IME_PRE];             /* mode 3: the hiragana typed and not yet put in the window */
+static int ime_pn;
+static int ime_ci = -1;                   /* the candidate shown in place of ime_pre after Space, or -1 */
+static int ime_nc;
+static char ime_cand[IME_CANDS][IME_PRE];
+static int ime_w(void) { return ime_on == 3 ? IME_W_KANJI : IME_W; }
 
 /* The task bar: a button that starts a terminal, then one for each window
  * in the order they were opened, the top one lit. */
@@ -424,7 +490,7 @@ static void draw_bar(void)
         if (!pool[i].used)
             continue;
         int x = BTN_X0 + n * (BTN_W + BTN_GAP);
-        if (x + BTN_W > (int)W - MENU_W - 12 - CLOCK_W - (ime_on ? IME_W : 0))
+        if (x + BTN_W > (int)W - MENU_W - 12 - CLOCK_W - (ime_on ? ime_w() : 0))
             break;
         fill(scene, x, y0 + 3, x + BTN_W, H - 3, &pool[i] == focus() ? rgb(40, 90, 200) : pool[i].hidden ? rgb(45, 45, 60) : rgb(70, 70, 85));
         char t[16];
@@ -432,7 +498,24 @@ static void draw_bar(void)
         text(scene, x + 6, y0 + 4, t, rgb(255, 255, 255));
         n++;
     }
-    if (ime_on) {
+    if (ime_on == 3) {
+        int ix = (int)W - MENU_W - 12 - CLOCK_W - IME_W_KANJI;
+        fill(scene, ix, y0 + 3, ix + IME_W_KANJI - 4, H - 3, rgb(150, 90, 30));
+        text(scene, ix + 4, y0 + 4, "Kj", rgb(255, 255, 255));
+        int tx = ix + 4 + 3 * CELL_W, end = ix + IME_W_KANJI - 8;
+        if (ime_ci >= 0) {                                    /* the candidate on trial, lit */
+            char info[24];
+            snprintf(info, sizeof info, " %d/%d", ime_ci + 1, ime_nc);
+            int e = text_ja(scene, tx, y0 + 4, ime_cand[ime_ci], rgb(255, 255, 255), end - 5 * CELL_W);
+            fill(scene, tx - 2, y0 + 20, e + 2, y0 + 21, rgb(255, 255, 255));
+            text(scene, e, y0 + 4, info, rgb(255, 220, 160));
+        } else {
+            int e = text_ja(scene, tx, y0 + 4, ime_pre, rgb(255, 255, 255), end - 4 * CELL_W);
+            if (ime_pn)
+                fill(scene, tx, y0 + 20, e, y0 + 21, rgb(255, 255, 255));
+            text(scene, e, y0 + 4, ime_buf, rgb(255, 220, 160));
+        }
+    } else if (ime_on) {
         int ix = (int)W - MENU_W - 12 - CLOCK_W - IME_W;
         fill(scene, ix, y0 + 3, ix + IME_W - 4, H - 3, rgb(150, 90, 30));
         char im[16];
@@ -1467,9 +1550,85 @@ static const struct { const char *r, *k; } ime_tab[] = {
     { "zyu", "じゅ" },
 };
 
+static int ime_put(struct win *top, const char *s);
+
+/* Puts the text of the conversion (the candidate on trial, else the hiragana) in the window and starts over. */
+static int ime_commit(struct win *top)
+{
+    int q = 0;
+    const char *t = ime_ci >= 0 ? ime_cand[ime_ci] : ime_pre;
+    for (; *t; t++)
+        q |= type_byte(top, *t);
+    ime_pn = 0;
+    ime_pre[0] = 0;
+    ime_ci = -1;
+    ime_nc = 0;
+    return q;
+}
+
+static void ime_add_cand(const char *s, size_t n)
+{
+    if (ime_nc < IME_CANDS && n > 0 && n < IME_PRE) {
+        memcpy(ime_cand[ime_nc], s, n);
+        ime_cand[ime_nc][n] = 0;
+        ime_nc++;
+    }
+}
+
+/* Space: the first call lists the candidates for ime_pre (the dictionary's, the hiragana, the katakana) and shows the
+ * first; each next call shows the next, and the last is followed by the first again. */
+static void ime_convert(void)
+{
+    if (ime_ci < 0) {
+        ime_nc = 0;
+        for (size_t i = 0; i < sizeof ime_dict / sizeof ime_dict[0]; i++) {
+            if (strcmp(ime_dict[i].r, ime_pre) != 0)
+                continue;
+            const char *c = ime_dict[i].c;
+            while (*c) {
+                const char *e = strchr(c, '/');
+                size_t n = e ? (size_t)(e - c) : strlen(c);
+                ime_add_cand(c, n);
+                c += n + (e ? 1 : 0);
+            }
+        }
+        ime_add_cand(ime_pre, (size_t)ime_pn);
+        char kata[IME_PRE];
+        size_t k = 0;
+        for (const char *p = ime_pre; *p && k + 3 < sizeof kata; ) {
+            unsigned char b1 = (unsigned char)p[1];
+            if ((unsigned char)p[0] == 0xe3 && p[1] && p[2] && (b1 == 0x81 || b1 == 0x82)) {
+                unsigned cp = 0x3000 | (unsigned)(b1 & 3) << 6 | ((unsigned char)p[2] & 0x3f);
+                if (cp >= 0x3041 && cp <= 0x3096)
+                    cp += 0x60;
+                kata[k++] = (char)0xe3;
+                kata[k++] = (char)(0x80 | (cp >> 6 & 0x3f));
+                kata[k++] = (char)(0x80 | (cp & 0x3f));
+                p += 3;
+            } else {
+                kata[k++] = *p++;
+            }
+        }
+        ime_add_cand(kata, k);
+        ime_ci = 0;
+    } else {
+        ime_ci = (ime_ci + 1) % ime_nc;
+    }
+}
+
 static int ime_put(struct win *top, const char *s)
 {
     int q = 0;
+    if (ime_on == 3) {                                   /* kanji conversion: the kana wait in ime_pre */
+        if (ime_ci >= 0)
+            q |= ime_commit(top);
+        size_t n = strlen(s);
+        if (ime_pn + n < IME_PRE) {
+            memcpy(ime_pre + ime_pn, s, n + 1);
+            ime_pn += (int)n;
+        }
+        return q;
+    }
     for (; *s; s++) {
         unsigned char b2 = (unsigned char)s[0] == 0xe3 && s[1] && s[2] ? (unsigned char)s[1] : 0;
         unsigned cp = b2 ? 0x3000 | (unsigned)(b2 & 3) << 6 | ((unsigned char)s[2] & 0x3f) : 0;
@@ -1508,7 +1667,7 @@ static int ime_type(struct win *top, char c)
 {
     int before = ime_n;
     int quit = ime_type1(top, c);
-    if (ime_on && (before || ime_n)) {                 /* the pending letters in the task bar changed */
+    if (ime_on && (before || ime_n || ime_on == 3)) {  /* the pending letters in the task bar changed */
         ime_buf[ime_n] = 0;
         touch_bar();
     }
@@ -1524,21 +1683,51 @@ static int ime_type1(struct win *top, char c)
         ime_n--;
         return 0;
     }
+    if (ime_on == 3 && (c == ' ' || c == '\r' || c == '\n') && ime_n == 1 && ime_buf[0] == 'n') {
+        quit |= ime_put(top, "\xe3\x82\x93");           /* ん, before the word is converted or put in */
+        ime_n = 0;
+    }
+    if (ime_on == 3 && ime_n == 0 && ime_pn > 0) {     /* kanji conversion with kana waiting */
+        if (c == ' ') {
+            ime_convert();
+            return quit;
+        }
+        if (c == '\r' || c == '\n')                        /* Enter puts the text in the window and is not passed on */
+            return quit | ime_commit(top);
+        if (c == 127 || c == 8) {                      /* Backspace goes back to the kana, then takes one off */
+            if (ime_ci >= 0) {
+                ime_ci = -1;
+            } else {
+                do
+                    ime_pn--;
+                while (ime_pn > 0 && ((unsigned char)ime_pre[ime_pn] & 0xc0) == 0x80);
+                ime_pre[ime_pn] = 0;
+            }
+            return 0;
+        }
+    }
     int ours = (c >= 'a' && c <= 'z') || c == '-' || c == ',' || c == '.' || c == '\'';
     if (!ours) {
         if (ime_n == 1 && ime_buf[0] == 'n')
             quit |= ime_put(top, "\xe3\x82\x93");   /* ん */
         ime_n = 0;
+        if (ime_on == 3)
+            quit |= ime_commit(top);
         return quit | type_byte(top, c);
     }
+    if (ime_on == 3 && ime_ci >= 0)
+        quit |= ime_commit(top);                       /* a letter after a conversion starts the next word */
     ime_buf[ime_n++] = c;
     while (ime_n > 0 && !ime_step(top, &quit)) {
         if (ime_n >= 2 && ime_buf[0] == ime_buf[1] && ime_buf[0] != 'n' && !strchr("aiueo", ime_buf[0]))
             quit |= ime_put(top, "\xe3\x81\xa3");   /* っ */
         else if (ime_buf[0] == 'n')
             quit |= ime_put(top, "\xe3\x82\x93");   /* ん */
-        else
+        else {
+            if (ime_on == 3)
+                quit |= ime_commit(top);
             quit |= type_byte(top, ime_buf[0]);
+        }
         memmove(ime_buf, ime_buf + 1, --ime_n);
     }
     return quit;
@@ -1551,6 +1740,14 @@ int main(int argc, char **argv)
     if (a < argc && strcmp(argv[a], "-n") == 0) {
         builtin = 0;
         a++;
+    }
+    unsigned mode_w = 0, mode_h = 0;
+    if (a + 1 < argc && strcmp(argv[a], "-m") == 0) {                    /* -m WxH: ask the display for that mode */
+        char *end;
+        mode_w = strtoul(argv[a + 1], &end, 10);
+        if (*end == 'x')
+            mode_h = strtoul(end + 1, NULL, 10);
+        a += 2;
     }
     unsigned want_w = 0, want_h = 0;
     if (a + 1 < argc && strcmp(argv[a], "-s") == 0) {
@@ -1576,6 +1773,12 @@ int main(int argc, char **argv)
     if (fb < 0 || ioctl(fb, 0x4600, &v) != 0 || ioctl(fb, 0x4602, &f) != 0 || v.bits_per_pixel != 32) {
         printf("bwm: no usable /dev/fb0 (errno %d)\n", errno);
         return 1;
+    }
+    if (mode_w && (mode_w != v.xres || mode_h != v.yres)) {
+        v.xres = v.xres_virtual = mode_w;
+        v.yres = v.yres_virtual = mode_h;
+        if (ioctl(fb, 0x4601, &v) != 0 || ioctl(fb, 0x4600, &v) != 0 || ioctl(fb, 0x4602, &f) != 0)
+            printf("bwm: cannot set the mode %ux%u (errno %d)\n", mode_w, mode_h, errno);
     }
     W = v.xres; H = v.yres; PITCH = f.line_length;
     if (want_w >= 320 && want_w < W && want_h >= 240 && want_h < H) {    /* pretend the screen is smaller */
@@ -1767,8 +1970,16 @@ int main(int argc, char **argv)
                         struct win *t = focus();
                         if (t)
                             close_win(t);
-                    } else if (code == 57 && down && k_alt) {      /* Alt-Space: off, romaji to hiragana, romaji to katakana */
-                        ime_on = (ime_on + 1) % 3;                 /* off, hiragana, katakana */
+                    } else if (code == 57 && down && k_alt) {      /* Alt-Space: off, romaji to hiragana, romaji to katakana; with Shift, kanji conversion */
+                        if (ime_pn && top) {
+                            if (ime_commit(top))
+                                quit_due = now_ms() + QUIT_WAIT_MS;
+                        } else {
+                            ime_pn = 0;
+                            ime_pre[0] = 0;
+                            ime_ci = -1;
+                        }
+                        ime_on = k_shift ? 3 : ime_on == 3 ? 0 : (ime_on + 1) % 3;   /* off, hiragana, katakana; 3 is kanji */
                         ime_n = 0;
                         touch_bar();
                     } else if (code == 58 && down) {
