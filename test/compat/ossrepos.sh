@@ -91,6 +91,22 @@ rs smallvec https://github.com/servo/rust-smallvec v1.13.2
 rs arrayvec https://github.com/bluss/arrayvec 0.7.6
 rs fnv https://github.com/servo/rust-fnv v1.0.7
 
+# A Ruby project's source tree, for tests that need only the gems of the
+# ruby image (minitest, test-unit, rake): a plain tarball.
+gs() {  # NAME URL TAG
+  [ -f "$out/$1.tar.gz" ] && return 0
+  mkdir "$work/gs-$1"
+  git -C "$work/gs-$1" init -q
+  git -C "$work/gs-$1" fetch -q --depth 1 "$2" "$3"
+  git -C "$work/gs-$1" checkout -q FETCH_HEAD
+  rm -rf "$work/gs-$1/.git"
+  mkdir "$work/gs-top-$1"
+  mv "$work/gs-$1" "$work/gs-top-$1/$1"
+  tar -C "$work/gs-top-$1" -cf - "$1" | gzip -n -c > "$out/$1.tar.gz"
+}
+
+gs rake https://github.com/ruby/rake v13.3.0
+
 # A Java project built with Maven on the host: its classes, test classes, test
 # resources (the tests open them by their path in the source tree) and the
 # libraries of its tests, and the JUnit console launcher that runs them.
