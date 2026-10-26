@@ -1142,6 +1142,7 @@ static int key_bytes(unsigned code, char *out)
             memcpy(out, fkey[i].seq, n);
             return (int)n;
         }
+    if (code == 15 && k_shift) { memcpy(out, "\033[Z", 3); return 3; }   /* Shift-Tab */
     if (code == 111) { memcpy(out, "\033[3~", 4); return 4; }        /* Delete */
     if (code == 104) { memcpy(out, "\033[5~", 4); return 4; }        /* Page Up */
     if (code == 109) { memcpy(out, "\033[6~", 4); return 4; }        /* Page Down */
@@ -1733,6 +1734,18 @@ int main(int argc, char **argv)
                             snap_win(t, code == 103 ? 0 : code == 106 ? 1 : -1);
                             touch_all();
                         }
+                    } else if (code == 67 && down && k_alt) {      /* Alt-F9: minimize the focused window */
+                        struct win *t = focus();
+                        if (t)
+                            minimize(t);
+                        touch_all();
+                    } else if (code == 108 && down && k_alt) {     /* Alt-Down: a snapped or maximized window goes back, any other is minimized */
+                        struct win *t = focus();
+                        if (t && t->maxed)
+                            toggle_max(t);
+                        else if (t)
+                            minimize(t);
+                        touch_all();
                     } else if (down && k_shift && (code == 110 || (code == 47 && k_ctrl))) {
                         if (top && top->cli >= 0) {                /* Shift-Insert, Ctrl-Shift-V: paste (key 0x100, for bterm) */
                             struct bwm_key pk = { (uint32_t)top->id, BWM_KEY_PASTE };
@@ -1742,6 +1755,13 @@ int main(int argc, char **argv)
                         if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm) */
                             struct bwm_key sk = { (uint32_t)top->id, code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN };
                             to_client(top->cli, BWM_KEY, &sk, sizeof sk);
+                        }
+                    } else if (code == 68 && down && k_alt) {      /* Alt-F10: maximize the focused window, or put it back */
+                        struct win *t = focus();
+                        if (t && t->resizable) {
+                            raise_win(t);
+                            toggle_max(t);
+                            touch_all();
                         }
                     } else if (code == 62 && down && k_alt) {      /* Alt-F4: close the focused window */
                         struct win *t = focus();

@@ -635,11 +635,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         until(b"# ", mark)
         # A process for the System window's list to end.
         mark = len(out)
-        q.stdin.write(b"sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
+        q.stdin.write(b"sleep 302 & echo sq$((1+2))=$!; sleep 301 & echo sp$((1+1))=$!; echo q$((3+4))\r"); q.stdin.flush()
         until(b"\nq7", mark)
         until(b"# ", mark)
         sleeper = re.search(rb"sp2=(\d+)", out[mark:])
         sleeper = int(sleeper.group(1)) if sleeper else 0
+        sleeper2 = re.search(rb"sq3=(\d+)", out[mark:])
+        sleeper2 = int(sleeper2.group(1)) if sleeper2 else 0
         # Ctrl-T starts a terminal window without a client on the command line.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
@@ -697,6 +699,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(1.5)
                 w, h, px = screendump()
                 return lambda x: tuple(px[(3 * w + x) * 3:(3 * w + x) * 3 + 3]) == (40, 90, 200)
+            # Alt-F10 maximizes the window and puts it back.
+            blue = snapped("alt-f10")
+            good = blue(300) and blue(800)
+            blue = snapped("alt-f10")
+            good = good and not blue(1000)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F10 maximizes the window and puts it back")
+            fails += not good
             blue = snapped("alt-left")
             good = blue(300) and not blue(800)
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Left puts the window on the left half of the screen")
@@ -724,6 +733,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 if good:
                     break
             print(("ok  " if good else "FAIL"), f"({name}) a double click on the title bar restores a maximized window")
+            fails += not good
+            blue = snapped("alt-up")
+            blue = snapped("alt-down")
+            good = not blue(1000)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Down puts a maximized window back")
+            fails += not good
+            blue = snapped("alt-down")
+            good = not any(blue(x) for x in range(0, 1000, 8))
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Down minimizes a window that is not maximized")
+            fails += not good
+            # The task bar button brings the window back; Alt-F9 minimizes it again.
+            for step in ((-200, -200),) * 4 + ((88, 200), (0, 200), (0, 200), (0, 156)):
+                monitor(f"mouse_move {step[0]} {step[1]}")
+            monitor("mouse_button 1", "mouse_button 0", gap=0.05)
+            time.sleep(1)
+            blue = snapped("alt-f9")
+            good = not any(blue(x) for x in range(0, 1000, 8))
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F9 minimizes the focused window")
             fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -797,6 +824,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bsys: live", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the System window refreshes itself")
             fails += not good
+            # F5 does what r does.
+            if good:
+                mark = len(out)
+                monitor("sendkey f5")
+                good = until(b"bsys: refreshed", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) F5 refreshes the System window")
+            fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
             monitor("sendkey p")
@@ -820,6 +854,66 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             else:
                 good = False
             print(("ok  " if good else "FAIL"), f"({name}) x ends the selected process")
+            fails += not good
+            # Delete does what x does.
+            monitor("sendkey g")
+            found = False
+            for _ in range(24):
+                if not good or found:
+                    break
+                monitor("sendkey j")
+                end = time.time() + 0.6
+                while time.time() < end:
+                    r, _, _ = select.select([q.stdout], [], [], 0.2)
+                    if r:
+                        out += q.stdout.read1(4096)
+                found = (b"bsys: select %d " % sleeper2) in out[mark:]
+            if found:
+                monitor("sendkey delete")
+                good = until(b"bsys: terminated %d" % sleeper2, mark)
+            else:
+                good = False
+            print(("ok  " if good else "FAIL"), f"({name}) Delete ends the selected process")
+            fails += not good
+            # G goes to the last process and g to the first.
+            mark3 = len(out)
+            monitor("sendkey shift-g")
+            good = until(b"bsys: select", mark3)
+            last = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey g")
+            good = good and until(b"bsys: select", mark3)
+            first = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            good = good and last != first and len(first) > 2 and len(last) > 2
+            print(("ok  " if good else "FAIL"), f"({name}) G and g in the process list go to the last and the first ({last!r} {first!r})")
+            fails += not good
+            # Page Down moves a page along the list and Page Up back to where it was.
+            mark3 = len(out)
+            monitor("sendkey pgdn")
+            good = until(b"bsys: select", mark3)
+            down = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey pgup")
+            good = good and until(b"bsys: select", mark3)
+            up = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            good = good and down != first and up == first
+            print(("ok  " if good else "FAIL"), f"({name}) Page Down and Page Up move along the process list ({first!r} {down!r} {up!r})")
+            fails += not good
+            # n sorts the list by name: the first name is not after the last, and n again goes back to newest first.
+            mark3 = len(out)
+            monitor("sendkey n")
+            good = until(b"bsys: sorted by name", mark3)
+            names = []
+            for key in ("g", "shift-g"):
+                mark3 = len(out)
+                monitor("sendkey " + key)
+                good = good and until(b"bsys: select", mark3)
+                sel = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0].split() if good else []
+                names.append(sel[1] if len(sel) > 1 else b"")
+            mark3 = len(out)
+            monitor("sendkey n")
+            good = good and until(b"bsys: sorted by pid", mark3) and names[0] and names[0] <= names[1]
+            print(("ok  " if good else "FAIL"), f"({name}) n sorts the process list by name ({names!r})")
             fails += not good
             monitor("sendkey p")
             good = until(b"bsys: system", mark)
@@ -912,6 +1006,46 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 -1")
             good = until(b"bfiles: top 3", mark)
         print(("ok  " if good else "FAIL"), f"({name}) the mouse wheel scrolls the window under the pointer")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The wheel walks the bsys process list: down from the first process moves off it.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bsys\r"); q.stdin.flush()
+        good = until(b"bsys: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey p")
+            good = until(b"bsys: processes", mark)
+        if good:
+            mark3 = len(out)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 200 150", "mouse_move 100 100", "mouse_move 0 0 -1")
+            good = until(b"bsys: select", mark3)
+        print(("ok  " if good else "FAIL"), f"({name}) the wheel walks the process list")
+        fails += not good
+        # A click on a process in the list selects it: the fourth row is what g followed by three j reaches.
+        clicked = keyed = b""
+        if good:
+            mark3 = len(out)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 150 %d" % (90 + 5 * 16 + 8), "mouse_button 1", "mouse_button 0")
+            good = until(b"bsys: select", mark3)
+            clicked = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if good else b""
+            mark3 = len(out)
+            monitor("sendkey g", "sendkey j", "sendkey j", "sendkey j")
+            end = time.time() + 2
+            while time.time() < end:
+                r, _, _ = select.select([q.stdout], [], [], 0.2)
+                if r:
+                    out += q.stdout.read1(4096)
+            keyed = bytes(out[mark3:]).split(b"bsys: select ")[-1].split(b"\n")[0] if b"bsys: select" in out[mark3:] else b""
+            good = good and clicked == keyed and len(clicked) > 2
+        print(("ok  " if good else "FAIL"), f"({name}) a click on a process selects it ({clicked!r} {keyed!r})")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -1034,11 +1168,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bfiles: deleted /tmp/rn/e", mark)
         print(("ok  " if good else "FAIL"), f"({name}) D twice in the bfiles list deletes the entry under the cursor")
         fails += not good
+        # F2 does what r does.
+        if good:
+            monitor("sendkey home", "sendkey down", "sendkey f2", "sendkey y", "sendkey ret")
+            good = until(b"bfiles: renamed /tmp/rn/a.txtx to /tmp/rn/a.txtxy", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) F2 in the bfiles list renames the entry under the cursor")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
         mark = len(out)
-        q.stdin.write(b"[ ! -e /tmp/rn/e ] && [ -f /tmp/rn/a.txtx ] && [ ! -e /tmp/rn/a.txt ] && [ -f /tmp/rn/b.txt ] && echo ok$((1+1))\r"); q.stdin.flush()
+        q.stdin.write(b"[ ! -e /tmp/rn/e ] && [ -f /tmp/rn/a.txtxy ] && [ ! -e /tmp/rn/a.txt ] && [ -f /tmp/rn/b.txt ] && echo ok$((1+1))\r"); q.stdin.flush()
         good = good and until(b"ok2", mark)
         print(("ok  " if good else "FAIL"), f"({name}) the renamed file is under its new name and the directory is gone")
         fails += not good
@@ -1245,6 +1385,81 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"cat /tmp/dd.txt; echo end$((1+1))\r"); q.stdin.flush()
         good = good and (until(b"foo\r\nxfoo\r\nbar\r\nend2", mark) or until(b"foo\nxfoo\nbar\nend2", mark))
         print(("ok  " if good else "FAIL"), f"({name}) Ctrl-D in the editor copies the line below it")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Ctrl-O in the editor opens an empty line below the cursor.
+        mark = len(out)
+        q.stdin.write(b"printf 'foo\\nbar\\n' > /tmp/oo.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/oo.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/oo.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/oo.txt", mark)
+        if good:
+            monitor("sendkey ctrl-o", "sendkey x", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/oo.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/oo.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"foo\r\nx\r\nbar\r\nend2", mark) or until(b"foo\nx\nbar\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-O in the editor opens a line below")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Ctrl-B in the editor swaps the two characters before the cursor.
+        mark = len(out)
+        q.stdin.write(b"printf 'abc\\nbar\\n' > /tmp/tt.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/tt.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/tt.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/tt.txt", mark)
+        if good:
+            monitor("sendkey ctrl-e", "sendkey ctrl-b", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/tt.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/tt.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"acb\r\nbar\r\nend2", mark) or until(b"acb\nbar\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Ctrl-B in the editor swaps two characters")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Shift-Tab in the editor takes four blanks off the start of the line.
+        mark = len(out)
+        q.stdin.write(b"printf '      ab\\nbar\\n' > /tmp/st.txt\r"); q.stdin.flush()
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bfiles /tmp/st.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/st.txt", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey e")
+            good = until(b"bfiles: edit /tmp/st.txt", mark)
+        if good:
+            monitor("sendkey shift-tab", "sendkey ctrl-s")
+            good = until(b"bfiles: saved /tmp/st.txt", mark)
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/st.txt; echo end$((1+1))\r"); q.stdin.flush()
+        good = good and (until(b"  ab\r\nbar\r\nend2", mark) or until(b"  ab\nbar\nend2", mark))
+        print(("ok  " if good else "FAIL"), f"({name}) Shift-Tab in the editor takes four blanks off the line")
         fails += not good
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
@@ -1645,6 +1860,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bfiles: dotfiles hidden", mark)
         print(("ok  " if good else "FAIL"), f"({name}) h in bfiles toggles the dotfiles")
         fails += not good
+        # . does what h does.
+        if good:
+            mark2 = len(out)
+            monitor("sendkey dot")
+            good = until(b"bfiles: dotfiles shown", mark2)
+            mark2 = len(out)
+            monitor("sendkey dot")
+            good = good and until(b"bfiles: dotfiles hidden", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) . in bfiles toggles the dotfiles too")
+        fails += not good
         # s in the list sorts the files by size (largest first), then by time (newest first), then back by name.
         if good:
             monitor("sendkey s")
@@ -1660,6 +1885,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey shift-r")
             good = until(b"bfiles: reloaded", mark)
         print(("ok  " if good else "FAIL"), f"({name}) R in bfiles reloads the list")
+        fails += not good
+        # F5 does what R does.
+        if good:
+            mark2 = len(out)
+            monitor("sendkey f5")
+            good = until(b"bfiles: reloaded", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) F5 in bfiles reloads the list")
         fails += not good
         # G jumps to the end of the list and g back to the top.
         if good:
@@ -1693,6 +1925,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
         print(("ok  " if good else "FAIL"), f"({name}) s twice in bfiles puts the newest file first")
+        fails += not good
+        # In that order the date of each file stands where the size was.
+        if good:
+            good = re.search(r"^zz +\d{4}-\d\d-\d\d$", lines[2]) is not None
+            if not good:
+                print(repr(lines[2]))
+        print(("ok  " if good else "FAIL"), f"({name}) bfiles shows the date of each file when sorted by time")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -1780,6 +2019,73 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             r1 = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
             good = 10000 < r0 < 20000 and r1 > 3 * r0
         print(("ok  " if good else "FAIL"), f"({name}) + zooms the image in bview ({r0} then {r1} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The mouse wheel zooms the image in bview: up in, down out.
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bview /tmp/nf/z.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        r0 = r1 = r2 = 0
+        if good:
+            time.sleep(1.5)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 140 150")
+            time.sleep(0.5)
+            def red():
+                w, h, px = screendump()
+                return sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (255, 0, 0))
+            r0 = red()
+            monitor("mouse_move 0 0 1")
+            time.sleep(2)
+            r1 = red()
+            monitor("mouse_move 0 0 -1", "mouse_move 0 0 -1")
+            time.sleep(2)
+            r2 = red()
+            good = r0 > 10000 and r1 > 3 * r0 and r2 < r0
+        print(("ok  " if good else "FAIL"), f"({name}) the wheel zooms the image in bview ({r0}, {r1}, {r2} pixels)")
+        fails += not good
+        # Home puts the zoom back to the first size.
+        if good:
+            monitor("mouse_move 0 0 1")
+            time.sleep(1.5)
+            monitor("sendkey home")
+            time.sleep(2)
+            r3 = red()
+            good = abs(r3 - r0) < r0 // 20
+        else:
+            r3 = 0
+        print(("ok  " if good else "FAIL"), f"({name}) Home resets the zoom in bview ({r3} against {r0} pixels)")
+        fails += not good
+        # End zooms in all the way.
+        if good:
+            monitor("sendkey end")
+            time.sleep(2)
+            r4 = red()
+            good = r4 > r0
+        else:
+            r4 = 0
+        print(("ok  " if good else "FAIL"), f"({name}) End zooms in all the way in bview ({r4} against {r0} pixels)")
+        fails += not good
+        # Page Up zooms in and Page Down out.
+        if good:
+            monitor("sendkey home")
+            time.sleep(2)
+            monitor("sendkey pgup")
+            time.sleep(2)
+            r5 = red()
+            monitor("sendkey pgdn")
+            time.sleep(2)
+            r6 = red()
+            good = r5 > r0 and abs(r6 - r0) < r0 // 20
+        else:
+            r5 = r6 = 0
+        print(("ok  " if good else "FAIL"), f"({name}) Page Up and Page Down zoom in and out in bview ({r5}, {r6} against {r0} pixels)")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -2449,30 +2755,43 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     print(f"---- {name} transcript ----")
     print(out.decode(errors="replace").replace("\r", "")[-1500:])
 
-run("BIOS", [])
-# The image `make usb` builds: the ISO, then a BastiOS partition. The
-# keyboard is on the same controller, so it is read through the disk.
-subprocess.run(["make", "-s", "build/bastios-usb.img", "USB_MIB=33"], check=True)
-stick = os.path.join(tmp.name, "stick.img")
-shutil.copy("build/bastios-usb.img", stick)
-run("BIOS, from a USB stick, USB keyboard", [], usb=True, stick=stick)
-if os.path.exists(ovmf) and os.path.exists(ovmf_vars):
+# ISO_PART names the runs to make (a, b, c; any mix, default all) so that
+# CI can give them runners of their own. Each run starts from a disk of its
+# own except "UEFI, USB keyboard, NVMe", which reads what "UEFI" wrote
+# through virtio: they stay in one part.
+parts = os.environ.get("ISO_PART", "abc")
+def part(x): return x in parts
+stick = None
+if part("a") or part("c"):
+    # The image `make usb` builds: the ISO, then a BastiOS partition. The
+    # keyboard is on the same controller, so it is read through the disk.
+    subprocess.run(["make", "-s", "build/bastios-usb.img", "USB_MIB=33"], check=True)
+    stick = os.path.join(tmp.name, "stick.img")
+    shutil.copy("build/bastios-usb.img", stick)
+if part("a"):
+    run("BIOS", [])
+    run("BIOS, from a USB stick, USB keyboard", [], usb=True, stick=stick)
+if not (part("b") or part("c")):
+    pass
+elif os.path.exists(ovmf) and os.path.exists(ovmf_vars):
     vars_copy = os.path.join(tmp.name, "vars.fd")
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                 "-drive", f"if=pflash,format=raw,file={vars_copy}"])
-    # The firmware drives the xHCI controller itself until it hands over.
-    # OVMF puts both controllers' 64-bit BARs far above 4 GiB, in the upper
-    # part of the device window.
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI, USB keyboard, NVMe", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                                     "-drive", f"if=pflash,format=raw,file={vars_copy}"], usb=True, nvme=True)
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI, from a USB stick", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                                   "-drive", f"if=pflash,format=raw,file={vars_copy}"], stick=stick)
-    shutil.copy(ovmf_vars, vars_copy)
-    run("UEFI, hardware report", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
-                                  "-drive", f"if=pflash,format=raw,file={vars_copy}"], diag=True)
+    if part("b"):
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                     "-drive", f"if=pflash,format=raw,file={vars_copy}"])
+        # The firmware drives the xHCI controller itself until it hands over.
+        # OVMF puts both controllers' 64-bit BARs far above 4 GiB, in the upper
+        # part of the device window.
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI, USB keyboard, NVMe", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                         "-drive", f"if=pflash,format=raw,file={vars_copy}"], usb=True, nvme=True)
+    if part("c"):
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI, from a USB stick", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                       "-drive", f"if=pflash,format=raw,file={vars_copy}"], stick=stick)
+        shutil.copy(ovmf_vars, vars_copy)
+        run("UEFI, hardware report", ["-drive", f"if=pflash,format=raw,readonly=on,file={ovmf}",
+                                      "-drive", f"if=pflash,format=raw,file={vars_copy}"], diag=True)
 else:
     print(f"SKIP UEFI: no OVMF firmware at {ovmf}")
 print(f"---- {fails} failed ----")

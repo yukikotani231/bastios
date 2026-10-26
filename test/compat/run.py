@@ -829,6 +829,7 @@ def main():
     ap.add_argument("--oss-dir", help="the git repositories of real projects (ossrepos.sh), served at HOSTURL/oss")
     ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
+    ap.add_argument("--ruby-disk", help="the Ruby disk (the root of the ruby:alpine image) for ruby.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--podman-disk", help="the Podman disk (the root of the podman image) for podman.txt")
     ap.add_argument("--gitsuite-tar", help="git's own tests with the build they test (gitsuite.sh), served at HOSTURL/gitsuite.tar, for the gitsuite lane")
@@ -844,7 +845,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "rust", "python", "podman", "gitsuite"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "ruby", "rust", "python", "python2", "podman", "gitsuite"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -867,7 +868,21 @@ def main():
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
     python = load_applets(os.path.join(HERE, "python.txt"))
+    # The cases run in one guest and build on each other, and the whole took
+    # longer than any other lane. python2 runs the unpacking, gcc, the venv
+    # and pytest (the cases up to the C extension's), then the binary wheels
+    # and the cases after them, which use the venv they install into; python
+    # runs the cases before the wheels, after the same set-up.
+    py_at = {c[0]: i for i, c in enumerate(python)}
+    py_setup = python[:py_at["pip: build a C extension from source (setuptools, gcc) and import it"] + 1]
+    py_wheels_at = py_at["pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)"]
+    python_parts = {"python": python[:py_wheels_at], "python#2": py_setup + python[py_wheels_at:]}
+    python_owner = {}
+    for k in python_parts:
+        for c in python_parts[k]:
+            python_owner.setdefault(c[0], k)
     java = load_applets(os.path.join(HERE, "java.txt"))
+    ruby = load_applets(os.path.join(HERE, "ruby.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     podman = load_applets(os.path.join(HERE, "podman.txt"))
     tty = load_tty(os.path.join(HERE, "tty.txt"))
@@ -1084,24 +1099,32 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append(("go", disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
-    if args.python_disk and lane_chosen("python"):
+    if args.python_disk and (lane_chosen("python") or lane_chosen("python2")):
         # Compilers and test suites on the emulated processor take a while;
         # the cases write the disk. The packages pip installs come from the
         # host's web server.
-        disk = os.path.join(args.out, "python-run.img")
-        shutil.copyfile(args.python_disk, disk)
         if args.python_wheels:
             os.symlink(os.path.abspath(args.python_wheels), os.path.join(web.dir, "wheels"))
         os.symlink(os.path.join(HERE, "pyprogs"), os.path.join(web.dir, "pyprogs"))
         if args.alpine_repo and not os.path.exists(os.path.join(web.dir, "alpine")):
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
-        lanes.append(("python", disk, [("python", "Python development", applets_lane(python, 900))], "1G"))
+        for lane_name, key, what in (("python", "python", "Python development"), ("python2", "python#2", "Python development, the packages with extension modules")):
+            if lane_chosen(lane_name):
+                disk = os.path.join(args.out, f"{lane_name}-run.img")
+                shutil.copyfile(args.python_disk, disk)
+                lanes.append((lane_name, disk, [(key, what, applets_lane(python_parts[key], 900))], "1G"))
     if args.jdk_disk and lane_chosen("java"):
         # The cases unpack a root of about 400 MB onto the disk: a copy.
         disk = os.path.join(args.out, "jdk-run.img")
         shutil.copyfile(args.jdk_disk, disk)
         lanes.append(("java", disk, [("java", "JDK", applets_lane(java, 900))], "2G"))
+    if args.ruby_disk and lane_chosen("ruby"):
+        # The cases unpack a root of about 250 MB onto the disk: a copy.
+        disk = os.path.join(args.out, "ruby-run.img")
+        shutil.copyfile(args.ruby_disk, disk)
+        os.symlink(os.path.join(HERE, "rbprogs"), os.path.join(web.dir, "rbprogs"))
+        lanes.append(("ruby", disk, [("ruby", "Ruby", applets_lane(ruby, 900))], "1G"))
     if args.rust_disk and lane_chosen("rust"):
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.
@@ -1126,6 +1149,11 @@ def main():
         ran = {c[0] for k, cs in alpine_parts.items() if k in held for c in cs}
         held.add("alpine")
         alpine_left = {"alpine: " + c[0] for c in alpine if c[0] not in ran}
+    python_left = set()
+    if held & set(python_parts):
+        ran = {c[0] for k, cs in python_parts.items() if k in held for c in cs}
+        held.add("python")
+        python_left = {"python: " + c[0] for c in python if c[0] not in ran}
     if not lanes:
         print("compat: no lane to run (is each chosen lane's disk given?)")
         return 2
@@ -1155,7 +1183,16 @@ def main():
                 if c["name"] not in merged or alpine_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["alpine"] = sorted(merged.values(), key=lambda c: at.get(c["name"], len(at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "rust", "python", "podman", "gitsuite"] if k in results}
+    if set(results) & set(python_parts):
+        # One group again, in the order of python.txt; the set-up cases that
+        # both lanes run are counted from the lane that holds them first.
+        merged = {}
+        for k in python_parts:
+            for c in results.pop(k, []):
+                if c["name"] not in merged or python_owner.get(c["name"]) == k:
+                    merged[c["name"]] = c
+        results["python"] = sorted(merged.values(), key=lambda c: py_at.get(c["name"], len(py_at)))
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "ruby", "rust", "python", "podman", "gitsuite"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
@@ -1171,7 +1208,7 @@ def main():
         return 0
     if os.path.exists(base):
         want = [l.strip() for l in open(base) if l.strip() and not l.startswith("#")]
-        lost = sorted(i for i in set(want) - set(ids) - alpine_left
+        lost = sorted(i for i in set(want) - set(ids) - alpine_left - python_left
                       if not (args.lanes or args.skip_lanes or args.groups) or i.split(": ", 1)[0] in held)
         fresh = sorted(set(ids) - set(want))
         if fresh and not lost:
