@@ -61,3 +61,7 @@ hello from the host
 == docker: a published port reaches the container
 $ dc run -d --name pub -p 8082:8080 ctr /bin/busybox sh -c 'echo from-pub | /bin/busybox nc -l -p 8080' >/dev/null 2>&1; bb sleep 2; bb nc -w 5 127.0.0.1 8082 </dev/null | bb head -1; dc rm -f pub >/dev/null 2>&1
 from-pub
+
+== docker: two containers on a user-defined network reach each other by address
+$ dc network create nn >/dev/null 2>&1; dc run -d --name nsrv --network nn ctr /bin/busybox sleep 120 >/dev/null 2>&1; ip=$(dc inspect -f '{{.NetworkSettings.Networks.nn.IPAddress}}' nsrv); dc run --rm --network nn ctr /bin/busybox ping -c 1 -W 5 $ip 2>&1 | bb grep -c '1 packets received'; dc rm -f nsrv >/dev/null 2>&1; dc network rm nn >/dev/null 2>&1
+1
