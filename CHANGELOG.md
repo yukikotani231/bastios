@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- The `SIGSYS` of a seccomp `SECCOMP_RET_TRAP` filter carries `si_code` `SYS_SECCOMP`, `si_syscall`, `si_arch` and `si_call_addr`, as Linux's does, so a sandbox's handler can see which call it refused.
 - A click on a process in the `bsys` list selects it.
 - Page Up and Page Down zoom the image in `bview` in and out, as `+` and `-` do.
 - The `bfiles` list shows the date of each file in place of its size while it is sorted by time.
