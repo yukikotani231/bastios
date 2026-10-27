@@ -1794,7 +1794,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     }
   }
   // The network card, if any: nine pages after the disk's four (an e1000
-  // takes six of them).
+  // takes seventeen).
   let mut nic = nic_new(&mut ports, &mut pci, &mut m, &mut win, 4, dev_lo, dev_hi, acpi_lo, acpi_hi, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi, snd_l, snd_h, msi, vm_where);
   // An e1000 has no MSI: its line goes through the 8259 (vectors 32-47,
   // acknowledged like the timer's), unless it shares the timer's, the

@@ -74,9 +74,20 @@ fn pci_nic_start(m: &mut Mem, win: &mut MmioSpace, at: u64, dk_lo: u64, dk_hi: u
   let b1 = take_low_page(&mut m, at + 2);
   let b2 = take_low_page(&mut m, at + 3);
   let b3 = take_low_page(&mut m, at + 4);
-  let t = take_low_page(&mut m, at + 5);
+  let b4 = take_low_page(&mut m, at + 5);
+  let b5 = take_low_page(&mut m, at + 6);
+  let b6 = take_low_page(&mut m, at + 7);
+  let b7 = take_low_page(&mut m, at + 8);
+  let b8 = take_low_page(&mut m, at + 9);
+  let b9 = take_low_page(&mut m, at + 10);
+  let b10 = take_low_page(&mut m, at + 11);
+  let b11 = take_low_page(&mut m, at + 12);
+  let b12 = take_low_page(&mut m, at + 13);
+  let b13 = take_low_page(&mut m, at + 14);
+  let b14 = take_low_page(&mut m, at + 15);
+  let b15 = take_low_page(&mut m, at + 16);
   let regs = mmio_claim(&mut win, bar, E1K_LEN);
-  return net_up(Card::E1000(e1k_new(regs, e1k_model(id % 65536, id / 65536 % 65536), r, b0, b1, b2, b3, t)));
+  return net_up(Card::E1000(e1k_new(regs, e1k_model(id % 65536, id / 65536 % 65536), r, b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11, b12, b13, b14, b15)));
 }
 
 /// Starts the network card: the first virtio network device in the slots
