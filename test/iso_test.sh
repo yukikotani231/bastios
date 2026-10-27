@@ -2073,6 +2073,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         good = good and until(b"8 /tmp/mm.out", mark)
         print(("ok  " if good else "FAIL"), f"({name}) a line of /etc/bwm.menu adds a launcher entry that runs a command")
         fails += not good
+        # bwm -w FILE puts a PPM over the whole desktop: a 2 x 2 green image makes the empty desktop pure green.
+        mark = len(out)
+        q.stdin.write(b"printf 'P6 2 2 255\\n\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000' > /tmp/nf/w.ppm; bwm -n -w /tmp/nf/w.ppm\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            at = (300 * w + 700) * 3
+            good = tuple(px[at:at + 3]) == (0, 255, 0)
+        print(("ok  " if good else "FAIL"), f"({name}) bwm -w puts an image over the desktop")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bview shows a PPM: a 2 x 2 red image becomes a block of pure red.
         mark = len(out)
         q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nf/t.ppm; bwm -n -c bview /tmp/nf/t.ppm\r"); q.stdin.flush()
