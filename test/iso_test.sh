@@ -2000,6 +2000,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # u shows the sizes as 4.8K and the like.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/uh; i=0; while [ $i -lt 500 ]; do echo 123456789; i=$((i+1)); done > /tmp/uh/big; bwm -n -c bfiles /tmp/uh\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey u")
+            good = until(b"bfiles: sizes human", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 24)
+            good = any(re.match(r"^big +4\.8K$", l.strip()) for l in lines)
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) u in bfiles shows the sizes in K and M")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Dragging a file onto a directory in the list moves it there.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/dd/sub; echo x > /tmp/dd/f; bwm -n -c bfiles /tmp/dd\r"); q.stdin.flush()
