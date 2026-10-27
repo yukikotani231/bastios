@@ -32,6 +32,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Alt-F2 in `bwm` asks for a command in the task bar and runs it in a terminal window (Enter runs it, Escape cancels).
 - `bwm -w FILE` puts a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP over the whole desktop, stretched to the screen. Without `-w`, the file named on the first line of `/etc/bwm.wallpaper` is used if there is one.
 - Ctrl-Shift-Page Up in `bterm` goes to the oldest line kept in the history, Ctrl-Shift-Page Down back to the live screen.
+- Alt-F12 in `bwm` saves the desktop as a PPM to `/tmp/screenshot.ppm` (open it with `bview` or from `bfiles`).
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
 - In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
 - The mouse wheel zooms the image in `bview`: up in, down out.

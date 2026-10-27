@@ -733,6 +733,31 @@ static int wall_load(const char *path)
     return 1;
 }
 
+/* Alt-F12: writes the desktop as it is now (without the pointer) to /tmp/screenshot.ppm, a PPM (P6) that bview and bfiles can show. */
+static void screenshot(void)
+{
+    FILE *f = fopen("/tmp/screenshot.ppm", "wb");
+    if (!f) {
+        puts("bwm: cannot write /tmp/screenshot.ppm");
+        return;
+    }
+    fprintf(f, "P6\n%u %u\n255\n", W, H);
+    unsigned char *row = malloc((size_t)W * 3);
+    for (unsigned y = 0; row && y < H; y++) {
+        for (unsigned x = 0; x < W; x++) {
+            uint32_t p = scene[y * W + x];
+            row[x * 3] = p >> roff & 255;
+            row[x * 3 + 1] = p >> goff & 255;
+            row[x * 3 + 2] = p >> boff & 255;
+        }
+        fwrite(row, 1, (size_t)W * 3, f);
+    }
+    free(row);
+    fclose(f);
+    puts("bwm: screenshot /tmp/screenshot.ppm");
+    fflush(stdout);
+}
+
 static void draw_scene(void)
 {
     if (wall)
@@ -2112,6 +2137,8 @@ int main(int argc, char **argv)
                             toggle_max(t);
                             touch_all();
                         }
+                    } else if (code == 88 && down && k_alt) {      /* Alt-F12: save a screenshot */
+                        screenshot();
                     } else if (code == 62 && down && k_alt) {      /* Alt-F4: close the focused window */
                         struct win *t = focus();
                         if (t)
