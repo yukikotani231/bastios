@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Ctrl-= and Ctrl-plus make the text of the focused `bterm` window bigger (up to three times), Ctrl-minus smaller and Ctrl-0 puts it back; the window keeps its size and the grid changes.
 - `t` in the `bsys` window cycles the time zone through a short list by writing `/etc/TZ`; the Time row and the `bwm` task bar clock show local time and follow a change within seconds.
 - The `SIGSYS` of a seccomp `SECCOMP_RET_TRAP` filter carries `si_code` `SYS_SECCOMP`, `si_syscall`, `si_arch` and `si_call_addr`, as Linux's does, so a sandbox's handler can see which call it refused.
 - A click on a process in the `bsys` list selects it.

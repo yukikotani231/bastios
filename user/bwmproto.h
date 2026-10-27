@@ -14,7 +14,9 @@
  * program picks the size it will have (the one asked for, or a smaller one
  * that fits its cells), answers with BWM_RESIZED (a shared window sends a
  * new memory file with it, as with BWM_CREATE_SHM) and draws all of the
- * window again. The window keeps its old size until the answer comes. */
+ * window again. The window keeps its old size until the answer comes.
+ * A resizable program may also send BWM_RESIZED unasked (bterm does when
+ * the text size changes). */
 #ifndef BWMPROTO_H
 #define BWMPROTO_H
 #include <stdint.h>
@@ -39,6 +41,9 @@ struct bwm_key { uint32_t id, ch; };                            /* ch is a byte,
 #define BWM_KEY_SCROLL_DOWN 0x102
 #define BWM_KEY_SCROLL_TOP 0x103       /* Ctrl-Shift-Page Up: back to the oldest line kept */
 #define BWM_KEY_SCROLL_END 0x104       /* Ctrl-Shift-Page Down: back to the live screen */
+#define BWM_KEY_ZOOM_IN 0x105          /* Ctrl-plus: bigger text */
+#define BWM_KEY_ZOOM_OUT 0x106         /* Ctrl-minus: smaller text */
+#define BWM_KEY_ZOOM_RESET 0x107       /* Ctrl-0: the normal size */
 struct bwm_mouse { uint32_t id, x, y, buttons; };              /* x, y inside the contents; signed, and outside it while a drag that began in it goes on */
 struct bwm_close { uint32_t id; };
 struct bwm_resizable { uint32_t id; };
