@@ -1,7 +1,7 @@
 #ifndef BSYS_H
 #define BSYS_H
 /* bsys, a System window for bwm: the kernel, uptime, memory, processors,
- * screen and root file system in a 60 x 12 grid drawn like bfiles (it shares
+ * screen, load averages and root file system in a 60 x 12 grid drawn like bfiles (it shares
  * bfiles' pixel buffer and cell routines). r reads the figures again and
  * says "bsys: refreshed"; p swaps them for the list of processes (newest
  * first; j and k or the Up and Down keys move along it and say
@@ -156,7 +156,16 @@ static void bs_paint(unsigned sw, unsigned sh)
     gmtime_r(&now, &tm);
     strftime(v, sizeof v, "%Y-%m-%d %H:%M:%S UTC", &tm);
     bs_row(9, "Time", v);
-    bf_put_row(10, "", 0, 0x00D8D8D8, 0x00101018);
+    double la[3] = {0, 0, 0};
+    FILE *lf = fopen("/proc/loadavg", "r");
+    if (lf) {
+        if (fscanf(lf, "%lf %lf %lf", &la[0], &la[1], &la[2]) != 3)
+            la[0] = la[1] = la[2] = 0;
+        fclose(lf);
+    }
+    snprintf(v, sizeof v, "%.2f %.2f %.2f", la[0], la[1], la[2]);
+    bs_row(10, "Load", v);
+    printf("bsys: load %s\n", v);
     bf_put_row(11, "  r: refresh  p: processes", 27, 0x00808090, 0x00101018);
 }
 

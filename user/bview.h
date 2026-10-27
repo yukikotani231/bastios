@@ -6,10 +6,15 @@
  * pixels live in bfiles' buffer. Any other key or the close box ends it. Says
  * "bview: window ID WxH" when the window is open and "bview: cannot show
  * FILE" otherwise. + and - (or =) zoom, h j k l or the arrow keys move
- * about a zoomed image, 0 goes back to the first view. It is part of the bterm program, which runs it when
+ * about a zoomed image, 0 goes back to the first view, n and p show the next
+ * and the previous image of the same directory (by name) in the same window
+ * and say "bview: show PATH". It is part of the bterm program, which runs it when
  * started as "bview" (bfiles' i runs it on the file shown). */
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <strings.h>
 
 #define BV_MAXW 512
 #define BV_MAXH 360
@@ -115,34 +120,95 @@ static void bv_draw(const struct bv_img *m, long bn, long bd, int e, long ww, lo
     bv_cur_h = h;
 }
 
-static int bview_main(int argc, char **argv)
+/* Reads a whole file (up to 8 MiB) into a new buffer; NULL when it cannot. */
+static unsigned char *bv_read(const char *path, size_t *np)
 {
-    const char *path = argc > 1 ? argv[1] : "";
     unsigned char *d = NULL;
     size_t n = 0, cap = 0;
     int f = open(path, O_RDONLY);
     for (ssize_t r; f >= 0 && n < (8u << 20); ) {
-        if (n == cap && !(d = realloc(d, cap = cap ? cap * 2 : 65536)))
-            break;
+        if (n == cap) {
+            unsigned char *g = realloc(d, cap = cap ? cap * 2 : 65536);
+            if (!g)
+                break;
+            d = g;
+        }
         if ((r = read(f, d + n, cap - n)) <= 0)
             break;
         n += r;
     }
-    struct bv_img m;
     if (f >= 0)
         close(f);
+    *np = n;
+    return d;
+}
+
+/* The whole factor that fits the image into mw x mh: enlarged by bn, or sampled by bd. */
+static void bv_fit(const struct bv_img *m, long mw, long mh, long *bn, long *bd)
+{
+    long up = mw / m->w < mh / m->h ? mw / m->w : mh / m->h;
+    long dn = (m->w + mw - 1) / mw > (m->h + mh - 1) / mh ? (m->w + mw - 1) / mw : (m->h + mh - 1) / mh;
+    int k = m->w > mw || m->h > mh;
+    *bn = k ? 1 : up;
+    *bd = k ? dn : 1;
+}
+
+static int bv_isimg(const char *name)
+{
+    size_t l = strlen(name);
+    return l > 4 && (strcasecmp(name + l - 4, ".ppm") == 0 || strcasecmp(name + l - 4, ".bmp") == 0);
+}
+
+/* Puts into out the image file next to path that comes after it by name (step 1) or before it (step -1), wrapping round;
+ * 0 when there is no other one. */
+static int bv_neighbour(const char *path, int step, char *out, size_t cap)
+{
+    char dir[512];
+    const char *base = strrchr(path, '/');
+    size_t dl = base ? (size_t)(base - path) : 0;
+    base = base ? base + 1 : path;
+    if (dl >= sizeof dir)
+        return 0;
+    memcpy(dir, path, dl);
+    dir[dl] = 0;
+    DIR *dp = opendir(dl ? dir : (path[0] == '/' ? "/" : "."));
+    if (!dp)
+        return 0;
+    char best[256] = "", first[256] = "", last[256] = "";       /* best: the nearest name in the wanted direction */
+    struct dirent *e;
+    while ((e = readdir(dp))) {
+        if (!bv_isimg(e->d_name) || strlen(e->d_name) >= sizeof best)
+            continue;
+        if (!first[0] || strcmp(e->d_name, first) < 0) strcpy(first, e->d_name);
+        if (!last[0] || strcmp(e->d_name, last) > 0) strcpy(last, e->d_name);
+        int c = strcmp(e->d_name, base);
+        if (c != 0 && (step > 0 ? c > 0 : c < 0) && (!best[0] || (step > 0 ? strcmp(e->d_name, best) < 0 : strcmp(e->d_name, best) > 0)))
+            strcpy(best, e->d_name);
+    }
+    closedir(dp);
+    const char *pick = best[0] ? best : step > 0 ? first : last;
+    if (!pick[0] || strcmp(pick, base) == 0)
+        return 0;
+    return snprintf(out, cap, "%s%s%s", dl ? dir : "", dl ? "/" : (path[0] == '/' ? "/" : ""), pick) < (int)cap;
+}
+
+static int bview_main(int argc, char **argv)
+{
+    char path[512];
+    snprintf(path, sizeof path, "%s", argc > 1 ? argv[1] : "");
+    size_t n = 0;
+    unsigned char *d = bv_read(path, &n);
+    struct bv_img m;
     if (!d || !bv_open(&m, d, n)) {
         printf("bview: cannot show %s\n", path);
         return 1;
     }
-    long k = m.w <= BV_MAXW && m.h <= BV_MAXH ? 0 : 1;      /* k: the factor to enlarge or to sample by */
-    long up = BV_MAXW / m.w < BV_MAXH / m.h ? BV_MAXW / m.w : BV_MAXH / m.h;
-    long dn = (m.w + BV_MAXW - 1) / BV_MAXW > (m.h + BV_MAXH - 1) / BV_MAXH ? (m.w + BV_MAXW - 1) / BV_MAXW : (m.h + BV_MAXH - 1) / BV_MAXH;
-    long w = k ? m.w / dn : m.w * up, h = k ? m.h / dn : m.h * up;
+    long bn, bd;
+    bv_fit(&m, BV_MAXW, BV_MAXH, &bn, &bd);
+    long w = m.w * bn / bd, h = m.h * bn / bd;
     if (w < 1) w = 1;
     if (h < 1) h = 1;
     long ww = w < 128 ? 128 : w, wh = h < 64 ? 64 : h;       /* a window never smaller than this */
-    long bn = k ? 1 : up, bd = k ? dn : 1;                   /* the scale at the start: bn / bd window pixels per image pixel */
     int ze = 0;                                              /* + and - double and halve it, up to 4 times each way */
     long panx = 0, pany = 0;                                 /* where the window's corner is in the scaled image, when that is bigger */
     bv_draw(&m, bn, bd, ze, ww, wh, &panx, &pany, 0, 0);
@@ -178,6 +244,33 @@ static int bview_main(int argc, char **argv)
         }
         long dx = 0, dy = 0;
         int dz = 0, reset = 0;
+        if (esc == 0 && (c == 'n' || c == 'p')) {            /* the next or the previous image of the directory, in this window */
+            char np[512];
+            unsigned char *nd;
+            size_t nn;
+            struct bv_img nm;
+            snprintf(np, sizeof np, "%s", path);
+            for (int tries = 0; tries < 32 && bv_neighbour(np, c == 'n' ? 1 : -1, np, sizeof np); tries++) {
+                if (strcmp(np, path) == 0)
+                    break;
+                if ((nd = bv_read(np, &nn)) && bv_open(&nm, nd, nn)) {
+                    free(d);
+                    d = nd;
+                    m = nm;
+                    snprintf(path, sizeof path, "%s", np);
+                    bv_fit(&m, ww, wh, &bn, &bd);
+                    ze = 0;
+                    panx = pany = 0;
+                    bv_draw(&m, bn, bd, ze, ww, wh, &panx, &pany, 0, 0);
+                    bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh);
+                    printf("bview: show %s\n", path);
+                    fflush(stdout);
+                    break;
+                }
+                free(nd);
+            }
+            continue;
+        }
         if (esc == 0 && c == 27) { esc = 1; continue; }
         if (esc == 1 && c == '[') { esc = 2; continue; }
         if (esc == 2 && (c == '5' || c == '6')) { esc = c; continue; }      /* Page Up and Page Down are ESC [ 5 ~ and ESC [ 6 ~ */

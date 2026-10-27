@@ -857,6 +857,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(1)
                 monitor("sendkey r")
                 good = until(b"bsys: refreshed", mark)
+            good = good and until(b"bsys: load ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the menu's System entry opens the System window and r refreshes it")
             fails += not good
             # left alone, the window reads the numbers again by itself.
@@ -2221,6 +2222,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         else:
             r5 = r6 = 0
         print(("ok  " if good else "FAIL"), f"({name}) Page Up and Page Down zoom in and out in bview ({r5}, {r6} against {r0} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # n and p show the next and the previous image of the directory in the same window.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/nv; printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nv/a.ppm; printf 'P6 2 2 255\\n\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000' > /tmp/nv/b.ppm; bwm -n -c bview /tmp/nv/a.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        if good:
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey n")
+            good = until(b"bview: show /tmp/nv/b.ppm", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            green = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (0, 255, 0))
+            good = green > 1000
+            mark = len(out)
+            monitor("sendkey p")
+            good = good and until(b"bview: show /tmp/nv/a.ppm", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) n and p step through the images of a directory in bview")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
