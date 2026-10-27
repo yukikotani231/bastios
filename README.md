@@ -145,7 +145,7 @@ The direction is in bastiolang's [ROADMAP.md](https://github.com/yukikotani231/b
 | `test/` | `make test` and the benchmarks; `test/compat/` is the Linux compatibility suite |
 | `arch/aarch64/`, `src/aarch64/`, `boot/aarch64/` | The AArch64 port ([docs/aarch64.md](docs/aarch64.md)) |
 | `bench/` | The benchmarks against Linux ([docs/performance.md](docs/performance.md)) |
-| `tools/` | Helpers: `mkusb.py` (USB images), `ocipull.sh` (pull a container image), `qemu-ena` (a model of the AWS adapter for QEMU), `proof_coverage.py` (which kernel functions carry specifications) |
+| `tools/` | Helpers: `mkusb.py` (USB images), `ec2-ami.sh` (an AWS AMI from the USB image), `ocipull.sh` (pull a container image), `qemu-ena` (a model of the AWS adapter for QEMU), `proof_coverage.py` (which kernel functions carry specifications) |
 | `docs/` | Everything else; the index is [docs/README.md](docs/README.md) |
 
 ## Contributing
