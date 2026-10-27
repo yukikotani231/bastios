@@ -26,8 +26,10 @@
 
 #define MAXC 160                          /* the most columns and rows the grid can have */
 #define MAXR 60
-#define CW 8
-#define CH 16
+static int fz = 1;                        /* the text size: each pixel of the 8 x 16 font is fz x fz */
+#define MAXZ 3
+#define CW (8 * fz)
+#define CH (16 * fz)
 #define MINC 10
 #define MINR 4
 
@@ -232,12 +234,13 @@ static void draw_cell(int r, int c, int cursor)
     const unsigned char *g = cp >= 128 ? glyph16(cp, &wide) : 0;
     int ch = cp < 128 ? cp : ' ';
     for (int y = 0; y < CH; y++) {
-        unsigned bits = g ? (wide ? g[y * 2 + half] : g[y]) : font8x8[ch * 8 + y / 2];
-        int lean = !(e->attr & 2) ? 0 : y < 5 ? 1 : y >= 11 ? -1 : 0;        /* italic: the top leans right, the bottom left */
+        int fy = y / fz;                                 /* the row of the 8 x 16 font this pixel row shows */
+        unsigned bits = g ? (wide ? g[fy * 2 + half] : g[fy]) : font8x8[ch * 8 + fy / 2];
+        int lean = !(e->attr & 2) ? 0 : fy < 5 ? 1 : fy >= 11 ? -1 : 0;      /* italic: the top leans right, the bottom left */
         for (int x = 0; x < CW; x++) {
-            int sx = x - lean;
-            int on = sx >= 0 && sx < CW && (bits >> sx & 1);
-            if (((e->attr & 1) && y >= CH - 2) || ((e->attr & 4) && (y == CH / 2 - 1 || y == CH / 2)))
+            int sx = x / fz - lean;
+            int on = sx >= 0 && sx < 8 && (bits >> sx & 1);
+            if (((e->attr & 1) && fy >= 14) || ((e->attr & 4) && (fy == 7 || fy == 8)))
                 on = 1;
             pix[(r * CH + y) * WIDTH + c * CW + x] = on ? f : b;
         }
@@ -605,6 +608,24 @@ static void resize_grid(int nc, int nr)
     memset(dirty, 1, sizeof dirty);
 }
 
+/* The grid gets nc x nr cells (the window is told, and the program on the pty); returns -1 when the server is gone. */
+static int set_grid(int fd, int id, int m, int nc, int nr)
+{
+    int maxc = MAXC / fz, maxr = MAXR / fz;           /* the pixel buffer holds as many pixels at any size */
+    nc = nc < MINC ? MINC : nc > maxc ? maxc : nc;
+    nr = nr < MINR ? MINR : nr > maxr ? maxr : nr;
+    if (shared) {
+        if (bwm_resized_shm(fd, id, nc * CW, nr * CH, &pix, (size_t)nc * CW * nr * CH * 4) != 0)
+            return -1;
+    } else if (bwm_resized(fd, id, nc * CW, nr * CH) != 0) {
+        return -1;
+    }
+    resize_grid(nc, nr);
+    struct winsize nws = { rows, cols, WIDTH, HEIGHT };
+    ioctl(m, TIOCSWINSZ, &nws);
+    return 0;
+}
+
 /* Redraws the rows that changed (and the cursor's) and sends them. */
 static int repaint(int fd, int id, int *old_cx, int *old_cy)
 {
@@ -879,6 +900,21 @@ int main(int argc, char **argv)
                     if (repaint(fd, id, &ocx, &ocy) != 0)
                         break;
                 }
+                if (k->ch >= BWM_KEY_ZOOM_IN && k->ch <= BWM_KEY_ZOOM_RESET) {
+                    int nz = k->ch == BWM_KEY_ZOOM_IN ? fz + 1 : k->ch == BWM_KEY_ZOOM_OUT ? fz - 1 : 1;
+                    if (nz >= 1 && nz <= MAXZ && nz != fz) {
+                        int pw = cols * CW, ph = rows * CH;       /* the window keeps its size: the grid changes */
+                        fz = nz;
+                        if (set_grid(fd, id, m, pw / CW, ph / CH) != 0)
+                            break;
+                        memset(dirty, 1, sizeof dirty);
+                        printf("bterm: text size %d (%d x %d)\n", fz, cols, rows);
+                        fflush(stdout);
+                        if (repaint(fd, id, &ocx, &ocy) != 0)
+                            break;
+                    }
+                    continue;
+                }
                 if (k->ch == BWM_KEY_PASTE)
                     paste(m);
                 else if (write(m, &c, 1) != 1)
@@ -940,18 +976,8 @@ int main(int argc, char **argv)
                     break;
             } else if (t == BWM_RESIZE) {
                 struct bwm_resize *r = (struct bwm_resize *)buf;
-                int nc = r->w / CW, nr = r->h / CH;
-                nc = nc < MINC ? MINC : nc > MAXC ? MAXC : nc;
-                nr = nr < MINR ? MINR : nr > MAXR ? MAXR : nr;
-                if (shared) {
-                    if (bwm_resized_shm(fd, id, nc * CW, nr * CH, &pix, (size_t)WIDTH * HEIGHT * 4) != 0)
-                        break;
-                } else if (bwm_resized(fd, id, nc * CW, nr * CH) != 0) {
+                if (set_grid(fd, id, m, r->w / CW, r->h / CH) != 0)
                     break;
-                }
-                resize_grid(nc, nr);
-                struct winsize nws = { rows, cols, WIDTH, HEIGHT };
-                ioctl(m, TIOCSWINSZ, &nws);
                 if (repaint(fd, id, &ocx, &ocy) != 0)
                     break;
             } else if (t == BWM_CLOSE || t < 0) {

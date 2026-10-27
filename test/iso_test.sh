@@ -1019,6 +1019,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         fails += not good
         if good:
             time.sleep(1)
+            # Ctrl-= makes the text bigger: the same window holds fewer, larger cells; Ctrl-0 goes back.
+            mark2 = len(out)
+            monitor("sendkey ctrl-equal")
+            good = until(b"bterm: text size 2", mark2)
+            m2 = re.search(rb"bterm: text size 2 \((\d+) x (\d+)\)", bytes(out[mark2:]))
+            good = good and m2 is not None and 10 <= int(m2.group(1)) <= 40
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-= doubles the text size of a terminal")
+            fails += not good
+            mark2 = len(out)
+            monitor("sendkey ctrl-0")
+            good = until(b"bterm: text size 1", mark2)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-0 puts the text size back")
+            fails += not good
+            good = True
             w, h, px = screendump()
             def title_at(x, y):
                 at = (y * w + x) * 3
