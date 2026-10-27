@@ -37,6 +37,10 @@ struct sock_fprog { unsigned short len; struct sock_filter *filter; };
 #define BPF_JEQ 0x10
 #define BPF_STMT(c, k) { (unsigned short)(c), 0, 0, (unsigned)(k) }
 #define BPF_JUMP(c, k, jt, jf) { (unsigned short)(c), (jt), (jf), (unsigned)(k) }
+#ifndef SYS_SECCOMP
+#define SYS_SECCOMP 1
+#endif
+#define AUDIT_ARCH_X86_64 0xc000003eU
 #define SECCOMP_SET_MODE_FILTER 1
 #define SECCOMP_GET_ACTION_AVAIL 2
 #define SECCOMP_MODE_STRICT 1
@@ -144,7 +148,18 @@ static int probes(void)
 }
 
 static volatile int trapped;
-static void on_sys(int s) { (void)s; trapped++; }
+static volatile int sys_code, sys_nr;
+static volatile unsigned sys_arch;
+static volatile void *sys_addr;
+static void on_sys(int s, siginfo_t *si, void *uc)
+{
+    (void)s; (void)uc;
+    sys_code = si->si_code;
+    sys_nr = si->si_syscall;
+    sys_arch = si->si_arch;
+    sys_addr = si->si_call_addr;
+    trapped++;
+}
 
 static int status_has(const char *line)
 {
@@ -269,14 +284,20 @@ static int trap_it(void)
 {
     struct sigaction sa;
     memset(&sa, 0, sizeof sa);
-    sa.sa_handler = on_sys;
+    sa.sa_sigaction = on_sys;
+    sa.sa_flags = SA_SIGINFO;
     sigaction(SIGSYS, &sa, 0);
     prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0);
     struct sock_filter f[] = { LD_NR, IF_NR(SYS_getppid, SECCOMP_RET_TRAP), RET(SECCOMP_RET_ALLOW) };
     if (load(f, sizeof f / sizeof f[0]) != 0)
         return 1;
     ppid();
-    return trapped == 1 ? 0 : 2;
+    if (trapped != 1)
+        return 2;
+    /* The siginfo names the call that was refused and where it was made. */
+    if (sys_code != SYS_SECCOMP || sys_nr != SYS_getppid || sys_arch != AUDIT_ARCH_X86_64 || sys_addr == 0)
+        return 3;
+    return 0;
 }
 
 static int kill_it(void)

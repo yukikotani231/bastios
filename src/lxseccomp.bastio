@@ -43,8 +43,7 @@
 //
 // Not done: the load-time check that scratch memory is
 // written before it is read (the interpreter starts every run with it
-// zeroed), SECCOMP_RET_LOG (allowed, not logged), and siginfo details for
-// SIGSYS (si_syscall and si_arch).
+// zeroed) and SECCOMP_RET_LOG (allowed, not logged).
 
 import "lxsig.bastio";
 import "scfmt.bastio";
@@ -645,7 +644,9 @@ fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
     return ScVerdict { run: false, ret: wrap_sub(0, smaller(act % 0x10000, 4095)), wait: false, stop: false };
   }
   if hi == SCA_TRAP / 0x10000 {
-    post_sig(&mut k, pid, 31);
+    // The handler's siginfo says which call (si_syscall) and where it was
+    // made (si_call_addr: the instruction after `syscall`).
+    post_w(&mut k, pid, 31, FAULT_MARK + SYS_MARK + (nr % 16384) * FAULT_CODE + pget(k.procs, pid, F_REGS + R_RIP) % FAULT_CODE);
     return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };
   }
   if hi == SCA_USER_NOTIF / 0x10000 {
