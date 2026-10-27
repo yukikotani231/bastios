@@ -2404,6 +2404,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The title row of bfiles counts the entries.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ct; touch /tmp/ct/a /tmp/ct/b /tmp/ct/c; bwm -n -c bfiles /tmp/ct\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = "(3 items)" in lines[0]
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) the bfiles title row counts the entries")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(1)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # The title row of bfiles says when the list is not sorted by name.
         mark = len(out)
         q.stdin.write(b"mkdir -p /tmp/ff; bwm -n -c bfiles /tmp/ff\r"); q.stdin.flush()

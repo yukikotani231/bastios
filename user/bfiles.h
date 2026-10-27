@@ -369,8 +369,13 @@ static void bf_paint(void)
         snprintf(h, sizeof h, "Find: %.40s_", bf_fbuf);
     else if (bf_confirm)
         snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
-    else
+    else {
         snprintf(h, sizeof h, "%s%s", bf_cwd, bf_sort == 1 ? "  [by size]" : bf_sort == 2 ? "  [by time]" : "");
+        char cnt[24];
+        int cl = snprintf(cnt, sizeof cnt, "  (%d item%s)", bf_nent - 1, bf_nent == 2 ? "" : "s");   /* ".." is not counted */
+        if (strlen(h) + (size_t)cl <= BF_COLS && strlen(h) + (size_t)cl < sizeof h)
+            strcat(h, cnt);
+    }
     bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming ? 0x00A03030 : hd);
     for (int r = 1; r < BF_ROWS; r++) {
         int i = bf_top + r - 1;
