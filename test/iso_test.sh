@@ -888,6 +888,10 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 found = (b"bsys: select %d " % sleeper) in out[mark:]
             print(("ok  " if found else "FAIL"), f"({name}) p lists the processes and j moves to one")
             fails += not found
+            kb = re.findall(rb"bsys: resident (\d+)", bytes(out[mark:])) if found else []
+            good = bool(kb) and int(kb[-1]) > 0
+            print(("ok  " if good else "FAIL"), f"({name}) the process list knows how much memory the selected process holds ({kb[-1].decode() if kb else '?'} KiB)")
+            fails += not good
             if found:
                 monitor("sendkey x")
                 good = until(b"bsys: terminated %d" % sleeper, mark)

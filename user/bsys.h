@@ -3,9 +3,9 @@
 /* bsys, a System window for bwm: the kernel, uptime, memory, processors,
  * screen, load averages and root file system in a 60 x 12 grid drawn like bfiles (it shares
  * bfiles' pixel buffer and cell routines). r reads the figures again and
- * says "bsys: refreshed"; p swaps them for the list of processes (newest
+ * says "bsys: refreshed"; p swaps them for the list of processes (with the memory each holds, newest
  * first; j and k or the Up and Down keys move along it and say
- * "bsys: select PID NAME", x asks the selected one to end with SIGTERM and
+ * "bsys: select PID NAME" and "bsys: resident KB", x asks the selected one to end with SIGTERM and
  * says "bsys: terminated PID", p goes back); the close box ends it. Says "bsys: window ID" when
  * the window is open. It is part of the bterm program, which runs it when
  * started as "bsys", so it adds no image to the kernel. */
@@ -25,7 +25,7 @@
 #define BS_PGDN 0x101
 #define BS_LIST 8                                 /* process rows shown, rows 2 .. 9 */
 
-struct bs_proc { int pid; char state; char name[24]; };
+struct bs_proc { int pid; char state; long rss_kb; char name[24]; };
 static struct bs_proc bs_procs[BS_MAXPROC];
 static int bs_nproc, bs_sel, bs_top, bs_tasks, bs_esc;
 
@@ -67,6 +67,14 @@ static void bs_scan(void)
         struct bs_proc *p = &bs_procs[bs_nproc++];
         p->pid = pid;
         p->state = c[1] == ' ' && c[2] ? c[2] : '?';
+        p->rss_kb = 0;
+        long vm = 0, res = 0;                              /* the second number of statm is the resident pages (stat's field is always 0 here) */
+        snprintf(path, sizeof path, "/proc/%d/statm", pid);
+        if ((f = fopen(path, "r"))) {
+            if (fscanf(f, "%ld %ld", &vm, &res) == 2)
+                p->rss_kb = res * (sysconf(_SC_PAGESIZE) / 1024);
+            fclose(f);
+        }
         size_t l = (size_t)(c - o - 1);
         if (l >= sizeof p->name)
             l = sizeof p->name - 1;
@@ -92,6 +100,7 @@ static void bs_move(int by)
         bs_top = bs_sel - BS_LIST + 1;
     if (bs_nproc)
         printf("bsys: select %d %s\n", bs_procs[bs_sel].pid, bs_procs[bs_sel].name);
+        printf("bsys: resident %ld\n", bs_procs[bs_sel].rss_kb);
     fflush(stdout);
 }
 
@@ -100,14 +109,14 @@ static void bs_paint_tasks(void)
     char t[BF_COLS + 1];
     snprintf(t, sizeof t, "Processes (%d)%s", bs_nproc, bs_byname ? "  [by name]" : "");
     bf_put_row(0, t, strlen(t), 0x00FFFFFF, 0x00305090);
-    bf_put_row(1, "  PID    S  Name", 16, 0x00808090, 0x00101018);
+    bf_put_row(1, "  PID    S  Mem(K)   Name", 25, 0x00808090, 0x00101018);
     for (int i = 0; i < BS_LIST; i++) {
         int k = bs_top + i;
         if (k >= bs_nproc) {
             bf_put_row(2 + i, "", 0, 0x00D8D8D8, 0x00101018);
             continue;
         }
-        snprintf(t, sizeof t, "  %-6d %c  %s", bs_procs[k].pid, bs_procs[k].state, bs_procs[k].name);
+        snprintf(t, sizeof t, "  %-6d %c  %7ld  %s", bs_procs[k].pid, bs_procs[k].state, bs_procs[k].rss_kb, bs_procs[k].name);
         bf_put_row(2 + i, t, strlen(t), 0x00D8D8D8, k == bs_sel ? 0x00305090 : 0x00101018);
     }
     bf_put_row(10, "", 0, 0x00D8D8D8, 0x00101018);
