@@ -959,6 +959,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bsys: sorted by pid", mark3) and names[0] and names[0] <= names[1]
             print(("ok  " if good else "FAIL"), f"({name}) n sorts the process list by name ({names!r})")
             fails += not good
+            # m sorts the list by memory: the largest comes first.
+            mark3 = len(out)
+            monitor("sendkey m")
+            good = until(b"bsys: sorted by memory", mark3)
+            sizes = []
+            for key in ("g", "shift-g"):
+                mark3 = len(out)
+                monitor("sendkey " + key)
+                good = good and until(b"bsys: resident", mark3)
+                kb = re.findall(rb"bsys: resident (\d+)", bytes(out[mark3:])) if good else []
+                sizes.append(int(kb[-1]) if kb else -1)
+            mark3 = len(out)
+            monitor("sendkey m")
+            good = good and until(b"bsys: sorted by pid", mark3) and sizes[0] >= sizes[1] >= 0
+            print(("ok  " if good else "FAIL"), f"({name}) m sorts the process list by memory ({sizes!r})")
+            fails += not good
             monitor("sendkey p")
             good = until(b"bsys: system", mark)
             print(("ok  " if good else "FAIL"), f"({name}) p goes back to the figures")

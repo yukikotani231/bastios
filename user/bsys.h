@@ -29,14 +29,18 @@ struct bs_proc { int pid; char state; long rss_kb; char name[24]; };
 static struct bs_proc bs_procs[BS_MAXPROC];
 static int bs_nproc, bs_sel, bs_top, bs_tasks, bs_esc;
 
-static int bs_byname;                   /* n sorts the list by name instead of newest first */
+static int bs_sort;                     /* 0: newest first; n sorts the list by name (1) and m by memory (2) */
 
 static int bs_cmp(const void *a, const void *b)
 {
-    if (bs_byname) {
+    if (bs_sort == 1) {
         int r = strcmp(((const struct bs_proc *)a)->name, ((const struct bs_proc *)b)->name);
         if (r)
             return r;
+    } else if (bs_sort == 2) {
+        long d = ((const struct bs_proc *)b)->rss_kb - ((const struct bs_proc *)a)->rss_kb;   /* the largest first */
+        if (d)
+            return d < 0 ? -1 : 1;
     }
     return ((const struct bs_proc *)b)->pid - ((const struct bs_proc *)a)->pid;   /* newest first */
 }
@@ -107,7 +111,7 @@ static void bs_move(int by)
 static void bs_paint_tasks(void)
 {
     char t[BF_COLS + 1];
-    snprintf(t, sizeof t, "Processes (%d)%s", bs_nproc, bs_byname ? "  [by name]" : "");
+    snprintf(t, sizeof t, "Processes (%d)%s", bs_nproc, bs_sort == 1 ? "  [by name]" : bs_sort == 2 ? "  [by memory]" : "");
     bf_put_row(0, t, strlen(t), 0x00FFFFFF, 0x00305090);
     bf_put_row(1, "  PID    S  Mem(K)   Name", 25, 0x00808090, 0x00101018);
     for (int i = 0; i < BS_LIST; i++) {
@@ -288,12 +292,13 @@ static int bsys_main(void)
         } else if (bs_tasks && (c == 'g' || c == 'G')) {            /* the first and the last of the list */
             bs_move(c == 'g' ? -bs_nproc : bs_nproc);
             bs_paint_tasks();
-        } else if (bs_tasks && c == 'n') {                           /* by name, or newest first again */
-            bs_byname = !bs_byname;
+        } else if (bs_tasks && (c == 'n' || c == 'm')) {             /* by name or by memory, or newest first again */
+            int want = c == 'n' ? 1 : 2;
+            bs_sort = bs_sort == want ? 0 : want;
             bs_scan();
             bs_sel = bs_top = 0;
             bs_paint_tasks();
-            printf("bsys: sorted by %s\n", bs_byname ? "name" : "pid");
+            printf("bsys: sorted by %s\n", bs_sort == 1 ? "name" : bs_sort == 2 ? "memory" : "pid");
         } else if (bs_tasks && c == 'x' && bs_nproc) {
             int pid = bs_procs[bs_sel].pid;
             if (pid == 1 || pid == getpid())
