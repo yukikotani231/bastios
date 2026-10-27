@@ -67,6 +67,16 @@ def hold(group, prefix="", mib=None):
     run(f"{prefix}ash -c 'echo $$ > /sys/fs/cgroup/{group}/cgroup.procs; exec /disk/mhog hold {mib or HOLD}' & big=$!")
     read_until(b"mhog: holding", mark)
 
+def swap_empty():
+    """Waits until the swap file is empty again: a killed program gives its
+    slots back as it is torn down, which on a busy host takes longer than a
+    fixed sleep, and a holder that starts while the last one's slots are
+    still in use may find no room to swap into."""
+    for _ in range(20):
+        if meminfo("SwapFree") == SWAP_KB:
+            return
+        run("sleep 1")
+
 def check(name, ok, text=""):
     global fails
     if ok:
@@ -214,9 +224,16 @@ t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
 used = meminfo("SwapTotal") - meminfo("SwapFree")
 check("a group with memory.swap.max 0 keeps its pages in memory", group_swap("sl") == 0 and "Out of memory: Killed process" in t, f"{group_swap('sl')} {t}")
 run("kill -9 $big; sleep 1")
+swap_empty()
 hold("sm")
 t = run(f"/disk/mhog touch {SECOND}; echo rc=$?")
-check("a group's swapped bytes stay under its memory.swap.max", f"touched {SECOND} MiB" in t and group_swap("sm") == 2097152, f"{group_swap('sm')} {t}")
+swapped = group_swap("sm")
+good = f"touched {SECOND} MiB" in t and swapped == 2097152
+# The check has failed on CI with the holder killed rather than swapped (and
+# 0 bytes in its group): on a failure, say what the kernel thought.
+why = "" if good else (f"{swapped} {t}\n" + run("cat /proc/swaps /sys/fs/cgroup/sm/memory.swap.current /sys/fs/cgroup/sm/memory.swap.max "
+    "/sys/fs/cgroup/sm/memory.events; grep -E 'oom_kill|swap' /proc/vmstat; grep -E 'MemFree|SwapFree|Cached' /proc/meminfo"))
+check("a group's swapped bytes stay under its memory.swap.max", good, why)
 run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm")
 t = run(f"/disk/mhog touch {HUGE}; echo rc=$?")
 check("a program bigger than memory and swap is killed", "Out of memory: Killed process" in t and "rc=137" in t, t)
