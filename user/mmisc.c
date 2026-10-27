@@ -35,6 +35,18 @@ static int fail(const char *what)
 }
 
 static volatile int got_usr, got_chld, info_pid;
+static char *alt_lo;
+static volatile int alt_where, alt_flags;
+static void on_alt(int s, siginfo_t *si, void *uc)
+{
+    (void)s; (void)si; (void)uc;
+    char here;
+    stack_t cur;
+    sigaltstack(0, &cur);
+    alt_lo = cur.ss_sp;
+    alt_flags = cur.ss_flags;
+    alt_where = (char *)&here >= alt_lo && (char *)&here < alt_lo + cur.ss_size;
+}
 
 static void on_info(int s, siginfo_t *si, void *uc)
 {
@@ -118,6 +130,29 @@ static int signals(void)
     stack_t old;
     if (sigaltstack(0, &old) != 0 || !(old.ss_flags & SS_DISABLE))
         return fail("sigaltstack");
+
+    /* A handler with SA_ONSTACK runs on the alternate stack, and sees
+     * SS_ONSTACK there. */
+    static char alt[16384];
+    stack_t ss = { .ss_sp = alt, .ss_flags = 0, .ss_size = sizeof alt };
+    struct sigaction al = { 0 };
+    al.sa_sigaction = on_alt;
+    al.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    if (sigaltstack(&ss, 0) != 0 || sigaction(SIGUSR2, &al, 0) != 0 || kill(getpid(), SIGUSR2) != 0)
+        return fail("SA_ONSTACK setup");
+    if (alt_where != 1)
+        return fail("a handler with SA_ONSTACK runs on the alternate stack");
+    if (alt_flags != SS_ONSTACK)
+        return fail("SS_ONSTACK while running on it");
+    char here;
+    if ((char *)&here >= alt && (char *)&here < alt + sizeof alt)
+        return fail("back on the normal stack after the handler");
+    if (sigaltstack(0, &old) != 0 || old.ss_sp != alt || old.ss_flags != 0)
+        return fail("the alternate stack after the handler");
+    signal(SIGUSR2, SIG_DFL);
+    ss.ss_flags = SS_DISABLE;
+    if (sigaltstack(&ss, 0) != 0)
+        return fail("sigaltstack disable");
     return 0;
 }
 
