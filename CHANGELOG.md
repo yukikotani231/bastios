@@ -34,6 +34,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Shift-Page Up in `bterm` goes to the oldest line kept in the history, Ctrl-Shift-Page Down back to the live screen.
 - Alt-F12 in `bwm` saves the desktop as a PPM to `/tmp/screenshot.ppm` (open it with `bview` or from `bfiles`).
 - The `bsys` System window shows the load averages (read from `/proc/loadavg`) in a new Load row.
+- `n` and `p` in `bview` show the next and the previous image (`.ppm` or `.bmp`) of the same directory, by name, in the same window.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
 - In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
 - The mouse wheel zooms the image in `bview`: up in, down out.
