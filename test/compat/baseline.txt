@@ -1937,3 +1937,23 @@ t_subreaper: the orphan is reparented to the subreaper and its exit is seen
 t_dockerd: a MAP_POPULATE mapping past the end of a growing file sees pwrite (tmpfs)
 t_dockerd: a MAP_POPULATE mapping past the end of a growing file sees pwrite (disk)
 t_dockerd: a mapping past the end of a growing file sees pwrite (disk)
+t_va: a 1 TiB PROT_NONE reservation
+t_va: pages in it, in two segments, work
+t_va: a page between them is still PROT_NONE
+t_va: the reservation is given back
+t_va: a fixed mapping across a segment boundary
+t_va: an 8-byte word across it
+t_va: pipe
+t_va: write() from a buffer across it
+t_va: read() into a buffer across it
+t_va: what was written comes back across it
+t_va: mprotect across it
+t_va: madvise across it
+t_va: a fork copies both sides of it
+t_va: mremap moves it to another segment
+t_va: munmap across it
+t_va: two adjacent fixed mappings in different segments
+t_va: munmap over both
+t_va: each is gone
+t_va: a page in every segment
+t_va: a child sees them copied

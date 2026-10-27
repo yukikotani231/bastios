@@ -15,6 +15,7 @@
         .equ    PCPU_IRQ, 352           /* the interrupt that ended bst_cpu_wait */
         .equ    PCPU_ID, 360
         .equ    PCPU_SHADOW, 376        /* the table user code runs on */
+        .equ    WINDOW_SEGS, 16         /* level-3 tables in a user window (WNSEG, src/space.bastio) */
         .equ    PCPU_TTBR, 384          /* shadow table | ASID << 48 (bst_user_ttbr) */
         .equ    PCPU_SIZE, 432
         .equ    CPU_STACK, 65536
@@ -245,14 +246,19 @@ bst_cpu_enter:
         stp     x25, x26, [sp, #64]
         stp     x27, x28, [sp, #80]
         mrs     x30, tpidr_el1          /* PCPU_CTX is 0 */
-        /* The processor's shadow table: slot 0 is the window's level-3 table,
-         * slot 1 of the process's own. */
+        /* The processor's shadow table: slots 0 .. WINDOW_SEGS - 1 are the
+         * window's level-3 tables, slots 1 .. WINDOW_SEGS of the process's own. */
         ldr     x2, [x30, #PCPU_MMU3]
-        ldr     x2, [x2, #8]
         ldr     x3, =bst_shadow_root
         ldr     x4, [x30, #PCPU_ID]
         add     x3, x3, x4, lsl #12
-        str     x2, [x3]
+        mov     x5, #0
+1:      add     x6, x2, x5, lsl #3
+        ldr     x6, [x6, #8]
+        str     x6, [x3, x5, lsl #3]
+        add     x5, x5, #1
+        cmp     x5, #WINDOW_SEGS
+        b.lo    1b
         str     x3, [x30, #PCPU_SHADOW]
         ldr     x0, [x30, #PCPU_MMU3]
         mov     x1, x3

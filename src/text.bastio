@@ -84,7 +84,7 @@ fn l2_put_text(l2: &mut PageTable, m: &mut Mem, q: u64, s: Shared)
 /// In program table `c`: maps a new reference to file page `n` read-only
 /// at window page `p` of `l3`. False if memory ran out.
 fn txt_map(c: &mut PageTable, m: &mut Mem, n: u64, l3: &mut PageTable, p: u64) -> bool
-  requires pt_level(c) == 1 && mem_ok(m) && n < 512 && pt_level(l3) == 3 && p < WPAGES
+  requires pt_level(c) == 1 && mem_ok(m) && n < 512 && pt_level(l3) == 3 && p < WSEG_PAGES
   ensures mem_ok(m) && pt_level(l3) == 3
 {
   if !pt_has(c, n) || !pt_shared(c, n) {
@@ -105,7 +105,7 @@ fn txt_map(c: &mut PageTable, m: &mut Mem, n: u64, l3: &mut PageTable, p: u64) -
 /// need be. False if memory ran out.
 fn share_page(m: &mut Mem, st: &mut PageTable, prog: u64, img: Str, n: u64, l3: &mut PageTable, p: u64) -> bool
   requires mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && prog < 512 && n < 512
-  requires pt_level(l3) == 3 && p < WPAGES
+  requires pt_level(l3) == 3 && p < WSEG_PAGES
   ensures mem_ok(m) && pt_level(st) == 2 && pt_leases(st) == 0 && pt_level(l3) == 3
 {
   if !txt_table(&mut m, &mut st, prog) {

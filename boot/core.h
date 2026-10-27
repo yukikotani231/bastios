@@ -18,6 +18,7 @@
  * finds it through KERNEL_GS_BASE and `swapgs`.
  */
 #define MAX_CPUS     256                        /* the GDT has a TSS slot for each */
+#define WINDOW_SEGS  16                         /* level-3 tables in a user window (WNSEG, src/space.bastio) */
 #define CORE_BLOCK   0x20000                    /* 128 KiB */
 #define CORE_KSTACK  (CORE_BLOCK - 0x6000)      /* kernel stack top (92 KiB); 24 KiB trap stack above */
 

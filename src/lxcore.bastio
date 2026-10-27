@@ -237,7 +237,7 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
     let mut off = CORE_HDR;
     let mut h = 0;
     while h < nrun
-      invariant h <= nrun && nrun <= CORE_MAX && blen(k.fs.xfer) == XBUF && blen(runs) == CORE_MAX * 24 && off <= CORE_HDR + h * 549755813888
+      invariant h <= nrun && nrun <= CORE_MAX && blen(k.fs.xfer) == XBUF && blen(runs) == CORE_MAX * 24 && off <= CORE_HDR + h * 8796093022208
     {
       let from = rd64(runs, h * 24);
       let to = rd64(runs, h * 24 + 8);
