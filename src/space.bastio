@@ -32,14 +32,16 @@ const L2_SIZE: u64 = 0x40000000;      // L2_PAGES * 4096 (1 GiB)
 const WIN_L2S: u64 = 512;             // level-2 tables under one level-3 table (a segment of the window)
 const WSEG_PAGES: u64 = 134217728;     // pages under one level-3 table: WIN_L2S * L2_PAGES
 const WSEG_BYTES: u64 = 0x8000000000;  // WSEG_PAGES * 4096 (512 GiB)
-const WNSEG: u64 = 1;                  // level-3 tables a window may hold, in slots 1 .. WNSEG of the top-level table
-const WPAGES: u64 = 134217728;        // WNSEG * WSEG_PAGES
-const USER_SIZE: u64 = 0x8000000000;  // WPAGES * 4096
+const WNSEG: u64 = 16;                 // level-3 tables a window may hold, in slots 1 .. WNSEG of the top-level table
+const WPAGES: u64 = 2147483648;       // WNSEG * WSEG_PAGES
+const USER_SIZE: u64 = 0x80000000000; // WPAGES * 4096
 const STACK_PAGES: u64 = 2048;        // 8 MiB, Linux's default RLIMIT_STACK
-const STACK_FIRST: u64 = 134215680;   // WPAGES - STACK_PAGES
+const STACK_FIRST: u64 = 2147481600;  // WPAGES - STACK_PAGES
 const STACK_MAPPED: u64 = 16;         // stack pages a new window maps
-const STACK_LOW: u64 = 134217712;     // WPAGES - STACK_MAPPED
-const IMAGE_MAX: u64 = 0x7FFF800000;  // STACK_FIRST * 4096
+const STACK_LOW: u64 = 2147483632;    // WPAGES - STACK_MAPPED
+const IMAGE_MAX: u64 = 0x7FFF800000;  // a program's image lies in the first segment, below this
+const TOP_PAGES: u64 = 2013265920;    // the window page the last segment starts at: (WNSEG - 1) * WSEG_PAGES
+const TOP_BYTES: u64 = 0x78000000000; // TOP_PAGES * 4096
 const KERNEL_ROOT: u64 = 0x8000000;    // mmu_root while CR3 holds the kernel's own map
 
 // A process's address space (its level-4 table), if it has one.
@@ -628,16 +630,23 @@ fn new_space(m: &mut Mem, img: Str, size: u64) -> Space
 {
   match new_window(&mut m, img, (size + 4095) / 4096) {
     Space::Empty => { return Space::Empty; },
-    Space::Mapped(l3) => { return space_from_l3(&mut m, l3); },
+    Space::Mapped(l3) => {
+      match new_top(&mut m) {
+        Space::Empty => {
+          free_l3(&mut m, l3);
+          return Space::Empty;
+        },
+        Space::Mapped(top) => { return space_from_tables(&mut m, l3, top); },
+      }
+    },
   }
 }
 
 /// A level-3 window table mapping the first `npages` pages of the window,
-/// holding `img`, and the top STACK_MAPPED stack pages; every other page
-/// is zero. Returns
-/// `Space::Empty`, with every page given back, when memory runs out.
+/// holding `img`; every other page is zero. Returns `Space::Empty`, with
+/// every page given back, when memory runs out.
 fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
-  requires mem_ok(m) && npages <= STACK_FIRST
+  requires mem_ok(m) && npages <= 134215680
   ensures mem_ok(m)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 3
 {
@@ -649,7 +658,7 @@ fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
   let mut p = 0;
   let mut ok = true;
   while ok && p < npages
-    invariant p <= npages && npages <= STACK_FIRST && mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
+    invariant p <= npages && npages <= 134215680 && mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
   {
     ok = w_map(&mut m, &mut l3, p, false);
     if ok {
@@ -658,9 +667,31 @@ fn new_window(m: &mut Mem, img: Str, npages: u64) -> Space
       p = p + 1;
     }
   }
-  p = STACK_LOW;
-  while ok && p < WPAGES
-    invariant STACK_LOW <= p && p <= WPAGES && mem_ok(m) && pt_level(l3) == 3
+  if !ok {
+    free_l3(&mut m, l3);
+    return Space::Empty;
+  }
+  return Space::Mapped(l3);
+}
+
+/// The level-3 table of the window's last segment, which holds the stack
+/// and the vDSO (and the mmap area below them): the top STACK_MAPPED stack
+/// pages are mapped, every other page is zero. Returns `Space::Empty`,
+/// with every page given back, when memory runs out.
+fn new_top(m: &mut Mem) -> Space
+  requires mem_ok(m)
+  ensures mem_ok(m)
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 3
+{
+  let a = find_free(&mut m);
+  if a >= NPAGES {
+    return Space::Empty;
+  }
+  let mut l3 = pt_new(take_page(&mut m, a), 3);
+  let mut p = STACK_LOW - TOP_PAGES;
+  let mut ok = true;
+  while ok && p < WSEG_PAGES
+    invariant STACK_LOW - TOP_PAGES <= p && p <= WSEG_PAGES && mem_ok(m) && pt_level(l3) == 3
   {
     ok = w_map(&mut m, &mut l3, p, false);
     if ok {
@@ -690,6 +721,26 @@ fn space_from_l3(m: &mut Mem, l3: PageTable) -> Space
   }
   let mut root = pt_new(take_page(&mut m, e), 4);
   pt_put(&mut root, 1, l3);
+  return Space::Mapped(root);
+}
+
+/// Puts the window tables `l3` (the first segment) and `top` (the last)
+/// in a new address space. Returns `Space::Empty`, with every page given
+/// back, when memory runs out.
+fn space_from_tables(m: &mut Mem, l3: PageTable, top: PageTable) -> Space
+  requires mem_ok(m) && pt_level(l3) == 3 && pt_level(top) == 3
+  ensures mem_ok(m)
+  ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
+{
+  let e = find_free(&mut m);
+  if e >= NPAGES {
+    free_l3(&mut m, l3);
+    free_l3(&mut m, top);
+    return Space::Empty;
+  }
+  let mut root = pt_new(take_page(&mut m, e), 4);
+  pt_put(&mut root, 1, l3);
+  pt_put(&mut root, WNSEG, top);
   return Space::Mapped(root);
 }
 

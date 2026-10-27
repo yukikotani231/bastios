@@ -172,7 +172,7 @@ fn sw_key(g: u64, q: u64) -> u64
   requires g < NPROC && q < WPAGES
   ensures result != 0
 {
-  return g * 268435456 + q + 1;
+  return g * 4294967296 + q + 1;
 }
 
 /// How many pages of process g are swapped out.
@@ -270,7 +270,7 @@ fn sw_drop(b: &mut Buf, s: u64)
       steps = steps + 1;
     }
   }
-  let g = (key - 1) / 268435456;
+  let g = (key - 1) / 4294967296;
   if g < NPROC && sw_get(b, SW_HDR + g) > 0 {
     sw_set(&mut b, SW_HDR + g, wrap_sub(sw_get(b, SW_HDR + g), 1));
   }
@@ -296,8 +296,8 @@ fn swap_forget(k: &mut Kernel, g: u64, from: u64, to: u64)
     invariant s <= ns && ns <= SW_MAX && kok(k)
   {
     let key = sw_get(k.swp, sw_key_at(ns, s));
-    if key != 0 && (key - 1) / 268435456 == g {
-      let q = (key - 1) % 268435456;
+    if key != 0 && (key - 1) / 4294967296 == g {
+      let q = (key - 1) % 4294967296;
       if q >= from && q < to {
         sw_drop(&mut k.swp, s);
       }
@@ -545,8 +545,8 @@ fn swap_reach(k: &mut Kernel, g: u64, r: u64, from: u64, to: u64) -> bool
     invariant s <= ns && ns <= SW_MAX && kok(k)
   {
     let key = sw_get(k.swp, sw_key_at(ns, s));
-    if key != 0 && (key - 1) / 268435456 == g {
-      let q = (key - 1) % 268435456;
+    if key != 0 && (key - 1) / 4294967296 == g {
+      let q = (key - 1) % 4294967296;
       if q >= from && q < to && q < WPAGES {
         let res = swap_in(&mut k, g, r, q);
         if res != SW_OK && res != SW_NO {
@@ -913,8 +913,8 @@ fn lx_swapoff(k: &mut Kernel, pid: u64, path: u64) -> u64
   {
     let key = sw_get(k.swp, sw_key_at(ns, s));
     if key != 0 {
-      let g = (key - 1) / 268435456;
-      let q = (key - 1) % 268435456;
+      let g = (key - 1) / 4294967296;
+      let q = (key - 1) % 4294967296;
       if g < NPROC && q < WPAGES {
         let r = swap_row(&mut k, g);
         let mut res = SW_BUSY;

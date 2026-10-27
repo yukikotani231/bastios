@@ -135,7 +135,7 @@ What the page tables enforce for a user process, and what they do not.
 
 - **Layout.** Randomized as the "Address space layout" row says, with
   fewer bits than Linux has: the stack moves by 15 bits, the mmap area by
-  24 bits of pages (the window is 512 GiB, Linux's is 128 TiB). The vDSO
+  24 bits of pages (the window is 8 TiB, Linux's is 128 TiB). The vDSO
   page still lies at a fixed place just under the stack, and so does the
   first part of the window (a non-PIE program).
 - **No execute (NX) and W^X, on x86-64.** `EFER.NXE` is set on every

@@ -43,7 +43,7 @@ const INTERP_MAX: u64 = 256;          // the longest interpreter path, NUL inclu
 const ARGS_MAX: u64 = 131072;         // string bytes, NULs included (Linux's ARG_MAX)
 const ARGV_MAX: u64 = 8192;           // the most arguments
 const ENVC_MAX: u64 = 1024;           // the most environment strings
-const RANDOM_AT: u64 = 0x7FFFFFFFF0;  // USER_SIZE - 16, where AT_RANDOM points when the stack is not moved
+const RANDOM_AT: u64 = 0x7FFFFFFFFF0;  // USER_SIZE - 16, where AT_RANDOM points when the stack is not moved
 const STACK_SHIFT_MAX: u64 = 524288;  // how far down the stack's top may move (the stack is 8 MiB, of which an exec uses at most 0.8 MiB)
 const MMAP_RND_PAGES: u64 = 16777216; // the mmap area's top moves down by up to this many pages (64 GiB)
 const PIE_RND_PAGES: u64 = 4194304;   // a position-independent program moves up by up to this many pages (16 GiB)
@@ -51,7 +51,8 @@ const BRK_RND_PAGES: u64 = 8192;      // the program break starts up to this man
 const AUX_WORDS: u64 = 36;            // the auxiliary vector: 18 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
-const VDSO_PAGE: u64 = 134215679;     // STACK_FIRST - 1
+const VDSO_PAGE: u64 = 2147481599;      // STACK_FIRST - 1
+const INTERP_TOP: u64 = 0x7FFF7FF000;   // the interpreter goes just below this, in the first segment
 const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch, then 1 if the process is in a time namespace
 const AT_SYSINFO_EHDR: u64 = 33;
 const AT_HWCAP: u64 = 16;
@@ -453,10 +454,11 @@ fn elf_sp(args: &Bytes, alen: u64, total: u64, shift: u64) -> u64
 /// (bytes after the last NUL, arguments past ARGV_MAX and strings past
 /// ENVC_MAX are not passed). `rn` gives the AT_RANDOM bytes and how far
 /// down the stack starts. `base` is where the interpreter was placed,
-/// or 0. False if memory ran out.
-fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, rn: Rnd) -> bool
-  requires mem_ok(m) && pt_level(l3) == 3 && alen <= total && total <= ARGS_MAX && total <= blen(args) && rnd_ok(rn)
-  ensures mem_ok(m) && pt_level(l3) == 3
+/// or 0. `top` is the table of the window's last segment, where the stack
+/// is. False if memory ran out.
+fn init_stack(m: &mut Mem, top3: &mut PageTable, e: Elf, base: u64, vdso: bool, args: &Bytes, alen: u64, total: u64, rn: Rnd) -> bool
+  requires mem_ok(m) && pt_level(top3) == 3 && alen <= total && total <= ARGS_MAX && total <= blen(args) && rnd_ok(rn)
+  ensures mem_ok(m) && pt_level(top3) == 3
 {
   let argc = nul_count(args, 0, alen, ARGV_MAX);
   let envc = nul_count(args, alen, total, ENVC_MAX);
@@ -466,9 +468,9 @@ fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   let top = rand_at / 4096;               // the page the AT_RANDOM bytes are on; above it nothing is mapped
   let mut p = at / 4096;
   while p <= top
-    invariant pt_level(l3) == 3 && mem_ok(m) && top < WPAGES
+    invariant pt_level(top3) == 3 && mem_ok(m) && top < WPAGES && p >= STACK_FIRST && top >= TOP_PAGES
   {
-    if !w_map(&mut m, &mut l3, p, false) {
+    if !w_map(&mut m, &mut top3, p - TOP_PAGES, false) {
       return false;
     }
     p = p + 1;
@@ -524,25 +526,25 @@ fn init_stack(m: &mut Mem, l3: &mut PageTable, e: Elf, base: u64, vdso: bool, ar
   let mut rnd = balloc(16);
   put_u64(&mut rnd, 0, rn.a);
   put_u64(&mut rnd, 8, rn.b);
-  put_window(&mut l3, vec, at, 8 * words);
-  put_window(&mut l3, args, s, total);
-  put_window(&mut l3, rnd, rand_at, 16);
+  put_window(&mut top3, vec, at - TOP_BYTES, 8 * words);
+  put_window(&mut top3, args, s - TOP_BYTES, total);
+  put_window(&mut top3, rnd, rand_at - TOP_BYTES, 16);
   bfree(vec);
   bfree(rnd);
   return true;
 }
 
 /// Maps the vDSO, read-only, at window page VDSO_PAGE (which must not be
-/// mapped yet). False if memory ran out.
+/// mapped yet) of `l3`, the last segment's table. False if memory ran out.
 fn vdso_map(m: &mut Mem, l3: &mut PageTable, t: Tsc, epoch: u64) -> bool
   requires mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
   ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
 {
-  if !w_map(&mut m, &mut l3, VDSO_PAGE, false) {
+  if !w_map(&mut m, &mut l3, VDSO_PAGE - TOP_PAGES, false) {
     return false;
   }
-  let t2 = VDSO_PAGE / L2_PAGES;
-  let q = VDSO_PAGE % L2_PAGES;
+  let t2 = (VDSO_PAGE - TOP_PAGES) / L2_PAGES;
+  let q = (VDSO_PAGE - TOP_PAGES) % L2_PAGES;
   if pt_has(l3, t2) {
     let mut l2 = pt_take(&mut l3, t2);
     let i = q / 512;
@@ -753,7 +755,7 @@ fn exec_pages(m: &mut Mem, l3: &mut PageTable, from: u64, to: u64)
   ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
 {
   let mut p = from;
-  while p < to && p < WPAGES
+  while p < to && p < WSEG_PAGES
     invariant mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
   {
     w_exec(&mut m, &mut l3, p);
@@ -775,6 +777,12 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
   match new_window(&mut m, "", 0) {
     Space::Empty => { return Space::Empty; },
     Space::Mapped(mut l3) => {
+     match new_top(&mut m) {
+      Space::Empty => {
+        free_l3(&mut m, l3);
+        return Space::Empty;
+      },
+      Space::Mapped(mut top3) => {
       // Shared read-only pages first; the rest of the image gets fresh
       // pages, and the copy below skips the read-only ones.
       let mut ok = share_text_in(&mut m, &mut txt, &mut l3, &mut v, src, e);
@@ -834,25 +842,29 @@ fn elf_space(m: &mut Mem, txt: &mut Store, v: &mut Vfs, src: Src, e: Elf, isrc: 
         }
         j = j + 1;
       }
-      // The vDSO, unless the program's own pages reach that high.
+      // The vDSO, in the last segment (no program's pages reach it).
       let mut vdso = false;
-      if ok && !w_has(&mut l3, VDSO_PAGE) {
-        ok = vdso_map(&mut m, &mut l3, clk, epoch);
+      if ok {
+        ok = vdso_map(&mut m, &mut top3, clk, epoch);
         vdso = true;
       }
       if !ok {
         free_l3(&mut m, l3);
+        free_l3(&mut m, top3);
         return Space::Empty;
       }
       let mut base = 0;
       if ie.ok {
         base = ie.bias;
       }
-      if !init_stack(&mut m, &mut l3, e, base, vdso, args, alen, total, rn) {
+      if !init_stack(&mut m, &mut top3, e, base, vdso, args, alen, total, rn) {
         free_l3(&mut m, l3);
+        free_l3(&mut m, top3);
         return Space::Empty;
       }
-      return space_from_l3(&mut m, l3);
+      return space_from_tables(&mut m, l3, top3);
+      },
+     }
     },
   }
 }

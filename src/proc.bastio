@@ -1870,8 +1870,8 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
       lz = lazy_plan(&mut v, src, e);
     }
     if e.ilen != 0 {
-      // A dynamically linked program: its interpreter goes just below
-      // where mmap starts, and runs first.
+      // A dynamically linked program: its interpreter goes at the top of
+      // the first segment, and runs first.
       isrc = isrc0;
       if !isrc.file {
         isrc = interp_src(&mut v, src, e);
@@ -1881,10 +1881,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
       }
       let probe = elf_parse_at(&mut v, isrc, 0);
       let low = (e.end + 4095) / 4096 * 4096;
-      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
+      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > INTERP_TOP || probe.end > INTERP_TOP - low {
         return Space::Empty;
       }
-      let mut place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
+      let mut place = (INTERP_TOP - probe.end) / 4096 * 4096;
       if place >= low + rn.mmap_pg * 4096 {
         place = place - rn.mmap_pg * 4096;      // moved down, if there is room above the program
       }
@@ -1893,7 +1893,6 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
         return Space::Empty;
       }
       entry = ie.entry;
-      mmap_top = place;
     }
   } else {
     // The BastiOS header: magic, bytes of memory the image needs, entry point.

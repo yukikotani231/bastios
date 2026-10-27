@@ -614,7 +614,7 @@ fn anon_touch(m: &mut Mem, spaces: &mut Vec[Space], an: &Buf, pid: u64, q: u64) 
     Space::Mapped(mut root) => {
       let mut ok = false;
       let sg = wseg_of(q * 4096);
-      if pt_has(root, 1 + sg) {
+      if root_seg(&mut m, &mut root, sg) {
         ok = pt_borrow(&mut root, 1 + sg, touch_l3, &mut m, q - sg * WSEG_PAGES, anon_exec(an, pid, q));
       }
       put_space(&mut spaces, pid, Space::Mapped(root));

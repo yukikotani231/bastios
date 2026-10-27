@@ -506,6 +506,9 @@ fn root_move(m: &mut Mem, root: &mut PageTable, from: u64, to: u64) -> bool
   if !root_seg(&mut m, &mut root, st) {
     return false;
   }
+  if !pt_has(root, 1 + sf) {
+    return true;
+  }
   let mut a = pt_take(&mut root, 1 + sf);
   let mut b = pt_take(&mut root, 1 + st);
   let r = w_move_x(&mut m, &mut a, &mut b, from - sf * WSEG_PAGES, to - st * WSEG_PAGES);
@@ -845,8 +848,8 @@ fn hole_touch(k: &Kernel, pid: u64, first: u64, end: u64) -> bool
 /// mmap area (and above the program break), where F_MMAP moves down to it
 /// and the space between becomes a hole, so the mapping can grow up into
 /// it with the next hint (the Go runtime's heap arenas grow so; its first
-/// hint, 0xc000000000, lies beyond the 512 GiB window, which is not taken,
-/// and Go tries the next hint or takes any address); or inside one hole. A PROT_NONE mapping
+/// hint, 0xc000000000, lies below the mmap area, so it is taken),
+/// or inside one hole. A PROT_NONE mapping
 /// made with MAP_FIXED below the mmap area leaves no record, so a hint
 /// may still land on one (not Linux's behaviour).
 fn mmap_hint(k: &mut Kernel, pid: u64, addr: u64, pages: u64) -> u64
@@ -988,7 +991,7 @@ fn l2_exec(m: &mut Mem, l2: &mut PageTable, p: u64) -> bool
 /// l2_exec for window page p: the pages of an executable segment, which
 /// elf_space maps as data pages (no-execute) before it copies the image in.
 fn w_exec(m: &mut Mem, l3: &mut PageTable, p: u64) -> bool
-  requires mem_ok(m) && pt_level(l3) == 3 && p < WPAGES && pt_leases(l3) == 0
+  requires mem_ok(m) && pt_level(l3) == 3 && p < WSEG_PAGES && pt_leases(l3) == 0
   ensures mem_ok(m) && pt_level(l3) == 3 && pt_leases(l3) == 0
 {
   let t = p / L2_PAGES;
