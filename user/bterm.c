@@ -857,9 +857,10 @@ int main(int argc, char **argv)
             if (t == BWM_KEY) {
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
-                if (k->ch == BWM_KEY_SCROLL_UP || k->ch == BWM_KEY_SCROLL_DOWN) {
+                if (k->ch >= BWM_KEY_SCROLL_UP && k->ch <= BWM_KEY_SCROLL_END) {
                     if (!alt) {
-                        int nb = back + (k->ch == BWM_KEY_SCROLL_UP ? rows - 1 : -(rows - 1));
+                        int nb = k->ch == BWM_KEY_SCROLL_TOP ? hist_n : k->ch == BWM_KEY_SCROLL_END ? 0
+                               : back + (k->ch == BWM_KEY_SCROLL_UP ? rows - 1 : -(rows - 1));
                         nb = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
                         if (nb != back) {
                             back = nb;
