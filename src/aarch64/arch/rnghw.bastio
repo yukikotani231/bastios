@@ -1,0 +1,49 @@
+// Finding the virtio entropy source on AArch64 (src/virtio_rng.bastio): on
+// virtio-mmio, at the slots the device tree names (QEMU's virt machine,
+// Firecracker and Cloud Hypervisor on Arm). It runs once, before any other
+// driver looks for its device, and leaves every register and page as it
+// found them.
+
+import "virtio_rng.bastio";
+import "virtio_mmio.bastio";
+import "net.bastio";
+import "blk.bastio";
+
+/// The pages 0 .. 3 for `vrng_read`, with `io`.
+fn rng_run(m: &mut Mem, io: Vt, out: &mut Buf) -> VRngRun
+  requires mem_ok(m) && vt_ok(io) && len(out) == VRNG_WORDS
+  requires get(m.bm, 0) == 1 && get(m.bm, 1) == 1 && get(m.bm, 2) == 1 && get(m.bm, 3) == 1
+  ensures mem_ok(m) && len(out) == VRNG_WORDS && result.n <= VRNG_WORDS && vt_ok(result.io)
+  ensures forall k: u64 :: vt_holds(result.io, k) == old(vt_holds(io, k))
+  ensures forall a: u64 :: vt_claims(result.io, a) == old(vt_claims(io, a))
+{
+  let f0 = take_low_page(&mut m, 0);
+  let f1 = take_low_page(&mut m, 1);
+  let f2 = take_low_page(&mut m, 2);
+  let f3 = take_low_page(&mut m, 3);
+  return vrng_read(&mut m, io, f0, f1, f2, f3, &mut out);
+}
+
+/// Entropy from the machine's virtio-rng, if it has one on virtio-mmio.
+/// Returns how many words are in `out` (0 for none).
+fn rng_hw(m: &mut Mem, win: &mut MmioSpace, vm: VmWhere, out: &mut Buf) -> u64
+  requires vmw_ok(vm) && mem_ok(m) && len(out) == VRNG_WORDS
+  requires forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
+  ensures mem_ok(m) && len(out) == VRNG_WORDS && result <= VRNG_WORDS
+  ensures forall a: u64 :: bar_space(a) ==> mmio_free(win, a)
+{
+  if !pages_free(m, 0, VRNG_PAGES) {
+    return 0;
+  }
+  match vm_find(&mut win, VM_ID_RNG, vm, 0, 0, 0, 0, 0, 0, 0, 0) {
+    VmFound::Found(d) => {
+      let r = rng_run(&mut m, Vt::Mem(d), &mut out);
+      match r.io {
+        Vt::Mem(e) => { mmio_release(&mut win, e.regs); },
+      }
+      return r.n;
+    },
+    VmFound::None => {},
+  }
+  return 0;
+}
