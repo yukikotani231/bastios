@@ -134,6 +134,7 @@ fn lx_tcp_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   of_set(&mut k.ofd, tk.h, 3, tm_word(tk.nb, port, TM_NEW));
   sock_bound(&mut k, tk.h, sin.ip);
+  nic_dns_note(&mut k.nic, net_ns(k, pid), sin.ip, port);
   return 0;
 }
 
@@ -264,7 +265,7 @@ fn lx_tcp_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u6
     if ofd_v6(k, tk.h) && !sin_mapped(&mut k, pid, addr) {
       cfam = FAM_BOTH;
     }
-    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, sin.port, cfam);
+    t = tcp_connect(&mut k.nic, net_ns(k, pid), sin.ip, nic_dns_port(k.nic, net_ns(k, pid), sin.ip, sin.port), cfam);
     if t >= TCBS {
       return ENETUNREACH;
     }

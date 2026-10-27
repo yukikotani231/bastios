@@ -422,6 +422,7 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     return EADDRINUSE;
   }
   sock_bound(&mut k, sk.h, sin.ip);
+  sock_dns_note(&mut k.nic, sk.s, sin.ip, sock_port(k.nic, sk.s));
   return 0;
 }
 

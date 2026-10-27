@@ -883,6 +883,14 @@ t_nlveth: the child is ready
 t_nlveth: the host end is here
 t_nlveth: the peer is not here
 t_nlveth: the peer there: addressed, routes asked for
+t_nldns: a UDP socket binds 127.0.0.11 at a port of its own
+t_nldns: a datagram for 127.0.0.11:53 reaches that socket and the answer reads as from port 53
+t_nldns: a datagram for another port is not redirected
+t_nldns: a network namespace of its own with lo up
+t_nldns: a stream connection to 127.0.0.11:53 reaches that listener
+t_nldns: a stream connection to the listener's own port works
+t_nldns: a stream listener binds 127.0.0.11 at a port of its own
+t_nldns: the first namespace has no redirect: a stream connect to 127.0.0.11:53 is refused
 t_pidfdinfo: CLONE_PIDFD with CLONE_PARENT_SETTID is EINVAL
 t_pidfdinfo: a child a signal ended has the signal in its status
 t_pidfdinfo: a null or short info, an unknown request and a pipe are refused
