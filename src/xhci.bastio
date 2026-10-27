@@ -236,7 +236,7 @@ struct Xhci {
   m_at: u64,          // its ring's position
   mq: Bytes,          // packets (4 bytes each), not yet taken
   mqn: u64,
-  mbtn: u64,          // the buttons in the last report
+  mbtn: u64,          // the buttons in the last report (5 bits)
   mlive: bool,        // is there a mouse?
   // The disk.
   msd: u64,           // MSD_NONE, MSD_UNUSED or MSD_ON
@@ -268,7 +268,7 @@ spec fn xhci_ok(x: &Xhci) -> bool {
   && x.e0c < RING_N * 2 && x.e0d < RING_N * 2 && x.e0e < RING_N * 2 && x.int_at < RING_N * 2
   && x.sp.e0 < RING_N * 2 && x.sp.in_at < RING_N * 2 && x.sp.out_at < RING_N * 2 && x.sp.in_dci < 32 && x.sp.out_dci < 32
   && x.sp.mps <= SER_RX_MAX && x.sp.kind <= SER_ACM && blen(x.sp.q) == SQ_N && x.sp.qn <= SQ_N
-  && x.m_at < RING_N * 2 && x.mdci < 32 && blen(x.mq) == MQ_N * 4 && x.mqn <= MQ_N && x.mbtn < 8
+  && x.m_at < RING_N * 2 && x.mdci < 32 && blen(x.mq) == MQ_N * 4 && x.mqn <= MQ_N && x.mbtn < 32
   && x.evt_at < EVT_N * 2 && x.out_at < RING_N * 2 && x.in_at < RING_N * 2
   && x.dci < 32 && x.dout < 32 && x.din < 32
   && x.plo <= 4294967296 && x.sectors <= 4294967296
@@ -2115,7 +2115,7 @@ fn mouse_report(x: &mut Xhci, n: u64)
   requires xhci_ok(x)
   ensures xhci_ok(x)
 {
-  let b = cast[u64](dma_read8(&mut x.intr, 3072)) % 8;
+  let b = cast[u64](dma_read8(&mut x.intr, 3072)) % 32;      // the buttons: 1 to 3, then side and extra
   let dx = cast[u64](dma_read8(&mut x.intr, 3073));
   let dy = cast[u64](dma_read8(&mut x.intr, 3074));
   let mut dz = 0;
@@ -2126,7 +2126,7 @@ fn mouse_report(x: &mut Xhci, n: u64)
     return;
   }
   x.mbtn = b;
-  let mut b0 = b + 8;
+  let mut b0 = b % 8 + b / 8 * 64 + 8;    // buttons 4 and 5 in bits 6 and 7, as src/lxmouse.bastio has them
   if dx >= 128 {
     b0 = b0 + 16;                     // x negative
   }
