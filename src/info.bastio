@@ -16,7 +16,8 @@ const INFO_CMDLINE: u64 = 0;     // byte i of the boot command line, 256 past it
 const INFO_MEM: u64 = 1;         // the memory map: i = 3 * region + 0 base, 1 length, 2 type (0 past the end)
 const INFO_CPUID: u64 = 2;       // 2-5: CPUID eax, ebx, ecx, edx for leaf i / 2^32, subleaf i % 2^32
 const INFO_SMP: u64 = 6;         // 0 processors the MADT lists, 1 x2APIC ones, 2 why not all run (SMP_*),
-                                 // 3 the local APIC's mode, 4 the mode the firmware left it in (APIC_*)
+                                 // 3 the local APIC's mode, 4 the mode the firmware left it in (APIC_*),
+                                 // 5 whether the processor asking is the bootstrap one
 const APIC_XAPIC: u64 = 1;       // INFO_SMP 3 and 4: 0 off, 1 xAPIC, 2 x2APIC, 3 x2APIC locked by the firmware
 const APIC_X2APIC: u64 = 2;
 const INFO_TIMER: u64 = 7;       // 0 what the local APIC timer was counted against, 1 its count for 10 ms, 2 it ticks for the PIT,

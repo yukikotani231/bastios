@@ -665,13 +665,84 @@ static void draw_icons(void)
     }
 }
 
+static uint32_t *wall;                   /* the wallpaper (bwm -w FILE), W x H, or NULL for the gradient */
+
+static unsigned wall_le(const unsigned char *p, int n)
+{
+    unsigned v = 0;
+    for (int i = n - 1; i >= 0; i--)
+        v = v << 8 | p[i];
+    return v;
+}
+
+/* Reads a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP and stretches it over the screen by sampling. */
+static int wall_load(const char *path)
+{
+    FILE *f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    size_t cap = 1 << 20, n = 0;
+    unsigned char *d = malloc(cap);
+    for (size_t r; d && (r = fread(d + n, 1, cap - n, f)) > 0; ) {
+        n += r;
+        if (n == cap) {
+            if (cap >= (24u << 20)) { n = 0; break; }
+            d = realloc(d, cap *= 2);
+        }
+    }
+    fclose(f);
+    if (!d || n < 12 || (d[0] == 'B' && n < 34)) { free(d); return 0; }
+    long iw = 0, ih = 0, stride = 0, bpp = 24;
+    int bmp = 0, flip = 0;
+    const unsigned char *px = NULL;
+    if (d[0] == 'B' && d[1] == 'M') {
+        bmp = 1;
+        iw = (int)wall_le(d + 18, 4);
+        ih = (int)wall_le(d + 22, 4);
+        bpp = wall_le(d + 28, 2);
+        if (ih > 0) flip = 1; else ih = -ih;
+        stride = (iw * bpp / 8 + 3) & ~3L;
+        px = d + wall_le(d + 10, 4);
+        if ((bpp != 24 && bpp != 32) || wall_le(d + 30, 4) != 0)
+            iw = 0;
+    } else if (d[0] == 'P' && d[1] == '6') {
+        char *e = (char *)d + 2;
+        iw = strtol(e, &e, 10);
+        ih = strtol(e, &e, 10);
+        long max = strtol(e, &e, 10);
+        px = (unsigned char *)e + 1;
+        stride = iw * 3;
+        if (max != 255)
+            iw = 0;
+    }
+    if (iw <= 0 || ih <= 0 || iw > 16384 || ih > 16384 || px < d || px > d + n || (size_t)(px - d) + (size_t)stride * ih > n) {
+        free(d);
+        return 0;
+    }
+    wall = malloc((size_t)W * H * 4);
+    if (!wall) { free(d); return 0; }
+    for (unsigned y = 0; y < H; y++) {
+        long sy = (long)y * ih / H;
+        const unsigned char *row = px + (flip ? ih - 1 - sy : sy) * stride;
+        for (unsigned x = 0; x < W; x++) {
+            const unsigned char *q = row + ((long)x * iw / W) * (bpp / 8);
+            wall[y * W + x] = bmp ? rgb(q[2], q[1], q[0]) : rgb(q[0], q[1], q[2]);
+        }
+    }
+    free(d);
+    return 1;
+}
+
 static void draw_scene(void)
 {
-    for (unsigned y = 0; y < H; y++) {
-        uint32_t c = rgb(10 + y * 40 / H, 60 + y * 50 / H, 80 + y * 60 / H);
-        for (unsigned x = 0; x < W; x++)
-            scene[y * W + x] = c;
-    }
+    if (wall)
+        memcpy(scene, wall, (size_t)W * H * 4);
+    else
+        for (unsigned y = 0; y < H; y++) {
+            uint32_t c = rgb(10 + y * 40 / H, 60 + y * 50 / H, 80 + y * 60 / H);
+            for (unsigned x = 0; x < W; x++)
+                scene[y * W + x] = c;
+        }
     draw_icons();
     for (int i = 0; i < nz; i++)
         if (!z[i]->hidden)
@@ -1772,6 +1843,11 @@ int main(int argc, char **argv)
             want_h = strtoul(end + 1, NULL, 10);
         a += 2;
     }
+    const char *wall_path = NULL;
+    if (a + 1 < argc && strcmp(argv[a], "-w") == 0) {                    /* -w FILE: a PPM or BMP over the whole desktop */
+        wall_path = argv[a + 1];
+        a += 2;
+    }
     char **child = a + 1 < argc && strcmp(argv[a], "-c") == 0 ? &argv[a + 1] : NULL;
     fb = open("/dev/fb0", O_RDWR | O_CLOEXEC);
     if (fb < 0 && errno == ENODEV) {
@@ -1810,6 +1886,19 @@ int main(int argc, char **argv)
         puts("bwm: out of memory");
         return 1;
     }
+    char wall_line[200];
+    if (!wall_path) {                                                    /* else the file named by the first line of /etc/bwm.wallpaper, if there is one */
+        FILE *wf = fopen("/etc/bwm.wallpaper", "r");
+        if (wf && fgets(wall_line, sizeof wall_line, wf)) {
+            wall_line[strcspn(wall_line, "\r\n")] = 0;
+            if (wall_line[0])
+                wall_path = wall_line;
+        }
+        if (wf)
+            fclose(wf);
+    }
+    if (wall_path && !wall_load(wall_path))
+        printf("bwm: cannot use %s as the wallpaper\n", wall_path);
     for (int i = 0; i < MAXCLI; i++) {
         clis[i].fd = -1;
         clis[i].pend_fd = -1;
@@ -2011,8 +2100,9 @@ int main(int argc, char **argv)
                             to_client(top->cli, BWM_KEY, &pk, sizeof pk);
                         }
                     } else if (down && k_shift && (code == 104 || code == 109)) {
-                        if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm) */
-                            struct bwm_key sk = { (uint32_t)top->id, code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN };
+                        if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm); with Ctrl, to the oldest line or the live screen (0x103 and 0x104) */
+                            struct bwm_key sk = { (uint32_t)top->id, k_ctrl ? (code == 104 ? BWM_KEY_SCROLL_TOP : BWM_KEY_SCROLL_END)
+                                                                     : (code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN) };
                             to_client(top->cli, BWM_KEY, &sk, sizeof sk);
                         }
                     } else if (code == 68 && down && k_alt) {      /* Alt-F10: maximize the focused window, or put it back */

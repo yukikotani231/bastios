@@ -1398,7 +1398,15 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         // Nothing to run: pump the console if it has output and no other
         // processor is at it, else sleep until an interrupt.
         if atomic_load(pend) == 0 || atomic_load(pumping) {
-          locked(s, stretch_lp, cpu);
+          // Only the bootstrap processor stretches its tick (stretch_p). An
+          // application processor that took the lock and the APIC for it
+          // just to find that out made three trips through the lock of
+          // each idle wait; with 255 processors waking at once, the
+          // crowd waiting for it kept the holder from finishing (an
+          // emulator spends the host's time on the spinners).
+          if boot_info(cpu, INFO_SMP, 5) == 1 {
+            locked(s, stretch_lp, cpu);
+          }
           let v = cpu_idle(&mut cpu);
           locked(s, idled_p, cpu, v, pend);
         }
