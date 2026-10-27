@@ -2797,6 +2797,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # Ctrl-Shift-Page Up goes to the oldest line kept, Ctrl-Shift-Page Down back to the live screen.
+            monitor("sendkey ctrl-shift-pgup")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = not any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-Page Up goes to the oldest line")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey ctrl-shift-pgdn")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-Page Down goes back to the live screen")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)

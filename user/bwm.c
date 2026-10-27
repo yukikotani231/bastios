@@ -2100,8 +2100,9 @@ int main(int argc, char **argv)
                             to_client(top->cli, BWM_KEY, &pk, sizeof pk);
                         }
                     } else if (down && k_shift && (code == 104 || code == 109)) {
-                        if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm) */
-                            struct bwm_key sk = { (uint32_t)top->id, code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN };
+                        if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm); with Ctrl, to the oldest line or the live screen (0x103 and 0x104) */
+                            struct bwm_key sk = { (uint32_t)top->id, k_ctrl ? (code == 104 ? BWM_KEY_SCROLL_TOP : BWM_KEY_SCROLL_END)
+                                                                     : (code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN) };
                             to_client(top->cli, BWM_KEY, &sk, sizeof sk);
                         }
                     } else if (code == 68 && down && k_alt) {      /* Alt-F10: maximize the focused window, or put it back */
