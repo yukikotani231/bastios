@@ -54,7 +54,7 @@ fn lx_fork(k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return ENOMEM;                          // the parent's swapped pages must be back: the copy shares no slot (src/swap.bastio)
   }
   let solo = group_alone(&mut k, pid);
-  match fork_space(&mut k.mem, &mut k.spaces, pid, solo) {
+  match fork_space(&mut k.mem, mmu, &mut k.spaces, pid, solo) {
     Space::Empty => {
       give_page(&mut k.mem, fpu);
       return ENOMEM;
@@ -238,8 +238,8 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
 /// A copy of process `pid`'s address space, or `Space::Empty`.
 /// Copy-on-write (`solo`: pid has no other thread, src/lxcow.bastio) if
 /// no processor runs the space now.
-fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, solo: bool) -> Space
-  requires mem_ok(m) && spaces_ok(spaces) && pid < NPROC
+fn fork_space(m: &mut Mem, mmu: &Mmu, spaces: &mut Vec[Space], pid: u64, solo: bool) -> Space
+  requires mem_ok(m) && mmu_root(mmu) == KERNEL_ROOT && spaces_ok(spaces) && pid < NPROC
   ensures mem_ok(m) && spaces_ok(spaces)
   ensures result is Space::Mapped ==> pt_level(result.Mapped) == 4
 {
@@ -247,7 +247,7 @@ fn fork_space(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, solo: bool) -> Spa
     Space::Empty => { return Space::Empty; },
     Space::Mapped(mut root) => {
       let cow = solo && pt_lease_count(&mut root) == 0;
-      let c = clone_space(&mut m, &mut root, cow);
+      let c = clone_space(&mut m, mmu, &mut root, cow);
       put_space(&mut spaces, pid, Space::Mapped(root));
       return c;
     },

@@ -222,15 +222,56 @@ fn read_root(root: &mut PageTable, off: u64) -> Word
   requires pt_level(root) == 4 && off + 8 <= USER_SIZE
   ensures pt_level(root) == 4
 {
-  if !pt_has(root, 1) {
-    return Word { ok: false, v: 0 };
+  let sg = wseg_of(off);
+  if off + 8 <= (sg + 1) * WSEG_BYTES {
+    if !pt_has(root, 1 + sg) {
+      return Word { ok: false, v: 0 };
+    }
+    return pt_borrow(&mut root, 1 + sg, read_l3, off - sg * WSEG_BYTES);
   }
-  return pt_borrow(&mut root, 1, read_l3, off);
+  // The word straddles two segments of the window: a byte at a time.
+  let mut v = 0;
+  let mut i = 8;
+  while i > 0
+    invariant i <= 8 && pt_level(root) == 4 && off + 8 <= USER_SIZE
+    invariant (i == 8 ==> v == 0) && (i == 7 ==> v < 0x100) && (i == 6 ==> v < 0x10000)
+    invariant (i == 5 ==> v < 0x1000000) && (i == 4 ==> v < 0x100000000)
+    invariant (i == 3 ==> v < 0x10000000000) && (i == 2 ==> v < 0x1000000000000)
+    invariant (i == 1 ==> v < 0x100000000000000)
+  {
+    i = i - 1;
+    let ch = root_byte(&mut root, off + i);
+    if ch == 256 {
+      return Word { ok: false, v: 0 };
+    }
+    v = v * 256 + ch;
+  }
+  return Word { ok: true, v: v };
+}
+
+/// The byte at window offset a (256 if not mapped), through the top-level
+/// table.
+fn root_byte(root: &mut PageTable, a: u64) -> u64
+  requires pt_level(root) == 4 && a < USER_SIZE
+  ensures pt_level(root) == 4 && result <= 256
+{
+  let sg = wseg_of(a);
+  if !pt_has(root, 1 + sg) {
+    return 256;
+  }
+  return pt_borrow(&mut root, 1 + sg, byte_l3, a - sg * WSEG_BYTES);
+}
+
+fn byte_l3(l3: &mut PageTable, a: u64) -> u64
+  requires pt_level(l3) == 3 && a < WSEG_BYTES
+  ensures result <= 256
+{
+  return w_byte(&mut l3, a);
 }
 
 /// read_root below the top-level table, in place.
 fn read_l3(l3: &mut PageTable, off: u64) -> Word
-  requires pt_level(l3) == 3 && off + 8 <= USER_SIZE
+  requires pt_level(l3) == 3 && off + 8 <= WSEG_BYTES
 {
   let mut v = 0;
   let mut i = 8;
@@ -2790,9 +2831,21 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
   match take_space(&mut spaces, pid) {
     Space::Empty => { return false; },
     Space::Mapped(mut root) => {
-      let mut ok = false;
-      if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, map_l3, &mut m, from, to, sh);
+      let mut ok = true;
+      let mut p = from;
+      while ok && p < to
+        invariant mem_ok(m) && pt_level(root) == 4 && from <= p && to <= WPAGES
+      {
+        let sg = wseg_of(p * 4096);
+        let mut cut = to;
+        if (sg + 1) * WSEG_PAGES < to {
+          cut = (sg + 1) * WSEG_PAGES;
+        }
+        ok = false;
+        if root_seg(&mut m, &mut root, sg) {
+          ok = pt_borrow(&mut root, 1 + sg, map_l3, &mut m, p - sg * WSEG_PAGES, cut - sg * WSEG_PAGES, sh);
+        }
+        p = cut;
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return ok;
@@ -2804,13 +2857,13 @@ fn lx_map_pages(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, from: u64, to: u
 /// running on the space, and the new pages appear to them as they are
 /// mapped.
 fn map_l3(l3: &mut PageTable, m: &mut Mem, from: u64, to: u64, sh: bool) -> bool
-  requires pt_level(l3) == 3 && mem_ok(m) && to <= WPAGES
+  requires pt_level(l3) == 3 && mem_ok(m) && to <= WSEG_PAGES
   ensures mem_ok(m)
 {
   let mut ok = true;
   let mut p = from;
   while ok && p < to
-    invariant mem_ok(m) && pt_level(l3) == 3 && to <= WPAGES
+    invariant mem_ok(m) && pt_level(l3) == 3 && to <= WSEG_PAGES
   {
     ok = w_map(&mut m, &mut l3, p, sh);
     p = p + 1;

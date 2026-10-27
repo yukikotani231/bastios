@@ -77,9 +77,20 @@ fn raw_from_user(spaces: &mut Vec[Space], pid: u64, off: u64, buf: &mut Bytes, k
   match take_space(&mut spaces, pid) {
     Space::Empty => { return NO_RESULT; },
     Space::Mapped(mut root) => {
+      let l = blen(buf);
       let mut k = k0;
-      if pt_has(root, 1) {
-        k = pt_borrow(&mut root, 1, l3_to_bytes, off, &mut buf, k0, n);
+      let mut more = true;
+      while more && k < n
+        invariant k0 <= k && k <= n && n <= blen(buf) && blen(buf) == l && off + n <= USER_SIZE && pt_level(root) == 4
+      {
+        let sg = wseg_of(off + k);
+        let kn = k + wseg_room(off + k, n - k);
+        more = false;
+        if pt_has(root, 1 + sg) {
+          let r = pt_borrow(&mut root, 1 + sg, l3_to_bytes, off, &mut buf, k, kn, sg * WSEG_BYTES);
+          more = r == kn;
+          k = r;
+        }
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return k;
@@ -89,8 +100,8 @@ fn raw_from_user(spaces: &mut Vec[Space], pid: u64, off: u64, buf: &mut Bytes, k
 
 /// copy_from_user below the top-level table (in place, as other threads
 /// may be running on the space).
-fn l3_to_bytes(l3: &mut PageTable, off: u64, buf: &mut Bytes, k0: u64, n: u64) -> u64
-  requires pt_level(l3) == 3 && off + n <= USER_SIZE && k0 <= n && n <= blen(buf)
+fn l3_to_bytes(l3: &mut PageTable, off: u64, buf: &mut Bytes, k0: u64, n: u64, base: u64) -> u64
+  requires pt_level(l3) == 3 && base <= off + k0 && off + n <= base + WSEG_BYTES && base + WSEG_BYTES <= USER_SIZE && k0 <= n && n <= blen(buf)
   ensures blen(buf) == old(blen(buf))
   ensures k0 <= result && result <= n
 {
@@ -100,7 +111,7 @@ fn l3_to_bytes(l3: &mut PageTable, off: u64, buf: &mut Bytes, k0: u64, n: u64) -
   while ok && k < n
     invariant k0 <= k && k <= n && n <= blen(buf) && blen(buf) == l && pt_level(l3) == 3
   {
-    let a = off + k;
+    let a = off + k - base;
     let m = chunk(a, n - k);
     if w_read(&mut l3, a, &mut buf, k, m) {
       k = k + m;
@@ -190,8 +201,18 @@ fn raw_frame_to_user(spaces: &mut Vec[Space], pid: u64, off: u64, src: &Frame, s
     Space::Empty => { return NO_RESULT; },
     Space::Mapped(mut root) => {
       let mut k = k0;
-      if pt_has(root, 1) {
-        k = pt_borrow(&mut root, 1, frame_to_l3, off, src, s, k0, n);
+      let mut more = true;
+      while more && k < n
+        invariant k0 <= k && k <= n && s + n <= 4096 && off + n <= USER_SIZE && pt_level(root) == 4
+      {
+        let sg = wseg_of(off + k);
+        let kn = k + wseg_room(off + k, n - k);
+        more = false;
+        if pt_has(root, 1 + sg) {
+          let r = pt_borrow(&mut root, 1 + sg, frame_to_l3, off, src, s, k, kn, sg * WSEG_BYTES);
+          more = r == kn;
+          k = r;
+        }
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return k;
@@ -200,8 +221,8 @@ fn raw_frame_to_user(spaces: &mut Vec[Space], pid: u64, off: u64, src: &Frame, s
 }
 
 /// copy_frame_to_user below the top-level table, in place.
-fn frame_to_l3(l3: &mut PageTable, off: u64, src: &Frame, s: u64, k0: u64, n: u64) -> u64
-  requires pt_level(l3) == 3 && off + n <= USER_SIZE && k0 <= n && s + n <= 4096
+fn frame_to_l3(l3: &mut PageTable, off: u64, src: &Frame, s: u64, k0: u64, n: u64, base: u64) -> u64
+  requires pt_level(l3) == 3 && base <= off + k0 && off + n <= base + WSEG_BYTES && base + WSEG_BYTES <= USER_SIZE && k0 <= n && s + n <= 4096
   ensures k0 <= result && result <= n
 {
   let mut k = k0;
@@ -209,7 +230,7 @@ fn frame_to_l3(l3: &mut PageTable, off: u64, src: &Frame, s: u64, k0: u64, n: u6
   while ok && k < n
     invariant k0 <= k && k <= n && pt_level(l3) == 3
   {
-    let a = off + k;
+    let a = off + k - base;
     let m = chunk(a, n - k);
     if w_write_fr(&mut l3, a, src, s + k, m) {
       k = k + m;
@@ -236,9 +257,20 @@ fn force_to_user(spaces: &mut Vec[Space], pid: u64, va: u64, buf: &Bytes, n: u64
   match take_space(&mut spaces, pid) {
     Space::Empty => { return NO_RESULT; },
     Space::Mapped(mut root) => {
+      let off = va - USER_BASE;
       let mut k = 0;
-      if pt_has(root, 1) {
-        k = pt_borrow(&mut root, 1, force_to_l3, va - USER_BASE, buf, n);
+      let mut more = true;
+      while more && k < n
+        invariant k <= n && n <= blen(buf) && off + n <= USER_SIZE && pt_level(root) == 4
+      {
+        let sg = wseg_of(off + k);
+        let kn = k + wseg_room(off + k, n - k);
+        more = false;
+        if pt_has(root, 1 + sg) {
+          let r = pt_borrow(&mut root, 1 + sg, force_to_l3, off, buf, k, kn, sg * WSEG_BYTES);
+          more = r == kn;
+          k = r;
+        }
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return k;
@@ -246,16 +278,16 @@ fn force_to_user(spaces: &mut Vec[Space], pid: u64, va: u64, buf: &Bytes, n: u64
   }
 }
 
-fn force_to_l3(l3: &mut PageTable, off: u64, buf: &Bytes, n: u64) -> u64
-  requires pt_level(l3) == 3 && off + n <= USER_SIZE && n <= blen(buf)
-  ensures result <= n
+fn force_to_l3(l3: &mut PageTable, off: u64, buf: &Bytes, k0: u64, n: u64, base: u64) -> u64
+  requires pt_level(l3) == 3 && base <= off + k0 && off + n <= base + WSEG_BYTES && base + WSEG_BYTES <= USER_SIZE && k0 <= n && n <= blen(buf)
+  ensures k0 <= result && result <= n
 {
-  let mut k = 0;
+  let mut k = k0;
   let mut ok = true;
   while ok && k < n
-    invariant k <= n && pt_level(l3) == 3
+    invariant k0 <= k && k <= n && pt_level(l3) == 3
   {
-    let a = off + k;
+    let a = off + k - base;
     let m = chunk(a, n - k);
     if w_write_force(&mut l3, a, buf, k, m) {
       k = k + m;
@@ -276,8 +308,18 @@ fn raw_to_user(spaces: &mut Vec[Space], pid: u64, off: u64, buf: &Bytes, k0: u64
     Space::Empty => { return NO_RESULT; },
     Space::Mapped(mut root) => {
       let mut k = k0;
-      if pt_has(root, 1) {
-        k = pt_borrow(&mut root, 1, bytes_to_l3, off, buf, k0, n);
+      let mut more = true;
+      while more && k < n
+        invariant k0 <= k && k <= n && n <= blen(buf) && off + n <= USER_SIZE && pt_level(root) == 4
+      {
+        let sg = wseg_of(off + k);
+        let kn = k + wseg_room(off + k, n - k);
+        more = false;
+        if pt_has(root, 1 + sg) {
+          let r = pt_borrow(&mut root, 1 + sg, bytes_to_l3, off, buf, k, kn, sg * WSEG_BYTES);
+          more = r == kn;
+          k = r;
+        }
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return k;
@@ -286,8 +328,8 @@ fn raw_to_user(spaces: &mut Vec[Space], pid: u64, off: u64, buf: &Bytes, k0: u64
 }
 
 /// copy_to_user below the top-level table, in place.
-fn bytes_to_l3(l3: &mut PageTable, off: u64, buf: &Bytes, k0: u64, n: u64) -> u64
-  requires pt_level(l3) == 3 && off + n <= USER_SIZE && k0 <= n && n <= blen(buf)
+fn bytes_to_l3(l3: &mut PageTable, off: u64, buf: &Bytes, k0: u64, n: u64, base: u64) -> u64
+  requires pt_level(l3) == 3 && base <= off + k0 && off + n <= base + WSEG_BYTES && base + WSEG_BYTES <= USER_SIZE && k0 <= n && n <= blen(buf)
   ensures k0 <= result && result <= n
 {
   let mut k = k0;
@@ -295,7 +337,7 @@ fn bytes_to_l3(l3: &mut PageTable, off: u64, buf: &Bytes, k0: u64, n: u64) -> u6
   while ok && k < n
     invariant k0 <= k && k <= n && pt_level(l3) == 3
   {
-    let a = off + k;
+    let a = off + k - base;
     let m = chunk(a, n - k);
     if w_write(&mut l3, a, buf, k, m) {
       k = k + m;
@@ -324,8 +366,9 @@ fn user_shared_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> u64
     Space::Empty => { return NO_RESULT; },
     Space::Mapped(mut root) => {
       let mut r = NO_RESULT;
-      if pt_has(root, 1) {
-        r = pt_borrow(&mut root, 1, l3_shared, off);
+      let sg = wseg_of(off);
+      if pt_has(root, 1 + sg) {
+        r = pt_borrow(&mut root, 1 + sg, l3_shared, off - sg * WSEG_BYTES);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       if r < len(bm) && bm_cow(get(bm, r)) {
@@ -354,8 +397,9 @@ fn user_cow_page(spaces: &mut Vec[Space], bm: &Buf, pid: u64, va: u64) -> bool
     Space::Empty => { return false; },
     Space::Mapped(mut root) => {
       let mut r = NO_RESULT;
-      if pt_has(root, 1) {
-        r = pt_borrow(&mut root, 1, l3_shared, off);
+      let sg = wseg_of(off);
+      if pt_has(root, 1 + sg) {
+        r = pt_borrow(&mut root, 1 + sg, l3_shared, off - sg * WSEG_BYTES);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return r < len(bm) && bm_cow(get(bm, r));
@@ -376,8 +420,9 @@ fn user_page_writable(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
     Space::Empty => { return false; },
     Space::Mapped(mut root) => {
       let mut r = false;
-      if pt_has(root, 1) {
-        r = pt_borrow(&mut root, 1, l3_writable, off);
+      let sg = wseg_of(off);
+      if pt_has(root, 1 + sg) {
+        r = pt_borrow(&mut root, 1 + sg, l3_writable, off - sg * WSEG_BYTES);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return r;
@@ -386,7 +431,7 @@ fn user_page_writable(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
 }
 
 fn l3_writable(l3: &mut PageTable, off: u64) -> bool
-  requires pt_level(l3) == 3 && off < USER_SIZE
+  requires pt_level(l3) == 3 && off < WSEG_BYTES
 {
   let t = off / L2_SIZE;
   if !pt_has(l3, t) {
@@ -413,7 +458,7 @@ fn l1_writable(l1: &mut PageTable, i: u64) -> bool
 }
 
 fn l3_shared(l3: &mut PageTable, off: u64) -> u64
-  requires pt_level(l3) == 3 && off < USER_SIZE
+  requires pt_level(l3) == 3 && off < WSEG_BYTES
   ensures result < NPAGES || result == NO_RESULT
 {
   let t = off / L2_SIZE;
@@ -568,8 +613,9 @@ fn anon_touch(m: &mut Mem, spaces: &mut Vec[Space], an: &Buf, pid: u64, q: u64) 
     Space::Empty => { return false; },
     Space::Mapped(mut root) => {
       let mut ok = false;
-      if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, touch_l3, &mut m, q, anon_exec(an, pid, q));
+      let sg = wseg_of(q * 4096);
+      if pt_has(root, 1 + sg) {
+        ok = pt_borrow(&mut root, 1 + sg, touch_l3, &mut m, q - sg * WSEG_PAGES, anon_exec(an, pid, q));
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return ok;
@@ -578,7 +624,7 @@ fn anon_touch(m: &mut Mem, spaces: &mut Vec[Space], an: &Buf, pid: u64, q: u64) 
 }
 
 fn touch_l3(l3: &mut PageTable, m: &mut Mem, q: u64, x: bool) -> bool
-  requires pt_level(l3) == 3 && mem_ok(m) && q < WPAGES
+  requires pt_level(l3) == 3 && mem_ok(m) && q < WSEG_PAGES
   ensures mem_ok(m)
 {
   if !x {
@@ -662,8 +708,9 @@ fn own_touch(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, q: u64, text: bool)
     Space::Empty => { return false; },
     Space::Mapped(mut root) => {
       let mut r = COW_NONE;
-      if pt_lease_count(&mut root) == 0 && pt_has(root, 1) {
-        r = pt_borrow(&mut root, 1, cow_l3, &mut m, q, text);
+      let sg = wseg_of(q * 4096);
+      if pt_lease_count(&mut root) == 0 && pt_has(root, 1 + sg) {
+        r = pt_borrow(&mut root, 1 + sg, cow_l3, &mut m, q - sg * WSEG_PAGES, text);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return r == COW_DONE;
@@ -672,7 +719,7 @@ fn own_touch(m: &mut Mem, spaces: &mut Vec[Space], pid: u64, q: u64, text: bool)
 }
 
 fn cow_l3(l3: &mut PageTable, m: &mut Mem, q: u64, text: bool) -> u64
-  requires pt_level(l3) == 3 && pt_leases(l3) == 0 && mem_ok(m) && q < WPAGES
+  requires pt_level(l3) == 3 && pt_leases(l3) == 0 && mem_ok(m) && q < WSEG_PAGES
   ensures mem_ok(m) && result <= COW_NOMEM
 {
   let t = q / L2_PAGES;
@@ -740,8 +787,9 @@ fn user_present(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
     Space::Empty => { return false; },
     Space::Mapped(mut root) => {
       let mut r = false;
-      if pt_has(root, 1) {
-        r = pt_borrow(&mut root, 1, l3_present, off);
+      let sg = wseg_of(off);
+      if pt_has(root, 1 + sg) {
+        r = pt_borrow(&mut root, 1 + sg, l3_present, off - sg * WSEG_BYTES);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return r;
@@ -750,7 +798,7 @@ fn user_present(spaces: &mut Vec[Space], pid: u64, va: u64) -> bool
 }
 
 fn l3_present(l3: &mut PageTable, off: u64) -> bool
-  requires pt_level(l3) == 3 && off < USER_SIZE
+  requires pt_level(l3) == 3 && off < WSEG_BYTES
 {
   let t = off / L2_SIZE;
   if !pt_has(l3, t) {
@@ -789,8 +837,9 @@ fn user_page_bits(spaces: &mut Vec[Space], pid: u64, q: u64) -> u64
     Space::Empty => { return 0; },
     Space::Mapped(mut root) => {
       let mut r = 0;
-      if pt_has(root, 1) {
-        r = pt_borrow(&mut root, 1, l3_bits, q * 4096);
+      let sg = wseg_of(q * 4096);
+      if pt_has(root, 1 + sg) {
+        r = pt_borrow(&mut root, 1 + sg, l3_bits, (q - sg * WSEG_PAGES) * 4096);
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return r;
@@ -799,7 +848,7 @@ fn user_page_bits(spaces: &mut Vec[Space], pid: u64, q: u64) -> u64
 }
 
 fn l3_bits(l3: &mut PageTable, off: u64) -> u64
-  requires pt_level(l3) == 3 && off < USER_SIZE
+  requires pt_level(l3) == 3 && off < WSEG_BYTES
   ensures result < 16
 {
   let t = off / L2_SIZE;
@@ -853,8 +902,18 @@ fn user_next_mapped(spaces: &mut Vec[Space], pid: u64, q: u64) -> u64
     Space::Empty => { return WPAGES; },
     Space::Mapped(mut root) => {
       let mut r = WPAGES;
-      if pt_has(root, 1) {
-        r = pt_borrow(&mut root, 1, l3_next, q);
+      let mut p = q;
+      while r == WPAGES && p < WPAGES
+        invariant q <= p && p <= WPAGES && q <= r && r <= WPAGES && pt_level(root) == 4
+      {
+        let sg = wseg_of(p * 4096);
+        if pt_has(root, 1 + sg) {
+          let rl = pt_borrow(&mut root, 1 + sg, l3_next, p - sg * WSEG_PAGES);
+          if rl < WSEG_PAGES {
+            r = sg * WSEG_PAGES + rl;
+          }
+        }
+        p = (sg + 1) * WSEG_PAGES;
       }
       put_space(&mut spaces, pid, Space::Mapped(root));
       return r;
@@ -863,8 +922,8 @@ fn user_next_mapped(spaces: &mut Vec[Space], pid: u64, q: u64) -> u64
 }
 
 fn l3_next(l3: &mut PageTable, q: u64) -> u64
-  requires pt_level(l3) == 3 && q < WPAGES
-  ensures q <= result && result <= WPAGES
+  requires pt_level(l3) == 3 && q < WSEG_PAGES
+  ensures q <= result && result <= WSEG_PAGES
 {
   return w_next(&mut l3, q);
 }

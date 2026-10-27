@@ -359,7 +359,7 @@ fn copy_in(l3: &mut PageTable, v: &mut Vfs, src: Src, from: u64, off: u64, n: u6
 /// Copies the first `n` bytes of `x` to window offset `off`, a page at a
 /// time; pages the window does not map are skipped.
 fn put_window(l3: &mut PageTable, x: &Bytes, off: u64, n: u64)
-  requires pt_level(l3) == 3 && n <= blen(x) && off + n <= USER_SIZE
+  requires pt_level(l3) == 3 && n <= blen(x) && off + n <= WSEG_BYTES
   ensures pt_level(l3) == 3
 {
   let mut k = 0;
@@ -574,7 +574,7 @@ fn aux(vec: &mut Bytes, w: u64, key: u64, v: u64)
 /// is shorter than it was, or memory ran out) is left to be copied, so
 /// this is false only if a level-1 table could not be made.
 fn share_file_page(m: &mut Mem, v: &mut Vfs, h: u64, pg: u64, l3: &mut PageTable, p: u64) -> bool
-  requires mem_ok(m) && vfs_ok(v) && pt_level(l3) == 3 && p < WPAGES && pg < 512
+  requires mem_ok(m) && vfs_ok(v) && pt_level(l3) == 3 && p < WSEG_PAGES && pg < 512
   ensures mem_ok(m) && vfs_ok(v) && pt_level(l3) == 3
 {
   let mut slot = pc_get(&mut v.pc, h, pg);
