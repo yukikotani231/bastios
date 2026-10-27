@@ -34,6 +34,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Shift-Page Up in `bterm` goes to the oldest line kept in the history, Ctrl-Shift-Page Down back to the live screen.
 - Alt-F12 in `bwm` saves the desktop as a PPM to `/tmp/screenshot.ppm` (open it with `bview` or from `bfiles`).
 - The `bsys` System window shows the load averages (read from `/proc/loadavg`) in a new Load row.
+- The title row of the `bfiles` list says how many entries the directory holds.
 - `u` in the `bfiles` list shows file sizes as 4.8K, 1.2M and 3.0G instead of bytes (and back).
 - Alt-F5 in `bwm` minimizes every window; pressing it again brings back the ones it hid.
 - The `bsys` System window shows the first network interface that has an address (or `none`) in a new Network row.
