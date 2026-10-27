@@ -39,6 +39,7 @@
 #include "font8x8.h"
 #include "imefont.h"
 #include "bwmdict.h"
+#include "bwmtz.h"
 
 struct bitfield { uint32_t offset, length, msb_right; };
 struct var_info {
@@ -414,53 +415,16 @@ static int mice_wheel(int fd)
     return got[0] == 0xFA && got[1] == 3 ? 4 : 3;
 }
 
-/* Minutes east of UTC for the clock: the TZ variable, or the first line of /etc/TZ, in the POSIX form NAME[+-]H[:MM]
- * ("JST-9" is nine hours east; "EST5" five west). No zone database: a name or no variable means UTC. */
-static int tz_minutes(void)
-{
-    char buf[64];
-    const char *tz = getenv("TZ");
-    if (!tz || !*tz) {
-        FILE *f = fopen("/etc/TZ", "r");
-        if (!f)
-            return 0;
-        char *got = fgets(buf, sizeof buf, f);
-        fclose(f);
-        if (!got)
-            return 0;
-        buf[strcspn(buf, "\r\n")] = 0;
-        tz = buf;
-    }
-    if (*tz == '<') {
-        while (*tz && *tz != '>')
-            tz++;
-        if (*tz)
-            tz++;
-    } else {
-        while ((*tz >= 'A' && *tz <= 'Z') || (*tz >= 'a' && *tz <= 'z'))
-            tz++;
-    }
-    int sign = 1;
-    if (*tz == '-' || *tz == '+')
-        sign = *tz++ == '-' ? -1 : 1;
-    int h = 0, m = 0;
-    while (*tz >= '0' && *tz <= '9' && h < 100)
-        h = h * 10 + *tz++ - '0';
-    if (*tz == ':') {
-        tz++;
-        while (*tz >= '0' && *tz <= '9' && m < 100)
-            m = m * 10 + *tz++ - '0';
-    }
-    int east = -sign * (h * 60 + m);
-    return east > 14 * 60 || east < -12 * 60 ? 0 : east;
-}
-
 /* The time of day (UTC, as the system keeps it, moved by tz_minutes) for the clock in the task bar. */
 static void clock_hm(int *h, int *m)
 {
-    static int off = 1 << 20;
-    if (off == 1 << 20)
+    static int off;
+    static time_t read_at;                                   /* the zone is read again every few seconds: bsys changes /etc/TZ */
+    time_t now = time(NULL);
+    if (!read_at || now - read_at >= 3 || now < read_at) {
         off = tz_minutes();
+        read_at = now;
+    }
     long min = ((long)(time(NULL) / 60) + off) % 1440;
     if (min < 0)
         min += 1440;
@@ -1157,7 +1121,7 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         int mf = clis[i].pend_fd;
         clis[i].pend_fd = -1;
         struct win *w = by_id(i, r.id);
-        int ok = w && w->pend && r.w >= MIN_CW && r.h >= MIN_CH && r.w <= W - 2 * BORDER && r.h <= H - TITLE_H - BORDER
+        int ok = w && (w->pend || w->resizable) && r.w >= MIN_CW && r.h >= MIN_CH && r.w <= W - 2 * BORDER && r.h <= H - TITLE_H - BORDER
                  && (w->shm ? mf >= 0 : mf < 0);
         void *m = MAP_FAILED;
         size_t need = (size_t)r.w * r.h * 4;
@@ -1996,6 +1960,8 @@ int main(int argc, char **argv)
                 wait = d < 0 ? 0 : (int)d;
         }
         int until_min = (int)(60 - time(NULL) % 60) * 1000;      /* the clock changes at the next minute */
+        if (until_min > 3000)
+            until_min = 3000;                                    /* but a new time zone is noticed within 3 s */
         if (wait < 0 || until_min < wait)
             wait = until_min;
         if (poll(p, np, wait) < 0 && errno != EINTR)
@@ -2131,6 +2097,11 @@ int main(int argc, char **argv)
                             struct bwm_key sk = { (uint32_t)top->id, k_ctrl ? (code == 104 ? BWM_KEY_SCROLL_TOP : BWM_KEY_SCROLL_END)
                                                                      : (code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN) };
                             to_client(top->cli, BWM_KEY, &sk, sizeof sk);
+                        }
+                    } else if (down && k_ctrl && !k_alt && (code == 13 || code == 78 || code == 12 || code == 74 || code == 11)) {
+                        if (top && top->cli >= 0) {                /* Ctrl-=, Ctrl-plus, Ctrl-minus, Ctrl-0: the text size of bterm (keys 0x105 to 0x107) */
+                            struct bwm_key zk = { (uint32_t)top->id, code == 13 || code == 78 ? BWM_KEY_ZOOM_IN : code == 11 ? BWM_KEY_ZOOM_RESET : BWM_KEY_ZOOM_OUT };
+                            to_client(top->cli, BWM_KEY, &zk, sizeof zk);
                         }
                     } else if (code == 68 && down && k_alt) {      /* Alt-F10: maximize the focused window, or put it back */
                         struct win *t = focus();

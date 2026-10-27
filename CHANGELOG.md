@@ -16,6 +16,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Ctrl-= and Ctrl-plus make the text of the focused `bterm` window bigger (up to three times), Ctrl-minus smaller and Ctrl-0 puts it back; the window keeps its size and the grid changes.
+- `/dev/input/mice` has the ImExPS/2 mode (sample rates 200, 200, 80, id 4): the fourth byte carries the wheel in its low four bits and the back and forward buttons in bits 4 and 5, fed from a USB mouse's side and extra buttons and from a PS/2 mouse that reports five buttons (`mmouse` and the USB and PS/2 mouse tests check it).
+- `t` in the `bsys` window cycles the time zone through a short list by writing `/etc/TZ`; the Time row and the `bwm` task bar clock show local time and follow a change within seconds.
 - The `SIGSYS` of a seccomp `SECCOMP_RET_TRAP` filter carries `si_code` `SYS_SECCOMP`, `si_syscall`, `si_arch` and `si_call_addr`, as Linux's does, so a sandbox's handler can see which call it refused.
 - A click on a process in the `bsys` list selects it.
 - Page Up and Page Down zoom the image in `bview` in and out, as `+` and `-` do.

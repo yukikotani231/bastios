@@ -10,9 +10,12 @@
 // sequence, enable reporting) and its bytes, which come through the same
 // data port marked by the status register, are put together into 3-byte
 // packets (buttons and sign bits; x; y), or 4-byte ones with the wheel if
-// the mouse then says it is an IntelliMouse (id 3). kbd_poll answers a
-// whole packet as MOUSE_PKT plus its four bytes (the wheel 0 without
-// one); the console pump
+// the mouse then says it is an IntelliMouse (id 3). A mouse with five buttons
+// then says id 4 to the sequence 200, 200, 80 (ImExPS/2), its wheel in the
+// low four bits of the fourth byte and the extra buttons in bits 4 and 5.
+// kbd_poll answers a whole packet as MOUSE_PKT plus its four bytes (the
+// wheel 0 without one; with five buttons, buttons 4 and 5 in bits 6 and 7
+// of byte 0, where the PS/2 packet has overflow flags); the console pump
 // hands packets to the kernel, which gives them to Linux programs as
 // /dev/input/mice (src/lxmouse.bastio). A byte that cannot start a packet
 // (bit 3 clear) is dropped, so a lost byte costs a packet, not the stream.
@@ -31,6 +34,7 @@ struct Kbd { data: PortIo, status: PortIo, shift: bool, ctrl: bool, alt: bool, e
   aux: bool,          // a PS/2 mouse answered and reports
   aux_irq: bool,      // ... and the controller raises IRQ 12 for its bytes (so no polling is needed to notice them)
   wheel: bool,        // ... with a wheel: 4-byte packets
+  imex: bool,         // ... and two more buttons (ImExPS/2, id 4): the 4th byte's bits 4 and 5
   mb: u64,            // the bytes of the mouse packet so far, first in the high byte
   mn: u64,            // how many (0 .. 3)
   pend: u64,          // the rest of an escape sequence still to hand out (navkeys.bastio)
@@ -72,6 +76,9 @@ fn kbd_init(k: &mut Kbd)
   // one, and reporting, each command acknowledged (0xFA) by the mouse.
   if kbd_ctl(&mut k, 0xA8) && aux_cmd(&mut k, 0xF6) {
     k.wheel = mouse_wheel(&mut k);
+    if k.wheel {
+      k.imex = mouse_imex(&mut k);
+    }
     k.aux = aux_cmd(&mut k, 0xF4);
     if k.aux {
       k.aux_irq = aux_irq_on(&mut k);
@@ -120,6 +127,24 @@ fn mouse_wheel(k: &mut Kbd) -> bool
   aux_cmd(&mut k, 0xF3);
   aux_cmd(&mut k, 100);
   return id == 3;
+}
+
+/// The ImExPS/2 sequence: sample rates 200, 200 and 80, after which a mouse
+/// with five buttons says id 4 and puts the two extra buttons in bits 4 and
+/// 5 of the wheel byte (the wheel itself in the low four bits). The rate is
+/// set back to 100 either way. True if it said 4.
+fn mouse_imex(k: &mut Kbd) -> bool
+  requires kbd_ok(k)
+  ensures kbd_ok(k) && k.mn == old(k.mn) && k.mb == old(k.mb)
+{
+  if !(aux_cmd(&mut k, 0xF3) && aux_cmd(&mut k, 200) && aux_cmd(&mut k, 0xF3) && aux_cmd(&mut k, 200)
+      && aux_cmd(&mut k, 0xF3) && aux_cmd(&mut k, 80) && aux_cmd(&mut k, 0xF2)) {
+    return false;
+  }
+  let id = aux_read(&mut k);
+  aux_cmd(&mut k, 0xF3);
+  aux_cmd(&mut k, 100);
+  return id == 4;
 }
 
 /// The next byte from the mouse, or 256 if none comes.
@@ -220,6 +245,15 @@ fn mouse_byte(k: &mut Kbd, b: u64) -> u64
   let mut p = MOUSE_PKT + k.mb * 256 + b;      // b is the wheel
   if !k.wheel {
     p = MOUSE_PKT + k.mb % 65536 * 65536 + b * 256;
+  }
+  if k.imex {
+    // The packet as src/lxmouse.bastio queues it: the wheel as a signed
+    // byte, buttons 4 and 5 in bits 6 and 7 of byte 0 (the overflow bits).
+    let mut z = b % 16;
+    if z >= 8 {
+      z = z + 240;
+    }
+    p = MOUSE_PKT + (k.mb / 65536 % 64 + b / 16 % 4 * 64) * 16777216 + k.mb % 65536 * 256 + z;
   }
   k.mb = 0;
   k.mn = 0;
