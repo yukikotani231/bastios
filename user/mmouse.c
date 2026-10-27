@@ -4,7 +4,10 @@
  * each as buttons, dx and dy (up positive). Then it switches the device to
  * ImPS/2 with the IntelliMouse sequence, checks the answers (0xFA, then
  * id 3), says "mmouse: wheel ready" and reads 4-byte packets until one
- * moves the wheel, which it prints (up negative). Without a mouse, opening the
+ * moves the wheel, which it prints (up negative). Then it switches to
+ * ImExPS/2 (sample rates 200, 200, 80), checks that the id is 4, says
+ * "mmouse: imex ready" and reads packets until one has a side button down,
+ * printing the buttons in bits 4 and 5. Without a mouse, opening the
  * device fails with ENODEV, which it reports (exit status 2).
  * test/shell_test.sh moves the mouse, presses a button and turns the wheel
  * through QEMU's monitor and checks what it prints. */
@@ -81,6 +84,25 @@ int main(void)
             return 1;
         if (p[3] != 0) {
             printf("mmouse: wheel %d\n", (signed char)p[3]);
+            break;
+        }
+    }
+    static const unsigned char imex[] = { 0xF3, 200, 0xF3, 200, 0xF3, 80 };
+    if (write(fd, imex, sizeof imex) != sizeof imex || readn(fd, p, 1) < 0 || p[0] != 0xFA) {
+        printf("mmouse: no answer to the ImExPS/2 sequence (%02x)\n", p[0]);
+        return 1;
+    }
+    if (write(fd, "\xF2", 1) != 1 || readn(fd, p, 2) < 0 || p[0] != 0xFA || p[1] != 4) {
+        printf("mmouse: id %02x %02x, not 4\n", p[0], p[1]);
+        return 1;
+    }
+    puts("mmouse: imex ready");
+    fflush(stdout);
+    for (int i = 0; i < 8; i++) {
+        if (readn(fd, p, 4) < 0)
+            return 1;
+        if (p[3] & 0x30) {
+            printf("mmouse: imex buttons %d wheel %d\n", p[3] >> 4 & 3, p[3] & 8 ? (p[3] & 15) - 16 : p[3] & 15);
             break;
         }
     }

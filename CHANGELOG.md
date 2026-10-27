@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `/dev/input/mice` has the ImExPS/2 mode (sample rates 200, 200, 80, id 4): the fourth byte carries the wheel in its low four bits and the back and forward buttons in bits 4 and 5, fed from a USB mouse's side and extra buttons and from a PS/2 mouse that reports five buttons (`mmouse` and the USB and PS/2 mouse tests check it).
 - A click on a process in the `bsys` list selects it.
 - Page Up and Page Down zoom the image in `bview` in and out, as `+` and `-` do.
 - The `bfiles` list shows the date of each file in place of its size while it is sorted by time.

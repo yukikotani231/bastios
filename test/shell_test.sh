@@ -1704,7 +1704,8 @@ def usbmouse(name, qmp_cmd):
     # mmouse reads two packets: a move 10 right and 5 up, then the left
     # button. A USB mouse says y down positive; the PS/2 packet, up. Then
     # it switches to ImPS/2 and reads the wheel turned up one step, which
-    # a USB mouse says as +1 and ImPS/2 as -1.
+    # a USB mouse says as +1 and ImPS/2 as -1. Then ImExPS/2 and the side
+    # button, which is button 4.
     global fails
     mark = len(out)
     qemu.stdin.write(b"mmouse\r"); qemu.stdin.flush()
@@ -1721,12 +1722,20 @@ def usbmouse(name, qmp_cmd):
                 qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
                     {"type": "btn", "data": {"down": down, "button": "wheel-up"}}]}})
                 time.sleep(0.3)
+            if read_until(b"mmouse: imex ready", mark):
+                for down in (True, False):
+                    qmp_cmd({"execute": "input-send-event", "arguments": {"events": [
+                        {"type": "btn", "data": {"down": down, "button": "side"}}]}})
+                    time.sleep(0.3)
     read_until(b"bastios> ", mark)
     good = b"mmouse: buttons 0 dx 10 dy 5\r\nmmouse: buttons 1 dx 0 dy 0\r\n" in out[mark:]
     print(("ok  " if good else "FAIL"), f"({name} boot) the USB mouse's move and button come through /dev/psaux")
     fails += not good
     good = b"mmouse: wheel ready\r\nmmouse: wheel -1\r\n" in out[mark:]
     print(("ok  " if good else "FAIL"), f"({name} boot) ImPS/2 mode, and the USB mouse's wheel turned up reads -1")
+    fails += not good
+    good = b"mmouse: imex ready\r\nmmouse: imex buttons 1 wheel 0\r\n" in out[mark:]
+    print(("ok  " if good else "FAIL"), f"({name} boot) ImExPS/2 mode (id 4), and the USB mouse's side button reads as button 4")
     fails += not good
 # A first controller with nothing on it stands for a PC's USB-C one: the
 # keyboard and mouse are on the second, which must be found.
@@ -2678,6 +2687,7 @@ fails += not good
 # wheel QEMU's PS/2 mouse has (the IntelliMouse sequence); mmouse turns
 # ImPS/2 on and reads the wheel turned up (`mouse_move 0 0 1`).
 mon = os.path.join(disk_dir.name, "mouse.sock")
+mon_qmp = os.path.join(disk_dir.name, "mouse-qmp.sock")
 def move():
     global out
     mark = len(out)
@@ -2699,18 +2709,35 @@ def move():
         m.sendall(b"mouse_move 0 0 1\n")       # the monitor's dz 1 is the wheel turned up
         time.sleep(0.3)
         m.close()
+        # The monitor has three buttons only: the side button goes through QMP.
+        q = socket.socket(socket.AF_UNIX)
+        q.connect(mon_qmp)
+        qf = q.makefile("rw")
+        qf.readline()
+        def qcmd(c):
+            qf.write(json.dumps(c) + "\n"); qf.flush()
+            return qf.readline()
+        qcmd({"execute": "qmp_capabilities"})
+        if read_until(b"mmouse: imex ready", mark):
+            for down in (True, False):
+                qcmd({"execute": "input-send-event", "arguments": {"events": [
+                    {"type": "btn", "data": {"down": down, "button": "side"}}]}})
+                time.sleep(0.3)
+        q.close()
     except OSError:
         pass
     read_until(b"bastios> ", mark)
-ok, code = report_boot(["-machine", "pc", "-m", "64M", "-append", "diag", "-monitor", f"unix:{mon},server,nowait"],
+ok, code = report_boot(["-machine", "pc", "-m", "64M", "-append", "diag", "-monitor", f"unix:{mon},server,nowait",
+                        "-qmp", f"unix:{mon_qmp},server,nowait"],
                        "mouse", 3, between=move)
 text = out.decode(errors="replace").replace("\r", "")
 for want, what in (
-        ("mouse: PS/2, with a wheel\n", "the report finds the PS/2 mouse, and its wheel"),
+        ("mouse: PS/2, with a wheel and 5 buttons\n", "the report finds the PS/2 mouse, its wheel and its five buttons"),
         ("mmouse: ready", "nothing to read before the mouse moves, O_NONBLOCK and poll"),
         ("mmouse: buttons 0 dx 10 dy 5\n", "a move comes through as one packet, y up positive"),
         ("mmouse: buttons 1 dx 0 dy 0\n", "the left button comes through"),
-        ("mmouse: wheel ready\nmmouse: wheel -1\n", "ImPS/2 mode, and the wheel turned up reads -1")):
+        ("mmouse: wheel ready\nmmouse: wheel -1\n", "ImPS/2 mode, and the wheel turned up reads -1"),
+        ("mmouse: imex ready\nmmouse: imex buttons 1 wheel 0\n", "ImExPS/2 mode (id 4), and the side button reads as button 4")):
     good = ok and want in text
     print(("ok  " if good else "FAIL"), f"(mouse) {what}")
     fails += not good
