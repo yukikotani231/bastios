@@ -770,6 +770,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             clock = any(tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255) for y in range(746, 766) for x in range(915, 965))
             print(("ok  " if clock else "FAIL"), f"({name}) the task bar shows a clock")
             fails += not clock
+            # and the month and the day left of it (the guest clock comes from the host RTC; a day either side
+            # allows for a zone and for the time between the two readings).
+            import datetime
+            dt = screen_text_at(px, w, w - 52 - 12 - 96 + 4, h - 24 + 4, 5, 1)[0]
+            now = datetime.datetime.utcnow()
+            want = {(now + datetime.timedelta(days=k)).strftime("%m-%d") for k in (-1, 0, 1)}
+            good = dt in want
+            print(("ok  " if good else "FAIL"), f"({name}) the task bar shows the date ({dt!r})")
+            fails += not good
             # A right click on the empty desktop opens the same menu at the pointer; a click elsewhere closes it.
             monitor("mouse_button 2", "mouse_button 0")
             time.sleep(0.7)

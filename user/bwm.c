@@ -73,7 +73,8 @@ struct fix_info {
 #define BTN_X0 60                        /* and the window buttons after it */
 #define BTN_W 120
 #define BTN_GAP 4
-#define CLOCK_W 48                       /* the clock left of it */
+#define CLOCK_W 96                       /* the date and the clock left of it */
+#define TIME_W 48                        /* the clock itself, at the right end of that */
 #define MENU_W 52                        /* the Menu button at the right end of the task bar */
 #define MENU_ITEM_W 140                  /* the launcher menu it opens above itself */
 #define MENU_ITEM_H 24
@@ -415,8 +416,8 @@ static int mice_wheel(int fd)
     return got[0] == 0xFA && got[1] == 3 ? 4 : 3;
 }
 
-/* The time of day (UTC, as the system keeps it, moved by tz_minutes) for the clock in the task bar. */
-static void clock_hm(int *h, int *m)
+/* The minutes since the epoch (UTC, as the system keeps it, moved by tz_minutes) for the clock in the task bar. */
+static long clock_local_min(void)
 {
     static int off;
     static time_t read_at;                                   /* the zone is read again every few seconds: bsys changes /etc/TZ */
@@ -425,11 +426,27 @@ static void clock_hm(int *h, int *m)
         off = tz_minutes();
         read_at = now;
     }
-    long min = ((long)(time(NULL) / 60) + off) % 1440;
+    return (long)(now / 60) + off;
+}
+
+/* The time of day for the clock in the task bar. */
+static void clock_hm(int *h, int *m)
+{
+    long min = clock_local_min() % 1440;
     if (min < 0)
         min += 1440;
     *h = (int)(min / 60);
     *m = (int)(min % 60);
+}
+
+/* The month and the day of the month, in the same zone. */
+static void clock_md(int *mo, int *d)
+{
+    time_t t = (time_t)clock_local_min() * 60;
+    struct tm g;
+    gmtime_r(&t, &g);
+    *mo = g.tm_mon + 1;
+    *d = g.tm_mday;
 }
 
 static char ime_buf[6];                   /* the romaji letters typed that do not make a kana yet, shown in the task bar */
@@ -505,7 +522,11 @@ static void draw_bar(void)
     clock_hm(&hh, &mm);
     char ck[8];
     snprintf(ck, sizeof ck, "%02d:%02d", hh, mm);
-    text(scene, (int)W - MENU_W - 12 - CLOCK_W + 4, y0 + 4, ck, rgb(255, 255, 255));
+    text(scene, (int)W - MENU_W - 12 - TIME_W + 4, y0 + 4, ck, rgb(255, 255, 255));
+    int mo, dd;
+    clock_md(&mo, &dd);
+    snprintf(ck, sizeof ck, "%02d-%02d", mo, dd);
+    text(scene, (int)W - MENU_W - 12 - CLOCK_W + 4, y0 + 4, ck, rgb(190, 190, 205));
     fill(scene, (int)W - MENU_W - 4, y0 + 3, (int)W - 4, H - 3, menu_open ? rgb(40, 90, 200) : rgb(70, 70, 85));
     text(scene, (int)W - MENU_W + 2, y0 + 4, "Menu", rgb(255, 255, 255));
 }
