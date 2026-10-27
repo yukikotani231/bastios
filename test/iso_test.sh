@@ -858,6 +858,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 monitor("sendkey r")
                 good = until(b"bsys: refreshed", mark)
             good = good and until(b"bsys: load ", mark)
+            good = good and re.search(rb"bsys: network (\S+  \d+\.\d+\.\d+\.\d+|none)", bytes(out[mark:])) is not None
             print(("ok  " if good else "FAIL"), f"({name}) the menu's System entry opens the System window and r refreshes it")
             fails += not good
             # left alone, the window reads the numbers again by itself.

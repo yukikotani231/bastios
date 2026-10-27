@@ -1,7 +1,7 @@
 #ifndef BSYS_H
 #define BSYS_H
 /* bsys, a System window for bwm: the kernel, uptime, memory, processors,
- * screen, load averages and root file system in a 60 x 12 grid drawn like bfiles (it shares
+ * screen, load averages, network address and root file system in a 60 x 13 grid drawn like bfiles (it shares
  * bfiles' pixel buffer and cell routines). r reads the figures again and
  * says "bsys: refreshed"; p swaps them for the list of processes (with the memory each holds, newest
  * first; j and k or the Up and Down keys move along it and say
@@ -18,8 +18,13 @@
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
 #include <time.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 
-#define BS_ROWS 12
+#define BS_ROWS 13
 #define BS_MAXPROC 64
 #define BS_PGUP 0x100                             /* keys that are not characters */
 #define BS_PGDN 0x101
@@ -125,6 +130,7 @@ static void bs_paint_tasks(void)
     }
     bf_put_row(10, "", 0, 0x00D8D8D8, 0x00101018);
     bf_put_row(11, "  j/k g/G: move  n: sort  x: end  p: back", 41, 0x00808090, 0x00101018);
+    bf_put_row(12, "", 0, 0x00D8D8D8, 0x00101018);
 }
 
 static void bs_row(int r, const char *k, const char *v)
@@ -179,7 +185,26 @@ static void bs_paint(unsigned sw, unsigned sh)
     snprintf(v, sizeof v, "%.2f %.2f %.2f", la[0], la[1], la[2]);
     bs_row(10, "Load", v);
     printf("bsys: load %s\n", v);
-    bf_put_row(11, "  r: refresh  p: processes", 27, 0x00808090, 0x00101018);
+    snprintf(v, sizeof v, "none");                         /* the first interface with an address that is not the loopback */
+    int ns = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ns >= 0) {
+        struct ifreq ifr[8];
+        struct ifconf ic = { .ifc_len = sizeof ifr, .ifc_req = ifr };
+        if (ioctl(ns, SIOCGIFCONF, &ic) == 0)
+            for (int i = 0; i < (int)(ic.ifc_len / sizeof ifr[0]); i++) {
+                struct sockaddr_in *a = (struct sockaddr_in *)&ifr[i].ifr_addr;
+                if (strcmp(ifr[i].ifr_name, "lo") == 0 || a->sin_family != AF_INET)
+                    continue;
+                char ip[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &a->sin_addr, ip, sizeof ip))
+                    snprintf(v, sizeof v, "%.15s  %s", ifr[i].ifr_name, ip);
+                break;
+            }
+        close(ns);
+    }
+    bs_row(11, "Network", v);
+    printf("bsys: network %s\n", v);
+    bf_put_row(12, "  r: refresh  p: processes", 27, 0x00808090, 0x00101018);
 }
 
 static int bsys_main(void)
