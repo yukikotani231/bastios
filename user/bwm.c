@@ -1886,6 +1886,17 @@ int main(int argc, char **argv)
         puts("bwm: out of memory");
         return 1;
     }
+    char wall_line[200];
+    if (!wall_path) {                                                    /* else the file named by the first line of /etc/bwm.wallpaper, if there is one */
+        FILE *wf = fopen("/etc/bwm.wallpaper", "r");
+        if (wf && fgets(wall_line, sizeof wall_line, wf)) {
+            wall_line[strcspn(wall_line, "\r\n")] = 0;
+            if (wall_line[0])
+                wall_path = wall_line;
+        }
+        if (wf)
+            fclose(wf);
+    }
     if (wall_path && !wall_load(wall_path))
         printf("bwm: cannot use %s as the wallpaper\n", wall_path);
     for (int i = 0; i < MAXCLI; i++) {

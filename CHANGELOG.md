@@ -30,7 +30,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Alt-F9 in `bwm` minimizes the focused window.
 - Alt-F1 in `bwm` opens the launcher menu from the keyboard: Up and Down move the lit entry, Enter chooses it and Escape closes the menu.
 - Alt-F2 in `bwm` asks for a command in the task bar and runs it in a terminal window (Enter runs it, Escape cancels).
-- `bwm -w FILE` puts a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP over the whole desktop, stretched to the screen.
+- `bwm -w FILE` puts a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP over the whole desktop, stretched to the screen. Without `-w`, the file named on the first line of `/etc/bwm.wallpaper` is used if there is one.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
 - In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
 - The mouse wheel zooms the image in `bview`: up in, down out.
