@@ -2090,6 +2090,26 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # Without -w, the file named in /etc/bwm.wallpaper is used.
+        mark = len(out)
+        q.stdin.write(b"echo /tmp/nf/w.ppm > /etc/bwm.wallpaper; bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            at = (300 * w + 700) * 3
+            good = tuple(px[at:at + 3]) == (0, 255, 0)
+        print(("ok  " if good else "FAIL"), f"({name}) /etc/bwm.wallpaper names the desktop image")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"rm -f /etc/bwm.wallpaper\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bview shows a PPM: a 2 x 2 red image becomes a block of pure red.
         mark = len(out)
         q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nf/t.ppm; bwm -n -c bview /tmp/nf/t.ppm\r"); q.stdin.flush()
