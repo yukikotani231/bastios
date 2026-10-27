@@ -872,6 +872,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = until(b"bsys: refreshed", mark)
             print(("ok  " if good else "FAIL"), f"({name}) F5 refreshes the System window")
             fails += not good
+            # t writes the next zone of its list into /etc/TZ.
+            if good:
+                monitor("sendkey t")
+                good = until(b"bsys: timezone ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) t in the System window picks a time zone")
+            fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
             monitor("sendkey p")
@@ -2401,6 +2407,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The title row of bfiles counts the entries.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/ct; touch /tmp/ct/a /tmp/ct/b /tmp/ct/c; bwm -n -c bfiles /tmp/ct\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = "(3 items)" in lines[0]
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) the bfiles title row counts the entries")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(1)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)

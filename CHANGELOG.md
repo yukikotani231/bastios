@@ -17,6 +17,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 ### Added
 
 - `/dev/input/mice` has the ImExPS/2 mode (sample rates 200, 200, 80, id 4): the fourth byte carries the wheel in its low four bits and the back and forward buttons in bits 4 and 5, fed from a USB mouse's side and extra buttons and from a PS/2 mouse that reports five buttons (`mmouse` and the USB and PS/2 mouse tests check it).
+- `t` in the `bsys` window cycles the time zone through a short list by writing `/etc/TZ`; the Time row and the `bwm` task bar clock show local time and follow a change within seconds.
 - The `SIGSYS` of a seccomp `SECCOMP_RET_TRAP` filter carries `si_code` `SYS_SECCOMP`, `si_syscall`, `si_arch` and `si_call_addr`, as Linux's does, so a sandbox's handler can see which call it refused.
 - A click on a process in the `bsys` list selects it.
 - Page Up and Page Down zoom the image in `bview` in and out, as `+` and `-` do.
@@ -36,6 +37,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Ctrl-Shift-Page Up in `bterm` goes to the oldest line kept in the history, Ctrl-Shift-Page Down back to the live screen.
 - Alt-F12 in `bwm` saves the desktop as a PPM to `/tmp/screenshot.ppm` (open it with `bview` or from `bfiles`).
 - The `bsys` System window shows the load averages (read from `/proc/loadavg`) in a new Load row.
+- The title row of the `bfiles` list says how many entries the directory holds.
 - `u` in the `bfiles` list shows file sizes as 4.8K, 1.2M and 3.0G instead of bytes (and back).
 - Alt-F5 in `bwm` minimizes every window; pressing it again brings back the ones it hid.
 - The `bsys` System window shows the first network interface that has an address (or `none`) in a new Network row.
