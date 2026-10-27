@@ -84,7 +84,8 @@ qemu = subprocess.Popen(
      "-drive", f"file={disk},format=raw,if=none,id=vd",
      "-device", ("nvme,drive=vd,serial=bastio" if nvme else "virtio-blk-pci,disable-legacy=on,drive=vd" if vpci else "virtio-blk-device,drive=vd"),
      ] + (["-device", "qemu-xhci,id=xh", "-drive", f"file={stick},format=raw,if=none,id=st", "-device", "usb-storage,bus=xh.0,drive=st"] if usb else []) + [
-     "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", (nic + ",netdev=n0" if nic else "virtio-net-pci,disable-legacy=on,netdev=n0" if vpci else "virtio-net-device,netdev=n0"), "-serial", "stdio", "-monitor", "none"],
+     "-netdev", "user,id=n0,net=10.0.2.0/24", "-device", (nic + ",netdev=n0" if nic else "virtio-net-pci,disable-legacy=on,netdev=n0" if vpci else "virtio-net-device,netdev=n0"), "-object", "rng-random,filename=/dev/urandom,id=r0", "-device", "virtio-rng-device,rng=r0",
+     "-serial", "stdio", "-monitor", "none"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
 out = b""
@@ -218,6 +219,7 @@ run("cat d/f2", b"no such file")
 # The virtio-mmio disk and network card (src/virtio_blk.bastio and
 # src/virtio_net.bastio over src/virtio_mmio.bastio, shared with x86-64).
 check("the device tree lists QEMU virt's 32 virtio-mmio slots", b"devicetree: 32 virtio-mmio slots from 0x000000000a000000\r\n" in out)
+check("the virtio entropy source is read at boot", b"rng: virtio-rng, 64 bytes of entropy\r\n" in out)
 if usb:
     check("the disk is the USB stick's BastiOS partition", b"disk: USB, the BastiOS partition (67584 sectors)\r\n" in out)
 elif nvme:

@@ -87,6 +87,7 @@ import "lxmouse.bastio";
 import "lxfb.bastio";
 import "lxserial.bastio";
 import "kernel.bastio";
+import "arch/rnghw.bastio";
 import "initfiles.bastio";
 import "lxnum.bastio";
 
@@ -722,6 +723,16 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   puts(&mut console, " virtio-mmio slots from ");
   put_hex(&mut console, vm_where.first);
   puts(&mut console, "\r\n");
+  // Entropy from the host, if it offers some (a virtio-rng): read and the
+  // device given back before any other driver looks for its device. It
+  // joins the generator's pool once the kernel exists.
+  let mut hw = alloc(VRNG_WORDS);
+  let hw_n = rng_hw(&mut m, &mut win, vm_where, &mut hw);
+  if hw_n > 0 {
+    puts(&mut console, "rng: virtio-rng, ");
+    put_num(&mut console, hw_n * 8);
+    puts(&mut console, " bytes of entropy\r\n");
+  }
   let ecam = dt_first(cpu, "pci-host-ecam-generic");
   let dev = blk_find(&mut m, &mut win, vm_where, ecam);
   let dk_lo = blk_mmio_lo(dev);
@@ -749,6 +760,14 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
     puts(&mut console, "net: e1000\r\n");
   }
   let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
+  let mut hi = 0;
+  while hi < hw_n
+    invariant hi <= hw_n && hw_n <= VRNG_WORDS && len(hw) == VRNG_WORDS && kok(k)
+  {
+    rng_feed(&mut k, get(hw, hi));
+    hi = hi + 1;
+  }
+  free(hw);
   install_files(&mut console, &mut k);
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut console, "cannot start the shell\r\n");
