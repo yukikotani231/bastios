@@ -75,3 +75,7 @@ $ dc network create nn2 >/dev/null 2>&1; dc run -d --name dsrv --network nn2 ctr
 == docker: a built image runs and its exit is seen
 $ bb mkdir -p /disk/p/tmp/b && printf 'FROM ctr\nRUN /bin/busybox echo built > /built.txt\nCMD ["/bin/busybox","cat","/built.txt"]\n' > /disk/p/tmp/b/Dockerfile && dc build --network=none -t bimg /tmp/b >/dev/null 2>&1; dc run --rm --network=none bimg 2>&1
 built
+
+== docker: a second build in the same daemon works
+$ printf 'FROM ctr\nRUN /bin/busybox echo two > /two.txt\nCMD ["/bin/busybox","cat","/two.txt"]\n' > /disk/p/tmp/b/Dockerfile && dc build --network=none -t bimg2 /tmp/b >/dev/null 2>&1; dc run --rm --network=none bimg2 2>&1
+two
