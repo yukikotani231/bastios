@@ -55,6 +55,7 @@ const CHLD_MARK: u64 = 0x10000000000000;   // 2^52: a SIGCHLD from a child's cha
 const CHLD_CODE: u64 = 0x100000000000;     // 2^44: three bits of si_code (CLD_EXITED .. CLD_CONTINUED)
 const TIMER_MARK: u64 = 0x20000000000000;  // 2^53: from a POSIX timer (with SW_QUEUE): si_code SI_TIMER, si_pid the timer's id
 const FAULT_CODE: u64 = 0x1000000000000;   // 2^48: in a fault word, si_code (a byte) times this, then the address (below)
+const SYS_MARK: u64 = 0x4000000000000000;  // 2^62: in a fault word, a seccomp SIGSYS: si_call_addr in the low 48 bits, si_syscall (14 bits) times FAULT_CODE above them
 const POLL_MARK: u64 = 0x2000000000000;    // 2^49: from O_ASYNC input on a descriptor (with SW_QUEUE): si_code POLL_IN, si_band POLLIN|POLLRDNORM, si_fd its value
 const MESGQ_MARK: u64 = 0x4000000000000;   // 2^50: a sender word from a message queue (post_mesgq)
 const TKILL_MARK: u64 = 0x8000000000000;   // 2^51: from tkill or tgkill (si_code SI_TKILL, si_pid the sender's group)
@@ -569,6 +570,21 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
   requires at + 32 <= blen(b)
   ensures blen(b) == old(blen(b))
 {
+  if word >= FAULT_MARK + SYS_MARK {
+    // A system call a seccomp filter refused with SECCOMP_RET_TRAP: si_code
+    // SYS_SECCOMP, then si_call_addr, si_syscall and si_arch (AUDIT_ARCH_X86_64).
+    let v = word - FAULT_MARK - SYS_MARK;
+    bset(&mut b, at + 8, 1);
+    xfer_u64(&mut b, at + 16, v % FAULT_CODE);
+    let nr = v / FAULT_CODE % 16384;
+    bset(&mut b, at + 24, cast[u8](nr % 256));
+    bset(&mut b, at + 25, cast[u8](nr / 256));
+    bset(&mut b, at + 28, 0x3e);
+    bset(&mut b, at + 29, 0);
+    bset(&mut b, at + 30, 0);
+    bset(&mut b, at + 31, 0xc0);
+    return;
+  }
   if word >= FAULT_MARK {
     // A processor exception (fault_caught): its si_code and si_addr.
     bset(&mut b, at + 8, cast[u8]((word - FAULT_MARK) / FAULT_CODE % 256));

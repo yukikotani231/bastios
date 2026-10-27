@@ -101,6 +101,7 @@ struct win {
     int resizable;                       /* has a grip */
     int again;                           /* a size was wanted while a request was pending: ask again when it is answered */
     int hidden;                          /* minimized: only its task bar button shows */
+    int desk;                            /* minimized by Alt-F5, which Alt-F5 again brings back */
     int maxed;                           /* maximized: sx, sy, sw, sh are the frame it goes back to */
     int sx, sy, sw, sh;
     int pend;                            /* a BWM_RESIZE has been sent and not answered */
@@ -926,6 +927,7 @@ static struct win *focus(void)
 static void raise_win(struct win *w)
 {
     w->hidden = 0;
+    w->desk = 0;
     int i = 0;
     while (i < nz && z[i] != w)
         i++;
@@ -2137,6 +2139,23 @@ int main(int argc, char **argv)
                             toggle_max(t);
                             touch_all();
                         }
+                    } else if (code == 63 && down && k_alt) {      /* Alt-F5: minimize every window, or bring those back */
+                        struct win *all[64];
+                        int n = nz < 64 ? nz : 64, any = 0;
+                        memcpy(all, z, n * sizeof all[0]);
+                        for (int i = 0; i < n; i++)
+                            any |= !all[i]->hidden;
+                        for (int i = 0; i < n; i++) {
+                            if (any && !all[i]->hidden) {
+                                minimize(all[i]);
+                                all[i]->desk = 1;
+                            } else if (!any && all[i]->desk) {
+                                raise_win(all[i]);
+                            }
+                        }
+                        touch_all();
+                        puts(any ? "bwm: desktop shown" : "bwm: windows back");
+                        fflush(stdout);
                     } else if (code == 88 && down && k_alt) {      /* Alt-F12: save a screenshot */
                         screenshot();
                     } else if (code == 62 && down && k_alt) {      /* Alt-F4: close the focused window */

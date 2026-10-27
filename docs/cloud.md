@@ -93,6 +93,38 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
 `-device ena,readless=off` (PCI revision 1: registers read directly) and
 `-device ena,queues-ext=off` (only the older maximum-queues feature).
 
+## Booting on EC2
+
+Nothing here has been run on EC2 yet. The path below is what the pieces in this
+repository support: an EC2 Nitro instance shows the EBS volume as an NVMe
+drive, the network card as an ENA, and the serial port as COM1, and boots a
+legacy-BIOS image from the first block of the root volume. On a QEMU machine
+with the same shape (`pc`, SeaBIOS, an NVMe boot disk) `build/bastios-usb.img`
+boots to the prompt, finds its partition and gets a DHCP address.
+
+1. Build the image: `make usb` (needs `xorriso`; see [getting-started.md](getting-started.md)).
+2. Make an AMI: `AWS_REGION=... BUCKET=... tools/ec2-ami.sh`. It uploads the
+   image, imports it as an EBS snapshot (`aws ec2 import-snapshot`, which needs
+   the `vmimport` service role) and registers it with `--boot-mode legacy-bios
+   --ena-support` and prints the AMI id.
+3. Launch it on an x86-64 Nitro type (`t3.micro` is enough: 2 vCPUs, 1 GiB),
+   in a subnet with DHCP and no key pair (BastiOS reads none from the AMI):
+   `aws ec2 run-instances --image-id ami-... --instance-type t3.micro`.
+4. Read the console. `aws ec2 get-console-output --instance-id i-... --latest
+   --output text` shows what went to COM1 (Limine, then the boot log). For a
+   shell, enable the account's serial console (`aws ec2 enable-serial-console-access`)
+   and open EC2 Serial Console in the browser: the `bastios>` prompt is on it.
+   `disk: NVMe`, `net: ena` and an address on `ifconfig` are the three things
+   to look for.
+
+If the log stops, or says `net: ena found but not started (reason N ...)`
+(see above), keep the output: it is what is needed to fix the driver. Types
+that accept only low latency queues are the likeliest reason for 5, and trying
+another family (`m5`, `c5`) is the first thing to try. To use the network
+beyond `ifconfig` and `ping`, press `e` on the first Limine entry at the
+serial console and add a line `cmdline: mcloud`, which fetches the host name
+and the first public key of the launch key pair from the metadata service.
+
 ## Other gaps in a cloud guest (issue #228)
 
 - **virtio over MMIO** (`src/virtio_mmio.bastio`, and the `Vt` transport in

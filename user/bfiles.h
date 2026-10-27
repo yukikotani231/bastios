@@ -88,6 +88,7 @@ static size_t bf_ebn;
 
 static int bf_sel;                              /* the entry the keyboard cursor is on (arrows move it, Enter opens it) */
 static int bf_sort;                             /* 0: by name, 1: files largest first, 2: newest first */
+static int bf_human;                            /* u: sizes as 4.8K and 1.2M instead of bytes */
 
 static int bf_cmp(const void *a, const void *b)
 {
@@ -387,6 +388,22 @@ static void bf_paint(void)
                 time_t mt = bf_ents[i].mtime;
                 gmtime_r(&mt, &tm);
                 snprintf(t, sizeof t, "%s %04d-%02d-%02d", nm, tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday);
+            } else if (bf_human) {
+                long long sz = bf_ents[i].size;
+                char hs[16];
+                if (sz < 1024)
+                    snprintf(hs, sizeof hs, "%lldB", sz);
+                else {
+                    long long v = sz;
+                    int u = 0;                                   /* K, M or G */
+                    while (v >= 1024 * 1024 && u < 2) {
+                        v /= 1024;
+                        u++;
+                    }
+                    long long tenths = v * 10 / 1024;
+                    snprintf(hs, sizeof hs, "%lld.%lld%c", tenths / 10, tenths % 10, "KMG"[u]);
+                }
+                snprintf(t, sizeof t, "%s %10s", nm, hs);
             } else
                 snprintf(t, sizeof t, "%s %10lld", nm, (long long)bf_ents[i].size);
         }
@@ -1856,6 +1873,11 @@ dispatch:;
             } else if (c == 's' && !bf_viewing) {
                 bf_sort = (bf_sort + 1) % 3;
                 printf("bfiles: sorted by %s\n", bf_sort == 1 ? "size" : bf_sort == 2 ? "time" : "name");
+                fflush(stdout);
+                bf_load_dir();
+            } else if (c == 'u' && !bf_viewing) {
+                bf_human = !bf_human;
+                printf("bfiles: sizes %s\n", bf_human ? "human" : "bytes");
                 fflush(stdout);
                 bf_load_dir();
             } else if ((c == 'h' || c == '.') && !bf_viewing) {
