@@ -55,20 +55,24 @@ runs:
         # three times; if that still fails, the second round reads
         # archive.ubuntu.com instead of the mirror list.
         APT="-o Acquire::http::Timeout=30 -o Acquire::Retries=3"
+        # A healthy mirror answers `update` in seconds and serves the packages
+        # in a minute or two, so a try that takes longer is stalled: give up
+        # on it early and move to the next mirror instead of waiting it out.
         try() {
+          limit=$1; shift
           for n in 1 2 3; do
             if [ "$n" = 2 ]; then
               sudo sed -i -E 's#^URIs: .*#URIs: http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list.d/ubuntu.sources 2>/dev/null || true
               sudo sed -i -E 's#mirror\+file:/etc/apt/apt-mirrors.txt#http://archive.ubuntu.com/ubuntu/#' /etc/apt/sources.list 2>/dev/null || true
               sudo apt-get $APT update || true
             fi
-            timeout 480 "$@" && return 0
+            timeout "$limit" "$@" && return 0
             echo "try $n of $*: failed"
           done
           return 1
         }
-        try sudo apt-get $APT update
-        try sudo apt-get $APT install -y --download-only $PACKAGES
+        try 90 sudo apt-get $APT update
+        try 240 sudo apt-get $APT install -y --download-only $PACKAGES
         mkdir -p "$DEBS"
         rm -f "$DEBS"/*.deb
         cp /var/cache/apt/archives/*.deb "$DEBS"/
