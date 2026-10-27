@@ -1924,3 +1924,16 @@ ruby: ruby: a real project (rexml) tested with its own test suite
 ruby: ruby: a real project (kramdown) tested with its own test suite
 ruby: ruby: a real project (csv) tested with its own test suite
 ruby: ruby: a real project (optparse) tested with its own test suite
+t_subreaper: pipes
+t_subreaper: set the flag in the main thread
+t_subreaper: a second thread
+t_subreaper: the child was forked
+t_subreaper: the grandchild runs
+t_subreaper: the child ended
+t_subreaper: the flag reads back in another thread
+t_subreaper: the grandchild is still running
+t_subreaper: release the grandchild
+t_subreaper: the orphan is reparented to the subreaper and its exit is seen
+t_dockerd: a MAP_POPULATE mapping past the end of a growing file sees pwrite (tmpfs)
+t_dockerd: a MAP_POPULATE mapping past the end of a growing file sees pwrite (disk)
+t_dockerd: a mapping past the end of a growing file sees pwrite (disk)

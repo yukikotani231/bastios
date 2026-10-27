@@ -20,12 +20,12 @@
 /* A read-only mapping 64 pages long of a file that is 4 pages long, then
  * the file grows by ftruncate and pwrite: the mapping must see every
  * write. */
-static int grow_seen(const char *path) {
+static int grow_seen_with(const char *path, int extra) {
     unlink(path);
     int fd = open(path, O_RDWR | O_CREAT, 0600);
     if (fd < 0) return 0;
     if (ftruncate(fd, 4 * 4096) != 0) return 0;
-    char *m = mmap(NULL, 64 * 4096, PROT_READ, MAP_SHARED, fd, 0);
+    char *m = mmap(NULL, 64 * 4096, PROT_READ, MAP_SHARED | extra, fd, 0);
     if (m == MAP_FAILED) return 0;
     static char buf[4096];
     int bad = 0;
@@ -43,10 +43,15 @@ static int grow_seen(const char *path) {
     return bad == 0;
 }
 
+static int grow_seen(const char *path) { return grow_seen_with(path, 0); }
+
 int main(void) {
     setup();
 
     EXPECT("a mapping past the end of a growing file sees pwrite (tmpfs)", grow_seen("/tmp/t_dockerd.db"));
+    EXPECT("a MAP_POPULATE mapping past the end of a growing file sees pwrite (tmpfs)", grow_seen_with("/tmp/t_dockerd2.db", MAP_POPULATE));
+    EXPECT("a MAP_POPULATE mapping past the end of a growing file sees pwrite (disk)", access("/disk", W_OK) != 0 || grow_seen_with("/disk/t_dockerd2.db", MAP_POPULATE));
+    EXPECT("a mapping past the end of a growing file sees pwrite (disk)", access("/disk", W_OK) != 0 || grow_seen("/disk/t_dockerd.db"));
 
     EXPECT("a peer's shutdown(SHUT_WR) is POLLRDHUP, not POLLHUP, and this end can still write", ({
         int sv[2], ok = 0;

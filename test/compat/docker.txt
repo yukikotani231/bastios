@@ -71,3 +71,7 @@ $ dc network create nn >/dev/null 2>&1; dc run -d --name nsrv --network nn ctr /
 == docker: containers on a user-defined network resolve each other's names
 $ dc network create nn2 >/dev/null 2>&1; dc run -d --name dsrv --network nn2 ctr /bin/busybox sleep 120 >/dev/null 2>&1; dc run --rm --network nn2 ctr /bin/busybox ping -c 1 -W 5 dsrv 2>&1 | bb grep -c '1 packets received'; dc rm -f dsrv >/dev/null 2>&1; dc network rm nn2 >/dev/null 2>&1
 1
+
+== docker: a built image runs and its exit is seen
+$ bb mkdir -p /disk/p/tmp/b && printf 'FROM ctr\nRUN /bin/busybox echo built > /built.txt\nCMD ["/bin/busybox","cat","/built.txt"]\n' > /disk/p/tmp/b/Dockerfile && dc build --network=none -t bimg /tmp/b >/dev/null 2>&1; dc run --rm --network=none bimg 2>&1
+built
