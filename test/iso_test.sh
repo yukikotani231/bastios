@@ -857,6 +857,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(1)
                 monitor("sendkey r")
                 good = until(b"bsys: refreshed", mark)
+            good = good and until(b"bsys: load ", mark)
+            good = good and re.search(rb"bsys: network (\S+  \d+\.\d+\.\d+\.\d+|none)", bytes(out[mark:])) is not None
             print(("ok  " if good else "FAIL"), f"({name}) the menu's System entry opens the System window and r refreshes it")
             fails += not good
             # left alone, the window reads the numbers again by itself.
@@ -887,6 +889,10 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 found = (b"bsys: select %d " % sleeper) in out[mark:]
             print(("ok  " if found else "FAIL"), f"({name}) p lists the processes and j moves to one")
             fails += not found
+            kb = re.findall(rb"bsys: resident (\d+)", bytes(out[mark:])) if found else []
+            good = bool(kb) and int(kb[-1]) > 0
+            print(("ok  " if good else "FAIL"), f"({name}) the process list knows how much memory the selected process holds ({kb[-1].decode() if kb else '?'} KiB)")
+            fails += not good
             if found:
                 monitor("sendkey x")
                 good = until(b"bsys: terminated %d" % sleeper, mark)
@@ -953,6 +959,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey n")
             good = good and until(b"bsys: sorted by pid", mark3) and names[0] and names[0] <= names[1]
             print(("ok  " if good else "FAIL"), f"({name}) n sorts the process list by name ({names!r})")
+            fails += not good
+            # m sorts the list by memory: the largest comes first.
+            mark3 = len(out)
+            monitor("sendkey m")
+            good = until(b"bsys: sorted by memory", mark3)
+            sizes = []
+            for key in ("g", "shift-g"):
+                mark3 = len(out)
+                monitor("sendkey " + key)
+                good = good and until(b"bsys: resident", mark3)
+                kb = re.findall(rb"bsys: resident (\d+)", bytes(out[mark3:])) if good else []
+                sizes.append(int(kb[-1]) if kb else -1)
+            mark3 = len(out)
+            monitor("sendkey m")
+            good = good and until(b"bsys: sorted by pid", mark3) and sizes[0] >= sizes[1] >= 0
+            print(("ok  " if good else "FAIL"), f"({name}) m sorts the process list by memory ({sizes!r})")
             fails += not good
             monitor("sendkey p")
             good = until(b"bsys: system", mark)
@@ -2084,11 +2106,42 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = tuple(px[at:at + 3]) == (0, 255, 0)
         print(("ok  " if good else "FAIL"), f"({name}) bwm -w puts an image over the desktop")
         fails += not good
+        # Alt-F12 saves the desktop to /tmp/screenshot.ppm: a P6 file of the screen's size, green here.
+        mark = len(out)
+        monitor("sendkey alt-f12")
+        good = until(b"bwm: screenshot /tmp/screenshot.ppm", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Alt-F12 saves a screenshot")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"echo shot $(wc -c < /tmp/screenshot.ppm) end\r"); q.stdin.flush()
+        good = until(b"shot 2359312 end", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the screenshot is a PPM of the whole screen")
+        fails += not good
+        # Without -w, the file named in /etc/bwm.wallpaper is used.
+        mark = len(out)
+        q.stdin.write(b"echo /tmp/nf/w.ppm > /etc/bwm.wallpaper; bwm -n\r"); q.stdin.flush()
+        good = until(b"bwm: ready", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            at = (300 * w + 700) * 3
+            good = tuple(px[at:at + 3]) == (0, 255, 0)
+        print(("ok  " if good else "FAIL"), f"({name}) /etc/bwm.wallpaper names the desktop image")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"rm -f /etc/bwm.wallpaper\r"); q.stdin.flush()
         until(b"# ", mark)
         # bview shows a PPM: a 2 x 2 red image becomes a block of pure red.
         mark = len(out)
@@ -2190,6 +2243,31 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         else:
             r5 = r6 = 0
         print(("ok  " if good else "FAIL"), f"({name}) Page Up and Page Down zoom in and out in bview ({r5}, {r6} against {r0} pixels)")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # n and p show the next and the previous image of the directory in the same window.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/nv; printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/nv/a.ppm; printf 'P6 2 2 255\\n\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000' > /tmp/nv/b.ppm; bwm -n -c bview /tmp/nv/a.ppm\r"); q.stdin.flush()
+        good = until(b"bview: window", mark)
+        if good:
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey n")
+            good = until(b"bview: show /tmp/nv/b.ppm", mark)
+        if good:
+            time.sleep(1)
+            w, h, px = screendump()
+            green = sum(1 for i in range(0, len(px) - 2, 3) if tuple(px[i:i + 3]) == (0, 255, 0))
+            good = green > 1000
+            mark = len(out)
+            monitor("sendkey p")
+            good = good and until(b"bview: show /tmp/nv/a.ppm", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) n and p step through the images of a directory in bview")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -2774,6 +2852,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             lines = screen_text_at(px, w, 72, 90, 60, 20)
             good = any(l.strip() == "l30" for l in lines)
             print(("ok  " if good else "FAIL"), f"({name}) Shift-Page Down scrolls forward a page")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            # Ctrl-Shift-Page Up goes to the oldest line kept, Ctrl-Shift-Page Down back to the live screen.
+            monitor("sendkey ctrl-shift-pgup")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = not any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-Page Up goes to the oldest line")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
+            monitor("sendkey ctrl-shift-pgdn")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 20)
+            good = any(l.strip() == "l30" for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-Page Down goes back to the live screen")
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good

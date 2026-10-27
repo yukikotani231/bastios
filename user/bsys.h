@@ -1,11 +1,11 @@
 #ifndef BSYS_H
 #define BSYS_H
 /* bsys, a System window for bwm: the kernel, uptime, memory, processors,
- * screen and root file system in a 60 x 12 grid drawn like bfiles (it shares
+ * screen, load averages, network address and root file system in a 60 x 13 grid drawn like bfiles (it shares
  * bfiles' pixel buffer and cell routines). r reads the figures again and
- * says "bsys: refreshed"; p swaps them for the list of processes (newest
+ * says "bsys: refreshed"; p swaps them for the list of processes (with the memory each holds, newest
  * first; j and k or the Up and Down keys move along it and say
- * "bsys: select PID NAME", x asks the selected one to end with SIGTERM and
+ * "bsys: select PID NAME" and "bsys: resident KB", x asks the selected one to end with SIGTERM and
  * says "bsys: terminated PID", p goes back); the close box ends it. Says "bsys: window ID" when
  * the window is open. It is part of the bterm program, which runs it when
  * started as "bsys", so it adds no image to the kernel. */
@@ -18,25 +18,34 @@
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
 #include <time.h>
+#include <net/if.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 
-#define BS_ROWS 12
+#define BS_ROWS 13
 #define BS_MAXPROC 64
 #define BS_PGUP 0x100                             /* keys that are not characters */
 #define BS_PGDN 0x101
 #define BS_LIST 8                                 /* process rows shown, rows 2 .. 9 */
 
-struct bs_proc { int pid; char state; char name[24]; };
+struct bs_proc { int pid; char state; long rss_kb; char name[24]; };
 static struct bs_proc bs_procs[BS_MAXPROC];
 static int bs_nproc, bs_sel, bs_top, bs_tasks, bs_esc;
 
-static int bs_byname;                   /* n sorts the list by name instead of newest first */
+static int bs_sort;                     /* 0: newest first; n sorts the list by name (1) and m by memory (2) */
 
 static int bs_cmp(const void *a, const void *b)
 {
-    if (bs_byname) {
+    if (bs_sort == 1) {
         int r = strcmp(((const struct bs_proc *)a)->name, ((const struct bs_proc *)b)->name);
         if (r)
             return r;
+    } else if (bs_sort == 2) {
+        long d = ((const struct bs_proc *)b)->rss_kb - ((const struct bs_proc *)a)->rss_kb;   /* the largest first */
+        if (d)
+            return d < 0 ? -1 : 1;
     }
     return ((const struct bs_proc *)b)->pid - ((const struct bs_proc *)a)->pid;   /* newest first */
 }
@@ -67,6 +76,14 @@ static void bs_scan(void)
         struct bs_proc *p = &bs_procs[bs_nproc++];
         p->pid = pid;
         p->state = c[1] == ' ' && c[2] ? c[2] : '?';
+        p->rss_kb = 0;
+        long vm = 0, res = 0;                              /* the second number of statm is the resident pages (stat's field is always 0 here) */
+        snprintf(path, sizeof path, "/proc/%d/statm", pid);
+        if ((f = fopen(path, "r"))) {
+            if (fscanf(f, "%ld %ld", &vm, &res) == 2)
+                p->rss_kb = res * (sysconf(_SC_PAGESIZE) / 1024);
+            fclose(f);
+        }
         size_t l = (size_t)(c - o - 1);
         if (l >= sizeof p->name)
             l = sizeof p->name - 1;
@@ -92,26 +109,28 @@ static void bs_move(int by)
         bs_top = bs_sel - BS_LIST + 1;
     if (bs_nproc)
         printf("bsys: select %d %s\n", bs_procs[bs_sel].pid, bs_procs[bs_sel].name);
+        printf("bsys: resident %ld\n", bs_procs[bs_sel].rss_kb);
     fflush(stdout);
 }
 
 static void bs_paint_tasks(void)
 {
     char t[BF_COLS + 1];
-    snprintf(t, sizeof t, "Processes (%d)%s", bs_nproc, bs_byname ? "  [by name]" : "");
+    snprintf(t, sizeof t, "Processes (%d)%s", bs_nproc, bs_sort == 1 ? "  [by name]" : bs_sort == 2 ? "  [by memory]" : "");
     bf_put_row(0, t, strlen(t), 0x00FFFFFF, 0x00305090);
-    bf_put_row(1, "  PID    S  Name", 16, 0x00808090, 0x00101018);
+    bf_put_row(1, "  PID    S  Mem(K)   Name", 25, 0x00808090, 0x00101018);
     for (int i = 0; i < BS_LIST; i++) {
         int k = bs_top + i;
         if (k >= bs_nproc) {
             bf_put_row(2 + i, "", 0, 0x00D8D8D8, 0x00101018);
             continue;
         }
-        snprintf(t, sizeof t, "  %-6d %c  %s", bs_procs[k].pid, bs_procs[k].state, bs_procs[k].name);
+        snprintf(t, sizeof t, "  %-6d %c  %7ld  %s", bs_procs[k].pid, bs_procs[k].state, bs_procs[k].rss_kb, bs_procs[k].name);
         bf_put_row(2 + i, t, strlen(t), 0x00D8D8D8, k == bs_sel ? 0x00305090 : 0x00101018);
     }
     bf_put_row(10, "", 0, 0x00D8D8D8, 0x00101018);
     bf_put_row(11, "  j/k g/G: move  n: sort  x: end  p: back", 41, 0x00808090, 0x00101018);
+    bf_put_row(12, "", 0, 0x00D8D8D8, 0x00101018);
 }
 
 static void bs_row(int r, const char *k, const char *v)
@@ -156,8 +175,36 @@ static void bs_paint(unsigned sw, unsigned sh)
     gmtime_r(&now, &tm);
     strftime(v, sizeof v, "%Y-%m-%d %H:%M:%S UTC", &tm);
     bs_row(9, "Time", v);
-    bf_put_row(10, "", 0, 0x00D8D8D8, 0x00101018);
-    bf_put_row(11, "  r: refresh  p: processes", 27, 0x00808090, 0x00101018);
+    double la[3] = {0, 0, 0};
+    FILE *lf = fopen("/proc/loadavg", "r");
+    if (lf) {
+        if (fscanf(lf, "%lf %lf %lf", &la[0], &la[1], &la[2]) != 3)
+            la[0] = la[1] = la[2] = 0;
+        fclose(lf);
+    }
+    snprintf(v, sizeof v, "%.2f %.2f %.2f", la[0], la[1], la[2]);
+    bs_row(10, "Load", v);
+    printf("bsys: load %s\n", v);
+    snprintf(v, sizeof v, "none");                         /* the first interface with an address that is not the loopback */
+    int ns = socket(AF_INET, SOCK_DGRAM, 0);
+    if (ns >= 0) {
+        struct ifreq ifr[8];
+        struct ifconf ic = { .ifc_len = sizeof ifr, .ifc_req = ifr };
+        if (ioctl(ns, SIOCGIFCONF, &ic) == 0)
+            for (int i = 0; i < (int)(ic.ifc_len / sizeof ifr[0]); i++) {
+                struct sockaddr_in *a = (struct sockaddr_in *)&ifr[i].ifr_addr;
+                if (strcmp(ifr[i].ifr_name, "lo") == 0 || a->sin_family != AF_INET)
+                    continue;
+                char ip[INET_ADDRSTRLEN];
+                if (inet_ntop(AF_INET, &a->sin_addr, ip, sizeof ip))
+                    snprintf(v, sizeof v, "%.15s  %s", ifr[i].ifr_name, ip);
+                break;
+            }
+        close(ns);
+    }
+    bs_row(11, "Network", v);
+    printf("bsys: network %s\n", v);
+    bf_put_row(12, "  r: refresh  p: processes", 27, 0x00808090, 0x00101018);
 }
 
 static int bsys_main(void)
@@ -270,12 +317,13 @@ static int bsys_main(void)
         } else if (bs_tasks && (c == 'g' || c == 'G')) {            /* the first and the last of the list */
             bs_move(c == 'g' ? -bs_nproc : bs_nproc);
             bs_paint_tasks();
-        } else if (bs_tasks && c == 'n') {                           /* by name, or newest first again */
-            bs_byname = !bs_byname;
+        } else if (bs_tasks && (c == 'n' || c == 'm')) {             /* by name or by memory, or newest first again */
+            int want = c == 'n' ? 1 : 2;
+            bs_sort = bs_sort == want ? 0 : want;
             bs_scan();
             bs_sel = bs_top = 0;
             bs_paint_tasks();
-            printf("bsys: sorted by %s\n", bs_byname ? "name" : "pid");
+            printf("bsys: sorted by %s\n", bs_sort == 1 ? "name" : bs_sort == 2 ? "memory" : "pid");
         } else if (bs_tasks && c == 'x' && bs_nproc) {
             int pid = bs_procs[bs_sel].pid;
             if (pid == 1 || pid == getpid())

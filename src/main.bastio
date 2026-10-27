@@ -856,12 +856,15 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // process_vm_writev, does the same), between this fault and its
     // handling: the handler above then finds it mapped (writable) and
     // declines. Run the instruction once more; a second fault at the same
-    // place is a protection fault.
+    // place is a protection fault. (A page in a segment of the window that
+    // another thread made after this processor's shadow table was copied
+    // faults as not present although it is mapped and readable; the next
+    // entry has it. A page mprotect hid is not readable: that fault stands.)
     let fva = pget(s.k.procs, p, reg_word(R_FAULT));
     let frip = pget(s.k.procs, p, F_REGS + R_RIP) % 4611686018427387904 + 1;
     if fva >= USER_BASE && fva - USER_BASE < USER_SIZE
        && (anon_covers(s.k.anon, p, (fva - USER_BASE) / 4096) || lazy_covers(s.k, p, (fva - USER_BASE) / 4096)
-           || user_page_writable(&mut s.k.spaces, p, fva))
+           || (user_page_bits(&mut s.k.spaces, p, (fva - USER_BASE) / 4096) / 2 % 2 == 1 && pget(s.k.procs, p, F_REGS + 18) % 2 == 0))
        && (pget(s.k.procs, p, F_FAULT_RIP) != frip || pget(s.k.procs, p, F_FAULT_VA) != fva) {
       pset(&mut s.k.procs, p, F_FAULT_RIP, frip);
       pset(&mut s.k.procs, p, F_FAULT_VA, fva);
@@ -1398,7 +1401,15 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], u: &Lock[Term], pumping: &
         // Nothing to run: pump the console if it has output and no other
         // processor is at it, else sleep until an interrupt.
         if atomic_load(pend) == 0 || atomic_load(pumping) {
-          locked(s, stretch_lp, cpu);
+          // Only the bootstrap processor stretches its tick (stretch_p). An
+          // application processor that took the lock and the APIC for it
+          // just to find that out made three trips through the lock of
+          // each idle wait; with 255 processors waking at once, the
+          // crowd waiting for it kept the holder from finishing (an
+          // emulator spends the host's time on the spinners).
+          if boot_info(cpu, INFO_SMP, 5) == 1 {
+            locked(s, stretch_lp, cpu);
+          }
           let v = cpu_idle(&mut cpu);
           locked(s, idled_p, cpu, v, pend);
         }

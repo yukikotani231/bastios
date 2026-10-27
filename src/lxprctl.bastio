@@ -255,11 +255,11 @@ fn lx_prctl(k: &mut Kernel, pid: u64, op: u64, a: u64, b: u64) -> u64
     return pr_get(k, pid, PRW_DEATH) / PRD_KEEPCAPS % 2;
   }
   if op == PR_SET_CHILD_SUBREAPER {
-    pr_flag(&mut k, pid, PRD_REAPER, a != 0);
+    pr_flag(&mut k, tgid(k.procs, pid), PRD_REAPER, a != 0);   // per process, not per thread
     return 0;
   }
   if op == PR_GET_CHILD_SUBREAPER {
-    if !put_user_u32(&mut k, pid, a, pr_get(k, pid, PRW_DEATH) / PRD_REAPER % 2) {
+    if !put_user_u32(&mut k, pid, a, pr_get(k, tgid(k.procs, pid), PRW_DEATH) / PRD_REAPER % 2) {
       return EFAULT;
     }
     return 0;
@@ -304,10 +304,13 @@ fn pr_reaper(k: &Kernel, p: u64) -> u64
   while q != 0 && q < NPROC && n < NPROC
     invariant n <= NPROC && kok(k)
   {
-    if state(k.procs, q) != FREE && pr_get(k, q, PRW_DEATH) / PRD_REAPER % 2 == 1 {
-      return q;
+    // The flag belongs to the process: the parent may be a thread other
+    // than the leader that asked for it (a Go runtime forks from any thread).
+    let g = tgid(k.procs, q);
+    if state(k.procs, g) != FREE && pr_get(k, g, PRW_DEATH) / PRD_REAPER % 2 == 1 {
+      return g;
     }
-    q = pget(k.procs, q, F_PARENT);
+    q = pget(k.procs, g, F_PARENT);
     n = n + 1;
   }
   return 0;

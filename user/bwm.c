@@ -733,6 +733,31 @@ static int wall_load(const char *path)
     return 1;
 }
 
+/* Alt-F12: writes the desktop as it is now (without the pointer) to /tmp/screenshot.ppm, a PPM (P6) that bview and bfiles can show. */
+static void screenshot(void)
+{
+    FILE *f = fopen("/tmp/screenshot.ppm", "wb");
+    if (!f) {
+        puts("bwm: cannot write /tmp/screenshot.ppm");
+        return;
+    }
+    fprintf(f, "P6\n%u %u\n255\n", W, H);
+    unsigned char *row = malloc((size_t)W * 3);
+    for (unsigned y = 0; row && y < H; y++) {
+        for (unsigned x = 0; x < W; x++) {
+            uint32_t p = scene[y * W + x];
+            row[x * 3] = p >> roff & 255;
+            row[x * 3 + 1] = p >> goff & 255;
+            row[x * 3 + 2] = p >> boff & 255;
+        }
+        fwrite(row, 1, (size_t)W * 3, f);
+    }
+    free(row);
+    fclose(f);
+    puts("bwm: screenshot /tmp/screenshot.ppm");
+    fflush(stdout);
+}
+
 static void draw_scene(void)
 {
     if (wall)
@@ -1886,6 +1911,17 @@ int main(int argc, char **argv)
         puts("bwm: out of memory");
         return 1;
     }
+    char wall_line[200];
+    if (!wall_path) {                                                    /* else the file named by the first line of /etc/bwm.wallpaper, if there is one */
+        FILE *wf = fopen("/etc/bwm.wallpaper", "r");
+        if (wf && fgets(wall_line, sizeof wall_line, wf)) {
+            wall_line[strcspn(wall_line, "\r\n")] = 0;
+            if (wall_line[0])
+                wall_path = wall_line;
+        }
+        if (wf)
+            fclose(wf);
+    }
     if (wall_path && !wall_load(wall_path))
         printf("bwm: cannot use %s as the wallpaper\n", wall_path);
     for (int i = 0; i < MAXCLI; i++) {
@@ -2089,8 +2125,9 @@ int main(int argc, char **argv)
                             to_client(top->cli, BWM_KEY, &pk, sizeof pk);
                         }
                     } else if (down && k_shift && (code == 104 || code == 109)) {
-                        if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm) */
-                            struct bwm_key sk = { (uint32_t)top->id, code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN };
+                        if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm); with Ctrl, to the oldest line or the live screen (0x103 and 0x104) */
+                            struct bwm_key sk = { (uint32_t)top->id, k_ctrl ? (code == 104 ? BWM_KEY_SCROLL_TOP : BWM_KEY_SCROLL_END)
+                                                                     : (code == 104 ? BWM_KEY_SCROLL_UP : BWM_KEY_SCROLL_DOWN) };
                             to_client(top->cli, BWM_KEY, &sk, sizeof sk);
                         }
                     } else if (code == 68 && down && k_alt) {      /* Alt-F10: maximize the focused window, or put it back */
@@ -2100,6 +2137,8 @@ int main(int argc, char **argv)
                             toggle_max(t);
                             touch_all();
                         }
+                    } else if (code == 88 && down && k_alt) {      /* Alt-F12: save a screenshot */
+                        screenshot();
                     } else if (code == 62 && down && k_alt) {      /* Alt-F4: close the focused window */
                         struct win *t = focus();
                         if (t)

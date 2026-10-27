@@ -95,23 +95,35 @@ fn write_from(con: &mut Con, root: &mut PageTable, off: u64, n0: u64) -> u64
   if room < n {
     n = room;
   }
-  if !pt_has(root, 1) {
-    return 0;
+  let mut k = 0;
+  let mut more = true;
+  while more && k < n
+    invariant k <= n && n <= n0 && con_ok(con) && pt_level(root) == 4
+  {
+    let sg = wseg_of(off + k);
+    let kn = k + wseg_room(off + k, n - k);
+    more = false;
+    if pt_has(root, 1 + sg) {
+      let r = pt_borrow(&mut root, 1 + sg, write_l3, &mut con, off, k, kn, sg * WSEG_BYTES);
+      more = r == kn;
+      k = r;
+    }
   }
-  return pt_borrow(&mut root, 1, write_l3, &mut con, off, n);
+  return k;
 }
 
-/// write_from below the top-level table, in place.
-fn write_l3(l3: &mut PageTable, con: &mut Con, off: u64, n: u64) -> u64
-  requires con_ok(con) && pt_level(l3) == 3 && off + n <= USER_SIZE
-  ensures con_ok(con)
+/// write_from below the top-level table, in place: bytes k0 .. n of the
+/// run, which lies in the segment that starts at base.
+fn write_l3(l3: &mut PageTable, con: &mut Con, off: u64, k0: u64, n: u64, base: u64) -> u64
+  requires con_ok(con) && pt_level(l3) == 3 && base <= off + k0 && off + n <= base + WSEG_BYTES && base + WSEG_BYTES <= USER_SIZE && k0 <= n
+  ensures con_ok(con) && k0 <= result && result <= n
 {
-  let mut k = 0;
+  let mut k = k0;
   let mut ok = true;
   while ok && k < n
-    invariant k <= n && pt_level(l3) == 3 && con_ok(con)
+    invariant k0 <= k && k <= n && pt_level(l3) == 3 && con_ok(con)
   {
-    let ch = w_byte(&mut l3, off + k);
+    let ch = w_byte(&mut l3, off + k - base);
     if ch == 256 {
       ok = false;
     } else {
@@ -149,15 +161,20 @@ fn find_prog(root: &mut PageTable, off: u64, n: u64) -> u64
   ensures pt_level(root) == 4
   ensures result <= NPROGS
 {
-  if !pt_has(root, 1) {
+  if off >= USER_SIZE {
     return NPROGS;
   }
-  return pt_borrow(&mut root, 1, find_l3, off, n);
+  // A name that straddles two segments of the window is not found.
+  let sg = wseg_of(off);
+  if !pt_has(root, 1 + sg) || off + n > (sg + 1) * WSEG_BYTES {
+    return NPROGS;
+  }
+  return pt_borrow(&mut root, 1 + sg, find_l3, off - sg * WSEG_BYTES, n);
 }
 
 /// find_prog below the top-level table, in place.
 fn find_l3(l3: &mut PageTable, off: u64, n: u64) -> u64
-  requires pt_level(l3) == 3 && off + n <= USER_SIZE
+  requires pt_level(l3) == 3 && off + n <= WSEG_BYTES
   ensures result <= NPROGS
 {
   let mut found = NPROGS;
@@ -175,7 +192,7 @@ fn find_l3(l3: &mut PageTable, off: u64, n: u64) -> u64
 
 /// Do the n bytes at offset off of the window `l3` maps spell `name`?
 fn w_matches(l3: &mut PageTable, off: u64, n: u64, name: Str) -> bool
-  requires pt_level(l3) == 3 && off + n <= USER_SIZE
+  requires pt_level(l3) == 3 && off + n <= WSEG_BYTES
   ensures pt_level(l3) == 3
 {
   if n != slen(name) {

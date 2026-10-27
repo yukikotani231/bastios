@@ -101,7 +101,7 @@ const F_ABI: u64 = 66;
 const F_START: u64 = 65;             // when it started: centiseconds since boot, plus 1 (/proc/PID/stat)
 const F_FAULT_RIP: u64 = 67;         // the last page fault found its page mapped already: rip + 1 and address (src/main.bastio)
 const F_FAULT_VA: u64 = 68;
-const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^40 (/proc/PID/cmdline)
+const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^44 (/proc/PID/cmdline)
 const F_WDONE: u64 = 71;             // Linux write(2) restarted for the disk: 2 * the bytes already written + 1 if the last pass stopped for the disk (src/linux.bastio)
 // The processes that share one descriptor table (threads, and clone with
 // CLONE_FILES) form a ring: F_FDNEXT is the next member's id, 0 for a
@@ -1870,8 +1870,8 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
       lz = lazy_plan(&mut v, src, e);
     }
     if e.ilen != 0 {
-      // A dynamically linked program: its interpreter goes just below
-      // where mmap starts, and runs first.
+      // A dynamically linked program: its interpreter goes at the top of
+      // the first segment, and runs first.
       isrc = isrc0;
       if !isrc.file {
         isrc = interp_src(&mut v, src, e);
@@ -1881,10 +1881,10 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
       }
       let probe = elf_parse_at(&mut v, isrc, 0);
       let low = (e.end + 4095) / 4096 * 4096;
-      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > VDSO_PAGE * 4096 || probe.end > VDSO_PAGE * 4096 - low {
+      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > INTERP_TOP || probe.end > INTERP_TOP - low {
         return Space::Empty;
       }
-      let mut place = (VDSO_PAGE * 4096 - probe.end) / 4096 * 4096;
+      let mut place = (INTERP_TOP - probe.end) / 4096 * 4096;
       if place >= low + rn.mmap_pg * 4096 {
         place = place - rn.mmap_pg * 4096;      // moved down, if there is room above the program
       }
@@ -1893,7 +1893,6 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
         return Space::Empty;
       }
       entry = ie.entry;
-      mmap_top = place;
     }
   } else {
     // The BastiOS header: magic, bytes of memory the image needs, entry point.
@@ -1930,7 +1929,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
   }
   pset(&mut procs, pid, F_ARGS, 0);
   if elf && total <= ARGS_MAX {
-    pset(&mut procs, pid, F_ARGS, str_at(total, rn.shift) + alen * 1099511627776);
+    pset(&mut procs, pid, F_ARGS, str_at(total, rn.shift) + alen * 17592186044416);
   }
   pset(&mut procs, pid, reg_word(R_PC), entry);
   pset(&mut procs, pid, reg_word(R_SP), rsp);

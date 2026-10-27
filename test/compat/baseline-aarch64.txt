@@ -1726,3 +1726,23 @@ apps: perl: the language
 t_core: RLIMIT_CORE 0 leaves no core file, and the status has no core flag
 t_core: RLIMIT_CORE above 0 leaves a core file, and the wait status says so
 t_core: the core file names the signal, the program counter and the variable
+t_va: a 1 TiB PROT_NONE reservation
+t_va: pages in it, in two segments, work
+t_va: a page between them is still PROT_NONE
+t_va: the reservation is given back
+t_va: a fixed mapping across a segment boundary
+t_va: an 8-byte word across it
+t_va: pipe
+t_va: write() from a buffer across it
+t_va: read() into a buffer across it
+t_va: what was written comes back across it
+t_va: mprotect across it
+t_va: madvise across it
+t_va: a fork copies both sides of it
+t_va: mremap moves it to another segment
+t_va: munmap across it
+t_va: two adjacent fixed mappings in different segments
+t_va: munmap over both
+t_va: each is gone
+t_va: a page in every segment
+t_va: a child sees them copied

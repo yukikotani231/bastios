@@ -30,7 +30,14 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - Alt-F9 in `bwm` minimizes the focused window.
 - Alt-F1 in `bwm` opens the launcher menu from the keyboard: Up and Down move the lit entry, Enter chooses it and Escape closes the menu.
 - Alt-F2 in `bwm` asks for a command in the task bar and runs it in a terminal window (Enter runs it, Escape cancels).
-- `bwm -w FILE` puts a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP over the whole desktop, stretched to the screen.
+- `bwm -w FILE` puts a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP over the whole desktop, stretched to the screen. Without `-w`, the file named on the first line of `/etc/bwm.wallpaper` is used if there is one.
+- Ctrl-Shift-Page Up in `bterm` goes to the oldest line kept in the history, Ctrl-Shift-Page Down back to the live screen.
+- Alt-F12 in `bwm` saves the desktop as a PPM to `/tmp/screenshot.ppm` (open it with `bview` or from `bfiles`).
+- The `bsys` System window shows the load averages (read from `/proc/loadavg`) in a new Load row.
+- The `bsys` System window shows the first network interface that has an address (or `none`) in a new Network row.
+- The process list of `bsys` has a Mem(K) column with the resident size of each process.
+- `m` in the `bsys` process list sorts by memory, largest first (and back to newest first).
+- `n` and `p` in `bview` show the next and the previous image (`.ppm` or `.bmp`) of the same directory, by name, in the same window.
 - Alt-Down in `bwm` puts a snapped or maximized window back, and minimizes any other.
 - In the `bsys` process list `g` and `G` (or Home and End) go to the first and the last process.
 - The mouse wheel zooms the image in `bview`: up in, down out.

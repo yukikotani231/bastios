@@ -270,7 +270,7 @@ long_mode:
  *
  * The process's top-level table (the prelude left it in CORE_UROOT) is not
  * what the CPU loads: this processor's shadow table has the process's window
- * (slot 1 of its table) in slot 0, at virtual address 0, and the entry area
+ * (slots 1 .. WINDOW_SEGS of its table) in slots 0 ..., from virtual address 0, and the entry area
  * (core.h) in the last slot, and nothing else. The kernel's memory stays out
  * of the user's address space. The frame for `iretq` goes on the trap stack
  * at its entry-area address, and the last instructions run in the entry area
@@ -308,7 +308,7 @@ bst_cpu_enter:
         movq    $2, CORE_UPCID(%rsi)
 5:      mov     %rax, CORE_KCR3(%rsi)
 4:
-        /* The shadow table: slot 0 is the window's level-3 table. */
+        /* The shadow table: slots 0 .. WINDOW_SEGS - 1 are the window's level-3 tables. */
         mov     CORE_UROOT(%rsi), %rax
         mov     %eax, %edi
         and     $1, %edi                        /* set below by the entry before this one, unless the prelude entered a table since */
@@ -337,8 +337,12 @@ bst_cpu_enter:
         je      6f
         bts     $63, %rcx                       /* still the same lease: nothing was taken out of the table, keep its translations */
 6:      mov     %rcx, CORE_CR3(%rsi)
-        mov     8(%rax), %rax                   /* slot 1 of the process's table */
-        mov     %rax, (%rdx)
+        xor     %r9d, %r9d                      /* slots 1 .. WINDOW_SEGS of the process's table: the window's level-3 tables */
+10:     mov     8(%rax,%r9,8), %r10
+        mov     %r10, (%rdx,%r9,8)
+        inc     %r9d
+        cmp     $WINDOW_SEGS, %r9d
+        jb      10b
         movq    $1, CORE_UMODE(%rsi)
 
         mov     CORE_ALIAS(%rsi), %rax

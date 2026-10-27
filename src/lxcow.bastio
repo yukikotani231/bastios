@@ -79,8 +79,16 @@ fn cow_break_all(k: &mut Kernel, pid: u64) -> bool
       let mut ok = true;
       // With a processor on the space it has a thread running already,
       // so (see above) no copy-on-write pages.
-      if pt_lease_count(&mut root) == 0 && pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, break_l3, &mut k.mem);
+      if pt_lease_count(&mut root) == 0 {
+        let mut sg = 0;
+        while ok && sg < WNSEG
+          invariant sg <= WNSEG && kok(k) && pt_level(root) == 4 && pt_leases(root) == 0
+        {
+          if pt_has(root, 1 + sg) {
+            ok = pt_borrow(&mut root, 1 + sg, break_l3, &mut k.mem);
+          }
+          sg = sg + 1;
+        }
       }
       put_space(&mut k.spaces, pid, Space::Mapped(root));
       return ok;

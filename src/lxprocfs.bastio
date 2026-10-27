@@ -2022,8 +2022,8 @@ fn environ_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
   ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let w = pget(k.procs, p, F_ARGS);
-  let top = w % 1099511627776;
-  let alen = w / 1099511627776;
+  let top = w % 17592186044416;
+  let alen = w / 17592186044416;
   if alen == 0 || top < 320 {
     return 0;
   }
@@ -2916,9 +2916,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   }
   if what == PF_CMDLINE {
     let w = pget(k.procs, p, F_ARGS);
-    let n = w / 1099511627776;
+    let n = w / 17592186044416;
     if n != 0 && n < PROC_OUT {
-      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + w % 1099511627776, &mut k.fs.xfer, n);
+      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + w % 17592186044416, &mut k.fs.xfer, n);
       if got == n {
         let mut i = 0;
         while i < n
@@ -2939,8 +2939,8 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     // are always AT_PHDR, AT_PHENT = the program header size, AT_PHNUM. A
     // debugger asks for AT_ENTRY to find where a PIE program was loaded.
     let w = pget(k.procs, p, F_ARGS);
-    let top = w % 1099511627776;
-    if w / 1099511627776 != 0 && top >= 320 {
+    let top = w % 17592186044416;
+    if w / 17592186044416 != 0 && top >= 320 {
       if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 320, &mut k.fs.xfer, 320) == 320 {
         let mut j = 0;
         let mut found = false;

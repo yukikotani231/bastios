@@ -228,8 +228,9 @@ fn lazy_read(k: &mut Kernel, pid: u64, q: u64, wait: bool) -> u64
     },
     Space::Mapped(mut root) => {
       let mut ok = false;
-      if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, lazy_l3, &mut k.mem, q, f);
+      let sg = wseg_of(q * 4096);
+      if root_seg(&mut k.mem, &mut root, sg) {
+        ok = pt_borrow(&mut root, 1 + sg, lazy_l3, &mut k.mem, q - sg * WSEG_PAGES, f);
       } else {
         give_page(&mut k.mem, f);
       }
@@ -251,8 +252,9 @@ fn lazy_share(k: &mut Kernel, pid: u64, q: u64, slot: u64) -> bool
     Space::Empty => { return false; },
     Space::Mapped(mut root) => {
       let mut ok = false;
-      if pt_has(root, 1) {
-        ok = pt_borrow(&mut root, 1, share_l3, &mut k.mem, &mut k.fs.pc, q, slot);
+      let sg = wseg_of(q * 4096);
+      if root_seg(&mut k.mem, &mut root, sg) {
+        ok = pt_borrow(&mut root, 1 + sg, share_l3, &mut k.mem, &mut k.fs.pc, q - sg * WSEG_PAGES, slot);
       }
       put_space(&mut k.spaces, pid, Space::Mapped(root));
       return ok;
@@ -261,7 +263,7 @@ fn lazy_share(k: &mut Kernel, pid: u64, q: u64, slot: u64) -> bool
 }
 
 fn share_l3(l3: &mut PageTable, m: &mut Mem, c: &mut PCache, q: u64, slot: u64) -> bool
-  requires pt_level(l3) == 3 && mem_ok(m) && pc_ok(c) && q < WPAGES && slot < PC_N
+  requires pt_level(l3) == 3 && mem_ok(m) && pc_ok(c) && q < WSEG_PAGES && slot < PC_N
   ensures mem_ok(m) && pc_ok(c)
 {
   let t = q / L2_PAGES;
@@ -291,7 +293,7 @@ fn share_l2(l2: &mut PageTable, m: &mut Mem, c: &mut PCache, q: u64, slot: u64) 
 }
 
 fn lazy_l3(l3: &mut PageTable, m: &mut Mem, q: u64, f: Frame) -> bool
-  requires pt_level(l3) == 3 && mem_ok(m) && q < WPAGES
+  requires pt_level(l3) == 3 && mem_ok(m) && q < WSEG_PAGES
   ensures mem_ok(m)
 {
   let t = q / L2_PAGES;
