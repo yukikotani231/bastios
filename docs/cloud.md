@@ -115,8 +115,9 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   Multiboot 1 form) is tested by booting the image with its Multiboot header
   blanked on QEMU's `pc` and `microvm` machines, since QEMU prefers
   Multiboot when both are present. Firecracker has not been run.
-- **Boot time and memory under KVM** have not been measured: the machine
-  these numbers were taken on has no `/dev/kvm`. Under TCG (QEMU 8, one CPU,
+- **Boot time and memory under KVM**: the machine these first numbers were
+  taken on has no `/dev/kvm`; the `bench-kvm` CI job measures boot under KVM
+  against Ubuntu's Linux 6.8 (see docs/performance.md). Under TCG (QEMU 8, one CPU,
   `-kernel`) the 2.9 MB image reaches the `bastios>` prompt in 0.2 to 0.4 s
   including QEMU's start-up. The smallest memory that boots is 36 MiB
   (`-m 36M`: 1863 pages of 4 KiB free at the prompt); `-m 33M` and `-m 34M`
@@ -167,9 +168,11 @@ test/shell_test.sh                          # includes three ENA boots, skipped 
   register and page is as before afterwards. Trusted: that the host's bytes
   are random; the pool only mixes them in, so bad ones add nothing and take
   nothing away. A source that never answers costs about a second under
-  TCG. Tested on PCI and on virtio-mmio, answering and silent. Not done:
-  AArch64 (its virtio-mmio finder is separate), RDRAND/RDSEED (needs a
-  compiler primitive), reading again later or on a timer.
+  TCG. Tested on PCI and on virtio-mmio, answering and silent. On AArch64
+  (`src/aarch64/arch/rnghw.bastio`) the device is looked for on virtio-mmio
+  at the slots the device tree names, and tested on QEMU's `virt`.
+  Not done: reading the device again later or on a timer, and the Arm
+  processor's own generator (FEAT_RNG).
 - **A bigger volume needs no resize step.** The file system takes its size
   from the disk at every mount, so a volume enlarged while the machine was
   off (an EBS volume resize, `truncate` on a raw image) shows its new size
