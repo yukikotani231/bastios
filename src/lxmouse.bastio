@@ -5,8 +5,11 @@
 // 2 are the motion in x (right is positive) and y (up is positive). A
 // program that writes the IntelliMouse sequence (set sample rate 200, 100,
 // 80) switches the device to ImPS/2: packets get a fourth byte, the wheel
-// (negative is up, at most 7 a packet). Each byte written is answered as
-// a mouse would: 0xFA, then, for 0xF2 (get id), 3 in ImPS/2 mode or 0,
+// (negative is up, at most 7 a packet). The sequence 200, 200, 80 switches
+// it to ImExPS/2 instead: the fourth byte then holds the wheel in its low
+// four bits (signed, -7 to 7) and the two extra buttons (back and forward)
+// in bits 4 and 5. Each byte written is answered as
+// a mouse would: 0xFA, then, for 0xF2 (get id), 4 in ImExPS/2 mode, 3 in ImPS/2 mode or 0,
 // for 0xE9 (status) three bytes, for 0xFF (reset) 0xAA 0 and back to PS/2
 // mode. As in Linux, only the answer to the last byte of a write is kept,
 // and it is read before any packet.
@@ -15,10 +18,11 @@
 // (src/xhci.bastio, which turns its boot reports into this form) through
 // the console pump (`exchange` in src/main.bastio) into k.mice: a header
 // (MICE_HDR bytes: where the oldest byte is, how many bytes there are,
-// whether there is a mouse, whether the mode is ImPS/2, how far into the
+// whether there is a mouse, the mode (0 PS/2, 1 ImPS/2, 2 ImExPS/2), how far into the
 // IntelliMouse sequence the writes are, and the answer waiting: its
 // length and up to 4 bytes) and a ring of MICE_CAP bytes holding 4-byte
-// packets (byte 0, x, y, wheel). When the ring is full, new packets are
+// packets (byte 0, x, y, wheel; bits 6 and 7 of byte 0 hold buttons 4 and
+// 5 here, and are put where the mode wants them on a read). When the ring is full, new packets are
 // dropped. The mode and the answer belong to the device, not to each open
 // file as in Linux: opening the device resets them, so the last program
 // to open it decides.
@@ -172,7 +176,9 @@ fn mice_answer(k: &mut Kernel, n: u64, a: u64, b: u64, c: u64, d: u64)
   put_u64(&mut k.mice, M_RLEN, n);
 }
 
-/// The byte at step i of the IntelliMouse sequence (F3 C8 F3 64 F3 50).
+/// The byte at step i of the IntelliMouse sequence (F3 C8 F3 64 F3 50); the
+/// ImExPS/2 one (F3 C8 F3 C8 F3 50) shares its first three bytes and is
+/// followed from step 6 (F3, then 50 at step 7).
 fn imps_seq(i: u64) -> u64 {
   if i % 2 == 0 {
     return 0xF3;                            // set sample rate
@@ -203,10 +209,12 @@ fn mice_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
     invariant kok(k)
   {
     let c = cast[u64](bget(k.fs.xfer, i));
-    let seq = get_u64(k.mice, M_SEQ) % 6;
-    if c == imps_seq(seq) {
-      if seq == 5 {
-        put_u64(&mut k.mice, M_IMPS, 1);
+    let seq = get_u64(k.mice, M_SEQ) % 8;
+    if seq == 3 && c == 200 {
+      put_u64(&mut k.mice, M_SEQ, 6);
+    } else if c == imps_seq(seq) {
+      if seq == 5 || seq == 7 {
+        put_u64(&mut k.mice, M_IMPS, (seq - 3) / 2);
         put_u64(&mut k.mice, M_SEQ, 0);
       } else {
         put_u64(&mut k.mice, M_SEQ, seq + 1);
@@ -220,6 +228,8 @@ fn mice_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
       let mut id = 0;
       if get_u64(k.mice, M_IMPS) == 1 {
         id = 3;
+      } else if get_u64(k.mice, M_IMPS) == 2 {
+        id = 4;
       }
       mice_answer(&mut k, 2, 0xFA, id, 0, 0);
     } else if c == 0xE9 {
@@ -248,6 +258,15 @@ fn wheel_byte(z: u64) -> u64
     return 249;                             // -7
   }
   return z;
+}
+
+/// The fourth byte of an ImExPS/2 packet: the wheel (as wheel_byte, in the
+/// low four bits) and buttons 4 and 5 (bits 6 and 7 of byte 0 as queued).
+fn imex_byte(b0: u64, z: u64) -> u64
+  requires b0 < 256 && z < 256
+  ensures result < 64
+{
+  return wheel_byte(z) % 16 + b0 / 64 % 4 * 16;
 }
 
 /// read(2) (system call n) of up to len bytes into va on descriptor fd, the
@@ -283,7 +302,7 @@ fn mouse_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u
     put_u64(&mut k.mice, M_RLEN, 0);
   } else {
     let mut size = 3;
-    if get_u64(k.mice, M_IMPS) == 1 {
+    if get_u64(k.mice, M_IMPS) >= 1 {
       size = 4;
     }
     let mut head = get_u64(k.mice, M_HEAD) % MICE_CAP;
@@ -297,8 +316,15 @@ fn mouse_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u
         invariant put <= room && room <= XFER && head < MICE_CAP && kok(k) && j <= size && size <= 4
       {
         let mut b = cast[u64](bget(k.mice, MICE_HDR + (head + j) % MICE_CAP));
+        if j == 0 {
+          b = b % 64;
+        }
         if j == 3 {
-          b = wheel_byte(b);
+          if get_u64(k.mice, M_IMPS) == 2 {
+            b = imex_byte(cast[u64](bget(k.mice, MICE_HDR + head % MICE_CAP)), b);
+          } else {
+            b = wheel_byte(b);
+          }
         }
         bset(&mut k.fs.xfer, put, cast[u8](b));
         put = put + 1;
