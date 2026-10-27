@@ -101,7 +101,7 @@ const F_ABI: u64 = 66;
 const F_START: u64 = 65;             // when it started: centiseconds since boot, plus 1 (/proc/PID/stat)
 const F_FAULT_RIP: u64 = 67;         // the last page fault found its page mapped already: rip + 1 and address (src/main.bastio)
 const F_FAULT_VA: u64 = 68;
-const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^40 (/proc/PID/cmdline)
+const F_ARGS: u64 = 69;              // Linux: the argument strings at exec: window offset + length * 2^44 (/proc/PID/cmdline)
 const F_WDONE: u64 = 71;             // Linux write(2) restarted for the disk: 2 * the bytes already written + 1 if the last pass stopped for the disk (src/linux.bastio)
 // The processes that share one descriptor table (threads, and clone with
 // CLONE_FILES) form a ring: F_FDNEXT is the next member's id, 0 for a
@@ -1929,7 +1929,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
   }
   pset(&mut procs, pid, F_ARGS, 0);
   if elf && total <= ARGS_MAX {
-    pset(&mut procs, pid, F_ARGS, str_at(total, rn.shift) + alen * 1099511627776);
+    pset(&mut procs, pid, F_ARGS, str_at(total, rn.shift) + alen * 17592186044416);
   }
   pset(&mut procs, pid, reg_word(R_PC), entry);
   pset(&mut procs, pid, reg_word(R_SP), rsp);
