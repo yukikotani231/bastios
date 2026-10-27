@@ -2084,12 +2084,23 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = tuple(px[at:at + 3]) == (0, 255, 0)
         print(("ok  " if good else "FAIL"), f"({name}) bwm -w puts an image over the desktop")
         fails += not good
+        # Alt-F12 saves the desktop to /tmp/screenshot.ppm: a P6 file of the screen's size, green here.
+        mark = len(out)
+        monitor("sendkey alt-f12")
+        good = until(b"bwm: screenshot /tmp/screenshot.ppm", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Alt-F12 saves a screenshot")
+        fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"echo shot $(wc -c < /tmp/screenshot.ppm) end\r"); q.stdin.flush()
+        good = until(b"shot 2359312 end", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the screenshot is a PPM of the whole screen")
+        fails += not good
         # Without -w, the file named in /etc/bwm.wallpaper is used.
         mark = len(out)
         q.stdin.write(b"echo /tmp/nf/w.ppm > /etc/bwm.wallpaper; bwm -n\r"); q.stdin.flush()
