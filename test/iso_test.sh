@@ -872,6 +872,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = until(b"bsys: refreshed", mark)
             print(("ok  " if good else "FAIL"), f"({name}) F5 refreshes the System window")
             fails += not good
+            # t writes the next zone of its list into /etc/TZ.
+            if good:
+                monitor("sendkey t")
+                good = until(b"bsys: timezone ", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) t in the System window picks a time zone")
+            fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
             monitor("sendkey p")

@@ -18,6 +18,7 @@
 #include <sys/sysinfo.h>
 #include <sys/utsname.h>
 #include <time.h>
+#include "bwmtz.h"
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -140,6 +141,52 @@ static void bs_row(int r, const char *k, const char *v)
     bf_put_row(r, t, strlen(t), 0x00D8D8D8, 0x00101018);
 }
 
+/* The zone the desktop clock uses, as the TZ variable or the first line of /etc/TZ says it ("UTC" when neither does). */
+static void bs_zone(char *out, size_t cap)
+{
+    const char *tz = getenv("TZ");
+    snprintf(out, cap, "UTC");
+    if (tz && *tz) {
+        snprintf(out, cap, "%.*s", (int)cap - 1, tz);
+        return;
+    }
+    FILE *f = fopen("/etc/TZ", "r");
+    if (f) {
+        char line[64];
+        if (fgets(line, sizeof line, f)) {
+            line[strcspn(line, "\r\n")] = 0;
+            if (line[0])
+                snprintf(out, cap, "%.*s", (int)cap - 1, line);
+        }
+        fclose(f);
+    }
+}
+
+/* t: the next zone of a short list goes into /etc/TZ, which bwm's clock reads again within seconds. */
+static void bs_next_zone(void)
+{
+    static const char *const zones[] = { "UTC0", "JST-9", "KST-9", "CST-8", "IST-5:30", "CET-1", "GMT0", "EST5", "CST6", "PST8", "AEST-10" };
+    int n = (int)(sizeof zones / sizeof zones[0]), at = -1;
+    char cur[64] = "";
+    FILE *f = fopen("/etc/TZ", "r");
+    if (f) {
+        if (fgets(cur, sizeof cur, f))
+            cur[strcspn(cur, "\r\n")] = 0;
+        fclose(f);
+    }
+    for (int i = 0; i < n; i++)
+        if (strcmp(cur, zones[i]) == 0)
+            at = i;
+    const char *next = zones[(at + 1) % n];
+    if ((f = fopen("/etc/TZ", "w"))) {
+        fprintf(f, "%s\n", next);
+        fclose(f);
+        printf("bsys: timezone %s\n", next);
+    } else
+        puts("bsys: cannot write /etc/TZ");
+    fflush(stdout);
+}
+
 static void bs_paint(unsigned sw, unsigned sh)
 {
     char v[BF_COLS + 1];
@@ -170,10 +217,13 @@ static void bs_paint(unsigned sw, unsigned sh)
     else
         snprintf(v, sizeof v, "unknown");
     bs_row(8, "Root disk", v);
-    time_t now = time(NULL);
+    time_t now = time(NULL) + (time_t)tz_minutes() * 60;     /* the local time: the zone is a POSIX offset such as JST-9 */
     struct tm tm;
     gmtime_r(&now, &tm);
-    strftime(v, sizeof v, "%Y-%m-%d %H:%M:%S UTC", &tm);
+    char zone[64];
+    bs_zone(zone, sizeof zone);
+    size_t tl = strftime(v, sizeof v, "%Y-%m-%d %H:%M:%S", &tm);
+    snprintf(v + tl, sizeof v - tl, "  (%s)", zone);
     bs_row(9, "Time", v);
     double la[3] = {0, 0, 0};
     FILE *lf = fopen("/proc/loadavg", "r");
@@ -204,7 +254,7 @@ static void bs_paint(unsigned sw, unsigned sh)
     }
     bs_row(11, "Network", v);
     printf("bsys: network %s\n", v);
-    bf_put_row(12, "  r: refresh  p: processes", 27, 0x00808090, 0x00101018);
+    bf_put_row(12, "  r: refresh  t: time zone  p: processes", 40, 0x00808090, 0x00101018);
 }
 
 static int bsys_main(void)
@@ -334,6 +384,9 @@ static int bsys_main(void)
                 printf("bsys: cannot end %d\n", pid);
             bs_scan();
             bs_paint_tasks();
+        } else if (!bs_tasks && c == 't') {
+            bs_next_zone();
+            bs_paint(sw, sh);
         } else if (c == 'r') {
             if (bs_tasks) {
                 bs_scan();
