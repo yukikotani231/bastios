@@ -124,6 +124,9 @@ static int menu_mx, menu_my;             /* the pointer, for the entry that is l
 static int run_on;                       /* the Alt-F2 prompt is showing in the task bar */
 static char run_buf[160];                /* what has been typed in it */
 static int run_n;
+#define RUN_HIST 8
+static char run_hist[RUN_HIST][160];     /* commands run from it, newest last (Up and Down walk them) */
+static int run_nh, run_hi;               /* how many; which one is shown (run_nh: none, the typed line) */
 static int menu_sel = -1;                /* the entry the keys lit (Alt-F1, Up, Down), or -1 to follow the pointer */
 static struct win *sizing;               /* the window whose grip is held */
 static int sox, soy;                     /* from the pointer to the edge or corner of the frame it holds, when it was taken */
@@ -2084,12 +2087,31 @@ int main(int argc, char **argv)
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
+                        if ((code == 103 || code == 108) && run_nh > 0) {      /* Up and Down: earlier commands */
+                            int hi = run_hi + (code == 103 ? -1 : 1);
+                            if (hi >= 0 && hi < run_nh) {
+                                run_hi = hi;
+                                snprintf(run_buf, sizeof run_buf, "%s", run_hist[hi]);
+                                run_n = (int)strlen(run_buf);
+                            } else if (hi == run_nh) {
+                                run_hi = hi;
+                                run_n = 0;
+                                run_buf[0] = 0;
+                            }
+                            m = 0;
+                        }
                         for (int j = 0; j < m; j++) {
                             unsigned char c = (unsigned char)out[j];
                             if (c == 13 || c == 10) {
                                 run_on = 0;
-                                if (run_n > 0)
+                                if (run_n > 0) {
+                                    if (run_nh == RUN_HIST) {
+                                        memmove(run_hist[0], run_hist[1], sizeof run_hist - sizeof run_hist[0]);
+                                        run_nh--;
+                                    }
+                                    snprintf(run_hist[run_nh++], sizeof run_hist[0], "%s", run_buf);
                                     launch_command(run_buf);
+                                }
                             } else if (c == 27) {
                                 run_on = 0;
                             } else if ((c == 127 || c == 8) && run_n > 0) {
@@ -2102,6 +2124,7 @@ int main(int argc, char **argv)
                         touch_bar();
                     } else if (code == 60 && down && k_alt) {      /* Alt-F2: ask for a command to run in a terminal window */
                         run_on = 1;
+                        run_hi = run_nh;
                         run_n = 0;
                         run_buf[0] = 0;
                         menu_open = 0;

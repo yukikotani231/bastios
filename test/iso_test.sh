@@ -833,6 +833,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bterm: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Enter in the Run prompt starts the command in a terminal window")
             fails += not good
+            # Up in the Run prompt brings back the last command.
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey alt-f2", "sendkey up", "sendkey ret")
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Up in the Run prompt brings back the last command")
+            fails += not good
             mark = len(out)
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
