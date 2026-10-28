@@ -40,6 +40,7 @@ uint64_t bst_boot_take(uint64_t size, uint64_t align) { (void)size; (void)align;
 uint64_t bst_boot_cmdline(uint64_t i) { (void)i; return 256; }
 uint64_t bst_boot_region(uint64_t n, uint64_t f) { (void)n; (void)f; return 0; }
 uint64_t bst_boot_framebuffer(uint64_t f) { (void)f; return 0; }
+void bst_pat_load(void) {}
 uint8_t bst_boot_rsdp[36];
 uint32_t bst_boot_rsdp_len;
 extern uint64_t bst_platform_acpi(uint64_t sig, uint64_t off);
