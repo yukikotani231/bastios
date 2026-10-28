@@ -1703,7 +1703,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     puts(&mut con, " bytes of entropy\r\n");
   }
   // The disk: that stick, else NVMe, virtio, AHCI or ATA (see blk_new).
-  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"), vm_where);
+  let mut nvme_why = 0;
+  let dev = blk_find(&mut ports, &mut pci, &mut m, &mut win, fb_lo, fb_hi, usb_lo, usb_hi, msi, &mut usb, acpi_lo, acpi_hi, boot_word(cpu, "ahci_reset"), vm_where, &mut nvme_why);
   let dev_lo = blk_ports_lo(dev);
   let dev_hi = blk_ports_hi(dev);
   let dk_lo = blk_mmio_lo(dev);
@@ -1836,6 +1837,11 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   if blk_sectors(disk.dev) == 0 {
     puts(&mut con, "disk: none found (NVMe, AHCI, ATA, virtio, USB); files are kept in memory only\r\n");
+    if nvme_why != 0 {
+      puts(&mut con, "disk: NVMe found but not started (reason ");
+      put_num(&mut con, nvme_why);
+      puts(&mut con, ", see docs/cloud.md)\r\n");
+    }
   }
   if nic_ena(nic) && !nic_live(nic) {
     puts(&mut con, "net: ena found but not started (reason ");
