@@ -28,6 +28,7 @@
 #define MAXR 60
 static int fz = 1;                        /* the text size: each pixel of the 8 x 16 font is fz x fz */
 #define MAXZ 3
+#define ZOOM_FILE "/etc/bterm.zoom"       /* the size the next window starts with: a digit, 1 to MAXZ */
 #define CW (8 * fz)
 #define CH (16 * fz)
 #define MINC 10
@@ -608,6 +609,28 @@ static void resize_grid(int nc, int nr)
     memset(dirty, 1, sizeof dirty);
 }
 
+static void save_zoom(void)
+{
+    FILE *f = fopen(ZOOM_FILE, "w");
+    if (f) {
+        fprintf(f, "%d\n", fz);
+        fclose(f);
+    }
+}
+
+static void load_zoom(void)
+{
+    FILE *f = fopen(ZOOM_FILE, "r");
+    int z = 0;
+    if (f) {
+        if (fscanf(f, "%d", &z) != 1)
+            z = 0;
+        fclose(f);
+    }
+    if (z >= 1 && z <= MAXZ)
+        fz = z;
+}
+
 /* The grid gets nc x nr cells (the window is told, and the program on the pty); returns -1 when the server is gone. */
 static int set_grid(int fd, int id, int m, int nc, int nr)
 {
@@ -788,6 +811,7 @@ int main(int argc, char **argv)
     if (strcmp(base ? base + 1 : argv[0], "bview") == 0)
         return bview_main(argc, argv);
     unsigned sw, sh;
+    load_zoom();
     bwm_screen(&sw, &sh);                         /* a small screen gets a smaller grid than 80 x 24 */
     if (sw >= 16 + MINC * CW && sh >= 80 + MINR * CH) {
         if (cols > (int)(sw - 16) / CW) cols = (sw - 16) / CW;
@@ -844,6 +868,8 @@ int main(int argc, char **argv)
     int ocx = 0, ocy = 0, mid = 0;
     repaint(fd, id, &ocx, &ocy);
     printf("bterm: window %d\n", id);
+    if (fz != 1)
+        printf("bterm: text size %d (%d x %d)\n", fz, cols, rows);
     fflush(stdout);
     for (;;) {
         struct pollfd p[2] = { { fd, POLLIN, 0 }, { m, POLLIN, 0 } };
@@ -905,6 +931,7 @@ int main(int argc, char **argv)
                     if (nz >= 1 && nz <= MAXZ && nz != fz) {
                         int pw = cols * CW, ph = rows * CH;       /* the window keeps its size: the grid changes */
                         fz = nz;
+                        save_zoom();
                         if (set_grid(fd, id, m, pw / CW, ph / CH) != 0)
                             break;
                         memset(dirty, 1, sizeof dirty);

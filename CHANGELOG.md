@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bterm` keeps its text size in `/etc/bterm.zoom`, so the next window starts at the size the last one was left at.
 - `k` in the `bsys` window cycles the keyboard layout of `bwm` (us, jp106, dvorak) through `/etc/keymap`, which `bwm` reads again within seconds; the Keyboard row shows it.
 - The `bwm` task bar shows the month and the day (`MM-DD`, in the clock's zone) left of the clock.
 - Ctrl-= and Ctrl-plus make the text of the focused `bterm` window bigger (up to three times), Ctrl-minus smaller and Ctrl-0 puts it back; the window keeps its size and the grid changes.
