@@ -1027,6 +1027,40 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # The text size of bterm is kept for the next window: Ctrl-= writes /etc/bterm.zoom, and a window
+        # started afterwards begins at that size.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+        good = until(b"bterm: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey ctrl-equal")
+            good = until(b"bterm: text size 2", mark)
+            monitor("sendkey ctrl-q")
+            until(b"bwm: bye", mark)
+            time.sleep(0.5)
+            mark = len(out)
+            q.stdin.write(b"\r"); q.stdin.flush()
+            until(b"# ", mark)
+            mark = len(out)
+            q.stdin.write(b"echo zoom $(cat /etc/bterm.zoom) end\r"); q.stdin.flush()
+            good = good and until(b"zoom 2 end", mark)
+            mark = len(out)
+            q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+            good = good and until(b"bterm: window", mark) and until(b"bterm: text size 2", mark)
+            if good:
+                time.sleep(1)
+                mark = len(out)
+                monitor("sendkey ctrl-0")
+                good = until(b"bterm: text size 1", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) a new terminal starts at the text size the last one was left at")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # A small screen: bwm -s 640x480 pretends the screen is that big. A
         # terminal gets a grid that fits it (80 columns would not), and the
         # window opens inside the screen, not past its right and bottom edge.
