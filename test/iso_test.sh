@@ -840,6 +840,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bterm: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Up in the Run prompt brings back the last command")
             fails += not good
+            # Tab completes the first word from /bin: mhel is mhello, whose output goes to a file.
+            time.sleep(1)
+            monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "mhel"], "sendkey tab")
+            monitor("sendkey spc", "sendkey shift-dot", *[f"sendkey {c}" for c in ("slash", "t", "m", "p", "slash", "t", "a", "b")], "sendkey ret")
+            time.sleep(2)
             mark = len(out)
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
@@ -1068,6 +1073,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/tab\r"); q.stdin.flush()
+        good = until(b"hello from musl", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) Tab in the Run prompt completes the program name")
+        fails += not good
         # m in the System window picks the screen mode bwm asks for the next time it starts (/etc/bwm.mode).
         mark = len(out)
         q.stdin.write(b"bwm -n -c bsys\r"); q.stdin.flush()
