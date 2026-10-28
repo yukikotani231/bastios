@@ -26,7 +26,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
-#define BS_ROWS 14
+#define BS_ROWS 15
 #define BS_MAXPROC 64
 #define BS_PGUP 0x100                             /* keys that are not characters */
 #define BS_PGDN 0x101
@@ -188,6 +188,33 @@ static void bs_next_zone(void)
     fflush(stdout);
 }
 
+#define BS_MODE_FILE "/etc/bwm.mode"
+
+/* m: the next screen mode of a short list goes into /etc/bwm.mode, which bwm reads when it starts. */
+static void bs_next_mode(void)
+{
+    static const char *const modes[] = { "640x480", "800x600", "1024x768", "1280x1024" };
+    int n = (int)(sizeof modes / sizeof modes[0]), at = -1;
+    char cur[24] = "";
+    FILE *f = fopen(BS_MODE_FILE, "r");
+    if (f) {
+        if (fgets(cur, sizeof cur, f))
+            cur[strcspn(cur, "\r\n")] = 0;
+        fclose(f);
+    }
+    for (int i = 0; i < n; i++)
+        if (strcmp(cur, modes[i]) == 0)
+            at = i;
+    const char *next = modes[(at + 1) % n];
+    if ((f = fopen(BS_MODE_FILE, "w"))) {
+        fprintf(f, "%s\n", next);
+        fclose(f);
+        printf("bsys: mode %s\n", next);
+    } else
+        puts("bsys: cannot write /etc/bwm.mode");
+    fflush(stdout);
+}
+
 /* k: the next layout goes into /etc/keymap, which bwm reads again within seconds. */
 static void bs_next_keymap(void)
 {
@@ -271,7 +298,18 @@ static void bs_paint(unsigned sw, unsigned sh)
     printf("bsys: network %s\n", v);
     snprintf(v, sizeof v, "%s", kb_names[kb_read()]);
     bs_row(12, "Keyboard", v);
-    bf_put_row(13, "  r: refresh  t: time zone  k: keyboard  p: processes", 54, 0x00808090, 0x00101018);
+    snprintf(v, sizeof v, "none");                         /* the screen mode bwm will ask for the next time it starts */
+    FILE *mf = fopen(BS_MODE_FILE, "r");
+    if (mf) {
+        char ml[24];
+        if (fgets(ml, sizeof ml, mf)) {
+            ml[strcspn(ml, "\r\n")] = 0;
+            snprintf(v, sizeof v, "%s", ml);
+        }
+        fclose(mf);
+    }
+    bs_row(13, "Next mode", v);
+    bf_put_row(14, "  r: refresh  t: zone  k: keys  m: mode  p: processes", 54, 0x00808090, 0x00101018);
 }
 
 static int bsys_main(void)
@@ -401,6 +439,9 @@ static int bsys_main(void)
                 printf("bsys: cannot end %d\n", pid);
             bs_scan();
             bs_paint_tasks();
+        } else if (!bs_tasks && c == 'm') {
+            bs_next_mode();
+            bs_paint(sw, sh);
         } else if (!bs_tasks && c == 'k') {
             bs_next_keymap();
             bs_paint(sw, sh);

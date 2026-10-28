@@ -1061,6 +1061,38 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
+        # m in the System window picks the screen mode bwm asks for the next time it starts (/etc/bwm.mode).
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bsys\r"); q.stdin.flush()
+        good = until(b"bsys: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey m")
+            good = until(b"bsys: mode 640x480", mark)
+            monitor("sendkey ctrl-q")
+            until(b"bwm: bye", mark)
+            time.sleep(0.5)
+            mark = len(out)
+            q.stdin.write(b"\r"); q.stdin.flush()
+            until(b"# ", mark)
+            mark = len(out)
+            q.stdin.write(b"bwm -n\r"); q.stdin.flush()
+            good = good and until(b"bwm: mode 640x480 from /etc/bwm.mode", mark) and until(b"bwm: ready", mark)
+            if good:
+                time.sleep(1)
+                w, h, px = screendump()
+                good = (w, h) == (640, 480)
+        print(("ok  " if good else "FAIL"), f"({name}) m in the System window sets the mode bwm starts in")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        mark = len(out)
+        q.stdin.write(b"rm -f /etc/bwm.mode; echo modeoff $((1+1))\r"); q.stdin.flush()
+        until(b"modeoff 2", mark)
         # A small screen: bwm -s 640x480 pretends the screen is that big. A
         # terminal gets a grid that fits it (80 columns would not), and the
         # window opens inside the screen, not past its right and bottom edge.
