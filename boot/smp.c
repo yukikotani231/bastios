@@ -78,6 +78,7 @@ uint64_t bst_platform_cpus(void) { return __atomic_load_n(&cpus_online, __ATOMIC
 
 static inline void outb(uint16_t port, uint8_t v) { __asm__ volatile ("outb %0, %1" : : "a"(v), "Nd"(port)); }
 static inline uint8_t inb(uint16_t port) { uint8_t v; __asm__ volatile ("inb %1, %0" : "=a"(v) : "Nd"(port)); return v; }
+extern void bst_pat_load(void);                        /* multiboot.c */
 static inline void wrmsr(uint32_t msr, uint64_t v) {
     __asm__ volatile ("wrmsr" : : "c"(msr), "a"((uint32_t)v), "d"((uint32_t)(v >> 32)));
 }
@@ -378,6 +379,7 @@ void bst_platform_smp_join(void) {
 }
 
 void bst_ap_main(void) {
+    bst_pat_load();                         /* multiboot.c: the same PAT as the first processor */
     bst_alias_load_gdt();
     __asm__ volatile ("lidt %0" : : "m"(ap_idtr));
     for (int m = 0; m < 3; m++) wrmsr(0xC0000081 + m + (m == 2), syscall_msrs[m]);

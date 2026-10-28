@@ -165,16 +165,19 @@ uint64_t bst_boot_cmdline(uint64_t i) {
 
 /* Field `f` of the boot loader's framebuffer if it is 32-bit RGB, wherever
  * it is: 0 its address, 1 bytes per line, 2 width, 3 height, 4 the bit
- * positions of red, green and blue (a byte each); 0 without one. The
+ * positions of red, green and blue (a byte each), 5 whether it is
+ * write-combining (bst_map_ram); 0 without one. The
  * `boot_fb` builtin says the same but only for one below 4 GiB, and a
  * GPU's framebuffer is often above (Intel graphics at 0x4000000000). */
+extern int bst_fb_wc;
 uint64_t bst_boot_framebuffer(uint64_t f) {
     uint64_t mb = info_mb1;
     if (!mb || !(rd32(mb) & (1u << 12)) || rd8(mb + 109) != 1 || rd8(mb + 108) != 32) return 0;
     uint64_t addr = rd64(mb + 88), pitch = rd32(mb + 96), w = rd32(mb + 100), h = rd32(mb + 104);
     if (addr == 0 || pitch < w * 4) return 0;
     return f == 0 ? addr : f == 1 ? pitch : f == 2 ? w : f == 3 ? h
-         : f == 4 ? rd8(mb + 110) | (uint64_t)rd8(mb + 112) << 8 | (uint64_t)rd8(mb + 114) << 16 : 0;
+         : f == 4 ? rd8(mb + 110) | (uint64_t)rd8(mb + 112) << 8 | (uint64_t)rd8(mb + 114) << 16
+         : f == 5 ? (uint64_t)bst_fb_wc : 0;
 }
 
 /* Field `f` (0 base, 1 length, 2 type) of region `n` of the memory map
@@ -260,6 +263,49 @@ static int ram_covers(uint64_t lo, uint64_t hi) {
     return lo >= hi;
 }
 
+/* Write-combining for the framebuffer. The device window is uncached, and
+ * on real hardware every 4-byte store to an uncached framebuffer is a PCIe
+ * write of its own: a full-screen update takes a long time. With the PAT
+ * (CPUID.1:EDX bit 16) entry 4 made write-combining, a 2 MiB page with its
+ * PAT bit set and PWT and PCD clear is write-combining: the processor
+ * gathers the stores into bursts. Only the pages the framebuffer fills,
+ * rounded out to 2 MiB, in the window below the I/O APIC, and only if it
+ * is at least 2 MiB: its BAR is then at least as big and aligned to it, so
+ * no register of another device shares the page. Every processor writes the
+ * same PAT value (bst_pat_load, from bst_ap_main). */
+#define PTE_PAT      (1ull << 12)
+#define MSR_PAT      0x277
+#define FB_WC_TOP    0xFEC00000ull
+int bst_fb_wc;                                    /* the framebuffer is write-combining */
+static int pat_wc;
+
+void bst_pat_load(void) {
+    if (!pat_wc) return;
+    uint32_t lo, hi;
+    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(MSR_PAT));
+    hi = (hi & ~0xFFu) | 0x01;                    /* entry 4: write-combining (WB by default) */
+    __asm__ volatile ("wrmsr" : : "c"(MSR_PAT), "a"(lo), "d"(hi));
+}
+
+static void fb_write_combine(uint64_t *pdpt) {
+    uint32_t a = 1, b, c, d;
+    __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "=c"(c), "=d"(d));
+    uint64_t lo = bst_boot_framebuffer(0), size = bst_boot_framebuffer(1) * bst_boot_framebuffer(3);
+    if (!(d & 1u << 16) || !lo || size < (2ull << 20) || lo < (2ull << 30) || lo > FB_WC_TOP || size > FB_WC_TOP - lo) return;
+    uint64_t first = lo >> 21, last = (lo + size - 1) >> 21;
+    if (((last + 1) << 21) > FB_WC_TOP) return;
+    for (int pass = 0; pass < 2; pass++)           /* pass 0: are they all device pages? pass 1: change them */
+        for (uint64_t p = first; p <= last; p++) {
+            uint64_t *pd = (uint64_t *)(pdpt[p >> 9] & PTE_ADDR);
+            uint64_t *e = &pd[p & 511];
+            if (pass == 0 && (*e & PTE_UC) != PTE_UC) return;
+            if (pass == 1) *e = (*e & ~PTE_UC) | PTE_PAT;
+        }
+    pat_wc = 1;
+    bst_pat_load();
+    bst_fb_wc = 1;
+}
+
 void bst_map_ram(void) {
     uint64_t *pdpt = (uint64_t *)(bst_kernel_pml4[0] & PTE_ADDR);
     bst_ram_limit = 4ull << 30;
@@ -286,6 +332,7 @@ void bst_map_ram(void) {
             pdpt[g] = (uint64_t)pd | 3;
         }
     }
+    fb_write_combine(pdpt);
     uint64_t cr3;
     __asm__ volatile ("mov %%cr3, %0; mov %0, %%cr3" : "=r"(cr3) : : "memory");
 }
