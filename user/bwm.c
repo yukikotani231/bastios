@@ -522,7 +522,7 @@ static void draw_bar(void)
     }
     int hh, mm;
     clock_hm(&hh, &mm);
-    char ck[8];
+    char ck[16];
     snprintf(ck, sizeof ck, "%02d:%02d", hh, mm);
     text(scene, (int)W - MENU_W - 12 - TIME_W + 4, y0 + 4, ck, rgb(255, 255, 255));
     int mo, dd;
