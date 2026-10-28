@@ -2999,6 +2999,46 @@ good = open(gptdisk, "rb").read() == bytes(other)
 print(("ok  " if good else "FAIL"), "(GPT disk) not a byte of it changed")
 fails += not good
 
+# The disk that is left alone can be read (src/lxsd.bastio): /dev/sda is the
+# whole of it and /dev/sda1 its one partition, both read-only, for programs
+# that copy someone else's files off.
+other = bytearray(before)
+other[1024:1040] = bytes(range(1, 17))
+other[pf * 512:pf * 512 + 23] = b"SDTEST-PART1\nSDLINE-TWO\n"
+open(gptdisk, "wb").write(other)
+sdsize = (len(other) + 511) // 512 * 512      # QEMU rounds an image up to whole sectors
+sd_lines = [
+    ("ash", b"built-in shell (ash)", b"\n# "),
+    ("stat -c %F /dev/sda /dev/sda1", b"block special file\r\nblock special file\r\n", b"\n# "),
+    ("wc -c < /dev/sda", b"%d\r\n" % sdsize, b"\n# "),
+    ("wc -c < /dev/sda1", b"%d\r\n" % (pn * 512), b"\n# "),
+    # ash's read takes a buffer and seeks back to the end of the line, so the
+    # second read starts in the middle of a sector.
+    ("{ read a; read b; } < /dev/sda1; echo $a/$b", b"SDTEST-PART1/SDLINE-TWO\r\n", b"\n# "),
+    ("cat /dev/sda1 | wc -c; cat /dev/sda | wc -c", b"%d\r\n%d\r\n" % (pn * 512, sdsize), b"\n# "),
+    ("cp /dev/sda1 /part; { read a; read b; } < /part; echo $a/$b; wc -c < /part", b"SDTEST-PART1/SDLINE-TWO\r\n%d\r\n" % (pn * 512), b"\n# "),
+    ("echo x > /dev/sda1 || echo refused; cat /dev/sda2 || echo none", b"Read-only file system\r\nrefused\r\n", b"\n# "),
+]
+qemu = boot(1, extra=["-drive", f"file={gptdisk},format=raw,if=none,id=sd", "-device", "virtio-blk-pci,drive=sd"])
+out = b""
+deadline = time.time() + timeout
+for line, want, until in sd_lines:
+    mark = len(out)
+    if mark == 0 and not read_until(b"bastios> "):
+        print("FAIL: no prompt after the foreign-disk boot"); fails += 1
+        break
+    mark = len(out)
+    qemu.stdin.write(line.encode() + b"\r"); qemu.stdin.flush()
+    ok = read_until(until if line != "ash" else want, mark) and want in out[mark:]
+    if line == "ash":
+        ok = ok and read_until(until, out.index(want, mark) + len(want))   # the shell's own prompt, before the next line is typed
+    print(("ok  " if ok else "FAIL"), "(readable foreign disk)", repr(line))
+    fails += not ok
+qemu.kill(); qemu.wait()
+good = open(gptdisk, "rb").read() == bytes(other)
+print(("ok  " if good else "FAIL"), "(readable foreign disk) not a byte of it changed")
+fails += not good
+
 # With the boot option `login`, the console is BusyBox's login instead of
 # the native shell, and a new login starts whenever the last one ends
 # (relogin, src/main.bastio). Root has no password here (passwd -d above).

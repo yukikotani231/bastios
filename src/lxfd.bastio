@@ -1453,6 +1453,19 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
       return EACCES;
     }
   }
+  if is_sd(dev) && flags & LO_PATH == 0 {
+    // The disk BastiOS left alone: read-only, for root and group disk
+    // (src/lxsd.bastio).
+    if sd_get(k.sdp, dev - DEV_SD, 1) == 0 {
+      return ENXIO;
+    }
+    if !may_meta(k.procs, pid, S_IFBLK, DISK_GID * 0x100000000, MAY_R) {
+      return EACCES;
+    }
+    if flags % 4 != 0 {
+      return EROFS;
+    }
+  }
   if dev != DEV_NONE && dev != DEV_DIR {
     return lx_open_dev(&mut k, pid, dev, flags);
   }

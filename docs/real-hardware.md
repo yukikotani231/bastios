@@ -9,7 +9,7 @@ BastiOS changes no firmware settings. The live image boots from a USB stick and 
 - the BastiOS partition of the USB stick it was written to with `make usb`;
 - a disk that is completely blank (its first and last 34 sectors are all zeros).
 
-(The installer, [install.md](install.md), is the one exception: it erases a disk after you type `erase`.) Any other disk, such as the one with your own operating system on it, is left alone: it has a partition table, so BastiOS reads its first and last sectors, sees that it is someone else's, and never writes to it. The boot log then says `disk: it holds a partition table or other data; left alone`. `test/shell_test.sh` checks this with a disk image that has an MBR and one that has only a GPT backup header: not a byte of either changes.
+(The installer, [install.md](install.md), is the one exception: it erases a disk after you type `erase`.) Any other disk, such as the one with your own operating system on it, is left alone: it has a partition table, so BastiOS reads its first and last sectors, sees that it is someone else's, and never writes to it. The boot log then says `disk: it holds a partition table or other data; left alone`. Root can still read such a disk: `/dev/sda` is the whole disk and `/dev/sda1` and the partitions after it are its partitions (GPT, or an MBR's primary partitions), read-only, so `cp /dev/sda2 /tmp/part` copies a partition into memory for a loop mount. `test/shell_test.sh` checks this with a disk image that has an MBR and one that has only a GPT backup header: not a byte of either changes.
 
 Still, BastiOS is young software with drivers that have only met QEMU's devices. Use a machine whose data is backed up, or a spare one.
 
