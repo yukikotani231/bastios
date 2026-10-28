@@ -69,6 +69,7 @@ import "lxcore.bastio";
 import "lxcap.bastio";
 import "lxlink.bastio";
 import "lxloop.bastio";
+import "lxsd.bastio";
 import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
@@ -1888,6 +1889,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   }
   let mut k = kernel_new(m, disk, nic, snd, mice_new(term.kbd.aux || usb_mouse_on), tsc, at, epoch, cpus);
   ser_set_kind(&mut k, ser_on);
+  sd_scan(&mut k);                          // /dev/sda of a disk left alone (src/lxsd.bastio)
   if screen_on(term.screen) {
     gfx_screen(&mut k, fb_w, fb_h, fb_pitch, boot_info(cpu, INFO_FB, 4));   // /dev/fb0 (src/lxfb.bastio)
     if term_vbe(&mut term, fb_w, fb_h) {
@@ -2004,6 +2006,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.anon);
   free(sys.k.locks);
   free(sys.k.loops);
+  free(sys.k.sdp);
   free(sys.k.ptys);
   bfree(sys.k.ptyb);
   bfree(sys.k.mice);
