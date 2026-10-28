@@ -896,14 +896,24 @@ int main(int argc, char **argv)
         if (poll(p, 2, -1) < 0)
             continue;
         if (p[1].revents & (POLLIN | POLLHUP)) {
-            unsigned char b[512];
+            unsigned char b[4096];
             ssize_t n = read(m, b, sizeof b);
             if (n <= 0) {
                 puts("bterm: shell exited");
                 break;
             }
-            for (ssize_t i = 0; i < n; i++)
-                feed(b[i]);
+            int again = 0;
+            for (;;) {                            /* more output already waiting: take it before drawing, up to 32 KiB */
+                for (ssize_t i = 0; i < n; i++)
+                    feed(b[i]);
+                again += (int)n;
+                struct pollfd more = { m, POLLIN, 0 };
+                if (again >= 32768 || poll(&more, 1, 0) <= 0 || !(more.revents & POLLIN))
+                    break;
+                n = read(m, b, sizeof b);
+                if (n <= 0)
+                    break;
+            }
             if (sel_on && !selecting) {
                 sel_on = 0;                       /* new output: the lit text may be gone */
                 memset(dirty, 1, sizeof dirty);
