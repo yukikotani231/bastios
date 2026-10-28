@@ -1675,15 +1675,17 @@ fn net_keyed(n: &Net, a: u64, b: u64, c: u64) -> u64
   return net_mix(net_mix(net_mix(n.sec ^ a) ^ b) ^ c);
 }
 
-/// Where the next ephemeral port search starts: somewhere unguessable in
-/// the range, so the ports a program gets do not follow one another.
+/// Where the next ephemeral port search starts: the counter, which began at
+/// an unguessable place (nic_seed) and moves on by a keyed 1 to 16 each time.
+/// Ports still come round slowly, so a port just closed is not handed out
+/// again at once (a peer, or a NAT, may still hold the old connection).
 fn net_start(n: &mut Net) -> u64
   requires net_ok(n)
   ensures net_ok(n) && result < EPH_N
 {
   let c = n.eph % EPH_N;
-  n.eph = (c + 1) % EPH_N;
-  return net_keyed(n, c, n.now, 7) % EPH_N;
+  n.eph = (c + 1 + net_keyed(n, c, n.now, 7) % 16) % EPH_N;
+  return c;
 }
 
 /// Gives the stack its secret (once: a later word is ignored).
@@ -1696,6 +1698,7 @@ fn nic_seed(c: &mut Nic, x: u64)
     Nic::Up(mut n) => {
       if n.sec == 0 {
         n.sec = x | 1;
+        n.eph = net_keyed(n, 0, 0, 0) % EPH_N;
       }
       c = Nic::Up(n);
     },
