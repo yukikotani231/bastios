@@ -43,7 +43,18 @@ const NVME_SPINS: u64 = 20000000;
 // NVME_SPINS), and a timeout means the drive is really gone.
 const NVME_IO_SPINS: u64 = 500000000;
 const NVME_SECTOR: u64 = 512;
-const Q_N: u64 = 64;
+// Why nvme_new left a drive unstarted (shown as `reason N` at boot).
+const NVME_WHY_MPSMIN: u64 = 1;       // CAP.MPSMIN is not 0 (the controller needs larger pages than 4 KiB)
+const NVME_WHY_CSS: u64 = 8;          // CAP.CSS lacks the NVM command set
+const NVME_WHY_MQES: u64 = 9;         // CAP.MQES allows fewer than Q_N queue entries
+const NVME_WHY_DOORBELL: u64 = 10;    // the doorbells lie outside the BAR
+const NVME_WHY_DISABLE: u64 = 2;      // CC.EN would not clear
+const NVME_WHY_ENABLE: u64 = 3;       // CSTS.RDY did not set after CC.EN
+const NVME_WHY_IDENTIFY: u64 = 4;     // Identify namespace failed
+const NVME_WHY_FORMAT: u64 = 5;       // block size other than 512 or 4096 bytes
+const NVME_WHY_CQ: u64 = 6;           // Create I/O completion queue failed
+const NVME_WHY_SQ: u64 = 7;           // Create I/O submission queue failed
+const Q_N: u64 = 32;
 
 // Controller registers.
 const NV_CAP: u64 = 0x00;
@@ -85,6 +96,7 @@ struct Nvme {
   extra: Vec[Extra],  // empty, or VIO_BATCH pages (nvme_install): the PRP list, then data pages for blocks 1 on
   pages: u64,         // the first `pages` data pages after the list are there
   maxn: u64,          // blocks one command may move: the drive's MDTS, at most VIO_BATCH (1: no batches)
+  why: u64,           // 0, or the step nvme_new stopped at (NVME_WHY_*)
 }
 
 spec fn nvme_ok(n: &Nvme) -> bool {
@@ -298,7 +310,7 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
 {
   let mut n = Nvme { regs: regs, asq: dma_lend(f0), acq: dma_lend(f1), sq: dma_lend(f2), cq: dma_lend(f3),
     buf: dma_lend(f4), stride: 4, asq_at: 0, sq_at: 0, acq_at: 1, cq_at: 1, sectors: 0, shift: 0, ns: 1, busy: false, irq: false,
-    extra: vec_new[Extra](), pages: 0, maxn: 1 };
+    extra: vec_new[Extra](), pages: 0, maxn: 1, why: 0 };
   let cap_lo = cast[u64](nr32(&mut n, NV_CAP));
   let cap_hi = cast[u64](nr32(&mut n, NV_CAP + 4));
   let mut stride = 4;
@@ -309,14 +321,27 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
     stride = stride * 2;
     k = k + 1;
   }
-  // Needs 4 KiB pages (MPSMIN 0), the NVM command set, room for 64 entries
+  // Needs 4 KiB pages (MPSMIN 0), the NVM command set, room for Q_N (32) entries
   // per queue and the four doorbells inside the claimed block.
-  if (cap_hi >> 16) % 16 != 0 || (cap_hi >> 5) % 2 == 0 || cap_lo % 65536 < Q_N - 1
-    || NV_DB + 4 * stride > mmio_len(n.regs) {
+  if (cap_hi >> 16) % 16 != 0 {
+    n.why = NVME_WHY_MPSMIN;
+    return n;
+  }
+  if (cap_hi >> 5) % 2 == 0 {
+    n.why = NVME_WHY_CSS;
+    return n;
+  }
+  if cap_lo % 65536 < Q_N - 1 {
+    n.why = NVME_WHY_MQES;
+    return n;
+  }
+  if NV_DB + 4 * stride > mmio_len(n.regs) {
+    n.why = NVME_WHY_DOORBELL;
     return n;
   }
   n.stride = stride;
   if !nvme_disable(&mut n) {
+    n.why = NVME_WHY_DISABLE;
     return n;
   }
   let mut i = 0;
@@ -334,6 +359,7 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
   nw64(&mut n, NV_ACQ, dma_phys(n.acq));
   nw32(&mut n, NV_CC, cast[u32](CC_QUEUES + CC_EN));
   if !wait_ready(&mut n, 1) {
+    n.why = NVME_WHY_ENABLE;
     return n;
   }
   // The first active namespace: the head of the active namespace list
@@ -361,12 +387,14 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
   // format in use (byte 26 picks one of the formats from byte 128, 4 bytes
   // each; byte 2 of a format is log2 of the block size).
   if !nvme_cmd(&mut n, false, OP_IDENTIFY, n.ns, dma_phys(n.buf), 0, 0, 0) {
+    n.why = NVME_WHY_IDENTIFY;
     return n;
   }
   let size = dma_read64(&mut n.buf, 0);
   let fmt = cast[u64](dma_read8(&mut n.buf, 26)) % 16;
   let lbads = cast[u64](dma_read8(&mut n.buf, 128 + fmt * 4 + 2));
   if (lbads != 9 && lbads != 12) || size >= 0x1000000000000 {
+    n.why = NVME_WHY_FORMAT;
     return n;                         // 512-byte and 4 KiB blocks only
   }
   // The I/O queues: completion queue 1, then submission queue 1 feeding it
@@ -377,8 +405,12 @@ fn nvme_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, i
   if irq {
     ien = 3;
   }
-  if !nvme_cmd(&mut n, false, OP_CREATE_CQ, 0, dma_phys(n.cq), cast[u32]((Q_N - 1) * 65536 + 1), cast[u32](ien), 0)
-    || !nvme_cmd(&mut n, false, OP_CREATE_SQ, 0, dma_phys(n.sq), cast[u32]((Q_N - 1) * 65536 + 1), cast[u32](65536 + 1), 0) {
+  if !nvme_cmd(&mut n, false, OP_CREATE_CQ, 0, dma_phys(n.cq), cast[u32]((Q_N - 1) * 65536 + 1), cast[u32](ien), 0) {
+    n.why = NVME_WHY_CQ;
+    return n;
+  }
+  if !nvme_cmd(&mut n, false, OP_CREATE_SQ, 0, dma_phys(n.sq), cast[u32]((Q_N - 1) * 65536 + 1), cast[u32](65536 + 1), 0) {
+    n.why = NVME_WHY_SQ;
     return n;
   }
   if lbads == 12 {

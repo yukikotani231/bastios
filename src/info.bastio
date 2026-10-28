@@ -531,6 +531,13 @@ fn hw_pci(con: &mut Con, pci: &mut Pci)
       puts(&mut con, " class ");
       put_hexw(&mut con, cls, 6);
       put_driver(&mut con, vendor, device, cls);
+      if cls == NVME_CLASS {
+        puts(&mut con, " (BAR0 ");
+        put_hexn(&mut con, pci_read(&mut pci, d, PCI_BAR0));
+        puts(&mut con, ", BAR1 ");
+        put_hexn(&mut con, pci_read(&mut pci, d, PCI_BAR0 + 4));
+        puts(&mut con, ")");
+      }
       puts(&mut con, "\r\n");
       n = n + 1;
     }
@@ -556,6 +563,8 @@ fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
     puts(&mut con, " virtio disk");
   } else if vendor == VIRTIO_VENDOR && device == VIRTIO_NET {
     puts(&mut con, " virtio network");
+  } else if ena_model(vendor, device) {
+    puts(&mut con, " ena network");
   } else if e1k_model(vendor, device) == E1K_8254X {
     puts(&mut con, " e1000 network");
   } else if e1k_model(vendor, device) == E1K_82574 {
