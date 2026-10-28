@@ -840,6 +840,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"bterm: window", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Up in the Run prompt brings back the last command")
             fails += not good
+            # Ctrl-U clears the line: after it, Enter on the empty line starts nothing.
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "xy"], "sendkey ctrl-u", "sendkey ret")
+            end = time.time() + 2
+            while time.time() < end:
+                r, _, _ = select.select([q.stdout], [], [], 0.2)
+                if r:
+                    out += q.stdout.read1(4096)
+            good = b"bterm: window" not in out[mark:]
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-U clears the Run prompt line")
+            fails += not good
             # Tab completes the first word from /bin: mhel is mhello, whose output goes to a file.
             time.sleep(1)
             monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "mhel"], "sendkey tab")
