@@ -834,7 +834,22 @@ fn tcp_in(n: &mut Net, total: u64)
     return;
   }
   if is_rst {
-    tcb_close(&mut n, t, true);
+    // RFC 5961 3.2: a reset closes the connection only if it says exactly
+    // the next byte we expect, so a peer that cannot see our traffic has to
+    // guess a 32-bit number. One inside the window gets a challenge ACK,
+    // and the real peer answers it with the reset that fits. While the
+    // connection is opening, the reset must acknowledge our SYN.
+    if st == T_SYN_SENT {
+      if is_ack && ackn == seq_add(twb(n, t, W_ISS, SEQ_MOD), 1) {
+        tcb_close(&mut n, t, true);
+      }
+      return;
+    }
+    if seq == twb(n, t, W_RCV, SEQ_MOD) {
+      tcb_close(&mut n, t, true);
+    } else if st != T_TIME_WAIT && seq_diff(seq, tw(n, t, W_RCV)) < TCP_RING {
+      tcp_output(&mut n, t, true);
+    }
     return;
   }
   if st == T_SYN_SENT {
