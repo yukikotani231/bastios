@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` repaints only the part of the screen that changed (it painted the whole screen for every change, so moving a window or typing in a terminal cost a full redraw), and writes a full-width update to the frame buffer in one call instead of one per row.
 - `bterm` keeps its text size in `/etc/bterm.zoom`, so the next window starts at the size the last one was left at.
 - `k` in the `bsys` window cycles the keyboard layout of `bwm` (us, jp106, dvorak) through `/etc/keymap`, which `bwm` reads again within seconds; the Keyboard row shows it.
 - The `bwm` task bar shows the month and the day (`MM-DD`, in the clock's zone) left of the clock.
