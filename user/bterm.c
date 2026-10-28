@@ -214,7 +214,13 @@ static const struct cell *view_row(int r)
     return hist[(hist_head + HIST + v) % HIST];
 }
 
-static void draw_cell(int r, int c, int cursor)
+/* What each cell was last drawn as, so that a row that is redrawn paints (and sends) only the cells that differ. */
+struct shown { uint32_t f, b; unsigned cp; unsigned char half, attr, fz; };
+static struct shown shown[MAXR][MAXC];
+static unsigned char shown_ok[MAXR][MAXC];                  /* 0 after the pixels were lost (a new size) */
+
+/* Returns 1 when the cell was drawn, 0 when its pixels were already right. */
+static int draw_cell(int r, int c, int cursor)
 {
     const struct cell *e = &view_row(r)[c];
     int fg = e->fg, bg = e->bg;
@@ -232,6 +238,11 @@ static void draw_cell(int r, int c, int cursor)
         cp = view_row(r)[c - 1].ch;
         half = 1;
     }
+    struct shown now = { f, b, cp, (unsigned char)half, (unsigned char)(e->attr & 7), (unsigned char)fz };
+    if (shown_ok[r][c] && memcmp(&shown[r][c], &now, sizeof now) == 0)
+        return 0;
+    shown[r][c] = now;
+    shown_ok[r][c] = 1;
     const unsigned char *g = cp >= 128 ? glyph16(cp, &wide) : 0;
     int ch = cp < 128 ? cp : ' ';
     for (int y = 0; y < CH; y++) {
@@ -246,6 +257,7 @@ static void draw_cell(int r, int c, int cursor)
             pix[(r * CH + y) * WIDTH + c * CW + x] = on ? f : b;
         }
     }
+    return 1;
 }
 
 /* After cells of a row were erased, inserted or deleted, a wide character may be left with one half: blank it. */
@@ -607,6 +619,7 @@ static void resize_grid(int nc, int nr)
     top = 0;
     bot = rows - 1;
     memset(dirty, 1, sizeof dirty);
+    memset(shown_ok, 0, sizeof shown_ok);                  /* the pixels start again */
 }
 
 static void save_zoom(void)
@@ -658,10 +671,17 @@ static int repaint(int fd, int id, int *old_cx, int *old_cy)
     for (int r = 0; r < rows; r++) {
         if (!dirty[r])
             continue;
+        int c0 = cols, c1 = -1;                           /* the cells that changed */
         for (int c = 0; c < cols; c++)
-            draw_cell(r, c, r == cy && c == ccx);
+            if (draw_cell(r, c, r == cy && c == ccx)) {
+                if (c < c0) c0 = c;
+                c1 = c;
+            }
         dirty[r] = 0;
-        if ((shared ? bwm_damage(fd, id, 0, r * CH, WIDTH, CH) : bwm_draw(fd, id, pix, WIDTH, 0, r * CH, WIDTH, CH)) != 0)
+        if (c1 < 0)
+            continue;
+        int x = c0 * CW, w = (c1 + 1) * CW - x;
+        if ((shared ? bwm_damage(fd, id, x, r * CH, w, CH) : bwm_draw(fd, id, pix, WIDTH, x, r * CH, w, CH)) != 0)
             return -1;
     }
     *old_cx = ccx;
