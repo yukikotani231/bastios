@@ -148,12 +148,15 @@ static uint32_t from_wire(uint32_t p)
     return rgb(p >> 16 & 255, p >> 8 & 255, p & 255);
 }
 
+/* What draw_scene paints: only the part of the screen that changed. Every drawing routine stays inside it. */
+static int clx0, cly0, clx1, cly1;
+
 static void fill(uint32_t *buf, int x0, int y0, int x1, int y1, uint32_t c)
 {
-    if (x0 < 0) x0 = 0;
-    if (y0 < 0) y0 = 0;
-    if (x1 > (int)W) x1 = W;
-    if (y1 > (int)H) y1 = H;
+    if (x0 < clx0) x0 = clx0;
+    if (y0 < cly0) y0 = cly0;
+    if (x1 > clx1) x1 = clx1;
+    if (y1 > cly1) y1 = cly1;
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++)
             buf[y * W + x] = c;
@@ -167,7 +170,7 @@ static void glyph(uint32_t *buf, int x, int y, int ch, uint32_t fg)
         unsigned bits = font8x8[ch * 8 + r / 2];
         for (int p = 0; p < CELL_W; p++, bits >>= 1) {
             int px = x + p, py = y + r;
-            if ((bits & 1) && px >= 0 && py >= 0 && px < (int)W && py < (int)H)
+            if ((bits & 1) && px >= clx0 && py >= cly0 && px < clx1 && py < cly1)
                 buf[py * W + px] = fg;
         }
     }
@@ -186,7 +189,7 @@ static void glyph_ja(uint32_t *buf, int x, int y, const unsigned char *g, int wi
         unsigned bits = wide ? g[r * 2 + half] : g[r];
         for (int p = 0; p < CELL_W; p++, bits >>= 1) {
             int px = x + p, py = y + r;
-            if ((bits & 1) && px >= 0 && py >= 0 && px < (int)W && py < (int)H)
+            if ((bits & 1) && px >= clx0 && py >= cly0 && px < clx1 && py < cly1)
                 buf[py * W + px] = fg;
         }
     }
@@ -323,7 +326,7 @@ static void draw_grip(const struct win *w)
     for (int k = 4; k <= 12; k += 4)
         for (int j = 0; j < k; j++) {
             int px = x1 - j, py = y1 - (k - 1 - j);
-            if (px >= 0 && py >= 0 && px < (int)W && py < (int)H)
+            if (px >= clx0 && py >= cly0 && px < clx1 && py < cly1)
                 scene[py * W + px] = c;
         }
 }
@@ -358,15 +361,13 @@ static void draw_win(const struct win *w, int focused)
     }
     if (w->pix) {
         int cw = cw_of(w), ch = ch_of(w);
+        int xa = clx0 > bx ? clx0 : bx, xb = clx1 < bx + cw ? clx1 : bx + cw;
         for (int y = 0; y < ch; y++) {
             int py = by + y;
-            if (py < 0 || py >= (int)H)
+            if (py < cly0 || py >= cly1)
                 continue;
-            for (int x = 0; x < cw; x++) {
-                int px = bx + x;
-                if (px >= 0 && px < (int)W)
-                    scene[py * W + px] = w->pix[y * cw + x];
-            }
+            if (xb > xa)
+                memcpy(&scene[py * W + xa], &w->pix[y * cw + (xa - bx)], (size_t)(xb - xa) * 4);
         }
         if (w->resizable)
             draw_grip(w);
@@ -745,19 +746,25 @@ static void screenshot(void)
     fflush(stdout);
 }
 
-static void draw_scene(void)
+/* Paints the rectangle of the screen that changed. */
+static void draw_scene(int x0, int y0, int x1, int y1)
 {
-    if (wall)
-        memcpy(scene, wall, (size_t)W * H * 4);
-    else
-        for (unsigned y = 0; y < H; y++) {
+    clx0 = x0 < 0 ? 0 : x0; cly0 = y0 < 0 ? 0 : y0;
+    clx1 = x1 > (int)W ? (int)W : x1; cly1 = y1 > (int)H ? (int)H : y1;
+    if (clx1 <= clx0 || cly1 <= cly0)
+        return;
+    for (int y = cly0; y < cly1; y++) {
+        if (wall)
+            memcpy(&scene[y * W + clx0], &wall[y * W + clx0], (size_t)(clx1 - clx0) * 4);
+        else {
             uint32_t c = rgb(10 + y * 40 / H, 60 + y * 50 / H, 80 + y * 60 / H);
-            for (unsigned x = 0; x < W; x++)
+            for (int x = clx0; x < clx1; x++)
                 scene[y * W + x] = c;
         }
+    }
     draw_icons();
     for (int i = 0; i < nz; i++)
-        if (!z[i]->hidden)
+        if (!z[i]->hidden && z[i]->x < clx1 && z[i]->x + z[i]->w > clx0 && z[i]->y < cly1 && z[i]->y + z[i]->h > cly0)
             draw_win(z[i], z[i] == focus());
     draw_bar();
     draw_menu();
@@ -872,6 +879,21 @@ static int flush(int x0, int y0, int x1, int y1, int mx, int my)
     for (int y = y0; y < y1; y++)
         memcpy(&frame[y * W + x0], &scene[y * W + x0], (x1 - x0) * 4);
     draw_cursor(mx, my);
+    if (x0 == 0 && x1 == (int)W && PITCH == (size_t)W * 4) {      /* whole rows are one run in the frame buffer: one write */
+        off_t at = (off_t)y0 * PITCH;
+        size_t n = (size_t)(y1 - y0) * PITCH;
+        const char *src = (const char *)&frame[y0 * W];
+        if (lseek(fb, at, SEEK_SET) != at)
+            return -1;
+        while (n) {                                           /* the device takes what it takes per write: the position moves on */
+            ssize_t got = write(fb, src, n);
+            if (got <= 0)
+                return -1;
+            src += got;
+            n -= (size_t)got;
+        }
+        return 0;
+    }
     for (int y = y0; y < y1; y++) {
         off_t at = (off_t)y * PITCH + (off_t)x0 * 4;
         if (lseek(fb, at, SEEK_SET) != at || write(fb, &frame[y * W + x0], (x1 - x0) * 4) != (ssize_t)((x1 - x0) * 4))
@@ -1952,7 +1974,7 @@ int main(int argc, char **argv)
     signal(SIGCHLD, SIG_IGN);                                 /* launched terminals need no wait */
     int mx = W / 2, my = H / 2;
     menu_load();
-    draw_scene();
+    draw_scene(0, 0, W, H);
     flush(0, 0, W, H, mx, my);
     printf("bwm: ready %ux%u\n", W, H);
     fflush(stdout);
@@ -2370,7 +2392,7 @@ int main(int argc, char **argv)
             }
         }
         if (dx0 < dx1) {
-            draw_scene();
+            draw_scene(dx0, dy0, dx1, dy1);
             if (flush(dx0, dy0, dx1, dy1, mx, my) != 0)
                 break;
             if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
