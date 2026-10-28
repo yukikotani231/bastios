@@ -1866,6 +1866,19 @@ int main(int argc, char **argv)
             mode_h = strtoul(end + 1, NULL, 10);
         a += 2;
     }
+    if (!mode_w) {                                                       /* no -m: the mode the System window chose, if any */
+        FILE *mf = fopen("/etc/bwm.mode", "r");
+        if (mf) {
+            unsigned mw = 0, mh = 0;
+            if (fscanf(mf, "%ux%u", &mw, &mh) == 2 && mw >= 320 && mh >= 240 && mw <= 8192 && mh <= 8192) {
+                mode_w = mw;
+                mode_h = mh;
+                printf("bwm: mode %ux%u from /etc/bwm.mode\n", mw, mh);
+                fflush(stdout);
+            }
+            fclose(mf);
+        }
+    }
     unsigned want_w = 0, want_h = 0;
     if (a + 1 < argc && strcmp(argv[a], "-s") == 0) {
         char *end;

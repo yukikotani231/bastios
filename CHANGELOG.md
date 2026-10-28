@@ -17,6 +17,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 ### Added
 
 - `bterm` redraws only the cells that changed and sends only the span of each row that changed (it redrew and sent whole rows), so typing and scrolling output move far less data to `bwm`.
+- `m` in the `bsys` window picks the screen mode (640x480, 800x600, 1024x768, 1280x1024) that `bwm` asks for the next time it starts, through `/etc/bwm.mode`; `-m` still wins.
 - `bwm` repaints only the part of the screen that changed (it painted the whole screen for every change, so moving a window or typing in a terminal cost a full redraw), and writes a full-width update to the frame buffer in one call instead of one per row.
 - `bterm` keeps its text size in `/etc/bterm.zoom`, so the next window starts at the size the last one was left at.
 - `k` in the `bsys` window cycles the keyboard layout of `bwm` (us, jp106, dvorak) through `/etc/keymap`, which `bwm` reads again within seconds; the Keyboard row shows it.
