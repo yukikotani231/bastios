@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- The boot framebuffer is mapped write-combining (page attribute table entry 4, set on every processor) when the processor has one and the framebuffer is at least 2 MiB inside the device window; the boot banner says `(write-combining)`. Until now every pixel store was its own uncached write, which is slow on real hardware; QEMU's emulation does not show the difference, so the gain there is not measured.
 - Writing to `/dev/fb0` takes up to a whole ring of pixels (32 records of 4 KiB) in one call instead of 4 KiB, and the ring is filled with a proved bulk copy instead of a byte loop; `bwm` writes the changed rows of the screen whole when they are wide, so a window drag or a full-screen update makes far fewer system calls (in QEMU a drag frame took about 40 ms instead of 65 to 95 ms, a full-screen update about 90 to 120 ms instead of 150 to 300 ms).
 - `bterm` redraws only the cells that changed and sends only the span of each row that changed (it redrew and sent whole rows), so typing and scrolling output move far less data to `bwm`.
 - `m` in the `bsys` window picks the screen mode (640x480, 800x600, 1024x768, 1280x1024) that `bwm` asks for the next time it starts, through `/etc/bwm.mode`; `-m` still wins.

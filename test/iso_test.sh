@@ -268,7 +268,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     return screen_text(open(dump, "rb").read())
             return []
         text = grab()
-        want = ["screen: 1024x768 framebuffer", "bastios> echo On_screen", "On_screen",
+        want = ["screen: 1024x768 framebuffer (write-combining)", "bastios> echo On_screen", "On_screen",
                 "日本語かな café ─│ ｱｲｳ", "bastios> echo " + "x" * 113, "日", "x" * 113 + "日"]
         good = all(w in text for w in want)
         print(("ok  " if good else "FAIL"), f"({name}) the framebuffer console shows it")

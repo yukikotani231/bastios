@@ -1664,7 +1664,11 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     put_num(&mut con, fb_w);
     puts(&mut con, "x");
     put_num(&mut con, fb_h);
-    puts(&mut con, " framebuffer\r\n");
+    puts(&mut con, " framebuffer");
+    if boot_info(cpu, INFO_FB, 5) == 1 {
+      puts(&mut con, " (write-combining)");
+    }
+    puts(&mut con, "\r\n");
   }
   let mut m = mem_new(pool);
   // The pool spans every run of RAM (bastiolang's bst_pool_init, and
