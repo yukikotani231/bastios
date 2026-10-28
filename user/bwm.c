@@ -18,6 +18,7 @@
  * that changed are written to the screen, line by line, through lseek and
  * write. test/iso_test.sh drives it with QEMU's monitor (mouse_move,
  * mouse_button, sendkey) and reads the screen back from a screendump. */
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -126,6 +127,8 @@ static char run_buf[160];                /* what has been typed in it */
 static int run_n;
 #define RUN_HIST 8
 static char run_hist[RUN_HIST][160];     /* commands run from it, newest last (Up and Down walk them) */
+static char tab_pfx[160];                /* the first word as typed when Tab was first pressed */
+static int tab_k;                        /* Tab presses in a row (0: none) */
 static int run_nh, run_hi;               /* how many; which one is shown (run_nh: none, the typed line) */
 static int menu_sel = -1;                /* the entry the keys lit (Alt-F1, Up, Down), or -1 to follow the pointer */
 static struct win *sizing;               /* the window whose grip is held */
@@ -1478,6 +1481,58 @@ static void launch_program(const char *name, const char *image)
 }
 
 /* Runs the shell command CMD in a terminal window, which waits for Enter when the command ends. */
+/* Tab in the Run prompt: the first word becomes the next program in /bin that begins with
+ * what was typed (in name order, again for the one after it); only while it has no blank. */
+static void run_complete(void)
+{
+    if (tab_k == 0) {
+        if (memchr(run_buf, ' ', run_n))
+            return;
+        snprintf(tab_pfx, sizeof tab_pfx, "%s", run_buf);
+    }
+    size_t pl = strlen(tab_pfx);
+    char best[160], prev[160];
+    int n = 0, want = tab_k, have = 0;
+    best[0] = prev[0] = 0;
+    for (int round = 0; round <= want; round++) {            /* the round-th name in order */
+        DIR *d = opendir("/bin");
+        if (!d)
+            return;
+        char pick[160];
+        pick[0] = 0;
+        struct dirent *e;
+        while ((e = readdir(d)) != NULL) {
+            if (strncmp(e->d_name, tab_pfx, pl) != 0 || strlen(e->d_name) >= sizeof pick)
+                continue;
+            if (round > 0 && strcmp(e->d_name, prev) <= 0)
+                continue;
+            if (!pick[0] || strcmp(e->d_name, pick) < 0)
+                snprintf(pick, sizeof pick, "%s", e->d_name);
+        }
+        closedir(d);
+        if (!pick[0]) {                                      /* ran off the end: start again */
+            if (round == 0)
+                return;
+            tab_k = 0;
+            round = -1;
+            want = 0;
+            prev[0] = 0;
+            continue;
+        }
+        snprintf(prev, sizeof prev, "%s", pick);
+        n++;
+        have = 1;
+        if (round == want)
+            snprintf(best, sizeof best, "%s", pick);
+    }
+    (void)n;
+    if (!have)
+        return;
+    snprintf(run_buf, sizeof run_buf, "%s", best);
+    run_n = (int)strlen(run_buf);
+    tab_k++;
+}
+
 static void launch_command(const char *cmd)
 {
     if (fork() == 0) {
@@ -2087,6 +2142,8 @@ int main(int argc, char **argv)
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
+                        if (code != 15)
+                            tab_k = 0;
                         if ((code == 103 || code == 108) && run_nh > 0) {      /* Up and Down: earlier commands */
                             int hi = run_hi + (code == 103 ? -1 : 1);
                             if (hi >= 0 && hi < run_nh) {
@@ -2102,6 +2159,11 @@ int main(int argc, char **argv)
                         }
                         for (int j = 0; j < m; j++) {
                             unsigned char c = (unsigned char)out[j];
+                            if (c == 9) {
+                                run_complete();
+                                continue;
+                            }
+                            tab_k = 0;
                             if (c == 13 || c == 10) {
                                 run_on = 0;
                                 if (run_n > 0) {
