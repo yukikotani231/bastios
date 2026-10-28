@@ -210,5 +210,13 @@ and the first public key of the launch key pair from the metadata service.
   off (an EBS volume resize, `truncate` on a raw image) shows its new size
   with all files in place after the next boot. Tested in
   `test/shell_test.sh`: a 64 MiB image written to, enlarged to 128 MiB and
-  booted again. Shrinking is not supported. The kernel does not look at
-  partition tables, so this is about a whole-disk volume, as the image is.
+  booted again. Shrinking is not supported. This is about a whole-disk
+  volume, as the image is. An installed disk with a GPT (`tools/mkusb.py`'s
+  layout, which the installer writes) grows too: when the disk is bigger
+  than the table says and the BastiOS partition is the last one, the kernel
+  extends that partition to the last usable sector and moves the backup
+  table to the new end, as `sgdisk -e` and `growpart` do. It checks both
+  CRC-32s first and leaves any other layout alone; the backup is written
+  first and the primary header last, so a power cut leaves either the old
+  table or the new one. Tested in `test/shell_test.sh` on a 33 MiB GPT disk
+  enlarged by 20 MiB.
