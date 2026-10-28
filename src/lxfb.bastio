@@ -15,7 +15,7 @@
 //
 // The pixels do not go to the screen from here: the screen belongs to the
 // console devices, whose lock the kernel does not hold, so a write queues
-// a record in the ring k.gfx and the console pump (`pump` in
+// records in the ring k.gfx (one for each XFER bytes, as many as fit) and the console pump (`pump` in
 // src/main.bastio) moves it to the framebuffer. The header of k.gfx:
 // whether there is a screen, its size, pitch and channel shifts, the
 // ring's head and count, how many descriptions of /dev/fb0 are open, and
@@ -182,12 +182,8 @@ fn gfx_take(k: &mut Kernel, gx: &mut Bytes) -> bool
     put_u64(&mut gx, 0, GX_BLIT);
     put_u64(&mut gx, 8, get_u64(k.gfx, at));
     put_u64(&mut gx, 16, n);
-    let mut i = 0;
-    while i < n
-      invariant i <= n && n <= XFER && kok(k) && blen(gx) == GXB_LEN && at == GFX_HDR + head * GFX_SLOT && head < GFX_SLOTS
-    {
-      bset(&mut gx, 24 + i, bget(k.gfx, at + 16 + i));
-      i = i + 1;
+    if n > 0 {
+      bcopy(&mut gx, 24, k.gfx, at + 16, n);
     }
     put_u64(&mut k.gfx, G_HEAD, (head + 1) % GFX_SLOTS);
     put_u64(&mut k.gfx, G_COUNT, cnt - 1);
@@ -271,25 +267,41 @@ fn fb_write(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64) -> u64
   if cnt >= GFX_SLOTS {
     return CON_FULL;
   }
-  let want = smaller(smaller(n, XFER), size - pos);
-  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
-  if got == NO_RESULT || got == 0 || got > want {
+  // As many records as the ring has room for, so a program that draws a
+  // whole row (or rows) pays for one system call, not one for each XFER.
+  if va > 0xFFFFFFFFFFFF {
     return EFAULT;
   }
+  let total = smaller(smaller(n, size - pos), GFX_SLOTS * XFER);
   let head = get_u64(k.gfx, G_HEAD) % GFX_SLOTS;
-  let at = GFX_HDR + ((head + cnt) % GFX_SLOTS) * GFX_SLOT;
-  put_u64(&mut k.gfx, at, pos);
-  put_u64(&mut k.gfx, at + 8, got);
-  let mut i = 0;
-  while i < got
-    invariant i <= got && got <= XFER && kok(k) && at == GFX_HDR + ((head + cnt) % GFX_SLOTS) * GFX_SLOT && head < GFX_SLOTS && cnt < GFX_SLOTS
+  let mut done = 0;
+  let mut used = cnt;
+  let mut go = true;
+  while go && done < total && used < GFX_SLOTS
+    invariant done <= total && total <= GFX_SLOTS * XFER && used <= GFX_SLOTS && head < GFX_SLOTS && kok(k) && va <= 0xFFFFFFFFFFFF
   {
-    bset(&mut k.gfx, at + 16 + i, bget(k.fs.xfer, i));
-    i = i + 1;
+    let want = smaller(total - done, XFER);
+    let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, &mut k.fs.xfer, want);
+    if got == NO_RESULT || got == 0 || got > want {
+      go = false;
+    } else {
+      let at = GFX_HDR + ((head + used) % GFX_SLOTS) * GFX_SLOT;
+      put_u64(&mut k.gfx, at, pos + done);
+      put_u64(&mut k.gfx, at + 8, got);
+      bcopy(&mut k.gfx, at + 16, k.fs.xfer, 0, got);
+      done = done + got;
+      used = used + 1;
+      if got < want {
+        go = false;
+      }
+    }
   }
-  put_u64(&mut k.gfx, G_COUNT, cnt + 1);
-  of_set(&mut k.ofd, h, 3, pos + got);
-  return got;
+  if done == 0 {
+    return EFAULT;
+  }
+  put_u64(&mut k.gfx, G_COUNT, used);
+  of_set(&mut k.ofd, h, 3, pos + done);
+  return done;
 }
 
 /// lseek(2) on /dev/fb0, with a signed offset.

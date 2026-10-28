@@ -866,6 +866,22 @@ static void draw_cursor(int mx, int my)
         }
 }
 
+/* Writes n bytes to the screen at byte offset at. The device takes what it takes per write (the position moves on), so this goes on until all are in. */
+static int fb_put(off_t at, const void *p, size_t n)
+{
+    const char *src = p;
+    if (lseek(fb, at, SEEK_SET) != at)
+        return -1;
+    while (n) {
+        ssize_t got = write(fb, src, n);
+        if (got <= 0)
+            return -1;
+        src += got;
+        n -= (size_t)got;
+    }
+    return 0;
+}
+
 /* Copies the rectangle from scene to frame, puts the cursor on it, and
  * writes it to the screen. */
 static int flush(int x0, int y0, int x1, int y1, int mx, int my)
@@ -876,27 +892,22 @@ static int flush(int x0, int y0, int x1, int y1, int mx, int my)
     if (y1 > (int)H) y1 = H;
     if (x1 <= x0 || y1 <= y0)
         return 0;
+    /* Each write to the device is a system call (and a queue slot per 4 KiB), so rows that are wide enough go out whole:
+     * the rows are then one run, written at once, which costs less than a call for each row of a narrower piece. */
+    if ((x1 - x0) * 8 >= (int)W && y1 - y0 >= 2) {
+        x0 = 0;
+        x1 = W;
+    }
     for (int y = y0; y < y1; y++)
         memcpy(&frame[y * W + x0], &scene[y * W + x0], (x1 - x0) * 4);
     draw_cursor(mx, my);
     if (x0 == 0 && x1 == (int)W && PITCH == (size_t)W * 4) {      /* whole rows are one run in the frame buffer: one write */
         off_t at = (off_t)y0 * PITCH;
         size_t n = (size_t)(y1 - y0) * PITCH;
-        const char *src = (const char *)&frame[y0 * W];
-        if (lseek(fb, at, SEEK_SET) != at)
-            return -1;
-        while (n) {                                           /* the device takes what it takes per write: the position moves on */
-            ssize_t got = write(fb, src, n);
-            if (got <= 0)
-                return -1;
-            src += got;
-            n -= (size_t)got;
-        }
-        return 0;
+        return fb_put(at, &frame[y0 * W], n);
     }
     for (int y = y0; y < y1; y++) {
-        off_t at = (off_t)y * PITCH + (off_t)x0 * 4;
-        if (lseek(fb, at, SEEK_SET) != at || write(fb, &frame[y * W + x0], (x1 - x0) * 4) != (ssize_t)((x1 - x0) * 4))
+        if (fb_put((off_t)y * PITCH + (off_t)x0 * 4, &frame[y * W + x0], (size_t)(x1 - x0) * 4) != 0)
             return -1;
     }
     return 0;
