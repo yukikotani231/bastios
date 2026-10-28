@@ -17,7 +17,8 @@ count after every round. The run fails when
     the lowest free memory of the last rounds is more than --leak-kb below
     the lowest of the rounds just after the warm-up;
   * the descriptor or process count of a round differs from the first one's;
-  * the pages free at power off differ from the pages free at boot.
+  * the pages free at power off differ from the pages free at boot;
+  * test/fsck.py finds the disk image unsound after the power off.
 
 --alpine IMG runs a different workload instead: Alpine's gcc and make build a
 C project over and over inside a chroot on the disk image IMG (see
@@ -135,6 +136,15 @@ def main():
         except subprocess.TimeoutExpired:
             q.kill()
             q.wait()
+        if not fails:
+            # The disk the run wrote to must be a sound file system after
+            # the clean power off (the same check the power-cut tests make).
+            r = subprocess.run([os.path.join(HERE, "fsck.py"), disk], capture_output=True, text=True)
+            line = (r.stdout.strip().splitlines() or [r.stderr.strip()])[-1]
+            if r.returncode == 0:
+                print("ok", line)
+            else:
+                fails.append("fsck after power off: " + r.stdout.strip()[-400:] + r.stderr.strip()[-200:])
         if fails:
             print("---- transcript (last 4000 bytes) ----")
             print(bytes(out[-4000:]).decode(errors="replace").replace("\r", ""))
