@@ -624,6 +624,47 @@ def zero_window_scenario():
     net.peer = None
 zero_window_scenario()
 
+# 4b. A reset closes a connection only when it carries exactly the next
+#     sequence number the guest expects (RFC 5961). One far outside the
+#     window is dropped, one inside it draws an ACK and changes nothing, and
+#     the exact one resets the connection.
+def reset_scenario():
+    data = pattern(3000, 11)
+    mark = listen_7001()
+    q = Peer(net, 45001, 7001, b"", active=True)
+    q.close_when = lambda r: len(r.got) >= len(data)
+    net.peer = q
+    q.emit(SYN, q.iss)
+    q.timer = time.time() + q.rto
+    up = until(lambda: q.state == "ESTABLISHED", 10)
+    at = q.abs_seq(0)                   # the next byte the guest expects from us
+    seen = len(q.log)
+    q.emit(RST, (at + 0x40000000) % M32)
+    q.emit(RST, (at + 1) % M32)
+    answered = until(lambda: len(q.log) > seen, 5)
+    q.data = data
+    q.output()
+    finished = until(lambda: q.done() and b"bastios> " in out[mark:], 30)
+    check(up and answered, "forged reset: a reset inside the window draws a challenge ACK")
+    check(finished and q.state != "RESET" and bytes(q.got) == data,
+          "forged reset: resets with the wrong sequence number leave the connection alone")
+    net.peer = None
+    mark = listen_7001()
+    q = Peer(net, 45002, 7001, b"", active=True)
+    net.peer = q
+    q.emit(SYN, q.iss)
+    q.timer = time.time() + q.rto
+    up = until(lambda: q.state == "ESTABLISHED", 10)
+    q.emit(RST, q.abs_seq(0))
+    until(lambda: False, 0.3)
+    q.data = b"x"
+    q.output()
+    check(up and until(lambda: q.state == "RESET", 5),
+          "forged reset: a reset with the expected sequence number closes the connection")
+    until(lambda: b"bastios> " in out[mark:], 20)
+    net.peer = None
+reset_scenario()
+
 # 5. Random loss, delay, reordering and duplication both ways, on a seed.
 rng = random.Random(seed)
 def chaos(f):
