@@ -16,7 +16,7 @@ import "netconst.bastio";
 const VIRTIO_NET: u64 = 0x1000;       // legacy (transitional) network device id
 const NET_F_MAC: u64 = 32;            // feature bit 5: the card has a MAC address
 const TX_BUF: u64 = 2048;             // the transmit page holds two
-const NET_PAGES: u64 = 9;
+const NET_PAGES: u64 = 17;            // set aside for a card: a virtio one takes nine, an e1000 seventeen
 
 struct VNet {
   io: Vt,
