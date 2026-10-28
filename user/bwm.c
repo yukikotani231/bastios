@@ -40,6 +40,7 @@
 #include "imefont.h"
 #include "bwmdict.h"
 #include "bwmtz.h"
+#include "bwmkeys.h"
 
 struct bitfield { uint32_t offset, length, msb_right; };
 struct var_info {
@@ -1265,8 +1266,6 @@ static int listen_socket(void)
  * the modifiers and makes the bytes the terminal would have given, so the
  * clients see the same keys either way. */
 struct kev { uint64_t sec, usec; uint16_t type, code; int32_t value; };
-static const char kmap[]  = "\0\033" "1234567890-=\177\tqwertyuiop[]\r\0asdfghjkl;'`\0\\zxcvbnm,./\0*\0 ";
-static const char kmaps[] = "\0\033" "!@#$%^&*()_+\177\tQWERTYUIOP{}\r\0ASDFGHJKL:\"~\0|ZXCVBNM<>?\0*\0 ";
 static int k_shift, k_ctrl, k_alt, k_caps;
 
 /* Auto-repeat is done here, since the key events carry only presses and
@@ -1328,9 +1327,7 @@ static int key_bytes(unsigned code, char *out)
     if (code == 104) { memcpy(out, "\033[5~", 4); return 4; }        /* Page Up */
     if (code == 109) { memcpy(out, "\033[6~", 4); return 4; }        /* Page Down */
     if (code == 110) { memcpy(out, "\033[2~", 4); return 4; }        /* Insert */
-    if (code >= sizeof kmap - 1)
-        return 0;
-    char c = k_shift ? kmaps[code] : kmap[code];
+    char c = kb_char(code, k_shift);
     if (c >= 'a' && c <= 'z' && k_caps)
         c -= 32;
     else if (c >= 'A' && c <= 'Z' && k_caps)
@@ -1997,6 +1994,7 @@ int main(int argc, char **argv)
         }
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
+        kb_poll();
         int clock_h, clock_m;
         clock_hm(&clock_h, &clock_m);
         if (clock_h * 60 + clock_m != clock_shown) {
