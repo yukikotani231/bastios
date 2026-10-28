@@ -140,6 +140,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Boot
 
+- A GPT disk that was made bigger since it was written (an EBS volume resized, an image `truncate`d up) gets its BastiOS partition extended to the new end at the next boot, and its backup table moved there with valid CRC-32s, when the table is the plain layout `tools/mkusb.py` writes and the partition is the last one (`gpt_grow`, `src/diskfs.bastio`). Any other layout, or a table whose CRC-32 does not match, is left untouched.
 - The ARP cache holds 64 neighbors (4 before): a machine on a network with more than four neighbors no longer asks again for the ones it just forgot.
 - An e1000 has thirty-two receive buffers (eight before), taking seventeen pages: the card drops a frame when it has none free, and sixteen frames dropped in a 2 MiB TCP echo through QEMU's user-mode network each cost a retransmission timeout, so the echo ran at 1 MiB/s against virtio's 4 MiB/s; now none are dropped and it runs at 4 MiB/s (`make bench-net`, #529).
 - The system runs 1023 processes and threads at once (511 before). `NPROC` is 1024; the per-process tables follow it, and `/proc/PID` names, `dec_out` and `proc_pid` take four-digit ids. `mproc` holds 700 children at once and checks ids past 511. A machine with a small kernel heap still stops sooner (about 250 at 256 MiB), because the per-process tables double at 257 rows.

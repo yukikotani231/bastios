@@ -2950,6 +2950,43 @@ after = open(gptdisk, "rb").read()
 good = after[:pf * 512] == before[:pf * 512] and after[(pf + pn) * 512:] == before[(pf + pn) * 512:]
 print(("ok  " if good else "FAIL"), "(GPT disk) not a byte outside the partition changed")
 fails += not good
+# The same disk made bigger afterwards (a cloud volume resized): the kernel
+# extends the partition to the new end and moves the backup table there,
+# both copies with valid CRC-32s, and the files already on it are still there.
+import struct, zlib
+grown = os.path.join(disk_dir.name, "gptgrow.img")
+open(grown, "wb").write(bytes(after) + bytes(20 * 2048 * 512))
+grow_args = ["-m", "64M", "-drive", f"file={grown},format=raw,if=none,id=gd", "-device", "virtio-blk-pci,drive=gd"]
+ok, code = report_boot(grow_args, "GPT disk grown", 0, between=gpt_cmd("cat disk/g", b"gpt\r\n"))
+img = open(grown, "rb").read()
+gtotal = len(img) // 512
+def gpt_hdr(lba):
+    h = bytearray(img[lba * 512:lba * 512 + 92])
+    crc = struct.unpack_from("<I", h, 16)[0]
+    struct.pack_into("<I", h, 16, 0)
+    return h, h[:8] == b"EFI PART" and crc == zlib.crc32(bytes(h))
+def gpt_ents(h):
+    elba = struct.unpack_from("<Q", h, 72)[0]
+    count, esz, ecrc = struct.unpack_from("<III", h, 80)
+    raw = img[elba * 512:elba * 512 + count * esz]
+    return raw, zlib.crc32(raw) == ecrc
+h1, ok1 = gpt_hdr(1)
+h2, ok2 = gpt_hdr(gtotal - 1)
+raw1, eok1 = gpt_ents(h1)
+raw2, eok2 = gpt_ents(h2)
+cur1, alt1, first_use, last_use = struct.unpack_from("<QQQQ", h1, 24)
+cur2, alt2 = struct.unpack_from("<QQ", h2, 24)
+pfirst, plast = struct.unpack_from("<QQ", raw1, 32)
+good = ok1 and ok2 and eok1 and eok2 and raw1 == raw2 and alt1 == gtotal - 1 and cur2 == gtotal - 1 and alt2 == 1
+good = good and last_use == gtotal - 34 and pfirst == pf and plast == last_use
+print(("ok  " if good else "FAIL"), "(GPT disk grown) both tables moved to the new end, valid, and the partition reaches the last usable sector")
+fails += not good
+good = ok and b"disk: the BastiOS partition at sector %d (%d sectors)" % (pf, gtotal - 34 - pf + 1) in out
+print(("ok  " if good else "FAIL"), "(GPT disk grown) the kernel mounts the whole new partition")
+fails += not good
+good = img[:512] == after[:512] and img[34 * 512:pf * 512] == after[34 * 512:pf * 512] and img[len(after) - 33 * 512:len(after)] == bytes(33 * 512)
+print(("ok  " if good else "FAIL"), "(GPT disk grown) nothing before the partition changed except the table, and the old backup is gone")
+fails += not good
 # Another type GUID on the partition: left alone.
 other = bytearray(before)
 other[1024:1040] = bytes(range(1, 17))

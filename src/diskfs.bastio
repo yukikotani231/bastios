@@ -87,6 +87,7 @@ import "diskq.bastio";
 import "smaller.bastio";
 import "core/endian.bastio";
 import "core/bitmap.bastio";
+import "core/csum.bastio";
 import "core/bytes.bastio";
 
 const LK_BYTES: u64 = 4096;            // the flags of disk_links' filter (DiskFs.lkb)
@@ -924,6 +925,176 @@ fn gpt_find(dev: &mut Blk, sec: &mut Bytes, total: u64) -> Part
   return r;
 }
 
+const GPT_ENTS: u64 = 16384;          // a GPT's entry array at most: 128 entries of 128 bytes
+
+/// Is the CRC-32 stored at byte 16 of the header in `hs` the CRC-32 of its
+/// 92 bytes with that field zero? (`sec` is scratch.)
+fn gpt_hdr_ok(hs: &Bytes, sec: &mut Bytes) -> bool
+  requires blen(hs) == SECTOR && blen(sec) == SECTOR
+  ensures blen(sec) == SECTOR
+{
+  bcopy(&mut sec, 0, hs, 0, SECTOR);
+  store_le32(&mut sec, 16, 0);
+  return cast[u64](crc32(sec, 0, 92)) == get_u64(hs, 16) % 4294967296;
+}
+
+/// Rewrites the CRC-32 of the header in `hs` (92 bytes) after its other fields changed.
+fn gpt_hdr_seal(hs: &mut Bytes)
+  requires blen(hs) == SECTOR
+  ensures blen(hs) == SECTOR
+{
+  put_u64(&mut hs, 16, 0);
+  let c = crc32(hs, 0, 92);
+  put_u64(&mut hs, 16, cast[u64](c));
+}
+
+/// The work of `gpt_grow`, with its two buffers: `hs` (a sector) and `es` (GPT_ENTS bytes).
+fn gpt_grow_with(dev: &mut Blk, sec: &mut Bytes, hs: &mut Bytes, es: &mut Bytes, total: u64) -> bool
+  requires blk_ok(dev) && blen(sec) == SECTOR && blen(hs) == SECTOR && blen(es) == GPT_ENTS
+  ensures blk_ok(dev) && blen(sec) == SECTOR && blen(hs) == SECTOR && blen(es) == GPT_ENTS
+{
+  if total < 68 || total > PLO_MAX || !blk_read(&mut dev, 1, &mut hs) || get_u64(hs, 0) != GPT_SIG {
+    return false;
+  }
+  if get_u64(hs, 8) % 4294967296 != 0x10000 || get_u64(hs, 8) / 4294967296 != 92 || !gpt_hdr_ok(hs, &mut sec) {
+    return false;
+  }
+  let alt = get_u64(hs, 32);
+  let first_use = get_u64(hs, 40);
+  let last_use = get_u64(hs, 48);
+  let w = get_u64(hs, 80);
+  let count = w % 4294967296;
+  if get_u64(hs, 24) != 1 || get_u64(hs, 72) != 2 || w / 4294967296 != 128 || count < 4 || count > 128 || count % 4 != 0 {
+    return false;
+  }
+  let esec = count / 4;
+  // The disk has grown past where this table ends (by more than the room
+  // the new backup copy needs, so it does not overlap the old one), and
+  // the table is the plain layout: entries after the header, the backup
+  // right after the last usable sector.
+  if alt > PLO_MAX || last_use >= alt || alt != last_use + esec + 1 || first_use < 2 + esec || first_use > last_use
+    || total < alt + esec + 3 {
+    return false;
+  }
+  let mut i = 0;
+  while i < esec
+    invariant i <= esec && esec <= 32 && blk_ok(dev) && blen(sec) == SECTOR && blen(es) == GPT_ENTS
+  {
+    if !blk_read(&mut dev, 2 + i, &mut sec) {
+      return false;
+    }
+    bcopy(&mut es, i * SECTOR, sec, 0, SECTOR);
+    i = i + 1;
+  }
+  if cast[u64](crc32(es, 0, count * 128)) != get_u64(hs, 88) % 4294967296 {
+    return false;
+  }
+  // The BastiOS partition (the first of that type: the one gpt_find
+  // takes) must end at the last usable sector, and no other partition
+  // may reach as far as its start.
+  let mut k = count;
+  let mut j = 0;
+  while j < count && k == count
+    invariant j <= count && count <= 128 && k <= count && blen(es) == GPT_ENTS
+  {
+    let o = j * 128;
+    if get_u64(es, o) == BASTIOS_PART_LO && get_u64(es, o + 8) == BASTIOS_PART_HI {
+      k = j;
+    }
+    j = j + 1;
+  }
+  if k == count {
+    return false;
+  }
+  let first = get_u64(es, k * 128 + 32);
+  if first < 34 || first % BSECT != 0 || first > last_use || get_u64(es, k * 128 + 40) != last_use {
+    return false;
+  }
+  j = 0;
+  while j < count
+    invariant j <= count && count <= 128 && blen(es) == GPT_ENTS
+  {
+    let o = j * 128;
+    if j != k && (get_u64(es, o) != 0 || get_u64(es, o + 8) != 0) && get_u64(es, o + 40) >= first {
+      return false;
+    }
+    j = j + 1;
+  }
+  // Write the new copy at the end first, the primary last: a cut leaves
+  // either the old table (valid on its own) or the new one.
+  let new_last = total - esec - 2;
+  put_u64(&mut es, k * 128 + 40, new_last);
+  let ecrc = cast[u64](crc32(es, 0, count * 128));
+  let bel = total - 1 - esec;
+  i = 0;
+  while i < esec
+    invariant i <= esec && esec <= 32 && blk_ok(dev) && blen(sec) == SECTOR && blen(es) == GPT_ENTS && bel + esec < total
+  {
+    bcopy(&mut sec, 0, es, i * SECTOR, SECTOR);
+    if !blk_write(&mut dev, bel + i, sec) {
+      return false;
+    }
+    i = i + 1;
+  }
+  put_u64(&mut hs, 24, total - 1);
+  put_u64(&mut hs, 32, 1);
+  put_u64(&mut hs, 48, new_last);
+  put_u64(&mut hs, 72, bel);
+  put_u64(&mut hs, 88, ecrc);
+  gpt_hdr_seal(&mut hs);
+  if !blk_write(&mut dev, total - 1, hs) {
+    return false;
+  }
+  i = 0;
+  while i < esec
+    invariant i <= esec && esec <= 32 && blk_ok(dev) && blen(sec) == SECTOR && blen(es) == GPT_ENTS
+  {
+    bcopy(&mut sec, 0, es, i * SECTOR, SECTOR);
+    if !blk_write(&mut dev, 2 + i, sec) {
+      return false;
+    }
+    i = i + 1;
+  }
+  put_u64(&mut hs, 24, 1);
+  put_u64(&mut hs, 32, total - 1);
+  put_u64(&mut hs, 72, 2);
+  gpt_hdr_seal(&mut hs);
+  if !blk_write(&mut dev, 1, hs) {
+    return false;
+  }
+  // The old backup copy now lies inside the partition: no longer a table.
+  zero(&mut sec, 0, SECTOR);
+  i = 0;
+  while i <= esec
+    invariant i <= esec + 1 && esec <= 32 && blk_ok(dev) && blen(sec) == SECTOR && alt + 1 <= total
+  {
+    if !blk_write(&mut dev, alt - esec + i, sec) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// A disk that was made bigger since its GPT was written (a cloud volume
+/// resized, an image `truncate`d up): when the table is the plain layout
+/// that `tools/mkusb.py` writes, with the BastiOS partition last, extends
+/// that partition to the new end of the disk and moves the backup table
+/// there, as `sgdisk -e` and `growpart` do. Both copies carry their CRC-32;
+/// a table that does not check out, or any other layout, is left as it is.
+/// True if the table was rewritten.
+fn gpt_grow(dev: &mut Blk, sec: &mut Bytes, total: u64) -> bool
+  requires blk_ok(dev) && blen(sec) == SECTOR
+  ensures blk_ok(dev) && blen(sec) == SECTOR
+{
+  let mut hs = balloc(SECTOR);
+  let mut es = balloc(GPT_ENTS);
+  let r = gpt_grow_with(&mut dev, &mut sec, &mut hs, &mut es, total);
+  bfree(hs);
+  bfree(es);
+  return r;
+}
+
 /// Mounts the disk (see DM_*), formatting it if it has no file system yet and is
 /// blank (else it is left alone: `foreign`), and works out which blocks
 /// are in use. Without a disk (or one too small) the file
@@ -958,6 +1129,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   if mode == DM_GPT {
     // A GPT with a BastiOS partition: the file system is in that
     // partition. A GPT without one is someone else's disk (below).
+    gpt_grow(&mut d.dev, &mut d.sec, total);
     let p = gpt_find(&mut d.dev, &mut d.sec, total);
     if p.found {
       d.plo = p.plo;
