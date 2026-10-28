@@ -19,13 +19,14 @@
 #include <sys/utsname.h>
 #include <time.h>
 #include "bwmtz.h"
+#include "bwmkeys.h"
 #include <net/if.h>
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
-#define BS_ROWS 13
+#define BS_ROWS 14
 #define BS_MAXPROC 64
 #define BS_PGUP 0x100                             /* keys that are not characters */
 #define BS_PGDN 0x101
@@ -187,6 +188,20 @@ static void bs_next_zone(void)
     fflush(stdout);
 }
 
+/* k: the next layout goes into /etc/keymap, which bwm reads again within seconds. */
+static void bs_next_keymap(void)
+{
+    const char *next = kb_names[(kb_read() + 1) % KB_N];
+    FILE *f = fopen(KB_FILE, "w");
+    if (f) {
+        fprintf(f, "%s\n", next);
+        fclose(f);
+        printf("bsys: keyboard %s\n", next);
+    } else
+        puts("bsys: cannot write /etc/keymap");
+    fflush(stdout);
+}
+
 static void bs_paint(unsigned sw, unsigned sh)
 {
     char v[BF_COLS + 1];
@@ -254,7 +269,9 @@ static void bs_paint(unsigned sw, unsigned sh)
     }
     bs_row(11, "Network", v);
     printf("bsys: network %s\n", v);
-    bf_put_row(12, "  r: refresh  t: time zone  p: processes", 40, 0x00808090, 0x00101018);
+    snprintf(v, sizeof v, "%s", kb_names[kb_read()]);
+    bs_row(12, "Keyboard", v);
+    bf_put_row(13, "  r: refresh  t: time zone  k: keyboard  p: processes", 54, 0x00808090, 0x00101018);
 }
 
 static int bsys_main(void)
@@ -384,6 +401,9 @@ static int bsys_main(void)
                 printf("bsys: cannot end %d\n", pid);
             bs_scan();
             bs_paint_tasks();
+        } else if (!bs_tasks && c == 'k') {
+            bs_next_keymap();
+            bs_paint(sw, sh);
         } else if (!bs_tasks && c == 't') {
             bs_next_zone();
             bs_paint(sw, sh);

@@ -180,13 +180,13 @@ GUILD := -Wl,-z,noseparate-code,-z,norelro,--build-id=none
 build/user/imefont.h: tools/imefont.py src/font16.bin user/bwmdict.h | build/user
 	python3 tools/imefont.py src/font16.bin user/bwmdict.h > $@
 
-build/user/bwm.elf: user/bwm.c user/bwmtz.h user/bwmproto.h user/bwmdict.h build/user/font8x8.h build/user/imefont.h | build/user
+build/user/bwm.elf: user/bwm.c user/bwmtz.h user/bwmkeys.h user/bwmproto.h user/bwmdict.h build/user/font8x8.h build/user/imefont.h | build/user
 	$(MUSLCC) -static-pie -O2 $(GUILD) -s -Ibuild/user -o $@ $<
 
 build/user/bhello.elf: user/bhello.c user/bwmlib.h user/bwmproto.h | build/user
 	$(MUSLCC) -static-pie -O2 $(GUILD) -s -o $@ $<
 
-build/user/bterm.elf: user/bterm.c user/font16.h user/bfiles.h user/bsys.h user/bview.h user/bwmtz.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h src/font16.bin | build/user
+build/user/bterm.elf: user/bterm.c user/font16.h user/bfiles.h user/bsys.h user/bview.h user/bwmtz.h user/bwmkeys.h user/bwmlib.h user/bwmproto.h build/user/font8x8.h src/font16.bin | build/user
 	$(MUSLCC) -static-pie -O2 -ffunction-sections -fdata-sections -Wl,--gc-sections $(GUILD) -s -Ibuild/user -o $@ $<
 
 # A dynamically linked PIE, and musl's dynamic linker (libc.so, which is
