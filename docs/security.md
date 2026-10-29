@@ -182,9 +182,10 @@ What the page tables enforce for a user process, and what they do not.
   quarter of a system call's time for a leak only Retbleed-class CPUs have), and the two indirect jumps in `boot/boot.S`
   that a trap or a return to user mode reach (`trap_alias`, `bst_cpu_enter`)
   are retpolines written out by hand. So a branch target a user program
-  trained does not choose where the kernel runs. Not done: IBPB between
-  processes (a user program can still try to train the predictor against
-  another user program), IBRS/STIBP, and RSB stuffing on a context switch.
+  trained does not choose where the kernel runs. When a processor starts running another process's page table it issues an
+  IBPB (`bst_cpu_enter`, if `CORE_IBPB`: CPUID reports IA32_PRED_CMD), so one
+  process cannot train the predictor against the next. Not done: IBRS/STIBP,
+  and RSB stuffing on a context switch.
 - **MDS and its relatives:** `bst_enter_tail` runs `verw` just before `iretq`
   when the boot code found the CPU enumerates MD_CLEAR and does not say it is
   immune (`MDS_NO`): `mds_verw` in `boot/smp.c`, kept per processor in

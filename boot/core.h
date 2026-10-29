@@ -41,6 +41,7 @@
 #define CORE_LROOT     416                      /* the process table of this processor's last flushing load of the shadow table, and */
 #define CORE_LGEN      424                      /* bst_pt_gen as read before it: the same table and count mean the shadow table's translations are still good */
 #define CORE_VERW      432                      /* nonzero: the CPU can be affected by MDS, so the return to user mode runs `verw` */
+#define CORE_IBPB      440                      /* nonzero: the CPU has IA32_PRED_CMD, so a switch to another process's table issues an IBPB */
 #define CORE_IST_TOP   0x2000                   /* top of the 4 KiB IST1 stack, the block's second page */
 #define CORE_GUARD     0x2000                   /* the unmapped page below the kernel stack */
 

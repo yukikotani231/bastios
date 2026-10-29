@@ -344,6 +344,23 @@ static uint64_t mds_verw(void) {
     return 1;
 }
 
+/* Whether IA32_PRED_CMD (MSR 0x49) exists, to flush the branch predictor
+ * with an IBPB: CPUID.7.EDX bit 26 on Intel, CPUID.80000008.EBX bit 12 on AMD. */
+static uint64_t has_ibpb(void) {
+    uint32_t r[4];
+    cpuid(0, 0, r);
+    if (r[0] >= 7) {
+        cpuid(7, 0, r);
+        if (r[3] & (1u << 26)) return 1;
+    }
+    cpuid(0x80000000, 0, r);
+    if (r[0] >= 0x80000008) {
+        cpuid(0x80000008, 0, r);
+        if (r[1] & (1u << 12)) return 1;
+    }
+    return 0;
+}
+
 /* Processor i's task state segment: user-mode traps land on the trap stack
  * at the end of its block. No I/O permission map. Also points
  * KERNEL_GS_BASE at the block for the `syscall` entry. */
@@ -354,6 +371,7 @@ static void core_init(uint64_t i) {
     *(uint64_t *)(core + CORE_ALIAS) = alias;
     *(uint64_t *)(core + CORE_TRAP_TOP) = top;
     *(uint64_t *)(core + CORE_VERW) = mds_verw();
+    *(uint64_t *)(core + CORE_IBPB) = has_ibpb();
     uint8_t *tss = core + CORE_TSS;
     for (int b = 0; b < 104; b++) tss[b] = 0;
     *(uint64_t *)(tss + 4) = top;                   /* rsp0 */
