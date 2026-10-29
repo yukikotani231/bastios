@@ -46,7 +46,7 @@ MAGIC = b"rhswfsj\0"                    # dm-log-writes' superblock magic
 
 def qemu(kernel, drive):
     return subprocess.Popen(
-        ["qemu-system-x86_64", "-kernel", kernel, "-m", "64M", "-display", "none", "-no-reboot",
+        ["qemu-system-x86_64", "-kernel", kernel, "-m", "256M", "-display", "none", "-no-reboot",
          "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04", "-serial", "stdio",
          "-monitor", "none", "-nic", "none"] + drive,
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
