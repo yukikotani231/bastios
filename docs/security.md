@@ -170,6 +170,32 @@ What the page tables enforce for a user process, and what they do not.
   could change kernel code. The proofs say the kernel makes no such write;
   this would be a second line.
 
+## Speculative execution
+
+- **Meltdown:** the kernel runs on its own page table and loads it on every
+  entry from user mode (`trap_alias`, KPTI), so user code finds no kernel
+  memory mapped to read speculatively. Kept on purpose (Yuki's decision of
+  2026-10-23).
+- **Spectre v2 (branch target injection):** the kernel and `boot/` are built
+  with retpolines (`-mindirect-branch=thunk -fno-jump-tables`,
+  `RETPOLINE` in the `Makefile`; no thunk on `ret`, which would cost a
+  quarter of a system call's time for a leak only Retbleed-class CPUs have), and the two indirect jumps in `boot/boot.S`
+  that a trap or a return to user mode reach (`trap_alias`, `bst_cpu_enter`)
+  are retpolines written out by hand. So a branch target a user program
+  trained does not choose where the kernel runs. When a processor starts running another process's page table it issues an
+  IBPB (`bst_cpu_enter`, if `CORE_IBPB`: CPUID reports IA32_PRED_CMD), so one
+  process cannot train the predictor against the next. The same switch fills the return stack buffer
+  with 32 harmless entries. Not done: IBRS/STIBP.
+- **MDS and its relatives:** `bst_enter_tail` runs `verw` just before `iretq`
+  when the boot code found the CPU enumerates MD_CLEAR and does not say it is
+  immune (`MDS_NO`): `mds_verw` in `boot/smp.c`, kept per processor in
+  `CORE_VERW`. A CPU that is immune pays nothing.
+- **Spectre v1 (bounds check bypass):** not mitigated. The proofs show every
+  index is in bounds, but a branch on a user-chosen value can still be
+  mispredicted, and the kernel does not mask or fence after such branches.
+  Retbleed, L1TF and the like depend on the processor and are not handled
+  either; SMT is left on.
+
 ## Randomness
 
 `/dev/urandom`, `/dev/random` and `getrandom` come from one ChaCha20 generator

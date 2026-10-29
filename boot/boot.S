@@ -318,8 +318,24 @@ bst_cpu_enter:
         jnz     7f
         mov     bst_pt_gen(%rip), %r8           /* read before CR3 is loaded: a take after it shows at the next entry */
         cmp     CORE_LROOT(%rsi), %rax          /* the table of the last flushing load, and no entry taken out of any table since (the prelude entered the table for a system call's copy, say) */
-        jne     8f
-        cmp     CORE_LGEN(%rsi), %r8
+        je      12f
+        cmpq    $0, CORE_IBPB(%rsi)             /* another process than the one this processor ran last: its branch predictions must not steer this one (Spectre v2) */
+        je      13f
+        xor     %edx, %edx
+        mov     $1, %eax                        /* IBPB; rax is reloaded below */
+        mov     $0x49, %ecx                     /* IA32_PRED_CMD */
+        wrmsr
+13:     mov     $32, %ecx                       /* RSB stuffing: 32 calls that never return fill the return stack with a harmless target, so returns the previous process left in it are not used */
+14:     call    15f
+        pause
+        lfence
+15:     dec     %ecx
+        jnz     14b
+        add     $32*8, %rsp
+        mov     CORE_UROOT(%rsi), %rax
+        and     $-2, %rax
+        jmp     8f
+12:     cmp     CORE_LGEN(%rsi), %r8
         je      9f
 8:      mov     %rax, CORE_LROOT(%rsi)
         mov     %r8, CORE_LGEN(%rsi)
@@ -397,7 +413,13 @@ bst_cpu_enter:
         mov     13*8(%rsi), %r14
         mov     14*8(%rsi), %r15
         mov     4*8(%rsi), %rsi
-        jmp     *enter_tail_ptr(%rip)           /* the rest runs in the entry area */
+        mov     enter_tail_ptr(%rip), %rax      /* the rest runs in the entry area (rax is free: the user's is on the stack) */
+        call    8f                              /* a retpoline: the user cannot train the branch predictor to send this jump elsewhere */
+7:      pause
+        lfence
+        jmp     7b
+8:      mov     %rax, (%rsp)
+        ret
 
 /* uint64_t *bst_platform_ctx(void): this processor's saved user context, the
  * start of its block. It touches only %rax, so the native backend's cpu_get and
@@ -444,8 +466,16 @@ bst_enter_tail:
         and     $-CORE_BLOCK, %rax
         mov     CORE_CR3(%rax), %rax
         mov     %rax, %cr3
-        mov     5*8(%rsp), %rax
-        iretq
+        mov     %rsp, %rax
+        and     $-CORE_BLOCK, %rax
+        cmpq    $0, CORE_VERW(%rax)             /* read after the switch: this is the processor's own block, mapped in the shadow table */
+        mov     5*8(%rsp), %rax                 /* leaves the flags */
+        je      1f
+        verw    bst_verw_sel(%rip)              /* clears the CPU's buffers of what the kernel just read (MDS) */
+1:      iretq
+.balign 2
+bst_verw_sel:
+        .word   UDATA
 
 /*
  * Entry for the `syscall` instruction (Linux system calls). The CPU leaves
@@ -493,7 +523,12 @@ trap_alias:
         mov     CORE_KCR3(%rax), %rax
         mov     %rax, %cr3
 1:      movabs  $trap_common, %rax
-        jmp     *%rax
+        call    8f                              /* a retpoline: a trap from user mode must not run where the user trained the predictor */
+7:      pause
+        lfence
+        jmp     7b
+8:      mov     %rax, (%rsp)
+        ret
 
 /*
  * Trap stubs. Each pushes a dummy error code where the CPU pushes none, then

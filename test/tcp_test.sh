@@ -151,6 +151,7 @@ class Peer:
         self.rto = 0.25
         self.log = []                   # (time, segment) of every guest segment seen
         self.close_when = lambda p: False
+        self.ack_cap = None
         self.ws = None                  # the window scale we offer in our SYN, if any
         self.sack_ok = False            # whether our SYN says we take SACK blocks
         self.peer_ws = None             # the guest's, once both sides scale
@@ -169,6 +170,8 @@ class Peer:
             win >>= self.ws                 # scaled, except in a SYN
         win = min(win, 65535)
         ack = self.rcv_abs() if self.irs is not None else 0
+        if self.ack_cap is not None:
+            ack = self.ack_cap              # acknowledges no more than the guest's SYN
         opts = b""
         if flags & SYN:
             opts = struct.pack("!BBH", 2, 4, self.mss)
@@ -329,6 +332,7 @@ class Net:
         self.echoes = []
         self.dhcp_done = False
         self.arp_asked = []
+        self.unreach = []               # the guest's ICMP destination unreachable messages
         self.echoed = []                # (destination, flags and fragment field) of the guest's echo replies
 
     def send_ip(self, proto, payload):
@@ -355,6 +359,9 @@ class Net:
         if f[12:14] != b"\x08\x00":
             return
         dst = struct.unpack("!I", f[30:34])[0]
+        if f[23] == 1 and f[34] == 3:
+            self.unreach.append(f)
+            return
         if f[23] == 1 and f[34] == 0:
             self.echoed.append((dst, f[18:22]))
             return
@@ -826,6 +833,91 @@ def no_ack_scenario():
     net.peer = None
 no_ack_scenario()
 
+# 6d. A UDP datagram for a port nobody listens on draws an ICMP port
+#     unreachable that carries the start of the datagram (RFC 1122 4.1.3.4);
+#     an echo request with IP options is answered all the same (RFC 1122
+#     3.2.1.8).
+udp = struct.pack("!HHHH", 5555, 9999, 8 + 4, 0) + b"ping"
+udp = udp[:6] + struct.pack("!H", l4_sum(17, HOST_IP, GUEST_IP, udp)) + udp[8:]
+net.unreach = []
+net.send_ip(17, udp)
+until(lambda: net.unreach, 5)
+check(len(net.unreach) == 1, "UDP to a closed port: the guest answers with ICMP destination unreachable")
+if net.unreach:
+    u = net.unreach[0]
+    check(u[34] == 3 and u[35] == 3 and csum(u[34:70]) == 0 and u[62:66] == udp[:4],
+          "UDP to a closed port: port unreachable (code 3), right checksum, the datagram's ports quoted")
+net.echoed = []
+body = struct.pack("!BBHHH", 8, 0, 0, 0x4321, 1) + b"opts"
+body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+hdr = struct.pack("!BBHHHBBHII", 0x46, 0, 24 + len(body), 7, 0, 64, 1, 0, HOST_IP, GUEST_IP) + b"\x01\x01\x01\x01"
+hdr = hdr[:10] + struct.pack("!H", csum(hdr)) + hdr[12:]
+link.send((link.guest_mac or BCAST) + HOST_MAC + b"\x08\x00" + hdr + body)
+until(lambda: net.echoed, 5)
+check(len(net.echoed) == 1, "IP options: an echo request with options is answered")
+
+# 6e. Slow start (RFC 5681, RFC 6928): with our ACKs of its data withheld, the guest
+#     sends no more than its initial window of ten segments in the first
+#     round trip, though our window would take far more.
+def hold_acks(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    def cap(f):
+        x = tcp_of(f)
+        if x and x["flags"] & SYN:
+            p.ack_cap = (x["seq"] + 1) % M32
+        return 0
+    link.in_rule = cap
+    def mute(f):
+        # No ACK-only segments once the guest sends data: they would repeat
+        # and start a fast retransmit, which is not what is measured here.
+        x = tcp_of(f)
+        if x and not x["data"] and not x["flags"] & (SYN | FIN | RST) and any(y["data"] for _, y in p.log):
+            return None
+        return 0
+    link.out_rule = mute
+mark = listen_7001()
+p = Peer(net, 45004, 7001, pattern(60000, 9), active=True)
+hold_acks(p)
+net.peer = p
+p.emit(SYN, p.iss)
+p.timer = time.time() + p.rto
+until(lambda: len([1 for _, x in p.log if x["data"]]) > 0, 10)
+until(lambda: False, 0.8)
+sent = {}
+for t, x in p.log:
+    if x["data"]:
+        sent[x["seq"]] = max(sent.get(x["seq"], 0), len(x["data"]))
+first = min(t for t, x in p.log if x["data"]) if sent else 0
+byts = sum(sent.values())
+check(sent and byts <= 14600, f"slow start: {byts} bytes in the first round trip with nothing acknowledged (at most 14600)")
+p.ack_cap = None
+p.emit(RST, p.abs_seq(0))
+until(lambda: b"bastios> " in out[mark:], 20)
+net.peer = None
+link.in_rule = lambda f: 0
+link.out_rule = lambda f: 0
+
+# 6f. Fast retransmit (RFC 5681 3.2): the third segment the guest sends is
+#     lost; the ACKs for the ones after it repeat, and the guest sends the
+#     missing one again long before its one second timer would.
+lost_fr = {"n": 0, "seq": None, "at": None}
+def lose_guest_third(f):
+    x = tcp_of(f)
+    if x and x["data"]:
+        if lost_fr["seq"] is None:
+            lost_fr["n"] += 1
+            if lost_fr["n"] == 3:
+                lost_fr["seq"], lost_fr["at"] = x["seq"], time.time()
+                return None
+    return 0
+def fr_setup(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    link.in_rule = lose_guest_third
+p = echo_run("fast retransmit", pattern(60000, 10), fr_setup)
+again = [t for t, x in p.log if x["data"] and x["seq"] == lost_fr["seq"]]
+check(lost_fr["seq"] is not None and again and again[0] - lost_fr["at"] < 0.7,
+      f"fast retransmit: the lost segment came again {again[0] - lost_fr['at'] if again else -1:.2f}s after (under 0.7 s, not the 1 s timer)")
+
 # 7. The ARP cache holds more than four neighbors: the guest pings twelve
 #    hosts that this script answers for, then the same twelve again. The
 #    second round needs no ARP request.
@@ -845,6 +937,40 @@ second = ping_round()
 asked_second = len(net.arp_asked) - asked_first
 check(first and second, "ARP cache: twelve neighbors answer a ping, twice")
 check(asked_first >= 12 and asked_second == 0, f"ARP cache: {asked_first} requests for twelve neighbors, {asked_second} the second time")
+
+# 6g. ICMP destination unreachable about a connection that is opening
+#     (RFC 1122 4.2.3.9, RFC 5927 4.1): a port unreachable that quotes the
+#     wrong sequence number is ignored; one that quotes our SYN's aborts the
+#     connect at once.
+mark = len(out)
+net.peer = None
+syn_seen = []
+def catch_syn(f):
+    s = tcp_of(f)
+    if s and s["flags"] & SYN and not s["flags"] & ACK and s["dport"] == 8081:
+        syn_seen.append(f)
+    return 0
+link.in_rule = catch_syn
+type_line("tcpget 10.0.2.2 8081 hi")
+until(lambda: syn_seen, 10)
+def quote_icmp(f, seq_delta):
+    inner = bytearray(f[14:14 + 20 + 8])
+    inner[24:28] = struct.pack("!I", (struct.unpack("!I", bytes(inner[24:28]))[0] + seq_delta) % M32)
+    body = struct.pack("!BBHI", 3, 3, 0, 0) + bytes(inner)
+    body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+    net.send_ip(1, body)
+if syn_seen:
+    quote_icmp(syn_seen[0], 1)
+    time.sleep(0.5)
+    pump()
+    check(b"connection refused" not in out[mark:], "ICMP port unreachable with a wrong sequence number: the connect goes on")
+    quote_icmp(syn_seen[0], 0)
+    done = until(lambda: b"connection refused" in out[mark:], 5)
+    check(done, "ICMP port unreachable quoting our SYN: the connect is refused at once")
+else:
+    check(False, "ICMP port unreachable: no SYN seen")
+link.in_rule = lambda f: 0
+until(lambda: b"bastios> " in out[mark:], 10)
 
 qemu.kill(); qemu.wait()
 print("---- transcript ----")

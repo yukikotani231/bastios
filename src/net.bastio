@@ -41,7 +41,9 @@ const IP_UDP: u64 = 17;
 const IP_TCP: u64 = 6;
 const ICMP_ECHO_REPLY: u64 = 0;
 const ICMP_ECHO: u64 = 8;
+const ICMP_UNREACH: u64 = 3;
 const UDP_ECHO_PORT: u64 = 7;
+const ICMP_RATE: u64 = 50;            // ICMP errors sent in a second, at most
 const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
 
@@ -180,7 +182,7 @@ const NAT_NONE: u64 = 18446744073709551615;
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 1024;               // connections (listeners and TIME_WAIT hold some)
 const TCB0: u64 = 64;                 // connections the table starts with (it doubles to TCBS)
-const TCB_W: u64 = 29;                // words per connection (TCP_RING, the size of
+const TCB_W: u64 = 35;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
 struct Net {
@@ -192,6 +194,8 @@ struct Net {
   span: u64,          // subnet when a / span == b / span)
   arp: Buf,           // ARP_N entries of (address, MAC, tick it was last learned at); MAC 0: empty
   arp_next: u64,      // the entry the next new address replaces
+  icmp_sec: u64,      // the second ICMP errors are being counted in, and how many went out in it (icmp_error)
+  icmp_n: u64,
   held: Bytes,        // frames waiting for their next hop's MAC, HELD_N slots
   held_len: Buf,      // of RX_BUF bytes, oldest first: their lengths ...
   held_hop: Buf,      // ... and the addresses they go to
@@ -860,6 +864,38 @@ fn udp_echo(n: &mut Net, ulen: u64)
   reply_send(&mut n, src, 34 + ulen);
 }
 
+/// ICMP destination unreachable, port unreachable (RFC 1122 4.1.3.4) for
+/// the datagram in pkt: the start of it (its IP header and 8 bytes) goes
+/// back to its sender. At most ICMP_RATE a second are sent (RFC 1122
+/// 3.2.2), and none to an IPv6 peer's token (src/net6.bastio answers those).
+fn icmp_unreach(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let src = be32(n.pkt, 26);
+  if is_v6tok(src) || src == 0 {
+    return;
+  }
+  if n.now / 100 != n.icmp_sec {
+    n.icmp_sec = n.now / 100;
+    n.icmp_n = 0;
+  }
+  if n.icmp_n >= ICMP_RATE {
+    return;
+  }
+  n.icmp_n = n.icmp_n + 1;
+  let smac = be48(n.pkt, 6);
+  eth_header(&mut n, smac, ETH_IP);
+  ip_header(&mut n, 56, IP_ICMP, src);
+  bset(&mut n.out, 34, 3);            // destination unreachable ...
+  bset(&mut n.out, 35, 3);            // ... port
+  put16(&mut n.out, 36, 0);
+  put32(&mut n.out, 38, 0);
+  bcopy(&mut n.out, 42, n.pkt, 14, 28);
+  put16(&mut n.out, 36, csum(n.out, 34, 36));
+  reply_send(&mut n, src, 70);
+}
+
 /// A UDP datagram for us (total: the IP length, checked against the
 /// frame): its checksum is checked when it has one, then it goes to the
 /// socket bound to its port, or to the echo on port 7.
@@ -887,15 +923,45 @@ fn udp_in(n: &mut Net, total: u64)
     udp_deliver(&mut n, s, ulen);
   } else if dport == UDP_ECHO_PORT {
     udp_echo(&mut n, ulen);
+  } else {
+    icmp_unreach(&mut n);
   }
 }
 
-fn ip_in(n: &mut Net, flen: u64)
-  requires net_ok(n) && flen <= NET_BUF
+fn ip_in(n: &mut Net, frame_len: u64)
+  requires net_ok(n) && frame_len <= NET_BUF
   ensures net_ok(n)
 {
-  if flen < 34 || bget(n.pkt, 14) != 0x45 || csum(n.pkt, 14, 20) != 0 {
+  let mut flen = frame_len;
+  if flen < 34 {
     return;
+  }
+  let vihl = cast[u64](bget(n.pkt, 14));
+  let ihl = vihl % 16 * 4;
+  if vihl / 16 != 4 || ihl < 20 || 14 + ihl > flen || csum(n.pkt, 14, ihl) != 0 {
+    return;
+  }
+  if ihl > 20 {
+    // RFC 1122 3.2.1.8: options are accepted, and none of them is acted on:
+    // the packet is closed up over them, so that everything below sees the
+    // plain header.
+    let tot = be16(n.pkt, 16);
+    if n.lo_split || tot < ihl || 14 + tot > flen {
+      return;
+    }
+    let cut = ihl - 20;
+    let mut i = 34;
+    while i < 14 + tot - cut
+      invariant 34 <= i && i <= 14 + tot - cut && 14 + tot <= flen && flen <= NET_BUF && net_ok(n)
+    {
+      bset(&mut n.pkt, i, bget(n.pkt, i + cut));
+      i = i + 1;
+    }
+    bset(&mut n.pkt, 14, 0x45);
+    put16(&mut n.pkt, 16, tot - cut);
+    put16(&mut n.pkt, 24, 0);
+    put16(&mut n.pkt, 24, csum(n.pkt, 14, 20));
+    flen = flen - cut;
   }
   // RFC 1122 3.2.1.3: a source that is a broadcast, multicast or class E
   // address, or a loopback address that came in from the wire, is silently
@@ -952,6 +1018,9 @@ fn ip_in(n: &mut Net, flen: u64)
     } else if kind == ICMP_ECHO_REPLY && n.ping_state == PING_ECHO
       && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
       n.ping_state = PING_DONE;
+    }
+    if mine && kind == ICMP_UNREACH {
+      tcp_icmp_error(&mut n, total);
     }
     if mine {
       raw_deliver(&mut n, total);
@@ -1026,6 +1095,10 @@ fn dhcp_start(n: &mut Net)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  // RFC 2131 4.1: a transaction id the network cannot predict, a new one for
+  // each transaction (net_keyed is only a guess until nic_seed gives the
+  // stack its secret, which then starts the search again).
+  n.dhcp_xid = net_keyed(n, card_mac(n.dev), n.now, 68) % 4294967296;
   n.dhcp_state = DHCP_DISCOVER;
   n.dhcp_offer = 0;
   n.dhcp_until = n.now;
@@ -1060,7 +1133,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
   let end = 34 + ulen;                // the end of the datagram in the frame
   let extend = n.dhcp_state == DHCP_RENEW || n.dhcp_state == DHCP_REBIND;
   if (n.dhcp_state != DHCP_DISCOVER && n.dhcp_state != DHCP_REQUEST && !extend) || end < 282
-    || bget(n.pkt, 42) != 2 || be32(n.pkt, 46) != n.dhcp_xid || be32(n.pkt, 278) != DHCP_MAGIC {
+    || bget(n.pkt, 42) != 2 || be32(n.pkt, 46) != n.dhcp_xid || be32(n.pkt, 278) != DHCP_MAGIC
+    || be48(n.pkt, 70) != card_mac(n.dev) {
     return;
   }
   let yiaddr = be32(n.pkt, 58);
@@ -1737,6 +1811,9 @@ fn nic_seed(c: &mut Nic, x: u64)
       if n.sec == 0 {
         n.sec = x | 1;
         n.eph = net_keyed(n, 0, 0, 0) % EPH_N;
+        if n.dhcp_state == DHCP_DISCOVER && n.dhcp_offer == 0 {
+          dhcp_start(&mut n);         // the first DISCOVER went out with a guessable transaction id
+        }
       }
       c = Nic::Up(n);
     },
@@ -2064,7 +2141,7 @@ fn net_up(d: Card) -> Nic
   ensures nic_ok(result)
 {
   let mut n = Net { dev: d, pkt: balloc(NET_BUF), out: balloc(NET_BUF), ip: 0, gw: 0, span: 1,
-    arp: alloc(ARP_N * 3), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
+    arp: alloc(ARP_N * 3), arp_next: 0, icmp_sec: 0, icmp_n: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), dm: alloc(0), cork: balloc(0), eph: 0,
@@ -2078,7 +2155,6 @@ fn net_up(d: Card) -> Nic
   n.iid = v6_iid(card_mac(n.dev));
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
-    n.dhcp_xid = card_mac(n.dev) % 4294967296;
     dhcp_start(&mut n);
   } else {
     dhcp_static(&mut n);
