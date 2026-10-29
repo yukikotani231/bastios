@@ -151,6 +151,7 @@ class Peer:
         self.rto = 0.25
         self.log = []                   # (time, segment) of every guest segment seen
         self.close_when = lambda p: False
+        self.ack_cap = None
         self.ws = None                  # the window scale we offer in our SYN, if any
         self.sack_ok = False            # whether our SYN says we take SACK blocks
         self.peer_ws = None             # the guest's, once both sides scale
@@ -169,6 +170,8 @@ class Peer:
             win >>= self.ws                 # scaled, except in a SYN
         win = min(win, 65535)
         ack = self.rcv_abs() if self.irs is not None else 0
+        if self.ack_cap is not None:
+            ack = self.ack_cap              # acknowledges no more than the guest's SYN
         opts = b""
         if flags & SYN:
             opts = struct.pack("!BBH", 2, 4, self.mss)
@@ -852,6 +855,38 @@ hdr = hdr[:10] + struct.pack("!H", csum(hdr)) + hdr[12:]
 link.send((link.guest_mac or BCAST) + HOST_MAC + b"\x08\x00" + hdr + body)
 until(lambda: net.echoed, 5)
 check(len(net.echoed) == 1, "IP options: an echo request with options is answered")
+
+# 6e. Slow start (RFC 5681, RFC 6928): with our ACKs of its data withheld, the guest
+#     sends no more than its initial window of ten segments in the first
+#     round trip, though our window would take far more.
+def hold_acks(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    def cap(f):
+        x = tcp_of(f)
+        if x and x["flags"] & SYN:
+            p.ack_cap = (x["seq"] + 1) % M32
+        return 0
+    link.in_rule = cap
+mark = listen_7001()
+p = Peer(net, 45004, 7001, pattern(60000, 9), active=True)
+hold_acks(p)
+net.peer = p
+p.emit(SYN, p.iss)
+p.timer = time.time() + p.rto
+until(lambda: len([1 for _, x in p.log if x["data"]]) > 0, 10)
+until(lambda: False, 0.8)
+sent = {}
+for t, x in p.log:
+    if x["data"]:
+        sent[x["seq"]] = max(sent.get(x["seq"], 0), len(x["data"]))
+first = min(t for t, x in p.log if x["data"]) if sent else 0
+byts = sum(sent.values())
+check(sent and byts <= 14600, f"slow start: {byts} bytes in the first round trip with nothing acknowledged (at most 14600)")
+p.ack_cap = None
+p.emit(RST, p.abs_seq(0))
+until(lambda: b"bastios> " in out[mark:], 20)
+net.peer = None
+link.in_rule = lambda f: 0
 
 # 7. The ARP cache holds more than four neighbors: the guest pings twelve
 #    hosts that this script answers for, then the same twelve again. The
