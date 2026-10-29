@@ -450,9 +450,13 @@ bst_enter_tail:
         and     $-CORE_BLOCK, %rax
         mov     CORE_CR3(%rax), %rax
         mov     %rax, %cr3
-        mov     5*8(%rsp), %rax
-        verw    bst_verw_sel(%rip)              /* clears the CPU's buffers of what the kernel just read (MDS); a plain segment check on a CPU without that */
-        iretq
+        mov     %rsp, %rax
+        and     $-CORE_BLOCK, %rax
+        cmpq    $0, CORE_VERW(%rax)             /* read after the switch: this is the processor's own block, mapped in the shadow table */
+        mov     5*8(%rsp), %rax                 /* leaves the flags */
+        je      1f
+        verw    bst_verw_sel(%rip)              /* clears the CPU's buffers of what the kernel just read (MDS) */
+1:      iretq
 .balign 2
 bst_verw_sel:
         .word   UDATA

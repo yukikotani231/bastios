@@ -52,7 +52,7 @@ BASE_CFLAGS := -std=c11 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
 # Spectre v2: indirect jumps, calls and returns of the kernel and of boot/ go
 # through retpoline thunks (GCC emits them in each object), so branch predictor
 # state a user program trained does not choose where the kernel runs.
-RETPOLINE := -mindirect-branch=thunk -mfunction-return=thunk -fcf-protection=none
+RETPOLINE := -mindirect-branch=thunk -fno-jump-tables -fcf-protection=none
 # Generated C (proved Bastio) is compiled without warnings: it declares
 # temporaries it may not use. The hand-written C in boot/ is the trusted
 # base, so every warning there is an error. GCC takes reads of the BIOS data
