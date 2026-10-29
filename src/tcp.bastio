@@ -1063,6 +1063,21 @@ fn tcp_in(n: &mut Net, total: u64)
       tset(&mut n, t, W_TRIES, 0);
       tset(&mut n, t, W_STATE, T_ESTABLISHED);
       tcp_output(&mut n, t, true);
+    } else if is_syn && !is_ack && !is_rst {
+      // Simultaneous open (RFC 9293 3.5): the peer's SYN crossed ours. Take
+      // what it offers, answer with SYN+ACK from our initial sequence number
+      // and wait in SYN_RCVD for the ACK of our SYN.
+      tset(&mut n, t, W_RCV, seq_add(seq, 1));
+      tset(&mut n, t, W_WND, be16(n.pkt, 48));
+      tset(&mut n, t, W_MSS, tcp_mss_opt(n, hl));
+      tset(&mut n, t, W_WS, tcp_ws_opt(n, hl));
+      if tcp_opt(n, hl, 4, 2) != 0 {
+        tset(&mut n, t, W_SACK, 1);
+      }
+      tset(&mut n, t, W_STATE, T_SYN_RCVD);
+      tset(&mut n, t, W_TRIES, 0);
+      tcp_emit(&mut n, t, TF_SYN + TF_ACK, twb(n, t, W_ISS, SEQ_MOD), 0, 0);
+      tcp_arm(&mut n, t);
     }
     return;
   }
