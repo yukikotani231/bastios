@@ -52,6 +52,7 @@ tests=(
   "fsck|c|test/fsck_test.py"
   "diskfuzz|c|test/diskfuzz.py --rounds 30 --write"
   "crashsim|e|test/crashsim.py --runs 1 --boots 8 --every 8"
+  "crashsim mpc|e|test/crashsim.py --workload mpc --runs 1 --boots 0 --every 4 --secs 3"
   "shell|a|test/shell_test.sh"
   "guide|c|test/guide_test.py"
   "tcp virtio|b|test/tcp_test.sh"

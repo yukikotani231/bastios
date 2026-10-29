@@ -46,6 +46,7 @@ const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
 
 const ARP_N: u64 = 64;
+const ARP_TTL: u64 = 6000;            // ticks (60 s) an address's MAC is kept after it was last learned (RFC 1122 2.3.2.1)
 const HELD_N: u64 = 8;                // frames held for ARP answers
 
 // DHCP (RFC 2131), as a client.
@@ -189,7 +190,7 @@ struct Net {
   ip: u64,            // our address, the gateway, and the subnet's size
   gw: u64,            // (2^32 - netmask: addresses a and b share the
   span: u64,          // subnet when a / span == b / span)
-  arp: Buf,           // ARP_N entries of (address, MAC); MAC 0: empty
+  arp: Buf,           // ARP_N entries of (address, MAC, tick it was last learned at); MAC 0: empty
   arp_next: u64,      // the entry the next new address replaces
   held: Bytes,        // frames waiting for their next hop's MAC, HELD_N slots
   held_len: Buf,      // of RX_BUF bytes, oldest first: their lengths ...
@@ -267,7 +268,7 @@ struct Net {
 spec fn net_ok(n: &Net) -> bool {
   card_ok(n.dev) && blen(n.pkt) == NET_BUF && blen(n.out) == NET_BUF && blen(n.held) == HELD_N * RX_BUF
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
-  && len(n.arp) == ARP_N * 2 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
+  && len(n.arp) == ARP_N * 3 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX && n.dns <= IP_MAX
   && len(n.socks) == SOCKS * SOCK_FIELDS && n.ucap <= SOCKS && blen(n.dq) == n.ucap * RXQ * UDP_MAX && len(n.dm) == n.ucap * RXQ * SLOT_W && blen(n.cork) == n.ucap * UDP_MAX
   && len(n.tcbs) <= TCBS * TCB_W && rings_ok(n.rb)
@@ -390,8 +391,8 @@ fn arp_find(n: &Net, ip: u64) -> u64
   while i < ARP_N
     invariant i <= ARP_N
   {
-    let mac = get(n.arp, 2 * i + 1);
-    if get(n.arp, 2 * i) == ip && mac < MAC_LIMIT {
+    let mac = get(n.arp, 3 * i + 1);
+    if get(n.arp, 3 * i) == ip && mac < MAC_LIMIT {
       return mac;
     }
     i = i + 1;
@@ -408,13 +409,13 @@ fn nic_arp(c: &Nic, e: u64, f: u64) -> u64
   match c {
     Nic::None => { return 0; },
     Nic::Up(n) => {
-      if e >= ARP_N || get(n.arp, 2 * e + 1) >= MAC_LIMIT || get(n.arp, 2 * e) > IP_MAX || get(n.arp, 2 * e + 1) == 0 {
+      if e >= ARP_N || get(n.arp, 3 * e + 1) >= MAC_LIMIT || get(n.arp, 3 * e) > IP_MAX || get(n.arp, 3 * e + 1) == 0 {
         return 0;
       }
       if f == 0 {
-        return get(n.arp, 2 * e);
+        return get(n.arp, 3 * e);
       }
-      return get(n.arp, 2 * e + 1);
+      return get(n.arp, 3 * e + 1);
     },
   }
 }
@@ -429,16 +430,37 @@ fn arp_learn(n: &mut Net, ip: u64, mac: u64)
   while i < ARP_N
     invariant i <= ARP_N && net_ok(n)
   {
-    if get(n.arp, 2 * i) == ip {
-      n.arp = set(n.arp, 2 * i + 1, mac);
+    if get(n.arp, 3 * i) == ip {
+      n.arp = set(n.arp, 3 * i + 1, mac);
+      n.arp = set(n.arp, 3 * i + 2, n.now);
       return;
     }
     i = i + 1;
   }
   let e = n.arp_next % ARP_N;
-  n.arp = set(n.arp, 2 * e, ip);
-  n.arp = set(n.arp, 2 * e + 1, mac);
+  n.arp = set(n.arp, 3 * e, ip);
+  n.arp = set(n.arp, 3 * e + 1, mac);
+  n.arp = set(n.arp, 3 * e + 2, n.now);
   n.arp_next = (e + 1) % ARP_N;
+}
+
+/// Forgets the MAC address of every neighbour not heard from (by an ARP
+/// request or answer) for ARP_TTL ticks, so that one whose address moved (a
+/// router replaced behind the same IP) is asked for again.
+fn arp_age(n: &mut Net, now: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut i = 0;
+  while i < ARP_N
+    invariant i <= ARP_N && net_ok(n)
+  {
+    let at = get(n.arp, 3 * i + 2);
+    if now >= at && now - at >= ARP_TTL {
+      n.arp = set(n.arp, 3 * i + 1, 0);
+    }
+    i = i + 1;
+  }
 }
 
 /// Is `ip` this machine, in namespace n.ns: 127.0.0.0/8, or one of its
@@ -776,7 +798,12 @@ fn ip_header(n: &mut Net, total: u64, proto: u64, dst: u64)
   bset(&mut n.out, 14, 0x45);         // version 4, 5 words of header
   bset(&mut n.out, 15, 0);
   put16(&mut n.out, 16, total);
-  put32(&mut n.out, 18, 0);           // id, no fragments
+  if proto == IP_TCP {
+    put32(&mut n.out, 18, 0x00004000);  // id 0 with DF set (RFC 6864): TCP keeps to the MSS
+  } else {
+    put16(&mut n.out, 18, n.tx % 65536);  // a datagram that may be fragmented on the way needs its own id
+    put16(&mut n.out, 20, 0);
+  }
   bset(&mut n.out, 22, 64);           // time to live
   bset(&mut n.out, 23, cast[u8](proto));
   put16(&mut n.out, 24, 0);
@@ -868,6 +895,17 @@ fn ip_in(n: &mut Net, flen: u64)
   ensures net_ok(n)
 {
   if flen < 34 || bget(n.pkt, 14) != 0x45 || csum(n.pkt, 14, 20) != 0 {
+    return;
+  }
+  // RFC 1122 3.2.1.3: a source that is a broadcast, multicast or class E
+  // address, or a loopback address that came in from the wire, is silently
+  // dropped (an IPv6 peer's token stands in for a source, net6.bastio). The
+  // unspecified address is only a DHCP client's.
+  let src = be32(n.pkt, 26);
+  if !n.lo_in && !is_v6tok(src) && (src / 16777216 == LO_NET || src >= 3758096384) {
+    return;
+  }
+  if src == 0 && cast[u64](bget(n.pkt, 23)) != IP_UDP {
     return;
   }
   // For us: our address, or (UDP only) the broadcast address, or while a
@@ -2026,7 +2064,7 @@ fn net_up(d: Card) -> Nic
   ensures nic_ok(result)
 {
   let mut n = Net { dev: d, pkt: balloc(NET_BUF), out: balloc(NET_BUF), ip: 0, gw: 0, span: 1,
-    arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
+    arp: alloc(ARP_N * 3), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), dm: alloc(0), cork: balloc(0), eph: 0,
@@ -2224,6 +2262,7 @@ fn nic_tick(c: &mut Nic, now: u64)
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
       n.ns = 0;                       // DHCP and IPv6 are the card's: namespace 0
+      arp_age(&mut n, now);
       dhcp_tick(&mut n, now);
       v6_tick(&mut n, now);
       tcp_tick(&mut n, now);

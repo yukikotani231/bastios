@@ -207,6 +207,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- The IPv4 stack follows more of RFC 1122 and RFC 9293: a packet whose source is a broadcast, multicast or class E address, or a loopback address that arrived over the wire, is dropped (it used to be answered); a TCP segment without ACK is dropped once the connection is synchronized; ARP cache entries expire 60 s after the neighbour was last heard from; TCP segments carry DF with identification 0 and other packets a new identification each (RFC 6864).
 - A driver for the AWS Elastic Network Adapter (`src/ena.bastio`, PCI
   `1d0f:ec20` and relatives), polled, one queue pair in host memory. It has
   been run only against a model of the device for QEMU
