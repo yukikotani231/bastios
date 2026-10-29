@@ -20,6 +20,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - The `bwm` Run prompt has a cursor: Left, Right, Ctrl-Left, Ctrl-Right (by words), Home, End, Delete, Ctrl-A and Ctrl-E move and edit in the middle of the line; Ctrl-U and Ctrl-W work left of it.
 - `bterm` keeps the last 2000 lines that scrolled off the top (it kept 200), so a long build log can be read back with the wheel or Shift-Page Up.
 - `bterm` finds text in the screen and the scrollback with Ctrl-Shift-F: what is typed shows in the title bar, the match is lit and scrolled to the middle, Enter goes to an older match, Tab to a newer one and Escape ends it.
+- The kanji dictionary of `bwm` (`user/bwmdict.h`) has about 150 more everyday words (verbs, adjectives, days of the week, directions, common computer terms), a few hundred in all.
 - `bterm` takes all the output that is already waiting (up to 32 KiB) before it draws, where it drew after every 512 bytes, so a program that prints a lot makes fewer redraws.
 - Tab in the `bwm` Run prompt (Alt-F2) completes the first word to a program in `/bin` (Tab again for the next one in name order).
 - Tab in the Run prompt also completes the other words of the line as file names (a directory gets a `/`).

@@ -2947,6 +2947,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # A word from the later part of the dictionary: "gakusei" is 学生.
+            monitor("sendkey ctrl-u", "sendkey alt-spc", *[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-shift-spc")
+            monitor(*[f"sendkey {c}" for c in "gakusei"])
+            monitor("sendkey spc")
+            time.sleep(1)
+            monitor("sendkey ret")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any("echo \u5b66\u751f" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) kanji conversion knows everyday words (gakusei is 学生)")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-u", "sendkey alt-spc")
             # 256 colours (38;5;N and 48;5;N) and 24-bit colours (48;2;R;G;B, drawn as the nearest of them).
             keys[";"] = "semicolon"
