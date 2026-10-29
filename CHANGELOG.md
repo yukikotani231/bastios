@@ -17,7 +17,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 ### Added
 
 - In the `bwm` Run prompt (Alt-F2) Ctrl-U clears the line and Ctrl-W takes off the last word.
-- The `bwm` Run prompt has a cursor: Left, Right, Home, End, Delete, Ctrl-A and Ctrl-E move and edit in the middle of the line; Ctrl-U and Ctrl-W work left of it.
+- The `bwm` Run prompt has a cursor: Left, Right, Ctrl-Left, Ctrl-Right (by words), Home, End, Delete, Ctrl-A and Ctrl-E move and edit in the middle of the line; Ctrl-U and Ctrl-W work left of it.
 - `bterm` keeps the last 2000 lines that scrolled off the top (it kept 200), so a long build log can be read back with the wheel or Shift-Page Up.
 - `bterm` finds text in the screen and the scrollback with Ctrl-Shift-F: what is typed shows in the title bar, the match is lit and scrolled to the middle, Enter goes to an older match, Tab to a newer one and Escape ends it.
 - `bterm` takes all the output that is already waiting (up to 32 KiB) before it draws, where it drew after every 512 bytes, so a program that prints a lot makes fewer redraws.

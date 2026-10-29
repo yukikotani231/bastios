@@ -2184,8 +2184,21 @@ int main(int argc, char **argv)
                             run_cur = run_n;
                             m = 0;
                         } else if (code == 105 || code == 106 || code == 102 || code == 107 || code == 111) {
-                            if (code == 105 && run_cur > 0) run_cur--;                   /* Left, Right, Home, End */
-                            if (code == 106 && run_cur < run_n) run_cur++;
+                            if (code == 105 && k_ctrl) {                                  /* Ctrl-Left, Ctrl-Right: by words */
+                                while (run_cur > 0 && run_buf[run_cur - 1] == ' ')
+                                    run_cur--;
+                                while (run_cur > 0 && run_buf[run_cur - 1] != ' ')
+                                    run_cur--;
+                            } else if (code == 106 && k_ctrl) {
+                                while (run_cur < run_n && run_buf[run_cur] == ' ')
+                                    run_cur++;
+                                while (run_cur < run_n && run_buf[run_cur] != ' ')
+                                    run_cur++;
+                            } else if (code == 105 && run_cur > 0) {
+                                run_cur--;                                                    /* Left, Right, Home, End */
+                            } else if (code == 106 && run_cur < run_n) {
+                                run_cur++;
+                            }
                             if (code == 102) run_cur = 0;
                             if (code == 107) run_cur = run_n;
                             if (code == 111 && run_cur < run_n) {                       /* Delete */
