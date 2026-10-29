@@ -867,6 +867,14 @@ def hold_acks(p):
             p.ack_cap = (x["seq"] + 1) % M32
         return 0
     link.in_rule = cap
+    def mute(f):
+        # No ACK-only segments once the guest sends data: they would repeat
+        # and start a fast retransmit, which is not what is measured here.
+        x = tcp_of(f)
+        if x and not x["data"] and not x["flags"] & (SYN | FIN | RST) and any(y["data"] for _, y in p.log):
+            return None
+        return 0
+    link.out_rule = mute
 mark = listen_7001()
 p = Peer(net, 45004, 7001, pattern(60000, 9), active=True)
 hold_acks(p)
@@ -887,6 +895,28 @@ p.emit(RST, p.abs_seq(0))
 until(lambda: b"bastios> " in out[mark:], 20)
 net.peer = None
 link.in_rule = lambda f: 0
+link.out_rule = lambda f: 0
+
+# 6f. Fast retransmit (RFC 5681 3.2): the third segment the guest sends is
+#     lost; the ACKs for the ones after it repeat, and the guest sends the
+#     missing one again long before its one second timer would.
+lost_fr = {"n": 0, "seq": None, "at": None}
+def lose_guest_third(f):
+    x = tcp_of(f)
+    if x and x["data"]:
+        if lost_fr["seq"] is None:
+            lost_fr["n"] += 1
+            if lost_fr["n"] == 3:
+                lost_fr["seq"], lost_fr["at"] = x["seq"], time.time()
+                return None
+    return 0
+def fr_setup(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    link.in_rule = lose_guest_third
+p = echo_run("fast retransmit", pattern(60000, 10), fr_setup)
+again = [t for t, x in p.log if x["data"] and x["seq"] == lost_fr["seq"]]
+check(lost_fr["seq"] is not None and again and again[0] - lost_fr["at"] < 0.7,
+      f"fast retransmit: the lost segment came again {again[0] - lost_fr['at'] if again else -1:.2f}s after (under 0.7 s, not the 1 s timer)")
 
 # 7. The ARP cache holds more than four neighbors: the guest pings twelve
 #    hosts that this script answers for, then the same twelve again. The

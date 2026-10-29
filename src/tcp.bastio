@@ -7,9 +7,9 @@
 // its window to 0 is probed with one byte for as long as it answers.
 // A congestion window (slow start and congestion avoidance, RFC 5681) keeps a
 // connection from sending more than the network took in the last round trip,
-// and the resend timeout follows the measured round trip (RFC 6298). There
-// is no timestamp option, no fast retransmit and no sending of selective
-// acknowledgements. test/tcp_test.sh drives these paths through a lossy
+// and the resend timeout follows the measured round trip (RFC 6298); three
+// duplicate ACKs resend the missing segment at once (RFC 5681 3.2). There
+// is no timestamp option and no sending of selective acknowledgements. test/tcp_test.sh drives these paths through a lossy
 // peer.
 //
 // As in the rest of the stack, every byte and table index is proved in
@@ -94,6 +94,7 @@ const W_RTTVAR: u64 = 32;
 const W_RTT_SEQ: u64 = 33;            // the sequence number whose ACK ends the sample being timed ...
 const W_RTT_AT: u64 = 34;             // ... and the tick it was sent at, plus 1; 0: none timed
 const W_RTO: u64 = 35;                // the resend timeout from the samples, ticks; 0: none yet
+const W_DUPS: u64 = 36;               // duplicate ACKs in a row (3 start a fast retransmit)
 const FAM_REUSE: u64 = 16;
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
@@ -317,6 +318,33 @@ fn tcp_rtt_sample(n: &mut Net, t: u64, r0: u64)
   tset(&mut n, t, W_SRTT, srtt);
   tset(&mut n, t, W_RTTVAR, var);
   tset(&mut n, t, W_RTO, rto);
+}
+
+/// Three duplicate ACKs: the segment at the oldest unacknowledged byte was
+/// probably lost. It goes again at once, the threshold drops to half of
+/// what was out, and the window to that plus the three segments the peer
+/// has kept (RFC 5681 3.2). The next ACK that moves the window ends it.
+fn tcp_fast_rexmit(n: &mut Net, t: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let mss = tcp_seg_mss(n, t);
+  let una = twb(n, t, W_UNA, SEQ_MOD);
+  let txlen = twb(n, t, W_TXLEN, TCP_RING + 1);
+  let mut ss = seq_diff(tw(n, t, W_MAX), una) / 2;
+  if ss < 2 * mss {
+    ss = 2 * mss;
+  }
+  tset(&mut n, t, W_SSTH, ss);
+  tset(&mut n, t, W_CWND, ss + 3 * mss);
+  tset(&mut n, t, W_RTT_AT, 0);
+  if txlen > 0 {
+    let mut l = mss;
+    if l > txlen {
+      l = txlen;
+    }
+    tcp_emit(&mut n, t, TF_ACK + TF_PSH, una, 0, l);
+  }
 }
 
 // ---------------------------------------------------------------- segments out
@@ -799,7 +827,12 @@ fn tcp_acked(n: &mut Net, t: u64, ackn: u64)
       tcp_rtt_sample(&mut n, t, n.now + 1 - at);
     }
   }
-  tcp_cwnd_grow(&mut n, t, k);
+  if tw(n, t, W_DUPS) >= 3 && tw(n, t, W_SSTH) != 0 {
+    tset(&mut n, t, W_CWND, tw(n, t, W_SSTH));    // the fast retransmit is over
+  } else {
+    tcp_cwnd_grow(&mut n, t, k);
+  }
+  tset(&mut n, t, W_DUPS, 0);
   tset(&mut n, t, W_TRIES, 0);
   tset(&mut n, t, W_TIMER, 0);
   if ackn != tw(n, t, W_NXT) {
@@ -1040,6 +1073,23 @@ fn tcp_in(n: &mut Net, total: u64)
         tset(&mut n, t, W_TRIES, 0);  // the peer answered: it is alive
         tset(&mut n, t, W_TIMER, 0);
       }
+      // A duplicate ACK (RFC 5681 2): it acknowledges nothing new, carries
+      // no data and does not change the window, while data is out.
+      if ackn == tw(n, t, W_UNA) && dlen == 0 && !is_fin && tw(n, t, W_MAX) != tw(n, t, W_UNA)
+        && wnd == tw(n, t, W_WND) && wnd > 0 {
+        let mut d = tw(n, t, W_DUPS);
+        if d < 1000 {
+          d = d + 1;
+        } else {
+          d = 1000;
+        }
+        tset(&mut n, t, W_DUPS, d);
+        if d == 3 {
+          tcp_fast_rexmit(&mut n, t);
+        } else if d > 3 {
+          tset(&mut n, t, W_CWND, tcp_cwnd(n, t) + tcp_seg_mss(n, t));
+        }
+      }
       tcp_acked(&mut n, t, ackn);
     }
     tset(&mut n, t, W_WND, tcp_wnd_in(n, t, false));
@@ -1212,6 +1262,7 @@ fn tcp_tick(n: &mut Net, now: u64)
           // for each loss, and the window starts again at one segment. A
           // resent segment is not timed (Karn).
           tset(&mut n, t, W_RTT_AT, 0);
+          tset(&mut n, t, W_DUPS, 0);
           if tw(n, t, W_WND) != 0 {
             let mss = tcp_seg_mss(n, t);
             if tw(n, t, W_TRIES) <= 1 {
