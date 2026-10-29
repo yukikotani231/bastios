@@ -704,7 +704,7 @@ static const struct cell *vline(int i)
 static int send_title(int fd, int id, const char *t)
 {
     struct bwm_settitle st = { (uint32_t)id, "" };
-    snprintf(st.title, sizeof st.title, "%s", t);
+    snprintf(st.title, sizeof st.title, "%.23s", t);
     return bwm_send(fd, BWM_SETTITLE, &st, sizeof st);
 }
 
