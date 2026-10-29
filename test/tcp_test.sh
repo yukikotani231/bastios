@@ -270,6 +270,14 @@ class Peer:
                 self.agree(s)
                 self.ack_now()
                 self.output()
+            elif s["flags"] & SYN and not s["flags"] & ACK:
+                # Simultaneous open: its SYN crossed ours.
+                self.irs = s["seq"]
+                self.peer_wnd = s["wnd"]
+                self.agree(s)
+                self.state = "SYN_RCVD"
+                self.emit(SYN, self.iss)
+                self.timer = time.time() + self.rto
             return
         if s["flags"] & SYN:
             self.ack_now()                  # our ACK of its SYN was lost
@@ -971,6 +979,32 @@ else:
     check(False, "ICMP port unreachable: no SYN seen")
 link.in_rule = lambda f: 0
 until(lambda: b"bastios> " in out[mark:], 10)
+
+# 6h. Simultaneous open (RFC 9293 3.5): our SYN crosses the guest's. The
+#     guest answers it with a SYN+ACK from its own initial sequence number and
+#     the connection comes up on both sides.
+mark = len(out)
+syn_seen.clear()
+def catch_syn2(f):
+    s = tcp_of(f)
+    if s and s["flags"] & SYN and not s["flags"] & ACK and s["dport"] == 8082:
+        syn_seen.append(s)
+    return 0
+link.in_rule = catch_syn2
+type_line("tcpget 10.0.2.2 8082 hi")
+until(lambda: syn_seen, 10)
+if syn_seen:
+    sim = Peer(net, 8082, syn_seen[0]["sport"], b"", active=True)
+    net.peer = sim
+    until(lambda: sim.state == "ESTABLISHED" and b"connected" in out[mark:], 10)
+    check(sim.state == "ESTABLISHED" and b"connected" in out[mark:],
+          f"simultaneous open: both sides establish (peer {sim.state})")
+    sim.closing = True
+else:
+    check(False, "simultaneous open: no SYN seen")
+link.in_rule = lambda f: 0
+net.peer = None
+until(lambda: b"bastios> " in out[mark:], 20)
 
 qemu.kill(); qemu.wait()
 print("---- transcript ----")
