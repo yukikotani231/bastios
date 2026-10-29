@@ -82,7 +82,7 @@ static int top, bot = 23;           /* the scroll region, inclusive */
 static int saved_cx, saved_cy;
 static struct cell main_grid[MAXR][MAXC];
 static int main_cx, main_cy, alt;
-#define HIST 200                          /* lines that scrolled off the top, kept for the wheel */
+#define HIST 2000                         /* lines that scrolled off the top, kept for the wheel */
 static struct cell hist[HIST][MAXC];
 static int hist_n, hist_head;             /* how many are kept; where the next one goes */
 static int back;                          /* how many lines the view is scrolled back (0 is the live screen) */
