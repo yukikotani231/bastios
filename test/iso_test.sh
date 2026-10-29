@@ -3119,6 +3119,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # Ctrl-Shift-F finds text in the history: l05 was printed above and is lit on a row; text that is not there finds none; Esc ends it.
+            mark = len(out)
+            monitor("sendkey ctrl-shift-f", "sendkey l", "sendkey 0", "sendkey 5")
+            good = until(b"bterm: find l05 ", mark)
+            m = re.search(rb"bterm: find l05 (-?\d+)", bytes(out[mark:]))
+            good = good and m is not None and int(m.group(1)) >= 0
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-F finds a line of the history")
+            fails += not good
+            mark = len(out)
+            monitor("sendkey q", "sendkey q")
+            good = until(b"bterm: find l05qq -1", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-F reports text that is not there")
+            fails += not good
+            monitor("sendkey esc")
+            time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
