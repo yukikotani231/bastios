@@ -318,8 +318,17 @@ bst_cpu_enter:
         jnz     7f
         mov     bst_pt_gen(%rip), %r8           /* read before CR3 is loaded: a take after it shows at the next entry */
         cmp     CORE_LROOT(%rsi), %rax          /* the table of the last flushing load, and no entry taken out of any table since (the prelude entered the table for a system call's copy, say) */
-        jne     8f
-        cmp     CORE_LGEN(%rsi), %r8
+        je      12f
+        cmpq    $0, CORE_IBPB(%rsi)             /* another process than the one this processor ran last: its branch predictions must not steer this one (Spectre v2) */
+        je      8f
+        xor     %edx, %edx
+        mov     $1, %eax                        /* IBPB; rax is reloaded below */
+        mov     $0x49, %ecx                     /* IA32_PRED_CMD */
+        wrmsr
+        mov     CORE_UROOT(%rsi), %rax
+        and     $-2, %rax
+        jmp     8f
+12:     cmp     CORE_LGEN(%rsi), %r8
         je      9f
 8:      mov     %rax, CORE_LROOT(%rsi)
         mov     %r8, CORE_LGEN(%rsi)
