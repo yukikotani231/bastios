@@ -5,8 +5,11 @@
 // is filled. Lost segments are resent go-back-N on a timeout that doubles
 // with each resend. Segments keep to the peer's MSS. A peer that shrinks
 // its window to 0 is probed with one byte for as long as it answers.
-// There is no congestion control, no window scaling and no selective
-// acknowledgement. test/tcp_test.sh drives these paths through a lossy
+// A congestion window (slow start and congestion avoidance, RFC 5681) keeps a
+// connection from sending more than the network took in the last round trip,
+// and the resend timeout follows the measured round trip (RFC 6298). There
+// is no timestamp option, no fast retransmit and no sending of selective
+// acknowledgements. test/tcp_test.sh drives these paths through a lossy
 // peer.
 //
 // As in the rest of the stack, every byte and table index is proved in
@@ -25,6 +28,8 @@ const TCP_MSS: u64 = 1460;            // the largest segment we send to or ask o
 const TCP_MSS_LO: u64 = 14946;        // ... and to an address of this one: a frame of NET_BUF bytes
 const TCP_WS: u64 = 4;                // our window scale (RFC 7323): TCP_RING fits in 16 bits after it
 const TCP_BURST: u64 = 16;            // segments one tcp_output sends at most
+const TCP_RTO_MAX: u64 = 6000;       // the longest the timeout gets from measuring (60 s)
+const CWND_MAX: u64 = 1073741824;
 const TCP_RTO: u64 = 100;             // ticks before the first resend (1 s); doubles on each
 const TCP_TRIES: u64 = 8;             // unanswered resends before the connection is reset
 const TCP_LINGER: u64 = 200;          // ticks in TIME_WAIT
@@ -82,6 +87,13 @@ const W_WS: u64 = 25;                 // the peer's window scale + 1, once both 
 const W_SACK: u64 = 26;               // 1 if the peer takes SACK blocks (it sent SACK-permitted)
 const W_NS: u64 = 27;                 // its network namespace (src/netns.bastio)
 const W_FAM: u64 = 28;                // a listener's FAM_* (net.bastio) plus FAM_REUSE if it set SO_REUSEPORT; a connection's: FAM_V4 if its peer is an IPv4 socket (FAM_BOTH: an IPv6 one)
+const W_CWND: u64 = 29;               // congestion window in bytes; 0: not set yet (ten segments)
+const W_SSTH: u64 = 30;               // slow start threshold; 0: none yet
+const W_SRTT: u64 = 31;               // smoothed round trip time, ticks; 0: no sample yet
+const W_RTTVAR: u64 = 32;
+const W_RTT_SEQ: u64 = 33;            // the sequence number whose ACK ends the sample being timed ...
+const W_RTT_AT: u64 = 34;             // ... and the tick it was sent at, plus 1; 0: none timed
+const W_RTO: u64 = 35;                // the resend timeout from the samples, ticks; 0: none yet
 const FAM_REUSE: u64 = 16;
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
@@ -206,6 +218,107 @@ fn tnxt(n: &mut Net, t: u64, v: u64)
   }
 }
 
+/// The largest segment connection t sends.
+fn tcp_seg_mss(n: &Net, t: u64) -> u64
+  requires net_ok(n) && t < TCBS
+  ensures 1 <= result && result <= TCP_MSS_LO
+{
+  let lim = mss_for(n, tw(n, t, W_RIP));
+  let m = tw(n, t, W_MSS);
+  if m == 0 || m > lim {
+    return lim;
+  }
+  return m;
+}
+
+/// Connection t's congestion window: what is set, else ten segments (RFC 6928).
+fn tcp_cwnd(n: &Net, t: u64) -> u64
+  requires net_ok(n) && t < TCBS
+  ensures 1 <= result && result <= CWND_MAX
+{
+  let c = tw(n, t, W_CWND);
+  if c == 0 {
+    return 10 * tcp_seg_mss(n, t);
+  }
+  if c > CWND_MAX {
+    return CWND_MAX;
+  }
+  return c;
+}
+
+/// An ACK of `k` new bytes: slow start below the threshold (a segment's
+/// worth for each ACK), else about one segment per round trip (RFC 5681 3.1).
+fn tcp_cwnd_grow(n: &mut Net, t: u64, k: u64)
+  requires net_ok(n) && t < TCBS && k >= 1
+  ensures net_ok(n)
+{
+  let mss = tcp_seg_mss(n, t);
+  let cw = tcp_cwnd(n, t);
+  let ss = tw(n, t, W_SSTH);
+  let mut inc = mss * mss / cw;
+  if ss == 0 || cw < ss {
+    inc = k;
+    if inc > mss {
+      inc = mss;
+    }
+  }
+  if inc == 0 {
+    inc = 1;
+  }
+  let mut nc = cw + inc;
+  if nc > CWND_MAX {
+    nc = CWND_MAX;
+  }
+  tset(&mut n, t, W_CWND, nc);
+}
+
+/// A round trip of r ticks was measured: the smoothed time, its variation and
+/// the timeout from them (RFC 6298 2), never under TCP_RTO (one second).
+fn tcp_rtt_sample(n: &mut Net, t: u64, r0: u64)
+  requires net_ok(n) && t < TCBS
+  ensures net_ok(n)
+{
+  let mut r = r0;
+  if r < 1 {
+    r = 1;
+  }
+  if r > TCP_RTO_MAX {
+    r = TCP_RTO_MAX;
+  }
+  let mut srtt = tw(n, t, W_SRTT);
+  let mut var = tw(n, t, W_RTTVAR);
+  if srtt == 0 || srtt > TCP_RTO_MAX || var > TCP_RTO_MAX {
+    srtt = r;
+    var = r / 2;
+  } else {
+    let mut d = 0;
+    if srtt > r {
+      d = srtt - r;
+    } else {
+      d = r - srtt;
+    }
+    var = (3 * var + d) / 4;
+    srtt = (7 * srtt + r) / 8;
+  }
+  if srtt < 1 {
+    srtt = 1;
+  }
+  let mut spread = 4 * var;
+  if spread < 1 {
+    spread = 1;
+  }
+  let mut rto = srtt + spread;
+  if rto < TCP_RTO {
+    rto = TCP_RTO;
+  }
+  if rto > TCP_RTO_MAX {
+    rto = TCP_RTO_MAX;
+  }
+  tset(&mut n, t, W_SRTT, srtt);
+  tset(&mut n, t, W_RTTVAR, var);
+  tset(&mut n, t, W_RTO, rto);
+}
+
 // ---------------------------------------------------------------- segments out
 
 /// The largest segment to send to `ip`, and the MSS to tell it: a card's
@@ -322,28 +435,33 @@ fn tcp_emit(n: &mut Net, t: u64, flags: u64, seq: u64, off: u64, dl: u64)
   send_via(&mut n, hop, 34 + tlen);
 }
 
-/// Arms the resend timer if it is off: TCP_RTO, doubled for each resend
+/// Arms the resend timer if it is off: the timeout (TCP_RTO until a round
+/// trip is measured), doubled for each resend
 /// so far, up to 64 times longer.
 fn tcp_arm(n: &mut Net, t: u64)
   requires net_ok(n) && t < TCBS
   ensures net_ok(n)
 {
   let tries = tw(n, t, W_TRIES);
-  let mut wait = TCP_RTO * 64;
-  if tries == 0 {
-    wait = TCP_RTO;
-  } else if tries == 1 {
-    wait = TCP_RTO * 2;
-  } else if tries == 2 {
-    wait = TCP_RTO * 4;
-  } else if tries == 3 {
-    wait = TCP_RTO * 8;
-  } else if tries == 4 {
-    wait = TCP_RTO * 16;
-  } else if tries == 5 {
-    wait = TCP_RTO * 32;
+  let mut rto = tw(n, t, W_RTO);
+  if rto < TCP_RTO || rto > TCP_RTO_MAX {
+    rto = TCP_RTO;
   }
-  if tw(n, t, W_TIMER) == 0 && n.now < 18446744073709551615 - TCP_RTO * 64 {
+  let mut wait = rto * 64;
+  if tries == 0 {
+    wait = rto;
+  } else if tries == 1 {
+    wait = rto * 2;
+  } else if tries == 2 {
+    wait = rto * 4;
+  } else if tries == 3 {
+    wait = rto * 8;
+  } else if tries == 4 {
+    wait = rto * 16;
+  } else if tries == 5 {
+    wait = rto * 32;
+  }
+  if tw(n, t, W_TIMER) == 0 && n.now < 18446744073709551615 - TCP_RTO_MAX * 64 {
     tset(&mut n, t, W_TIMER, n.now + wait);
   }
 }
@@ -365,6 +483,11 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
   let una = twb(n, t, W_UNA, SEQ_MOD);
   let txlen = twb(n, t, W_TXLEN, TCP_RING + 1);
   let wnd = tw(n, t, W_WND);
+  // What may be out at once: the peer's window, and the congestion window.
+  let mut lim = tcp_cwnd(n, t);
+  if wnd < lim {
+    lim = wnd;
+  }
   let rip = tw(n, t, W_RIP);
   let mut off = seq_diff(tw(n, t, W_NXT), una);
   if off > txlen {
@@ -381,7 +504,7 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
   // loopback queue stops the burst rather than dropping what follows:
   // the ACKs for what is queued send the rest.
   let hold = tw(n, t, W_CORK) != 0 && tw(n, t, W_FIN) == 0;
-  while off < txlen && off < wnd && segs < TCP_BURST && tw(n, t, W_FIN) != 2 && !(hold && txlen - off < mss)
+  while off < txlen && off < lim && segs < TCP_BURST && tw(n, t, W_FIN) != 2 && !(hold && txlen - off < mss)
     && !lo_full(n, rip)
     invariant off <= txlen && txlen <= TCP_RING && una < SEQ_MOD && net_ok(n)
   {
@@ -389,8 +512,14 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
     if l > mss {
       l = mss;
     }
-    if l > wnd - off {
-      l = wnd - off;
+    if l > lim - off {
+      l = lim - off;
+    }
+    // A segment sent for the first time starts a round trip measurement if
+    // none is running (RFC 6298 3; Karn: a resent one is never timed).
+    if off >= seq_diff(tw(n, t, W_MAX), una) && tw(n, t, W_RTT_AT) == 0 && n.now < 18446744073709551615 {
+      tset(&mut n, t, W_RTT_SEQ, seq_add(una, off + l));
+      tset(&mut n, t, W_RTT_AT, n.now + 1);
     }
     tcp_emit(&mut n, t, TF_ACK + TF_PSH, seq_add(una, off), off, l);
     off = off + l;
@@ -663,6 +792,14 @@ fn tcp_acked(n: &mut Net, t: u64, ackn: u64)
   if ahead {
     tset(&mut n, t, W_NXT, ackn);
   }
+  let at = tw(n, t, W_RTT_AT);
+  if at != 0 && seq_diff(ackn, tw(n, t, W_RTT_SEQ)) < 2147483648 {
+    tset(&mut n, t, W_RTT_AT, 0);
+    if n.now < 18446744073709551615 && n.now + 1 >= at {
+      tcp_rtt_sample(&mut n, t, n.now + 1 - at);
+    }
+  }
+  tcp_cwnd_grow(&mut n, t, k);
   tset(&mut n, t, W_TRIES, 0);
   tset(&mut n, t, W_TIMER, 0);
   if ackn != tw(n, t, W_NXT) {
@@ -1070,7 +1207,22 @@ fn tcp_tick(n: &mut Net, now: u64)
           tcp_emit(&mut n, t, TF_SYN + TF_ACK, iss, 0, 0);
         } else {
           // Go back: resend from the oldest unacknowledged byte. A FIN
-          // that was out goes again after the data.
+          // that was out goes again after the data. A timeout is a loss
+          // (RFC 5681 3.1): half of what was out is the new threshold, once
+          // for each loss, and the window starts again at one segment. A
+          // resent segment is not timed (Karn).
+          tset(&mut n, t, W_RTT_AT, 0);
+          if tw(n, t, W_WND) != 0 {
+            let mss = tcp_seg_mss(n, t);
+            if tw(n, t, W_TRIES) <= 1 {
+              let mut ss = seq_diff(tw(n, t, W_MAX), tw(n, t, W_UNA)) / 2;
+              if ss < 2 * mss {
+                ss = 2 * mss;
+              }
+              tset(&mut n, t, W_SSTH, ss);
+            }
+            tset(&mut n, t, W_CWND, mss);
+          }
           tset(&mut n, t, W_NXT, tw(n, t, W_UNA));
           if tw(n, t, W_FIN) == 2 {
             tset(&mut n, t, W_FIN, 1);

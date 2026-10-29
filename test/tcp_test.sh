@@ -151,6 +151,7 @@ class Peer:
         self.rto = 0.25
         self.log = []                   # (time, segment) of every guest segment seen
         self.close_when = lambda p: False
+        self.ack_cap = None
         self.ws = None                  # the window scale we offer in our SYN, if any
         self.sack_ok = False            # whether our SYN says we take SACK blocks
         self.peer_ws = None             # the guest's, once both sides scale
@@ -169,6 +170,8 @@ class Peer:
             win >>= self.ws                 # scaled, except in a SYN
         win = min(win, 65535)
         ack = self.rcv_abs() if self.irs is not None else 0
+        if self.ack_cap is not None:
+            ack = self.ack_cap              # acknowledges no more than the guest's SYN
         opts = b""
         if flags & SYN:
             opts = struct.pack("!BBH", 2, 4, self.mss)
@@ -329,6 +332,7 @@ class Net:
         self.echoes = []
         self.dhcp_done = False
         self.arp_asked = []
+        self.unreach = []               # the guest's ICMP destination unreachable messages
         self.echoed = []                # (destination, flags and fragment field) of the guest's echo replies
 
     def send_ip(self, proto, payload):
@@ -355,6 +359,9 @@ class Net:
         if f[12:14] != b"\x08\x00":
             return
         dst = struct.unpack("!I", f[30:34])[0]
+        if f[23] == 1 and f[34] == 3:
+            self.unreach.append(f)
+            return
         if f[23] == 1 and f[34] == 0:
             self.echoed.append((dst, f[18:22]))
             return
@@ -825,6 +832,61 @@ def no_ack_scenario():
     until(lambda: b"bastios> " in out[mark:], 20)
     net.peer = None
 no_ack_scenario()
+
+# 6d. A UDP datagram for a port nobody listens on draws an ICMP port
+#     unreachable that carries the start of the datagram (RFC 1122 4.1.3.4);
+#     an echo request with IP options is answered all the same (RFC 1122
+#     3.2.1.8).
+udp = struct.pack("!HHHH", 5555, 9999, 8 + 4, 0) + b"ping"
+udp = udp[:6] + struct.pack("!H", l4_sum(17, HOST_IP, GUEST_IP, udp)) + udp[8:]
+net.unreach = []
+net.send_ip(17, udp)
+until(lambda: net.unreach, 5)
+check(len(net.unreach) == 1, "UDP to a closed port: the guest answers with ICMP destination unreachable")
+if net.unreach:
+    u = net.unreach[0]
+    check(u[34] == 3 and u[35] == 3 and csum(u[34:70]) == 0 and u[62:66] == udp[:4],
+          "UDP to a closed port: port unreachable (code 3), right checksum, the datagram's ports quoted")
+net.echoed = []
+body = struct.pack("!BBHHH", 8, 0, 0, 0x4321, 1) + b"opts"
+body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+hdr = struct.pack("!BBHHHBBHII", 0x46, 0, 24 + len(body), 7, 0, 64, 1, 0, HOST_IP, GUEST_IP) + b"\x01\x01\x01\x01"
+hdr = hdr[:10] + struct.pack("!H", csum(hdr)) + hdr[12:]
+link.send((link.guest_mac or BCAST) + HOST_MAC + b"\x08\x00" + hdr + body)
+until(lambda: net.echoed, 5)
+check(len(net.echoed) == 1, "IP options: an echo request with options is answered")
+
+# 6e. Slow start (RFC 5681, RFC 6928): with our ACKs of its data withheld, the guest
+#     sends no more than its initial window of ten segments in the first
+#     round trip, though our window would take far more.
+def hold_acks(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    def cap(f):
+        x = tcp_of(f)
+        if x and x["flags"] & SYN:
+            p.ack_cap = (x["seq"] + 1) % M32
+        return 0
+    link.in_rule = cap
+mark = listen_7001()
+p = Peer(net, 45004, 7001, pattern(60000, 9), active=True)
+hold_acks(p)
+net.peer = p
+p.emit(SYN, p.iss)
+p.timer = time.time() + p.rto
+until(lambda: len([1 for _, x in p.log if x["data"]]) > 0, 10)
+until(lambda: False, 0.8)
+sent = {}
+for t, x in p.log:
+    if x["data"]:
+        sent[x["seq"]] = max(sent.get(x["seq"], 0), len(x["data"]))
+first = min(t for t, x in p.log if x["data"]) if sent else 0
+byts = sum(sent.values())
+check(sent and byts <= 14600, f"slow start: {byts} bytes in the first round trip with nothing acknowledged (at most 14600)")
+p.ack_cap = None
+p.emit(RST, p.abs_seq(0))
+until(lambda: b"bastios> " in out[mark:], 20)
+net.peer = None
+link.in_rule = lambda f: 0
 
 # 7. The ARP cache holds more than four neighbors: the guest pings twelve
 #    hosts that this script answers for, then the same twelve again. The
