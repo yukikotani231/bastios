@@ -36,8 +36,8 @@ def csum(data):
         s = (s & 0xFFFF) + (s >> 16)
     return 0xFFFF - s
 
-def ip_packet(proto, src, dst, payload):
-    h = struct.pack("!BBHHHBBHII", 0x45, 0, 20 + len(payload), 0, 0, 64, proto, 0, src, dst)
+def ip_packet(proto, src, dst, payload, frag=0):
+    h = struct.pack("!BBHHHBBHII", 0x45, 0, 20 + len(payload), 0, frag, 64, proto, 0, src, dst)
     h = h[:10] + struct.pack("!H", csum(h)) + h[12:]
     return h + payload
 
@@ -326,6 +326,7 @@ class Net:
     def __init__(self, link):
         self.link = link
         self.peer = None
+        self.echoes = []
         self.dhcp_done = False
         self.arp_asked = []
 
@@ -359,6 +360,9 @@ class Net:
             body = b"\0\0" + struct.pack("!H", csum(body)) + body[4:]
             mac = bytes([2, 0, 0, 0, 1, dst - HOST_IP])
             self.link.send(f[6:12] + mac + b"\x08\x00" + ip_packet(1, dst, GUEST_IP, body))
+            return
+        if f[23] == 17 and len(f) >= 42 and struct.unpack("!H", f[34:36])[0] == 7:
+            self.echoes.append(bytes(f[42:]))      # the guest's echo service answering
             return
         if f[23] == 17 and len(f) >= 282 + 4 and struct.unpack("!H", f[36:38])[0] == 67:
             self.dhcp(f)
@@ -664,6 +668,28 @@ def reset_scenario():
     until(lambda: b"bastios> " in out[mark:], 20)
     net.peer = None
 reset_scenario()
+
+# 4c. The guest does not reassemble, so a fragment is not a datagram: a UDP
+#     datagram for the echo service is answered, the same with more-fragments
+#     set or a fragment offset is not.
+def fragment_scenario():
+    def probe(tag, frag):
+        udp = struct.pack("!HHHH", 40000, 7, 8 + len(tag), 0) + tag
+        udp = udp[:6] + struct.pack("!H", l4_sum(17, HOST_IP, GUEST_IP, udp)) + udp[8:]
+        mac = link.guest_mac or BCAST
+        link.send(mac + HOST_MAC + b"\x08\x00" + ip_packet(17, HOST_IP, GUEST_IP, udp, frag))
+    net.echoes = []
+    probe(b"more", 0x2000)
+    probe(b"offset", 0x0001)
+    probe(b"whole", 0)
+    def echoed(tag):
+        return any(e.startswith(tag) for e in net.echoes)   # a short frame comes back padded
+    got = until(lambda: echoed(b"whole"), 5)
+    until(lambda: False, 0.5)
+    check(got, "fragments: a whole datagram is echoed")
+    check(not echoed(b"more") and not echoed(b"offset"),
+          "fragments: a first fragment and an offset one are dropped, not taken for datagrams")
+fragment_scenario()
 
 # 5. Random loss, delay, reordering and duplication both ways, on a seed.
 rng = random.Random(seed)

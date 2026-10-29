@@ -1914,6 +1914,8 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
     put_num(&mut con, hr);
     puts(&mut con, " bytes of entropy\r\n");
   }
+  let secret = rng_next(&mut k);
+  nic_seed(&mut k.nic, secret);                 // keys the TCP sequence numbers and ephemeral ports (src/net.bastio)
   install_files(&mut con, &mut k);
   let mut login = 0;
   if boot_word(cpu, "login") {

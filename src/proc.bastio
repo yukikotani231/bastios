@@ -1857,7 +1857,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
   let mut rsp = USER_BASE + elf_sp(args, alen, total, rn.shift);
   let mut isrc = Src { file: false, prog: NPROGS, f: 0, size: 0 };
   let mut ie = bad_elf();
-  let mut mmap_top = VDSO_PAGE * 4096;     // the vDSO's page is above it
+  let mut mmap_top = VDSO_PAGE * 4096 - STACK_GUARD_GAP;     // the guard gap and the vDSO's page are above it
   if e.ok && rn.mmap_pg * 4096 + (e.end + 4095) / 4096 * 4096 < mmap_top {
     mmap_top = mmap_top - rn.mmap_pg * 4096;
   }
