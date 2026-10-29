@@ -181,7 +181,7 @@ const NAT_NONE: u64 = 18446744073709551615;
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 1024;               // connections (listeners and TIME_WAIT hold some)
 const TCB0: u64 = 64;                 // connections the table starts with (it doubles to TCBS)
-const TCB_W: u64 = 36;                // words per connection (TCP_RING, the size of
+const TCB_W: u64 = 35;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
 struct Net {
@@ -1091,6 +1091,10 @@ fn dhcp_start(n: &mut Net)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  // RFC 2131 4.1: a transaction id the network cannot predict, a new one for
+  // each transaction (net_keyed is only a guess until nic_seed gives the
+  // stack its secret, which then starts the search again).
+  n.dhcp_xid = net_keyed(n, card_mac(n.dev), n.now, 68) % 4294967296;
   n.dhcp_state = DHCP_DISCOVER;
   n.dhcp_offer = 0;
   n.dhcp_until = n.now;
@@ -1125,7 +1129,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
   let end = 34 + ulen;                // the end of the datagram in the frame
   let extend = n.dhcp_state == DHCP_RENEW || n.dhcp_state == DHCP_REBIND;
   if (n.dhcp_state != DHCP_DISCOVER && n.dhcp_state != DHCP_REQUEST && !extend) || end < 282
-    || bget(n.pkt, 42) != 2 || be32(n.pkt, 46) != n.dhcp_xid || be32(n.pkt, 278) != DHCP_MAGIC {
+    || bget(n.pkt, 42) != 2 || be32(n.pkt, 46) != n.dhcp_xid || be32(n.pkt, 278) != DHCP_MAGIC
+    || be48(n.pkt, 70) != card_mac(n.dev) {
     return;
   }
   let yiaddr = be32(n.pkt, 58);
@@ -1802,6 +1807,9 @@ fn nic_seed(c: &mut Nic, x: u64)
       if n.sec == 0 {
         n.sec = x | 1;
         n.eph = net_keyed(n, 0, 0, 0) % EPH_N;
+        if n.dhcp_state == DHCP_DISCOVER && n.dhcp_offer == 0 {
+          dhcp_start(&mut n);         // the first DISCOVER went out with a guessable transaction id
+        }
       }
       c = Nic::Up(n);
     },
@@ -2143,7 +2151,6 @@ fn net_up(d: Card) -> Nic
   n.iid = v6_iid(card_mac(n.dev));
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
-    n.dhcp_xid = card_mac(n.dev) % 4294967296;
     dhcp_start(&mut n);
   } else {
     dhcp_static(&mut n);
