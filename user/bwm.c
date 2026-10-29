@@ -1481,29 +1481,45 @@ static void launch_program(const char *name, const char *image)
 }
 
 /* Runs the shell command CMD in a terminal window, which waits for Enter when the command ends. */
-/* Tab in the Run prompt: the first word becomes the next program in /bin that begins with
- * what was typed (in name order, again for the one after it); only while it has no blank. */
+/* Tab in the Run prompt completes the last word of the line: the first word from /bin, the
+ * others as file names (in the directory the word names, else the current one), taking the
+ * next name in order on each further Tab. A directory gets a '/' added. */
+static char tab_head[160];               /* the line up to the word being completed */
+static char tab_dir[160];                /* where its names are looked up */
+
 static void run_complete(void)
 {
     if (tab_k == 0) {
-        if (memchr(run_buf, ' ', run_n))
-            return;
-        snprintf(tab_pfx, sizeof tab_pfx, "%s", run_buf);
+        const char *sp = NULL;                               /* the last blank */
+        for (int i = 0; i < run_n; i++)
+            if (run_buf[i] == ' ')
+                sp = run_buf + i;
+        const char *w = sp ? sp + 1 : run_buf;               /* the word being completed */
+        const char *sl = strrchr(w, '/');
+        const char *base = sl ? sl + 1 : w;
+        snprintf(tab_head, sizeof tab_head, "%.*s", (int)(base - run_buf), run_buf);
+        snprintf(tab_pfx, sizeof tab_pfx, "%s", base);
+        if (sl)
+            snprintf(tab_dir, sizeof tab_dir, "%.*s", sl == w ? 1 : (int)(sl - w), w);
+        else
+            snprintf(tab_dir, sizeof tab_dir, "%s", sp ? "." : "/bin");
     }
     size_t pl = strlen(tab_pfx);
     char best[160], prev[160];
-    int n = 0, want = tab_k, have = 0;
+    int want = tab_k, have = 0;
     best[0] = prev[0] = 0;
     for (int round = 0; round <= want; round++) {            /* the round-th name in order */
-        DIR *d = opendir("/bin");
+        DIR *d = opendir(tab_dir);
         if (!d)
             return;
         char pick[160];
         pick[0] = 0;
         struct dirent *e;
         while ((e = readdir(d)) != NULL) {
-            if (strncmp(e->d_name, tab_pfx, pl) != 0 || strlen(e->d_name) >= sizeof pick)
+            if (strncmp(e->d_name, tab_pfx, pl) != 0 || strlen(e->d_name) >= sizeof pick - 1)
                 continue;
+            if (pl == 0 && e->d_name[0] == '.')
+                continue;                                    /* hidden names only when asked for */
             if (round > 0 && strcmp(e->d_name, prev) <= 0)
                 continue;
             if (!pick[0] || strcmp(e->d_name, pick) < 0)
@@ -1520,15 +1536,22 @@ static void run_complete(void)
             continue;
         }
         snprintf(prev, sizeof prev, "%s", pick);
-        n++;
         have = 1;
         if (round == want)
             snprintf(best, sizeof best, "%s", pick);
     }
-    (void)n;
     if (!have)
         return;
-    snprintf(run_buf, sizeof run_buf, "%s", best);
+    char full[400];
+    struct stat st;
+    snprintf(full, sizeof full, "%s/%s", tab_dir, best);
+    int dir = stat(full, &st) == 0 && S_ISDIR(st.st_mode);
+    if (strlen(tab_head) + strlen(best) + 2 > sizeof run_buf)
+        return;                                              /* would not fit */
+    strcpy(run_buf, tab_head);
+    strcat(run_buf, best);
+    if (dir)
+        strcat(run_buf, "/");
     run_n = (int)strlen(run_buf);
     tab_k++;
 }
