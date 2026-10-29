@@ -163,7 +163,7 @@ class Peer:
     def rcv_abs(self):
         return (self.irs + 1 + len(self.got) + (1 if self.peer_fin else 0)) % M32
 
-    def emit(self, flags, seq, data=b"", window=None):
+    def emit(self, flags, seq, data=b"", window=None, noack=False):
         win = self.rwin if window is None else window
         if not flags & SYN and self.peer_ws is not None:
             win >>= self.ws                 # scaled, except in a SYN
@@ -178,7 +178,7 @@ class Peer:
                 opts += bytes([1, 1, 4, 2])
         hl = 20 + len(opts)
         seg = struct.pack("!HHIIBBHHH", self.lport, self.rport, seq, ack, hl // 4 << 4,
-                          flags | (ACK if self.irs is not None else 0), win, 0, 0)
+                          flags | (ACK if self.irs is not None and not noack else 0), win, 0, 0)
         seg += opts
         seg += data
         seg = seg[:16] + struct.pack("!H", l4_sum(6, HOST_IP, GUEST_IP, seg)) + seg[18:]
@@ -328,6 +328,7 @@ class Net:
         self.peer = None
         self.dhcp_done = False
         self.arp_asked = []
+        self.echoed = []                # (destination, flags and fragment field) of the guest's echo replies
 
     def send_ip(self, proto, payload):
         mac = self.link.guest_mac or BCAST
@@ -353,6 +354,9 @@ class Net:
         if f[12:14] != b"\x08\x00":
             return
         dst = struct.unpack("!I", f[30:34])[0]
+        if f[23] == 1 and f[34] == 0:
+            self.echoed.append((dst, f[18:22]))
+            return
         if f[23] == 1 and f[34] == 8 and HOST_IP < dst <= HOST_IP + 12:
             # An echo request for one of the twelve neighbors: answer as it.
             body = b"\0\0\0\0" + f[38:14 + struct.unpack("!H", f[16:18])[0]]
@@ -746,6 +750,55 @@ check(finished and b"hello from the host" in out[mark:] and bytes(srv.got) == b"
 check(syns and all(k in syns[0]["opts"] for k in (2, 3, 4)),
       "connecting out: the SYN offers an MSS, window scaling and SACK (and nothing is scaled when we do not)")
 net.peer = None
+
+# 6b. Addresses that cannot be a source (RFC 1122 3.2.1.3): an echo request
+#     from a broadcast, multicast or class E address, or from loopback but
+#     over the wire, is dropped without an answer; one from a real address
+#     is answered, with the "don't fragment" bit clear and a new
+#     identification each time (a datagram that may be fragmented needs one,
+#     RFC 6864), while TCP segments carry DF and identification 0.
+def echo_from(src, seq):
+    body = struct.pack("!BBHHH", 8, 0, 0, 0x1234, seq) + b"abcdefgh"
+    body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+    mac = link.guest_mac or BCAST
+    link.send(mac + HOST_MAC + b"\x08\x00" + ip_packet(1, src, GUEST_IP, body))
+net.echoed = []
+for k, src in enumerate((0x7F000001, 0xFFFFFFFF, 0xE0000001, 0xF0000001, 0xFFFFFFFE)):
+    echo_from(src, k)
+until(lambda: False, 1.0)
+check(not net.echoed, f"bad sources: echo requests from loopback, broadcast, multicast and class E get no answer ({len(net.echoed)} seen)")
+echo_from(HOST_IP, 10)
+echo_from(HOST_IP, 11)
+until(lambda: len(net.echoed) >= 2, 5)
+check(len(net.echoed) >= 2, "bad sources: an echo request from a real address is answered")
+if len(net.echoed) >= 2:
+    check(all(not e[1][2] & 0x40 for e in net.echoed) and net.echoed[0][1][:2] != net.echoed[1][1][:2],
+          "ICMP: not marked don't-fragment, and a new identification for each reply")
+tcp_frames = [s["frame"] for _, s in link.seen]
+check(tcp_frames and all(f[20] & 0x40 and f[18:20] == b"\0\0" for f in tcp_frames),
+      f"TCP: segments carry DF and identification 0 ({len(tcp_frames)} seen)")
+
+# 6c. A segment without ACK is dropped once the connection is synchronized
+#     (RFC 9293 3.10.7.4): data sent that way is not echoed, the same data
+#     with ACK is.
+def no_ack_scenario():
+    mark = listen_7001()
+    q = Peer(net, 45003, 7001, b"", active=True)
+    net.peer = q
+    q.emit(SYN, q.iss)
+    q.timer = time.time() + q.rto
+    up = until(lambda: q.state == "ESTABLISHED", 10)
+    q.emit(PSH, q.abs_seq(0), b"hello", noack=True)
+    until(lambda: len(q.got) > 0, 1.5)
+    ignored = len(q.got) == 0
+    q.emit(PSH, q.abs_seq(0), b"hello")
+    taken = until(lambda: bytes(q.got) == b"hello", 5)
+    check(up and ignored, "no ACK: data in a segment without ACK is dropped")
+    check(taken, "no ACK: the same data with ACK is taken")
+    q.emit(RST, q.abs_seq(5))
+    until(lambda: b"bastios> " in out[mark:], 20)
+    net.peer = None
+no_ack_scenario()
 
 # 7. The ARP cache holds more than four neighbors: the guest pings twelve
 #    hosts that this script answers for, then the same twelve again. The
