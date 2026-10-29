@@ -2176,6 +2176,15 @@ int main(int argc, char **argv)
                                 }
                             } else if (c == 27) {
                                 run_on = 0;
+                            } else if (c == 21) {                  /* Ctrl-U: the whole line */
+                                run_n = 0;
+                                run_buf[0] = 0;
+                            } else if (c == 23) {                  /* Ctrl-W: the last word */
+                                while (run_n > 0 && run_buf[run_n - 1] == ' ')
+                                    run_n--;
+                                while (run_n > 0 && run_buf[run_n - 1] != ' ')
+                                    run_n--;
+                                run_buf[run_n] = 0;
                             } else if ((c == 127 || c == 8) && run_n > 0) {
                                 run_buf[--run_n] = 0;
                             } else if (c >= 32 && c < 127 && run_n < (int)sizeof run_buf - 1) {

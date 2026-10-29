@@ -507,7 +507,10 @@ fn tcb_init(n: &mut Net, t: u64, st: u64, lport: u64, rip: u64, rport: u64, pare
   }
   rb_clear(&mut n.rb, rx_ring(t));    // a slot reused before tcp_tick freed its pages
   rb_clear(&mut n.rb, tx_ring(t));
-  n.iss = (n.iss % SEQ_MOD + 64000 + n.now % 65536) % SEQ_MOD;
+  // RFC 6528: a clock that ticks every 4 microseconds (a tick here is 10 ms)
+  // plus a keyed function of the four-tuple, so a peer that cannot see the
+  // connection cannot guess where its numbers start.
+  n.iss = (n.now % 1000000 * 2500 + net_keyed(n, lport, rip, rport) % SEQ_MOD) % SEQ_MOD;
   tset(&mut n, t, W_ISS, n.iss);
   tset(&mut n, t, W_UNA, n.iss);
   tset(&mut n, t, W_NXT, n.iss);
@@ -1184,11 +1187,11 @@ fn tcp_eph_port(n: &mut Net) -> u64
 {
   let mut lport = 0;
   let mut tries = 0;
+  let start = net_start(&mut n);
   while tries <= TCBS && lport == 0
     invariant net_ok(n) && lport <= 65535
   {
-    let p = EPH_LO + n.eph % EPH_N;
-    n.eph = (n.eph % EPH_N + 1) % EPH_N;
+    let p = EPH_LO + (start + tries) % EPH_N;
     if !tcp_port_used(n, p) {
       lport = p;
     }

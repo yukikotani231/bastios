@@ -224,6 +224,7 @@ struct Net {
   tcbs: Buf,          // TCP connections (src/tcp.bastio), TCB_W words each
   rb: Rings,          // their receive and send buffers (src/tcpbuf.bastio)
   iss: u64,           // the next initial sequence number
+  sec: u64,           // a secret from the kernel's generator (nic_seed): keys the initial sequence numbers and the ephemeral ports
   lo: Bytes,          // frames sent to ourselves, packed in a ring of LO_BYTES,
   lo_len: Buf,        // their lengths,
   lo_at: Buf,         // where each starts,
@@ -890,6 +891,11 @@ fn ip_in(n: &mut Net, flen: u64)
     return;
   }
   if !mine && !(dst == IP_MAX && cast[u64](bget(n.pkt, 23)) == IP_UDP) {
+    return;
+  }
+  // No reassembly: a fragment (more-fragments set, or an offset) is not a
+  // whole datagram, and must not be taken for one.
+  if be16(n.pkt, 20) % 16384 != 0 {
     return;
   }
   let total = be16(n.pkt, 16);
@@ -1651,6 +1657,54 @@ fn udp_head_len(n: &mut Net, s: u64) -> u64
   return l;
 }
 
+/// One keyed mixing step (the multiply-xorshift finalizer the generator in
+/// src/lxdev.bastio uses).
+fn net_mix(z: u64) -> u64 {
+  let a = wrap_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9);
+  let b = wrap_mul(a ^ (a >> 27), 0x94D049BB133111EB);
+  return b ^ (b >> 31);
+}
+
+/// A word that depends on the secret and on a, b and c: what RFC 6528 asks
+/// of the offset of an initial sequence number, and unguessable without the
+/// secret. It is a mixing function, not a MAC; an attacker who cannot see
+/// our traffic has the secret's 64 bits to guess.
+fn net_keyed(n: &Net, a: u64, b: u64, c: u64) -> u64
+  requires net_ok(n)
+{
+  return net_mix(net_mix(net_mix(n.sec ^ a) ^ b) ^ c);
+}
+
+/// Where the next ephemeral port search starts: the counter, which began at
+/// an unguessable place (nic_seed) and moves on by a keyed 1 to 16 each time.
+/// Ports still come round slowly, so a port just closed is not handed out
+/// again at once (a peer, or a NAT, may still hold the old connection).
+fn net_start(n: &mut Net) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && result < EPH_N
+{
+  let c = n.eph % EPH_N;
+  n.eph = (c + 1 + net_keyed(n, c, n.now, 7) % 16) % EPH_N;
+  return c;
+}
+
+/// Gives the stack its secret (once: a later word is ignored).
+fn nic_seed(c: &mut Nic, x: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if n.sec == 0 {
+        n.sec = x | 1;
+        n.eph = net_keyed(n, 0, 0, 0) % EPH_N;
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
 /// Binds open, unbound socket s to a free ephemeral port. Returns the
 /// port, or 0 if none was found. There are fewer sockets than tries, so
 /// one of the ports tried is always free.
@@ -1659,11 +1713,11 @@ fn udp_bind_any(n: &mut Net, s: u64) -> u64
   ensures net_ok(n) && result <= 65535
 {
   let mut tries = 0;
+  let start = net_start(&mut n);
   while tries <= SOCKS
     invariant net_ok(n)
   {
-    let p = EPH_LO + n.eph % EPH_N;
-    n.eph = (n.eph % EPH_N + 1) % EPH_N;
+    let p = EPH_LO + (start + tries) % EPH_N;
     if sock_find(n, p) == SOCKS {
       sk_set(&mut n, s, S_PORT, p);
       return p;
@@ -1976,7 +2030,7 @@ fn net_up(d: Card) -> Nic
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), dm: alloc(0), cork: balloc(0), eph: 0,
-    tcbs: alloc(TCB0 * TCB_W), rb: rings_new(), iss: 0,
+    tcbs: alloc(TCB0 * TCB_W), rb: rings_new(), iss: 0, sec: 0,
     lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, lo_split: false, lo_src: 0, seen_rx: 0, seen_tick: 0, irq_on: false,
     v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_lo: 0, dns6_hi: 0, dns6_lo: 0, rs_n: 0, rs_until: 0,
     ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,

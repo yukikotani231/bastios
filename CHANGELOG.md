@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- In the `bwm` Run prompt (Alt-F2) Ctrl-U clears the line and Ctrl-W takes off the last word.
 - `bterm` takes all the output that is already waiting (up to 32 KiB) before it draws, where it drew after every 512 bytes, so a program that prints a lot makes fewer redraws.
 - Tab in the `bwm` Run prompt (Alt-F2) completes the first word to a program in `/bin` (Tab again for the next one in name order).
 - In the `bwm` Run prompt (Alt-F2) Up and Down bring back the last 8 commands that were run from it.
