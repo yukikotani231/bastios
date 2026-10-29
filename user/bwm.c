@@ -125,6 +125,7 @@ static int menu_mx, menu_my;             /* the pointer, for the entry that is l
 static int run_on;                       /* the Alt-F2 prompt is showing in the task bar */
 static char run_buf[160];                /* what has been typed in it */
 static int run_n;
+static int run_cur;                      /* where the cursor is in it (0 to run_n) */
 #define RUN_HIST 8
 static char run_hist[RUN_HIST][160];     /* commands run from it, newest last (Up and Down walk them) */
 static char tab_pfx[160];                /* the first word as typed when Tab was first pressed */
@@ -521,9 +522,11 @@ static void draw_bar(void)
         fill(scene, x0, y0 + 3, x1, H - 3, rgb(30, 110, 70));
         text(scene, x0 + 4, y0 + 4, "Run:", rgb(255, 255, 255));
         int room = (x1 - x0 - 8) / CELL_W - 6;
-        const char *shown = run_n > room ? run_buf + (run_n - room) : run_buf;
+        int from = run_cur > room ? run_cur - room : 0;       /* the cursor stays in view; the tail may not be */
+        char shown[160];
+        snprintf(shown, sizeof shown, "%.*s", room > 0 ? room : 0, run_buf + from);
         text(scene, x0 + 4 + 5 * CELL_W, y0 + 4, shown, rgb(255, 255, 255));
-        int cx = x0 + 4 + (5 + (int)strlen(shown)) * CELL_W;
+        int cx = x0 + 4 + (5 + run_cur - from) * CELL_W;
         fill(scene, cx, y0 + 5, cx + 2, y0 + 19, rgb(255, 255, 255));
     }
     int hh, mm;
@@ -2178,12 +2181,24 @@ int main(int argc, char **argv)
                                 run_n = 0;
                                 run_buf[0] = 0;
                             }
+                            run_cur = run_n;
+                            m = 0;
+                        } else if (code == 105 || code == 106 || code == 102 || code == 107 || code == 111) {
+                            if (code == 105 && run_cur > 0) run_cur--;                   /* Left, Right, Home, End */
+                            if (code == 106 && run_cur < run_n) run_cur++;
+                            if (code == 102) run_cur = 0;
+                            if (code == 107) run_cur = run_n;
+                            if (code == 111 && run_cur < run_n) {                       /* Delete */
+                                memmove(run_buf + run_cur, run_buf + run_cur + 1, (size_t)(run_n - run_cur));
+                                run_n--;
+                            }
                             m = 0;
                         }
                         for (int j = 0; j < m; j++) {
                             unsigned char c = (unsigned char)out[j];
                             if (c == 9) {
                                 run_complete();
+                                run_cur = run_n;
                                 continue;
                             }
                             tab_k = 0;
@@ -2199,20 +2214,31 @@ int main(int argc, char **argv)
                                 }
                             } else if (c == 27) {
                                 run_on = 0;
-                            } else if (c == 21) {                  /* Ctrl-U: the whole line */
-                                run_n = 0;
-                                run_buf[0] = 0;
-                            } else if (c == 23) {                  /* Ctrl-W: the last word */
-                                while (run_n > 0 && run_buf[run_n - 1] == ' ')
-                                    run_n--;
-                                while (run_n > 0 && run_buf[run_n - 1] != ' ')
-                                    run_n--;
-                                run_buf[run_n] = 0;
-                            } else if ((c == 127 || c == 8) && run_n > 0) {
-                                run_buf[--run_n] = 0;
+                            } else if (c == 21) {                  /* Ctrl-U: what is left of the cursor */
+                                memmove(run_buf, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_n -= run_cur;
+                                run_cur = 0;
+                            } else if (c == 23) {                  /* Ctrl-W: the word left of the cursor */
+                                int e = run_cur;
+                                while (e > 0 && run_buf[e - 1] == ' ')
+                                    e--;
+                                while (e > 0 && run_buf[e - 1] != ' ')
+                                    e--;
+                                memmove(run_buf + e, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_n -= run_cur - e;
+                                run_cur = e;
+                            } else if (c == 1) {                   /* Ctrl-A, Ctrl-E: start and end */
+                                run_cur = 0;
+                            } else if (c == 5) {
+                                run_cur = run_n;
+                            } else if ((c == 127 || c == 8) && run_cur > 0) {
+                                memmove(run_buf + run_cur - 1, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_n--;
+                                run_cur--;
                             } else if (c >= 32 && c < 127 && run_n < (int)sizeof run_buf - 1) {
-                                run_buf[run_n++] = (char)c;
-                                run_buf[run_n] = 0;
+                                memmove(run_buf + run_cur + 1, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_buf[run_cur++] = (char)c;
+                                run_n++;
                             }
                         }
                         touch_bar();
@@ -2220,6 +2246,7 @@ int main(int argc, char **argv)
                         run_on = 1;
                         run_hi = run_nh;
                         run_n = 0;
+                        run_cur = 0;
                         run_buf[0] = 0;
                         menu_open = 0;
                         touch_all();
