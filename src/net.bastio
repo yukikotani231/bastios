@@ -41,6 +41,7 @@ const IP_UDP: u64 = 17;
 const IP_TCP: u64 = 6;
 const ICMP_ECHO_REPLY: u64 = 0;
 const ICMP_ECHO: u64 = 8;
+const ICMP_UNREACH: u64 = 3;
 const UDP_ECHO_PORT: u64 = 7;
 const ICMP_RATE: u64 = 50;            // ICMP errors sent in a second, at most
 const PING_ID: u64 = 0x4253;          // "BS"
@@ -1017,6 +1018,9 @@ fn ip_in(n: &mut Net, frame_len: u64)
     } else if kind == ICMP_ECHO_REPLY && n.ping_state == PING_ECHO
       && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
       n.ping_state = PING_DONE;
+    }
+    if mine && kind == ICMP_UNREACH {
+      tcp_icmp_error(&mut n, total);
     }
     if mine {
       raw_deliver(&mut n, total);

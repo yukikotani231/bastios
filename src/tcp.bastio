@@ -962,6 +962,33 @@ fn tcp_accept_syn(n: &mut Net, lis: u64, seq: u64, hl: u64)
   tcp_arm(&mut n, t);
 }
 
+/// An ICMP destination unreachable that came in (total: the IP length) and
+/// quotes a segment of ours. A hard error (protocol, port, source route or
+/// administrative prohibition: codes 2, 3, 9, 10, 13) aborts a connection
+/// that is still opening, which then reports as refused (RFC 1122 4.2.3.9);
+/// the quoted sequence number must be our SYN's, so a sender that cannot
+/// see our traffic cannot guess it (RFC 5927 4.1). Soft errors, "fragmentation
+/// needed" and errors about established connections change nothing.
+fn tcp_icmp_error(n: &mut Net, total: u64)
+  requires net_ok(n) && 28 <= total && total <= NET_BUF - 14
+  ensures net_ok(n)
+{
+  if total < 56 || csum(n.pkt, 34, total - 20) != 0 {
+    return;
+  }
+  let code = cast[u64](bget(n.pkt, 35));
+  if !(code == 2 || code == 3 || code == 9 || code == 10 || code == 13) {
+    return;
+  }
+  if cast[u64](bget(n.pkt, 42)) != 69 || cast[u64](bget(n.pkt, 51)) != IP_TCP {
+    return;
+  }
+  let t = tcb_find(n, be16(n.pkt, 62), be32(n.pkt, 58), be16(n.pkt, 64));
+  if t < TCBS && tw(n, t, W_STATE) == T_SYN_SENT && be32(n.pkt, 66) == twb(n, t, W_ISS, SEQ_MOD) {
+    tcb_close(&mut n, t, true);
+  }
+}
+
 /// A TCP segment for us (total: the IP length, checked against the frame).
 fn tcp_in(n: &mut Net, total: u64)
   requires net_ok(n) && 28 <= total && total <= NET_BUF - 14
