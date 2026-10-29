@@ -19,6 +19,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - In the `bwm` Run prompt (Alt-F2) Ctrl-U clears the line and Ctrl-W takes off the last word.
 - `bterm` takes all the output that is already waiting (up to 32 KiB) before it draws, where it drew after every 512 bytes, so a program that prints a lot makes fewer redraws.
 - Tab in the `bwm` Run prompt (Alt-F2) completes the first word to a program in `/bin` (Tab again for the next one in name order).
+- Tab in the Run prompt also completes the other words of the line as file names (a directory gets a `/`).
 - In the `bwm` Run prompt (Alt-F2) Up and Down bring back the last 8 commands that were run from it.
 - The boot framebuffer is mapped write-combining (page attribute table entry 4, set on every processor) when the processor has one and the framebuffer is at least 2 MiB inside the device window; the boot banner says `(write-combining)`. Until now every pixel store was its own uncached write, which is slow on real hardware; QEMU's emulation does not show the difference, so the gain there is not measured.
 - Writing to `/dev/fb0` takes up to a whole ring of pixels (32 records of 4 KiB) in one call instead of 4 KiB, and the ring is filled with a proved bulk copy instead of a byte loop; `bwm` writes the changed rows of the screen whole when they are wide, so a window drag or a full-screen update makes far fewer system calls (in QEMU a drag frame took about 40 ms instead of 65 to 95 ms, a full-screen update about 90 to 120 ms instead of 150 to 300 ms).
