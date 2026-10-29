@@ -876,6 +876,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(0.5)
             monitor("sendkey alt-f4")
             time.sleep(0.5)
+            # Left, Delete, Home and End edit the Run line in the middle: xecxho becomes echo.
+            monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "xecxho"], *["sendkey left"] * 3, "sendkey delete",
+                    "sendkey home", "sendkey delete", "sendkey end", "sendkey spc", "sendkey z", "sendkey z",
+                    "sendkey spc", "sendkey shift-dot", *[f"sendkey {c}" for c in ("slash", "t", "m", "p", "slash", "c", "u", "r")], "sendkey ret")
+            time.sleep(2)
+            if run_prompt():
+                monitor("sendkey esc")
+                time.sleep(0.5)
+            monitor("sendkey alt-f4")
+            time.sleep(0.5)
             mark = len(out)
             monitor("mouse_move 482 372")                          # onto the Menu button
             monitor("mouse_button 1", "mouse_button 0")
@@ -1113,6 +1123,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"cat /tmp/tab2\r"); q.stdin.flush()
         good = until(b"/bin/mhello\r\n", mark)
         print(("ok  " if good else "FAIL"), f"({name}) Tab in the Run prompt completes a file name")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/cur\r"); q.stdin.flush()
+        good = until(b"zz\r\n", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the Run prompt line can be edited with Left, Delete, Home and End")
         fails += not good
         # m in the System window picks the screen mode bwm asks for the next time it starts (/etc/bwm.mode).
         mark = len(out)
