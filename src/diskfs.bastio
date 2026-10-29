@@ -192,6 +192,7 @@ struct DiskFs {
   pden: u64,
   pek: Buf,             // scratch for the commit: the kinds of the entries of pde, which the first round leaves out
   ppt: u64,             // the tick the first of them was noted
+  vac: u64,             // 1 if a name the disk still has was freed in memory only since the last commit (a lazy move or removal): a creation or move onto a name must not share its commit
   pr: u64,              // 1 if the batch holds writes of files besides the current one (disk_write retires a file when another is written)
   tick: u64,            // the last tick disk_pump was given
   used: Bits,           // a set bit for each block in use, one per block of the disk (at most MAX_BLOCKS)
@@ -1122,7 +1123,7 @@ fn disk_mount(dev: Blk, mode: u64, cslots: u64) -> DiskFs
   }
   let mut d = DiskFs { dev: dev, dir: balloc(DIR_START * BLOCK), dcap: DIR_START, sb: balloc(BLOCK), ext: balloc(EXT_START * BLOCK), ecap: EXT_START, next: 0, sec: balloc(SECTOR), root: balloc(BLOCK), sp: balloc(BLOCK),
     la: balloc(BLOCK), lb: balloc(BLOCK), data: balloc(BLOCK), d2: balloc(BLOCK), q: dq_new(nc), txn: 0, pw: 0, mr: 0, ma: 0, pb: alloc(BATCH_MAX), pn: 0, bmax: bmax, ob: alloc(OB_MAX), on: 0, pt: 0, pd: alloc(PD_MAX), pdn: 0, pf: alloc(PD_MAX), pdd: alloc(PDD_MAX), pddn: 0, pde: alloc(PDE_MAX), pden: 0, pek: alloc(PDE_MAX), ppt: 0, pr: 0, tick: 0,
-    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, lkb: balloc(LK_BYTES), psz: total, plo: 0, raw: mode == DM_RAW };
+    used: bits_new(n), blocks: 0, slots: 0, hint: DATA_B0, ix: balloc(0), ixn: 0, pnew: 0, vac: 0, ixmin: ixmin, free0: 0, foreign: false, links: true, lkb: balloc(LK_BYTES), psz: total, plo: 0, raw: mode == DM_RAW };
   if mode == DM_RAW {
     return d;
   }
@@ -1758,6 +1759,22 @@ fn disk_find(d: &DiskFs, name: &Bytes, from: u64, n: u64) -> u64
   return DSLOTS;
 }
 
+/// A name freed in memory only (a lazy move or removal) is still on the
+/// disk until the commit. If the same name were taken again in the same
+/// commit, a power cut between the commit's sector writes would leave both
+/// entries with it. So a creation or move that comes after such a change
+/// has the batch committed first: the queue runs that commit, flush and
+/// all, ahead of the one that holds the new entry.
+fn vac_settle(d: &mut DiskFs)
+  requires disk_ok(d)
+  ensures disk_ok(d) && d.blocks == old(d.blocks) && d.slots == old(d.slots)
+{
+  if d.vac != 0 && d.pdn != 0 {
+    settle_batch(&mut d);
+  }
+  d.vac = 0;
+}
+
 /// Creates an empty file (or directory) at the path name[from..from + n].
 /// Its directory must exist, its last component be 1 to DNAME_MAX bytes,
 /// and the name be free. Returns the entry or DSLOTS.
@@ -1941,6 +1958,8 @@ fn disk_entry(d: &mut DiskFs, name: &Bytes, from: u64, n: u64, dir: bool, link: 
   let lazy = link >= DSLOTS;
   if !lazy {
     disk_drain(&mut d);               // queued writes reach the disk first
+  } else {
+    vac_settle(&mut d);
   }
   let end = from + n;
   let mut k = end;
@@ -2061,6 +2080,8 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   let lazy = i < DSLOTS && dent_byte(d, i, E_KIND) == 1;
   if !lazy {
     disk_drain(&mut d);               // queued writes reach the disk first
+  } else {
+    vac_settle(&mut d);
   }
   if !dent_live(d, i) {
     return false;
@@ -2140,6 +2161,9 @@ fn disk_move(d: &mut DiskFs, i: u64, name: &Bytes, from: u64, n: u64) -> bool
   let mut ok = false;
   if lazy {
     ok = ent_lazy(&mut d, i);
+    if ok {
+      d.vac = 1;                      // the old name is still on the disk
+    }
   } else {
     ok = ent_flush(&mut d, i);
   }
@@ -2174,6 +2198,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   // only in memory) are what the removal frees.
   let mut dropped = false;
   let mut oldroot = 0;
+  let mut ondisk = true;              // does the disk have the entry's name?
   if d.pw == i + 1 && d.pr == 0 && dent_byte(d, i, E_KIND) == 1 {
     disk_wait(&mut d);
     if d.pw == i + 1 && d.pr == 0 {
@@ -2183,6 +2208,7 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
         // Created since the directory last reached the disk, which holds a
         // free slot there: no read to find that out.
         dropped = true;
+        ondisk = false;
       } else if b != 0 && b < MAX_BLOCKS && blk_read(&mut d.dev, d.plo + b * BSECT + s % BSECT, &mut d.sec) {
         // (A free slot on the disk may keep the root of a file removed
         // from it: only a file's own entry names blocks to free.)
@@ -2208,6 +2234,9 @@ fn disk_remove(d: &mut DiskFs, i: u64) -> bool
   if dropped && oldroot == 0 {
     if !ent_lazy(&mut d, i) {
       return false;
+    }
+    if ondisk {
+      d.vac = 1;                      // the name may still be on the disk (an empty file)
     }
   } else if !ent_flush(&mut d, i) {
     return false;
