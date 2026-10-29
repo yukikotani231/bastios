@@ -320,11 +320,18 @@ bst_cpu_enter:
         cmp     CORE_LROOT(%rsi), %rax          /* the table of the last flushing load, and no entry taken out of any table since (the prelude entered the table for a system call's copy, say) */
         je      12f
         cmpq    $0, CORE_IBPB(%rsi)             /* another process than the one this processor ran last: its branch predictions must not steer this one (Spectre v2) */
-        je      8f
+        je      13f
         xor     %edx, %edx
         mov     $1, %eax                        /* IBPB; rax is reloaded below */
         mov     $0x49, %ecx                     /* IA32_PRED_CMD */
         wrmsr
+13:     mov     $32, %ecx                       /* RSB stuffing: 32 calls that never return fill the return stack with a harmless target, so returns the previous process left in it are not used */
+14:     call    15f
+        pause
+        lfence
+15:     dec     %ecx
+        jnz     14b
+        add     $32*8, %rsp
         mov     CORE_UROOT(%rsi), %rax
         and     $-2, %rax
         jmp     8f
