@@ -49,6 +49,10 @@ QEMU    ?= qemu-system-x86_64
 
 BASE_CFLAGS := -std=c11 -O2 -ffreestanding -fno-builtin -fno-stack-protector \
                -fno-pic -fno-pie -mno-red-zone -mgeneral-regs-only -nostdlib
+# Spectre v2: indirect jumps, calls and returns of the kernel and of boot/ go
+# through retpoline thunks (GCC emits them in each object), so branch predictor
+# state a user program trained does not choose where the kernel runs.
+RETPOLINE := -mindirect-branch=thunk -fno-jump-tables -fcf-protection=none
 # Generated C (proved Bastio) is compiled without warnings: it declares
 # temporaries it may not use. The hand-written C in boot/ is the trusted
 # base, so every warning there is an error. GCC takes reads of the BIOS data
@@ -254,7 +258,7 @@ build/kernel.o: build/kernel.s build/kernel.backend
 	$(CC) -c -o $@ $<
 else
 build/kernel.o: build/kernel.c build/kernel.backend
-	$(CC) $(CFLAGS) -ffunction-sections -c -o $@ $<
+	$(CC) $(CFLAGS) $(RETPOLINE) -ffunction-sections -c -o $@ $<
 endif
 
 build/libc.o: boot/libc.c | build
@@ -264,10 +268,10 @@ build/boot.o: boot/boot.S boot/core.h | build
 	$(CC) -c -o $@ $<
 
 build/platform.o: boot/platform.c | build
-	$(CC) $(TCFLAGS) -ffunction-sections -c -o $@ $<
+	$(CC) $(TCFLAGS) $(RETPOLINE) -ffunction-sections -c -o $@ $<
 
 build/smp.o: boot/smp.c boot/core.h | build
-	$(CC) $(TCFLAGS) -ffunction-sections -c -o $@ $<
+	$(CC) $(TCFLAGS) $(RETPOLINE) -ffunction-sections -c -o $@ $<
 
 build/multiboot.o: boot/multiboot.c | build
 	$(CC) $(TCFLAGS) -c -o $@ $<
@@ -370,7 +374,7 @@ $(INSTALL_DIR)/kernel.c: $(KSRCS) $(KFILES) $(UBINS) $(BASTIOC) $(INSTALL_DIR)/l
 	$(BASTIOC) --lib $(BASTIOLIB) --lib $(INSTALL_DIR)/lib --lib src/x86_64/default --lib src/x86_64 --lib src --target kernel -o $@ src/main.bastio
 
 $(INSTALL_DIR)/kernel.o: $(INSTALL_DIR)/kernel.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+	$(CC) $(CFLAGS) $(RETPOLINE) -c -o $@ $<
 
 $(INSTALL_DIR)/bastios64.elf: $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS)) boot/linker.ld
 	$(CC) $(LDFLAGS) -o $@ $(patsubst build/kernel.o,$(INSTALL_DIR)/kernel.o,$(KOBJS))

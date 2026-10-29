@@ -397,7 +397,13 @@ bst_cpu_enter:
         mov     13*8(%rsi), %r14
         mov     14*8(%rsi), %r15
         mov     4*8(%rsi), %rsi
-        jmp     *enter_tail_ptr(%rip)           /* the rest runs in the entry area */
+        mov     enter_tail_ptr(%rip), %rax      /* the rest runs in the entry area (rax is free: the user's is on the stack) */
+        call    8f                              /* a retpoline: the user cannot train the branch predictor to send this jump elsewhere */
+7:      pause
+        lfence
+        jmp     7b
+8:      mov     %rax, (%rsp)
+        ret
 
 /* uint64_t *bst_platform_ctx(void): this processor's saved user context, the
  * start of its block. It touches only %rax, so the native backend's cpu_get and
@@ -444,8 +450,16 @@ bst_enter_tail:
         and     $-CORE_BLOCK, %rax
         mov     CORE_CR3(%rax), %rax
         mov     %rax, %cr3
-        mov     5*8(%rsp), %rax
-        iretq
+        mov     %rsp, %rax
+        and     $-CORE_BLOCK, %rax
+        cmpq    $0, CORE_VERW(%rax)             /* read after the switch: this is the processor's own block, mapped in the shadow table */
+        mov     5*8(%rsp), %rax                 /* leaves the flags */
+        je      1f
+        verw    bst_verw_sel(%rip)              /* clears the CPU's buffers of what the kernel just read (MDS) */
+1:      iretq
+.balign 2
+bst_verw_sel:
+        .word   UDATA
 
 /*
  * Entry for the `syscall` instruction (Linux system calls). The CPU leaves
@@ -493,7 +507,12 @@ trap_alias:
         mov     CORE_KCR3(%rax), %rax
         mov     %rax, %cr3
 1:      movabs  $trap_common, %rax
-        jmp     *%rax
+        call    8f                              /* a retpoline: a trap from user mode must not run where the user trained the predictor */
+7:      pause
+        lfence
+        jmp     7b
+8:      mov     %rax, (%rsp)
+        ret
 
 /*
  * Trap stubs. Each pushes a dummy error code where the CPU pushes none, then
