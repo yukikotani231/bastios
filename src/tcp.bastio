@@ -89,12 +89,9 @@ const W_NS: u64 = 27;                 // its network namespace (src/netns.bastio
 const W_FAM: u64 = 28;                // a listener's FAM_* (net.bastio) plus FAM_REUSE if it set SO_REUSEPORT; a connection's: FAM_V4 if its peer is an IPv4 socket (FAM_BOTH: an IPv6 one)
 const W_CWND: u64 = 29;               // congestion window in bytes; 0: not set yet (ten segments)
 const W_SSTH: u64 = 30;               // slow start threshold; 0: none yet
-const W_SRTT: u64 = 31;               // smoothed round trip time, ticks; 0: no sample yet
-const W_RTTVAR: u64 = 32;
-const W_RTT_SEQ: u64 = 33;            // the sequence number whose ACK ends the sample being timed ...
-const W_RTT_AT: u64 = 34;             // ... and the tick it was sent at, plus 1; 0: none timed
-const W_RTO: u64 = 35;                // the resend timeout from the samples, ticks; 0: none yet
-const W_DUPS: u64 = 36;               // duplicate ACKs in a row (3 start a fast retransmit)
+const W_RTTV: u64 = 31;               // round trip measurements, in ticks: smoothed time | variation << 16 | resend timeout << 32; 0: no sample yet
+const W_RTTT: u64 = 32;               // the segment being timed: the sequence number whose ACK ends the sample << 32 | the tick it was sent at (low 32 bits, never 0); 0: none timed
+const W_DUPS: u64 = 33;               // duplicate ACKs in a row (3 start a fast retransmit)
 const FAM_REUSE: u64 = 16;
 const TCP_CORK_TICKS: u64 = 20;       // 200 ms, as Linux
 
@@ -286,8 +283,9 @@ fn tcp_rtt_sample(n: &mut Net, t: u64, r0: u64)
   if r > TCP_RTO_MAX {
     r = TCP_RTO_MAX;
   }
-  let mut srtt = tw(n, t, W_SRTT);
-  let mut var = tw(n, t, W_RTTVAR);
+  let packed = tw(n, t, W_RTTV);
+  let mut srtt = packed % 65536;
+  let mut var = packed / 65536 % 65536;
   if srtt == 0 || srtt > TCP_RTO_MAX || var > TCP_RTO_MAX {
     srtt = r;
     var = r / 2;
@@ -315,9 +313,7 @@ fn tcp_rtt_sample(n: &mut Net, t: u64, r0: u64)
   if rto > TCP_RTO_MAX {
     rto = TCP_RTO_MAX;
   }
-  tset(&mut n, t, W_SRTT, srtt);
-  tset(&mut n, t, W_RTTVAR, var);
-  tset(&mut n, t, W_RTO, rto);
+  tset(&mut n, t, W_RTTV, srtt + var * 65536 + rto * 4294967296);
 }
 
 /// Three duplicate ACKs: the segment at the oldest unacknowledged byte was
@@ -337,7 +333,7 @@ fn tcp_fast_rexmit(n: &mut Net, t: u64)
   }
   tset(&mut n, t, W_SSTH, ss);
   tset(&mut n, t, W_CWND, ss + 3 * mss);
-  tset(&mut n, t, W_RTT_AT, 0);
+  tset(&mut n, t, W_RTTT, 0);
   if txlen > 0 {
     let mut l = mss;
     if l > txlen {
@@ -471,7 +467,7 @@ fn tcp_arm(n: &mut Net, t: u64)
   ensures net_ok(n)
 {
   let tries = tw(n, t, W_TRIES);
-  let mut rto = tw(n, t, W_RTO);
+  let mut rto = tw(n, t, W_RTTV) / 4294967296;
   if rto < TCP_RTO || rto > TCP_RTO_MAX {
     rto = TCP_RTO;
   }
@@ -545,9 +541,12 @@ fn tcp_output(n: &mut Net, t: u64, want_ack: bool)
     }
     // A segment sent for the first time starts a round trip measurement if
     // none is running (RFC 6298 3; Karn: a resent one is never timed).
-    if off >= seq_diff(tw(n, t, W_MAX), una) && tw(n, t, W_RTT_AT) == 0 && n.now < 18446744073709551615 {
-      tset(&mut n, t, W_RTT_SEQ, seq_add(una, off + l));
-      tset(&mut n, t, W_RTT_AT, n.now + 1);
+    if off >= seq_diff(tw(n, t, W_MAX), una) && tw(n, t, W_RTTT) == 0 {
+      let mut at = (n.now % 4294967296 + 1) % 4294967296;
+      if at == 0 {
+        at = 1;
+      }
+      tset(&mut n, t, W_RTTT, seq_add(una, off + l) * 4294967296 + at);
     }
     tcp_emit(&mut n, t, TF_ACK + TF_PSH, seq_add(una, off), off, l);
     off = off + l;
@@ -820,12 +819,10 @@ fn tcp_acked(n: &mut Net, t: u64, ackn: u64)
   if ahead {
     tset(&mut n, t, W_NXT, ackn);
   }
-  let at = tw(n, t, W_RTT_AT);
-  if at != 0 && seq_diff(ackn, tw(n, t, W_RTT_SEQ)) < 2147483648 {
-    tset(&mut n, t, W_RTT_AT, 0);
-    if n.now < 18446744073709551615 && n.now + 1 >= at {
-      tcp_rtt_sample(&mut n, t, n.now + 1 - at);
-    }
+  let timed = tw(n, t, W_RTTT);
+  if timed != 0 && seq_diff(ackn, timed / 4294967296) < 2147483648 {
+    tset(&mut n, t, W_RTTT, 0);
+    tcp_rtt_sample(&mut n, t, ((n.now % 4294967296 + 1) % 4294967296 + 4294967296 - timed % 4294967296) % 4294967296);
   }
   if tw(n, t, W_DUPS) >= 3 && tw(n, t, W_SSTH) != 0 {
     tset(&mut n, t, W_CWND, tw(n, t, W_SSTH));    // the fast retransmit is over
@@ -1261,7 +1258,7 @@ fn tcp_tick(n: &mut Net, now: u64)
           // (RFC 5681 3.1): half of what was out is the new threshold, once
           // for each loss, and the window starts again at one segment. A
           // resent segment is not timed (Karn).
-          tset(&mut n, t, W_RTT_AT, 0);
+          tset(&mut n, t, W_RTTT, 0);
           tset(&mut n, t, W_DUPS, 0);
           if tw(n, t, W_WND) != 0 {
             let mss = tcp_seg_mss(n, t);

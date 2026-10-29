@@ -208,6 +208,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Network
 
+- The DHCP client picks a new transaction id for each exchange from the stack's secret (it was the low half of the MAC address, the same every time), and ignores an answer whose client hardware address is not the card's (RFC 2131 4.1).
 - TCP keeps a congestion window (RFC 5681: ten segments to start, slow start, then about a segment per round trip; a timeout halves the threshold and restarts at one segment) and a resend timeout that follows the measured round trip (RFC 6298, never under one second, resent segments are not timed). Before, a connection sent a whole peer window at once and always waited one second, doubled. Three duplicate ACKs resend the missing segment at once and start fast recovery (RFC 5681 3.2); there is still no timestamp option.
 - A UDP datagram for a port nobody listens on is answered with ICMP port unreachable (at most 50 a second), and an IPv4 packet with options is taken in with the options ignored (RFC 1122 4.1.3.4 and 3.2.1.8).
 - The IPv4 stack follows more of RFC 1122 and RFC 9293: a packet whose source is a broadcast, multicast or class E address, or a loopback address that arrived over the wire, is dropped (it used to be answered); a TCP segment without ACK is dropped once the connection is synchronized; ARP cache entries expire 60 s after the neighbour was last heard from; TCP segments carry DF with identification 0 and other packets a new identification each (RFC 6864).
