@@ -44,6 +44,7 @@ struct bwm_key { uint32_t id, ch; };                            /* ch is a byte,
 #define BWM_KEY_ZOOM_IN 0x105          /* Ctrl-plus: bigger text */
 #define BWM_KEY_ZOOM_OUT 0x106         /* Ctrl-minus: smaller text */
 #define BWM_KEY_ZOOM_RESET 0x107       /* Ctrl-0: the normal size */
+#define BWM_KEY_FIND 0x108             /* Ctrl-Shift-F: look for text in the lines of the screen and the history */
 struct bwm_mouse { uint32_t id, x, y, buttons; };              /* x, y inside the contents; signed, and outside it while a drag that began in it goes on */
 struct bwm_close { uint32_t id; };
 struct bwm_resizable { uint32_t id; };
