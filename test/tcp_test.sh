@@ -938,6 +938,40 @@ asked_second = len(net.arp_asked) - asked_first
 check(first and second, "ARP cache: twelve neighbors answer a ping, twice")
 check(asked_first >= 12 and asked_second == 0, f"ARP cache: {asked_first} requests for twelve neighbors, {asked_second} the second time")
 
+# 6g. ICMP destination unreachable about a connection that is opening
+#     (RFC 1122 4.2.3.9, RFC 5927 4.1): a port unreachable that quotes the
+#     wrong sequence number is ignored; one that quotes our SYN's aborts the
+#     connect at once.
+mark = len(out)
+net.peer = None
+syn_seen = []
+def catch_syn(f):
+    s = tcp_of(f)
+    if s and s["flags"] & SYN and not s["flags"] & ACK and s["dport"] == 8081:
+        syn_seen.append(f)
+    return 0
+link.in_rule = catch_syn
+type_line("tcpget 10.0.2.2 8081 hi")
+until(lambda: syn_seen, 10)
+def quote_icmp(f, seq_delta):
+    inner = bytearray(f[14:14 + 20 + 8])
+    inner[24:28] = struct.pack("!I", (struct.unpack("!I", bytes(inner[24:28]))[0] + seq_delta) % M32)
+    body = struct.pack("!BBHI", 3, 3, 0, 0) + bytes(inner)
+    body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+    net.send_ip(1, body)
+if syn_seen:
+    quote_icmp(syn_seen[0], 1)
+    time.sleep(0.5)
+    pump()
+    check(b"connection refused" not in out[mark:], "ICMP port unreachable with a wrong sequence number: the connect goes on")
+    quote_icmp(syn_seen[0], 0)
+    done = until(lambda: b"connection refused" in out[mark:], 5)
+    check(done, "ICMP port unreachable quoting our SYN: the connect is refused at once")
+else:
+    check(False, "ICMP port unreachable: no SYN seen")
+link.in_rule = lambda f: 0
+until(lambda: b"bastios> " in out[mark:], 10)
+
 qemu.kill(); qemu.wait()
 print("---- transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))
