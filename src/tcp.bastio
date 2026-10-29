@@ -877,6 +877,9 @@ fn tcp_in(n: &mut Net, total: u64)
     tcp_output(&mut n, t, true);      // a repeated SYN: acknowledge again
     return;
   }
+  if !is_ack {
+    return;                           // RFC 9293 3.10.7.4: a segment without ACK is dropped
+  }
   if is_ack {
     if st == T_SYN_RCVD {
       if ackn != seq_add(twb(n, t, W_ISS, SEQ_MOD), 1) {
