@@ -3150,11 +3150,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("sendkey esc")
             time.sleep(1)
             # Past the window limit a new terminal is refused, and the task bar says so (it goes after a few seconds).
-            mark = len(out)
-            for _ in range(18):
+            good = False
+            for _ in range(20):                                    # one terminal at a time: each takes a while to start
+                m2 = len(out)
                 monitor("sendkey ctrl-t")
-                time.sleep(0.7)
-            good = until(b"bwm: no room for a window", mark)
+                end = time.time() + 20
+                seen = b""
+                while time.time() < end and b"bterm: window" not in seen and b"bwm: no room for a window" not in seen:
+                    r, _, _ = select.select([q.stdout], [], [], 0.2)
+                    if r:
+                        out += q.stdout.read1(4096)
+                    seen = bytes(out[m2:])
+                if b"bwm: no room for a window" in seen:
+                    good = True
+                    break
+            time.sleep(1)
             print(("ok  " if good else "FAIL"), f"({name}) a window past the limit is refused with a notice")
             fails += not good
             monitor("sendkey ctrl-q")
