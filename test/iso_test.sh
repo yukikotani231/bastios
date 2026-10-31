@@ -3149,6 +3149,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             monitor("sendkey esc")
             time.sleep(1)
+            # Past the window limit a new terminal is refused, and the task bar says so (it goes after a few seconds).
+            mark = len(out)
+            for _ in range(18):
+                monitor("sendkey ctrl-t")
+                time.sleep(0.7)
+            good = until(b"bwm: no room for a window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a window past the limit is refused with a notice")
+            fails += not good
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)
