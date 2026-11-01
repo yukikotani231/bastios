@@ -2,11 +2,12 @@
 """Writes the X11 disk for the compat suite (test/compat/x11.txt): the root of
 an Alpine image with the Xvfb X server and the root of one with xterm, each as
 a tar file (/disk/server.tar, /disk/client.tar), a BusyBox at /disk/busybox and
-bx11 and fakebwm (the program that connects X to bwm, and a stand-in for bwm).
+bx11 and fakebwm (the program that connects X to bwm, and a stand-in for bwm)
+and x11start (the script that starts them all).
 The checks unpack the roots under /disk/x and /disk/t, start Xvfb in the first
 and xterm in the second (which share the X socket through a bind mount).
 
-    x11disk.py OUT.img SERVER_IMAGE CLIENT_IMAGE BUSYBOX BX11 FAKEBWM --cache DIR
+    x11disk.py OUT.img SERVER_IMAGE CLIENT_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR
 
 The images are Docker Hub images, NAME@sha256:DIGEST (images.mk pins them),
 fetched and cached as alpinedisk.py does it.
@@ -36,7 +37,7 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
-    out, server, client, busybox, bx11, fakebwm = args
+    out, server, client, busybox, bx11, fakebwm, x11start = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "x11")
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
@@ -48,7 +49,7 @@ def main():
         write_tar(files, os.path.join(work, tar))
     env = dict(os.environ, MKDISK_FREE_MB="300")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
-                               f"busybox={busybox}", f"bx11={bx11}", f"fakebwm={fakebwm}",
+                               f"busybox={busybox}", f"bx11={bx11}", f"fakebwm={fakebwm}", f"x11start={x11start}",
                                f"server.tar={os.path.join(work, 'server.tar')}",
                                f"client.tar={os.path.join(work, 'client.tar')}"], env)
 
