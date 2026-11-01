@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Generic netlink (`socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC)`): the controller family `nlctrl` answers `CTRL_CMD_GETFAMILY` by name or by id and in a dump, with its id, name, version and largest attribute; other family ids are ENOENT. This is how a program finds the families added later (WireGuard).
 - `O_DIRECT` is kept on an open file description: `open`, `fcntl(F_GETFL)` and `fcntl(F_SETFL)` report and change it. It is not enforced (no alignment checks, reads and writes go through the page cache), as on Linux's tmpfs.
 - `FICLONE`, `FICLONERANGE` and `FIDEDUPERANGE` (`cp --reflink`, `ioctl_ficlone`): clones copy the bytes and deduplication compares them; no space is shared yet.
 - `io_uring_setup`, `io_uring_enter` and `io_uring_register` (a subset): rings of up to 256 entries mapped as liburing expects, with `NOP`, `READ`, `WRITE`, `READV`, `WRITEV` and `FSYNC` on files done inside `io_uring_enter`. The kernel keeps its own copy of the ring positions and never holds a reference into the program's pages.

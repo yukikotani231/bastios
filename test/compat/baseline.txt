@@ -434,6 +434,21 @@ t_file: open with O_DIRECT is accepted and F_GETFL reports it
 t_file: O_DIRECT can be cleared and set again with F_SETFL
 t_file: O_DIRECT does not disturb O_ASYNC or O_NONBLOCK
 t_file: an aligned O_DIRECT write and read come back
+t_genl: GETFAMILY by id finds nlctrl
+t_genl: GETFAMILY by name finds nlctrl
+t_genl: GETFAMILY without an attribute is EINVAL
+t_genl: a NETLINK_GENERIC socket opens
+t_genl: a dump lists nlctrl and ends
+t_genl: a message shorter than a generic header is EINVAL
+t_genl: a message to a family that is not there is ENOENT
+t_genl: an attribute longer than its message is refused
+t_genl: an unknown controller command is EOPNOTSUPP
+t_genl: an unknown family id is ENOENT
+t_genl: an unknown family name is ENOENT
+t_genl: the reply carries the name back
+t_genl: the reply is a NEWFAMILY of the controller
+t_genl: the reply names the version and the largest attribute
+t_genl: the socket still answers after bad requests
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
