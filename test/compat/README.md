@@ -138,8 +138,9 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   sqlite3, ctypes, multiprocessing (fork, spawn and forkserver), asyncio and
   TLS. `pyprogs/` is served at `HOSTURL/pyprogs/`, and the same script runs on
   Linux (`python3 pyprogs/stdlib.py`). x86-64 only; the guest has 1 GiB. The
-  cases run in two lanes: `python` runs those before the binary wheels, and
-  `python2` repeats the set-up (the root, gcc, the venv, pytest) and runs the
+  cases run in three lanes: `python` runs those before the binary wheels, and
+  `python2` and `python3` repeat the set-up (the root, gcc, the venv, pytest);
+  `python3` runs pytest's own and more-itertools' test suites and `python2` the
   rest. Their results come back as one group.
 - `go.txt`: the Go toolchain of the official `golang` image (`GO_IMAGE`), from
   a seventh disk (`godisk.py`), entered with `chroot`: Go programs are
