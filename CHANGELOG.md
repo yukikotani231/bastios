@@ -16,6 +16,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- X11 programs run on BastiOS: Alpine's Xvfb and xterm work unmodified, and `bx11` shows the X screen in a `bwm` window and sends the window's keys and pointer events to it (docs/x11.md; the compat suite has an `x11` lane).
+- `chown` of a device node by root (xterm does it to its pseudo-terminal) is accepted instead of failing with `EPERM`; the node keeps no owner.
 - In the `bwm` Run prompt (Alt-F2) Ctrl-U clears the line and Ctrl-W takes off the last word.
 - The `bwm` Run prompt has a cursor: Left, Right, Ctrl-Left, Ctrl-Right (by words), Home, End, Delete, Ctrl-A and Ctrl-E move and edit in the middle of the line; Ctrl-U and Ctrl-W work left of it.
 - `bterm` keeps the last 2000 lines that scrolled off the top (it kept 200), so a long build log can be read back with the wheel or Shift-Page Up.
