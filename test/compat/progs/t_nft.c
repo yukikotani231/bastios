@@ -730,6 +730,19 @@ int main(void) {
         }
     }
 
+    /* Leave nothing behind: later programs of the run share this network. */
+    {
+        const char *left[] = {"ts", "tr", "tl", "tj", "f3", "f4", "tc", "tt"};
+        for (unsigned i = 0; i < sizeof left / sizeof *left; i++) {
+            batch_begin();
+            msg(NFT(MSG_DELTABLE), NLM_F_ACK, NFPROTO_INET);
+            putstr(1, left[i]);
+            mend();
+            batch_end();
+            talk(s, 1);
+        }
+    }
+
     close(s);
     return done();
 }
