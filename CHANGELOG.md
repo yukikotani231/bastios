@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `FICLONE`, `FICLONERANGE` and `FIDEDUPERANGE` (`cp --reflink`, `ioctl_ficlone`): clones copy the bytes and deduplication compares them; no space is shared yet.
 - `io_uring_setup`, `io_uring_enter` and `io_uring_register` (a subset): rings of up to 256 entries mapped as liburing expects, with `NOP`, `READ`, `WRITE`, `READV`, `WRITEV` and `FSYNC` on files done inside `io_uring_enter`. The kernel keeps its own copy of the ring positions and never holds a reference into the program's pages.
 - X11 programs run on BastiOS: Alpine's Xvfb and xterm work unmodified, and `bx11` shows the X screen in a `bwm` window and sends the window's keys and pointer events to it (docs/x11.md; the compat suite has an `x11` lane).
 - `futex` supports `FUTEX_WAKE_OP`, which musl's condition variables use: Qt 6 programs such as QDirStat hung at start-up without it, and now run on the `bwm` desktop through `bx11`.
