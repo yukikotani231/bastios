@@ -430,6 +430,9 @@ fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u
     if nu == 0 && ng == 0 {
       return 0;                             // root's already, and it keeps no other
     }
+    if uid == 0 {
+      return 0;                             // root may chown any file; a device keeps no owner, so xterm's chown of its pty to group tty is accepted and not kept
+    }
     return EPERM;
   }
   if !vfs_set_owner(&mut k.fs, f, nu, ng) {

@@ -1,0 +1,30 @@
+# X11 on BastiOS, for the compatibility suite (test/compat): Xvfb, the X
+# server, and xterm, an X client, both from Alpine images, each entered with
+# chroot. bx11 (user/bx11.c) shows the X screen in a bwm window and turns the
+# window's keys and pointer events into X input; fakebwm stands in for bwm.
+# The X11 disk (x11disk.py) holds the two roots as tar files and a BusyBox at
+# /disk/busybox. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+
+== x11: unpack the server and the client roots
+$ bb mkdir -p /disk/x /disk/t /tmp && bb tar -xf /disk/server.tar -C /disk/x && bb tar -xf /disk/client.tar -C /disk/t && for r in x t; do bb mkdir -p /disk/$r/dev /disk/$r/proc /disk/$r/tmp/.X11-unix && bb mount --bind /dev /disk/$r/dev && bb mount -t proc proc /disk/$r/proc; done; bb mkdir -p /disk/x/tmp/fb; echo ok
+ok
+
+== x11: Xvfb listens on a UNIX socket and keeps its screen in a file
+# timeout 120
+$ bb chroot /disk/x /usr/bin/Xvfb :0 -screen 0 640x480x24 -ac -fbdir /tmp/fb >/disk/xlog 2>&1 & bb sleep 8; test -S /disk/x/tmp/.X11-unix/X0 && echo socket; test -f /disk/x/tmp/fb/Xvfb_screen0 && echo screen
+socket
+screen
+
+== x11: xterm draws on the X screen and takes the keys bwm sends through bx11
+# timeout 300
+$ bb mount --bind /disk/x/tmp/.X11-unix /disk/t/tmp/.X11-unix; bb mkdir -p /tmp/.X11-unix; bb mount --bind /disk/x/tmp/.X11-unix /tmp/.X11-unix; DISPLAY=:0 bb chroot /disk/t /usr/bin/xterm -e /bin/sh -c 'read v; echo got $v > /tmp/got; sleep 1' >/disk/tlog 2>&1 & /disk/fakebwm 120 'abc\r' >/disk/fb.out 2>&1 & bb sleep 2; /disk/bx11 -f /disk/x/tmp/fb/Xvfb_screen0 >/disk/bx.out 2>&1 & until bb grep -q typed /disk/fb.out; do bb sleep 1; done; bb sleep 4; bb cat /disk/fb.out /disk/bx.out; bb cat /disk/t/tmp/got || { bb cat /disk/tlog /disk/xlog; bb ps; }
+fakebwm: listening
+fakebwm: window 640x480 X11
+fakebwm: pixels drawn
+fakebwm: typed
+bx11: window 1, screen 640x480
+got abc
