@@ -109,6 +109,8 @@ const PATH_FIRST: u64 = 256;            // read first; most paths end within it
 
 const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_GET_GS: u64 = 0x1004;
 const ARCH_GET_CPUID: u64 = 0x1011;
 const ARCH_SET_CPUID: u64 = 0x1012;
 const IOV_MAX: u64 = 1024;
@@ -952,6 +954,16 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
       ret(&mut k.procs, pid, 0);
     } else if a == ARCH_GET_FS {
       xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_REGS + R_FSBASE));
+      ret(&mut k.procs, pid, lx_put_out(&mut k, pid, b, 8));
+    } else if a == ARCH_SET_GS {
+      if b > 0x00007FFFFFFFFFFF {
+        ret(&mut k.procs, pid, EPERM);        // a base that is not canonical
+      } else {
+        pset(&mut k.procs, pid, F_GSBASE, b);
+        ret(&mut k.procs, pid, 0);
+      }
+    } else if a == ARCH_GET_GS {
+      xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_GSBASE));
       ret(&mut k.procs, pid, lx_put_out(&mut k, pid, b, 8));
     } else if a == ARCH_GET_CPUID {
       ret(&mut k.procs, pid, 1);              // cpuid runs
