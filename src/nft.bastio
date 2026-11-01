@@ -2253,13 +2253,17 @@ fn ex_reject(n: &mut Net, ty: u64, code: u64)
   let skip = nf_x(n, NX_SKIP);
   nf_xset(&mut n, NX_SKIP, 1);
   let total = be16(n.pkt, 16);
+  let mut dst = 0;
+  let mut len = 0;
   if ty == 1 {
     let thl = cast[u64](bget(n.pkt, 46)) / 16 * 4;
     if cast[u64](bget(n.pkt, 23)) == IP_TCP && total >= 20 + thl && thl >= 20 && total <= NET_BUF - 14 {
-      tcp_refuse(&mut n, cast[u64](bget(n.pkt, 47)), total - 20 - thl);
+      dst = tcp_refuse_frame(&mut n, cast[u64](bget(n.pkt, 47)), total - 20 - thl);
+      len = 54;
     }
   } else if ty == 0 && code <= 15 {
-    icmp_unreach_code(&mut n, code);
+    dst = icmp_unreach_frame(&mut n, code);
+    len = 70;
   } else if ty == 2 {
     // icmpx: no route, port unreachable, host unreachable, admin prohibited
     let mut c = 3;
@@ -2270,7 +2274,11 @@ fn ex_reject(n: &mut Net, ty: u64, code: u64)
     } else if code == 3 {
       c = 13;
     }
-    icmp_unreach_code(&mut n, c);
+    dst = icmp_unreach_frame(&mut n, c);
+    len = 70;
+  }
+  if dst != 0 {
+    reply_raw(&mut n, dst, len);
   }
   nf_xset(&mut n, NX_SKIP, skip);
 }

@@ -710,7 +710,7 @@ fn reply_raw(n: &mut Net, ip: u64, flen: u64) -> bool
     if hop > IP_MAX || flen < 14 {
       return false;
     }
-    return send_via(&mut n, hop, flen);
+    return send_via_raw(&mut n, hop, flen);
   }
   if is_v6tok(ip) {
     return v6_out(&mut n, flen);
@@ -731,6 +731,15 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
   if !nf_out(&mut n, hop, flen) {
     return true;                      // dropped by a rule: as if lost on the way
   }
+  return send_via_raw(&mut n, hop, flen);
+}
+
+/// send_via without the output hook (for a frame that has been through it, or
+/// that a reject rule makes: that one must not be able to reach the hook again).
+fn send_via_raw(n: &mut Net, hop: u64, flen: u64) -> bool
+  requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= NET_BUF
+  ensures net_ok(n)
+{
   if is_local(n, hop) {
     return lo_send(&mut n, flen);
   }
@@ -921,16 +930,29 @@ fn icmp_unreach_code(n: &mut Net, code: u64)
   requires net_ok(n) && code <= 15
   ensures net_ok(n)
 {
+  let src = icmp_unreach_frame(&mut n, code);
+  if src != 0 {
+    reply_send(&mut n, src, 70);
+  }
+}
+
+/// Builds the message in the outgoing frame and returns the address to send
+/// it to, or 0 if there is to be none (a packet filter's reject sends it
+/// without running the output hook again, so it cannot recurse).
+fn icmp_unreach_frame(n: &mut Net, code: u64) -> u64
+  requires net_ok(n) && code <= 15
+  ensures net_ok(n)
+{
   let src = be32(n.pkt, 26);
   if is_v6tok(src) || src == 0 {
-    return;
+    return 0;
   }
   if n.now / 100 != n.icmp_sec {
     n.icmp_sec = n.now / 100;
     n.icmp_n = 0;
   }
   if n.icmp_n >= ICMP_RATE {
-    return;
+    return 0;
   }
   n.icmp_n = n.icmp_n + 1;
   let smac = be48(n.pkt, 6);
@@ -942,7 +964,7 @@ fn icmp_unreach_code(n: &mut Net, code: u64)
   put32(&mut n.out, 38, 0);
   bcopy(&mut n.out, 42, n.pkt, 14, 28);
   put16(&mut n.out, 36, csum(n.out, 34, 36));
-  reply_send(&mut n, src, 70);
+  return src;
 }
 
 /// A UDP datagram for us (total: the IP length, checked against the
