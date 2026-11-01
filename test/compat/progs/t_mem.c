@@ -474,5 +474,31 @@ int main(void) {
                ok = ok && munmap(r, 512u << 20) == 0;
            }
            ok; }));
+    /* /proc/PID/status of a process another processor is running: the count
+     * of its pages cannot be taken then, and VmRSS must not turn into the
+     * size of the whole window (8 TiB), which top and ps would show. */
+    EXPECT("VmRSS of a process running on another processor is not the size of the address space", ({
+           volatile int *stop = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+           pid_t c = fork();
+           if (c == 0) {
+               while (!*stop) { }
+               _exit(0);
+           }
+           int ok = c > 0;
+           for (int i = 0; ok && i < 200; i++) {
+               char path[64], buf[2048];
+               snprintf(path, sizeof path, "/proc/%d/status", (int)c);
+               int fd = open(path, O_RDONLY);
+               ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : -1;
+               if (fd >= 0) close(fd);
+               if (n <= 0) { ok = 0; break; }
+               buf[n] = 0;
+               const char *r = strstr(buf, "VmRSS:"), *z = strstr(buf, "VmSize:");
+               ok = r && z && atol(r + 6) < (1l << 20) && atol(z + 7) < (1l << 30);   /* kB: under 1 GiB, and 1 TiB */
+               sched_yield();
+           }
+           *stop = 1;
+           if (c > 0) waitpid(c, 0, 0);
+           ok; }));
     return done();
 }
