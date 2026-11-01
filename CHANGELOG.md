@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `ip link add wg0 type wireguard` makes a WireGuard device: a layer-3 link (no link-layer address, MTU 1420) that can be listed, addressed, brought up and deleted through rtnetlink. It carries no traffic yet: keys, peers and the handshake come in later changes.
 - Generic netlink (`socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC)`): the controller family `nlctrl` answers `CTRL_CMD_GETFAMILY` by name or by id and in a dump, with its id, name, version and largest attribute; other family ids are ENOENT. This is how a program finds the families added later (WireGuard).
 - `O_DIRECT` is kept on an open file description: `open`, `fcntl(F_GETFL)` and `fcntl(F_SETFL)` report and change it. It is not enforced (no alignment checks, reads and writes go through the page cache), as on Linux's tmpfs.
 - `FICLONE`, `FICLONERANGE` and `FIDEDUPERANGE` (`cp --reflink`, `ioctl_ficlone`): clones copy the bytes and deduplication compares them; no space is shared yet.

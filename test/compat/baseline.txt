@@ -2054,3 +2054,21 @@ t_va: munmap over both
 t_va: each is gone
 t_va: a page in every segment
 t_va: a child sees them copied
+t_wg: a device with no name is EINVAL
+t_wg: a kind that continues past it is refused
+t_wg: a kind that only starts like it is refused
+t_wg: a name that is taken is EEXIST
+t_wg: a wireguard device is made
+t_wg: deleting it again is ENODEV
+t_wg: it goes up
+t_wg: it has no link-layer address
+t_wg: it has no link-layer type
+t_wg: it is deleted
+t_wg: it is gone
+t_wg: it is listed
+t_wg: it shows up
+t_wg: it takes an address
+t_wg: its MTU is 1420
+t_wg: its kind is wireguard
+t_wg: netlink socket
+t_wg: the refused devices were not made
