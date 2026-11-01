@@ -660,10 +660,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             mark2 = len(out)
             monitor("sendkey ctrl-t")
             good = until(b"bterm: window", mark2)
+            # The ninth and tenth: bwm used to serve eight clients and
+            # closed the connection of any further one.
+            for _ in range(8):
+                time.sleep(1)
+                monitor("sendkey ctrl-t")
+            good = good and until(b"bterm: window 10", mark2)
             time.sleep(1)
             monitor("sendkey ctrl-q")
             good = good and until(b"bwm: bye", mark2)
-            print(("ok  " if good else "FAIL"), f"({name}) bwm still gets keys with two terminal windows open")
+            print(("ok  " if good else "FAIL"), f"({name}) bwm still gets keys with ten terminal windows open")
             fails += not good
         else:
             monitor("sendkey ctrl-q")
