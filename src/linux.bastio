@@ -58,7 +58,9 @@ const LX_MEMBARRIER: u64 = 324;
 const LX_MBIND: u64 = 237;
 const LX_SET_MEMPOLICY: u64 = 238;
 const LX_GET_MEMPOLICY: u64 = 239;
-const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
+const LX_IO_URING_SETUP: u64 = 425;    // src/lxuring.bastio
+const LX_IO_URING_ENTER: u64 = 426;
+const LX_IO_URING_REGISTER: u64 = 427;
 const LX_OPENAT: u64 = 257;
 const LX_CREAT: u64 = 85;
 const LX_STAT: u64 = 4;
@@ -995,7 +997,10 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   }
   // The new mount API (runc and crun use it when present) likewise falls
   // back on ENOSYS.
-  if n == LX_RSEQ || n == LX_IO_URING_SETUP
+  if n >= LX_IO_URING_SETUP && n <= LX_IO_URING_REGISTER {
+    return lx_uring_call(&mut con, &mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
+  if n == LX_RSEQ
       || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
       || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
     ret(&mut k.procs, pid, ENOSYS);
@@ -2975,6 +2980,25 @@ fn lx_brk(k: &mut Kernel, pid: u64, want: u64) -> u64
 /// cache's pages, so every process that maps the same part of the file
 /// shares them too. The address hint without MAP_FIXED is ignored.
 fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
+{
+  // A ring of io_uring (src/lxuring.bastio) is mapped at offsets of its own.
+  let mut o = off;
+  if flags / MAP_ANONYMOUS % 2 == 0 {
+    let rf = ur_file(k, pid, fd);
+    if rf < NO_FILE {
+      o = ur_mmap_off(k, rf, off);
+      if o == 0xFFFFFFFFFFFFF000 {
+        return EINVAL;
+      }
+    }
+  }
+  return lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+}
+
+fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
   ensures lx_user_addr_or_errno(result)
