@@ -752,6 +752,7 @@ t_mem: writable MAP_SHARED of a read-only file is EACCES
 t_mem: a page touched before munmap faults after it
 t_mem: a page written before mprotect(PROT_READ) faults on the next write
 t_mem: a page read before munmap and mapped again at its address is a fresh zero page
+t_mem: VmRSS of a process running on another processor is not the size of the address space
 t_misc: /etc/passwd
 t_misc: /proc/diskstats opens
 t_misc: /proc/diskstats has the disk's line with its counts

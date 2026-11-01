@@ -2369,7 +2369,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         // The sums /proc/PID/smaps_rollup gives, with the pages statm counts
         // as resident: all of them private and dirty, none shared.
         let sp = smaller((what - SY_PX) / PXF_N, NPROC - 1);
-        let kb = 4 * smaller(anon_count(&mut k, sp, 0, WPAGES), WPAGES);
+        let kb = 4 * anon_resident(&mut k, sp);
         let mut a = put_s(&mut o, 0, "00400000-7ffffffff000 ---p 00000000 00:00 0                          [rollup]\n");
         a = put_s(&mut o, a, "Rss:               ");
         a = put_n(&mut o, a, kb);
@@ -2841,7 +2841,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       i = i + 1;
     }
     // Every page the process has counts as resident (as in statm).
-    let kb = smaller(anon_count(&mut k, p, 0, WPAGES), WPAGES) * 4;
+    let kb = anon_resident(&mut k, p) * 4;
     a = put_s(&mut o, a, "\nVmPeak:\t");
     a = put_n(&mut o, a, kb);
     a = put_s(&mut o, a, " kB\nVmSize:\t");
@@ -2885,7 +2885,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   if what == PF_STATM {
     // size resident shared text lib data dt, in pages: every page the process
     // has is counted as resident and as data; nothing is shared or text.
-    let c = smaller(anon_count(&mut k, p, 0, WPAGES), WPAGES);
+    let c = anon_resident(&mut k, p);
     let mut a = put_n(&mut o, 0, c);
     a = put_c(&mut o, a, 32);
     a = put_n(&mut o, a, c);
