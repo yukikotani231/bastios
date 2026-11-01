@@ -42,10 +42,15 @@ int main(int argc, char **argv)
     }
     printf("fakebwm: window %ux%u %s\n", cr.w, cr.h, cr.title);
     fflush(stdout);
-    sleep(wait);
     unsigned long n = 0;
-    for (size_t i = 0; i < (size_t)cr.w * cr.h; i++)
-        n += pix[i] != 0;
+    for (unsigned t = 0; t < wait && n <= 1000; t++) {     /* until the X client has drawn itself */
+        sleep(1);
+        n = 0;
+        for (size_t i = 0; i < (size_t)cr.w * cr.h; i++)
+            n += pix[i] != 0;
+    }
+    if (n > 1000)
+        sleep(3);                                          /* and has started its shell */
     printf("fakebwm: pixels %s\n", n > 1000 ? "drawn" : "missing");
     fflush(stdout);
     struct bwm_mouse m = { 1, 10, 10, 0 };
