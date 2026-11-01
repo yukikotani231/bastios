@@ -1521,6 +1521,29 @@ t_timens: the offsets are frozen once a process is in the namespace
 t_timens: the time links name the first namespace, and NS_GET_NSTYPE says CLONE_NEWTIME
 t_timens: unshare moves the children only: they read the written offsets
 t_timens: an offset that overflows the clock is ERANGE
+t_uring: a NOP completes with its user data
+t_uring: a full completion ring stops the kernel taking requests
+t_uring: a head written back to zero does not run old requests again
+t_uring: a read comes back
+t_uring: a tail far ahead is limited to the ring
+t_uring: a write goes to the file
+t_uring: an index past the end of the array is dropped, not run
+t_uring: an offset of -1 uses and moves the file position
+t_uring: an unmapped bad offset is refused
+t_uring: enter on a bad descriptor is EBADF
+t_uring: enter on a file that is not a ring is refused
+t_uring: entries are rounded up to a power of two
+t_uring: errors are in the completion: bad descriptor, unknown opcode, pipe
+t_uring: fsync completes
+t_uring: io_uring_setup returns a ring
+t_uring: other register calls are refused
+t_uring: readv and writev take vectors
+t_uring: several requests at once complete in order
+t_uring: the mapping stays valid after the descriptor is closed
+t_uring: the probe lists the operations
+t_uring: the ring has the sizes asked for, and the single-map feature
+t_uring: unknown enter flags are refused
+t_uring: zero entries and setup flags are refused
 t_userns: /dev/full reads zeros and writes ENOSPC
 t_userns: a process may chown its own pipe to itself, not to others
 t_userns: an unprivileged process may raise its hard descriptor limit

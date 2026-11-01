@@ -1,0 +1,533 @@
+// io_uring: io_uring_setup, io_uring_enter and io_uring_register.
+//
+// A ring is a file of its own (a RAM file made as memfd_create makes one and
+// unlinked at once) that holds the submission queue, the completion queue and
+// the array of submission entries. io_uring_setup returns a descriptor of that
+// file, and mmap of it (src/linux.bastio, lx_mmap) shares the file's pages
+// with the program at the three offsets liburing uses: IORING_OFF_SQ_RING
+// and IORING_OFF_CQ_RING (both the start of the file: the features say
+// IORING_FEAT_SINGLE_MMAP) and IORING_OFF_SQES.
+//
+//   byte 0        submission ring: head, tail, ring_mask, ring_entries,
+//                 flags, dropped; the index array from byte 64
+//   cq_base       completion ring: head, tail, ring_mask, ring_entries,
+//                 overflow, flags; the 16-byte entries from cq_base + 64
+//   sqes_base     the 64-byte submission entries, at a page boundary
+//
+// The kernel never holds a pointer into the program's memory or a reference
+// to the pages: it reads and writes the file (vfs_read_at, vfs_write on a
+// descriptor row the kernel opened itself), which is the same memory the
+// program sees through the page cache. Everything it reads from a ring is
+// read once into a local and checked there; the positions it relies on (the
+// submission head, the completion tail and the dropped count) are its own
+// copies in the ring table, never the ones in the file, which the program can
+// write. So a program that writes a ring behind the kernel's back can make
+// its own requests wrong and nothing else.
+//
+// Requests are done at once, in io_uring_enter: a read or write of a file at
+// an offset (or at the file's position, offset -1), the vectored forms, an
+// fsync and a no-op. A request that cannot be done gets its error in the
+// completion. So nothing is ever in flight, io_uring_enter never waits (a
+// minimum number of completions that are not there is not waited for) and
+// the kernel thread polling a ring (SQPOLL) is not needed. When the
+// completion ring is full the kernel stops taking requests, as Linux with
+// IORING_FEAT_NODROP does, and the program reaps completions first.
+//
+// URING_N rings, each of at most URING_MAX entries; the completion ring has
+// twice as many. A ring belongs to the thread group that made it and its
+// slot is reused once that group is gone; the table has no other clean-up.
+//
+// Not done: linked requests (IOSQE_IO_LINK), fixed files and buffers,
+// registered rings, buffer selection, SQPOLL and IOPOLL, the socket, poll,
+// open, close, accept and timeout requests (-EINVAL in the completion),
+// io_uring_register other than the probe.
+
+const URING_MAX: u64 = 256;
+const IORING_OFF_CQ_RING: u64 = 134217728;       // 0x8000000
+const IORING_OFF_SQES: u64 = 268435456;          // 0x10000000
+const IORING_ENTER_ALL: u64 = 15;                // GETEVENTS, SQ_WAKEUP, SQ_WAIT, EXT_ARG
+const IORING_REGISTER_PROBE: u64 = 8;
+const IORING_OP_LAST: u64 = 23;
+
+fn ursl(s: u64, f: u64) -> u64
+  requires s < URING_N && f < URING_W
+  ensures result < SYS_LEN
+{
+  return SYS_URING + s * URING_W + f;
+}
+
+/// The offset of the completion ring in the ring file, for sq entries.
+fn ur_cqb(sq: u64) -> u64
+  requires sq <= URING_MAX
+  ensures result <= 1088 && result % 64 == 0
+{
+  return (64 + 4 * sq + 63) / 64 * 64;
+}
+
+/// The offset of the submission entries, a page boundary past the rings.
+fn ur_sqes(sq: u64, cq: u64) -> u64
+  requires sq <= URING_MAX && cq <= 2 * URING_MAX
+  ensures result <= 16384 && result % 4096 == 0
+{
+  return (ur_cqb(sq) + 64 + 16 * cq + 4095) / 4096 * 4096;
+}
+
+fn ur_put32(x: &mut Bytes, at: u64, v: u64)
+  requires at + 4 <= blen(x)
+  ensures blen(x) == old(blen(x))
+{
+  store_le32(&mut x, at, cast[u32](v % 4294967296));
+}
+
+/// The slot whose ring is file f, or URING_N.
+fn ur_find(k: &Kernel, f: u64) -> u64
+  requires kok(k)
+  ensures result <= URING_N
+{
+  if f >= NO_FILE {
+    return URING_N;
+  }
+  let mut s = 0;
+  while s < URING_N
+    invariant s <= URING_N && kok(k)
+  {
+    if get(k.sys, ursl(s, 0)) == f + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return URING_N;
+}
+
+/// The file handle behind descriptor fd of pid if it is a plain file, else NO_FILE.
+fn ur_file(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if fd >= LXNFD {
+    return NO_FILE;
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_FILE || d.x >= FD_ROWS {
+    return NO_FILE;
+  }
+  return row_file(k.fs, d.x);
+}
+
+/// Writes the first n bytes of the transfer buffer into ring s at off.
+fn ur_wr(k: &mut Kernel, s: u64, off: u64, n: u64) -> bool
+  requires kok(k) && s < URING_N && n <= XFER
+  ensures kok(k)
+{
+  let r = get(k.sys, ursl(s, 1));
+  if r == 0 || r > FD_ROWS {
+    return false;
+  }
+  if !vfs_seek(&mut k.fs, r - 1, off) {
+    return false;
+  }
+  return vfs_write(&mut k.fs, &mut k.mem, r - 1, n) == n;
+}
+
+/// Reads n bytes of ring s at off into the start of the transfer buffer.
+fn ur_rd(k: &mut Kernel, s: u64, off: u64, n: u64) -> bool
+  requires kok(k) && s < URING_N && n <= XFER
+  ensures kok(k)
+{
+  let f = get(k.sys, ursl(s, 0));
+  if f == 0 || f >= NO_FILE {
+    return false;
+  }
+  return vfs_read_at(&mut k.fs, f - 1, off, n) == n;
+}
+
+/// A slot for a new ring: a free one, or one whose group has gone (its
+/// kernel row closed here); URING_N if none.
+fn ur_slot(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= URING_N
+{
+  let mut s = 0;
+  while s < URING_N
+    invariant s <= URING_N && kok(k)
+  {
+    if get(k.sys, ursl(s, 0)) == 0 {
+      return s;
+    }
+    s = s + 1;
+  }
+  s = 0;
+  while s < URING_N
+    invariant s <= URING_N && kok(k)
+  {
+    let o = get(k.sys, ursl(s, 2));
+    let mut gone = o == 0 || o > NPROC;
+    if !gone {
+      let st = pget(k.procs, o - 1, F_STATE);
+      gone = st == FREE || st == ZOMBIE;
+    }
+    if gone {
+      let r = get(k.sys, ursl(s, 1));
+      if r != 0 && r <= FD_ROWS {
+        vfs_close(&mut k.fs, &mut k.mem, r - 1);
+      }
+      k.sys = set(k.sys, ursl(s, 0), 0);
+      k.sys = set(k.sys, ursl(s, 1), 0);
+      return s;
+    }
+    s = s + 1;
+  }
+  return URING_N;
+}
+
+/// io_uring_setup(entries, params).
+fn ur_setup(k: &mut Kernel, pid: u64, entries: u64, pa: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if pa == 0 || pa >= 0x800000000000 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, pa, &mut k.fs.xfer, 120) != 120 {
+    return EFAULT;
+  }
+  if rd32(k.fs.xfer, 8) != 0 || rd32(k.fs.xfer, 28) != 0 || rd32(k.fs.xfer, 32) != 0 || rd32(k.fs.xfer, 36) != 0 {
+    return EINVAL;                          // setup flags, and the reserved words
+  }
+  if entries == 0 || entries > URING_MAX {
+    return EINVAL;
+  }
+  let mut sq = 1;
+  while sq < entries && sq <= 128
+    invariant 1 <= sq && sq <= URING_MAX
+  {
+    sq = sq * 2;
+  }
+  let cq = 2 * sq;
+  let cqb = ur_cqb(sq);
+  let sqes = ur_sqes(sq, cq);
+  let s = ur_slot(&mut k);
+  if s >= URING_N {
+    return ENOMEM;
+  }
+  // The answer first, while the program's memory is known to be writable.
+  let mut i = 0;
+  while i < 120
+    invariant i <= 120 && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, 0);
+    i = i + 1;
+  }
+  ur_put32(&mut k.fs.xfer, 0, sq);
+  ur_put32(&mut k.fs.xfer, 4, cq);
+  ur_put32(&mut k.fs.xfer, 20, 1);          // IORING_FEAT_SINGLE_MMAP
+  ur_put32(&mut k.fs.xfer, 40, 0);          // sq_off: head, tail, ring_mask, ring_entries, flags, dropped, array
+  ur_put32(&mut k.fs.xfer, 44, 4);
+  ur_put32(&mut k.fs.xfer, 48, 8);
+  ur_put32(&mut k.fs.xfer, 52, 12);
+  ur_put32(&mut k.fs.xfer, 56, 16);
+  ur_put32(&mut k.fs.xfer, 60, 20);
+  ur_put32(&mut k.fs.xfer, 64, 64);
+  ur_put32(&mut k.fs.xfer, 80, cqb);        // cq_off: head, tail, ring_mask, ring_entries, overflow, cqes, flags
+  ur_put32(&mut k.fs.xfer, 84, cqb + 4);
+  ur_put32(&mut k.fs.xfer, 88, cqb + 8);
+  ur_put32(&mut k.fs.xfer, 92, cqb + 12);
+  ur_put32(&mut k.fs.xfer, 96, cqb + 16);
+  ur_put32(&mut k.fs.xfer, 100, cqb + 64);
+  ur_put32(&mut k.fs.xfer, 104, cqb + 20);
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, pa, k.fs.xfer, 120) != 120 {
+    return EFAULT;
+  }
+  // The file: a descriptor for the program, a row of the kernel's own, then the name goes.
+  let mut tries = 0;
+  lpath_ro_clear(&mut k);
+  while tries < 16
+    invariant tries <= 16 && kok(k)
+  {
+    let n = memfd_name(&mut k, pid, sat_add(k.ns, tries));
+    let fd = lx_open_n(&mut k, pid, n, LO_RDWR + LO_CREAT + LO_EXCL + LO_CLOEXEC, 384);
+    if fd < LXNFD {
+      let n2 = memfd_name(&mut k, pid, sat_add(k.ns, tries));
+      let nf = vfs_open(&mut k.fs, &mut k.mem, nbase(0), NFD, O_READ + O_WRITE, n2);
+      let n3 = memfd_name(&mut k, pid, sat_add(k.ns, tries));
+      vfs_unlink(&mut k.fs, &mut k.mem, n3);
+      if nf >= NFD {
+        lx_close_range(&mut k, pid, fd, fd, 0);
+        return ENOMEM;
+      }
+      let row = nbase(0) + nf;
+      let f = vfs_row_file(k.fs, row);
+      if f >= NO_FILE || !vfs_truncate(&mut k.fs, &mut k.mem, row, sqes + 64 * sq) {
+        vfs_close(&mut k.fs, &mut k.mem, row);
+        lx_close_range(&mut k, pid, fd, fd, 0);
+        return ENOMEM;
+      }
+      k.sys = set(k.sys, ursl(s, 0), f + 1);
+      k.sys = set(k.sys, ursl(s, 1), row + 1);
+      k.sys = set(k.sys, ursl(s, 2), ktg(k, pid) + 1);
+      k.sys = set(k.sys, ursl(s, 3), sq);
+      k.sys = set(k.sys, ursl(s, 4), cq);
+      k.sys = set(k.sys, ursl(s, 5), sqes);
+      k.sys = set(k.sys, ursl(s, 6), cqb);
+      k.sys = set(k.sys, ursl(s, 7), 0);
+      k.sys = set(k.sys, ursl(s, 8), 0);
+      k.sys = set(k.sys, ursl(s, 9), 0);
+      // The two ring headers: the mask and the size.
+      let mut j = 0;
+      while j < 64
+        invariant j <= 64 && kok(k)
+      {
+        bset(&mut k.fs.xfer, j, 0);
+        j = j + 1;
+      }
+      ur_put32(&mut k.fs.xfer, 8, sq - 1);
+      ur_put32(&mut k.fs.xfer, 12, sq);
+      ur_wr(&mut k, s, 0, 64);
+      ur_put32(&mut k.fs.xfer, 8, cq - 1);
+      ur_put32(&mut k.fs.xfer, 12, cq);
+      ur_wr(&mut k, s, cqb, 64);
+      return fd;
+    }
+    if fd != EEXIST {
+      return fd;
+    }
+    tries = tries + 1;
+  }
+  return EEXIST;
+}
+
+/// The result of a completion, as the 32 bits the entry holds.
+fn ur_res(r: u64) -> u64
+  ensures result < 4294967296
+{
+  if r < 0x8000000000000000 {
+    return smaller(r, 0x7FFFFFFF);
+  }
+  return r % 4294967296;
+}
+
+/// One request: its result, a byte count or -errno.
+fn ur_do(con: &mut Con, k: &mut Kernel, pid: u64, op: u64, fd: u64, off: u64, addr: u64, len: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if op == 0 {
+    return 0;                               // IORING_OP_NOP
+  }
+  if op != 1 && op != 2 && op != 3 && op != 22 && op != 23 {
+    return EINVAL;
+  }
+  if fd >= 0x80000000 || fd >= LXNFD {
+    return EBADF;
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return EBADF;
+  }
+  if d.kind != K_FILE {
+    return EOPNOTSUPP;                      // pipes, sockets and devices are not done
+  }
+  if op == 3 {
+    return 0;                               // IORING_OP_FSYNC: a file is as on disk as the cache makes it
+  }
+  let write = op == 2 || op == 23;
+  let mut at = off;
+  let usepos = off == 0xFFFFFFFFFFFFFFFF;
+  if usepos {
+    at = vfs_offset(k.fs, d.x);
+  }
+  let mut r = 0;
+  if op == 22 || op == 23 {
+    r = lx_pio(&mut con, &mut k, pid, write, fd, addr, len, at);
+  } else {
+    r = lx_piov(&mut con, &mut k, pid, write, fd, addr, len, at);
+  }
+  if r >= 0x8000000000000000 && r < 0xFFFFFFFFFFFFF000 {
+    r = EAGAIN;                             // the disk was not ready: try again
+  }
+  if usepos && r < 0x8000000000000000 {
+    vfs_seek(&mut k.fs, d.x, sat_add(at, r));
+  }
+  return r;
+}
+
+/// io_uring_enter(fd, to_submit, min_complete, flags): the requests it took.
+fn ur_enter(con: &mut Con, k: &mut Kernel, pid: u64, fd: u64, nsub: u64, flags: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  if flags % 4294967296 & !IORING_ENTER_ALL != 0 {
+    return EINVAL;
+  }
+  let f = ur_file(k, pid, fd);
+  if f >= NO_FILE {
+    return EBADF;
+  }
+  let s = ur_find(k, f);
+  if s >= URING_N {
+    return EOPNOTSUPP;                      // a file, but not a ring
+  }
+  let sq = get(k.sys, ursl(s, 3));
+  let cq = get(k.sys, ursl(s, 4));
+  if sq == 0 || sq > URING_MAX || cq != 2 * sq {
+    return EINVAL;
+  }
+  let cqb = ur_cqb(sq);
+  let base = ur_sqes(sq, cq);
+  let mut head = get(k.sys, ursl(s, 7)) % 4294967296;
+  let mut cqt = get(k.sys, ursl(s, 8)) % 4294967296;
+  let mut dropped = get(k.sys, ursl(s, 9)) % 4294967296;
+  let want = nsub % 4294967296;
+  if want == 0 {
+    return 0;
+  }
+  // What the program owns, read once: the submission tail and the completion head.
+  if !ur_rd(&mut k, s, 4, 4) {
+    return EFAULT;
+  }
+  let tail = rd32(k.fs.xfer, 0);
+  if !ur_rd(&mut k, s, cqb, 4) {
+    return EFAULT;
+  }
+  let chead = rd32(k.fs.xfer, 0);
+  let avail = (tail + 4294967296 - head) % 4294967296;
+  let used = (cqt + 4294967296 - chead) % 4294967296;
+  let mut room = 0;
+  if used < cq {
+    room = cq - used;
+  }
+  let n = smaller(smaller(want, avail), sq);
+  let mut i = 0;
+  let mut done = 0;
+  while i < n && done < room
+    invariant i <= n && n <= sq && sq <= URING_MAX && cq == 2 * sq && done <= room && room <= cq && cqb <= 1088 && base <= 16384
+      && head < 4294967296 && cqt < 4294967296 && dropped < 4294967296 && s < URING_N && con_ok(con) && kok(k)
+  {
+    // The index in the array, then the entry it names.
+    if !ur_rd(&mut k, s, 64 + 4 * (head % sq), 4) {
+      return EFAULT;
+    }
+    let idx = rd32(k.fs.xfer, 0);
+    head = (head + 1) % 4294967296;
+    i = i + 1;
+    if idx >= sq {
+      dropped = (dropped + 1) % 4294967296;
+    } else {
+      if !ur_rd(&mut k, s, base + 64 * idx, 64) {
+        return EFAULT;
+      }
+      let op = cast[u64](bget(k.fs.xfer, 0));
+      let sflags = cast[u64](bget(k.fs.xfer, 1));
+      let rfd = rd32(k.fs.xfer, 4);
+      let off = rd64(k.fs.xfer, 8);
+      let addr = rd64(k.fs.xfer, 16);
+      let len = rd32(k.fs.xfer, 24);
+      let ud = rd64(k.fs.xfer, 32);
+      let mut r = EINVAL;
+      if sflags & !18 == 0 {                // IOSQE_IO_DRAIN and IOSQE_ASYNC change nothing here
+        r = ur_do(&mut con, &mut k, pid, op, rfd, off, addr, len);
+      }
+      // The completion: user_data, res, flags.
+      xfer_u64(&mut k.fs.xfer, 0, ud);
+      ur_put32(&mut k.fs.xfer, 8, ur_res(r));
+      ur_put32(&mut k.fs.xfer, 12, 0);
+      ur_wr(&mut k, s, cqb + 64 + 16 * (cqt % cq), 16);
+      cqt = (cqt + 1) % 4294967296;
+      done = done + 1;
+    }
+  }
+  // The positions the kernel keeps, and the copies the program reads.
+  k.sys = set(k.sys, ursl(s, 7), head);
+  k.sys = set(k.sys, ursl(s, 8), cqt);
+  k.sys = set(k.sys, ursl(s, 9), dropped);
+  ur_put32(&mut k.fs.xfer, 0, head);
+  ur_wr(&mut k, s, 0, 4);
+  ur_put32(&mut k.fs.xfer, 0, dropped);
+  ur_wr(&mut k, s, 20, 4);
+  ur_put32(&mut k.fs.xfer, 0, cqt);
+  ur_wr(&mut k, s, cqb + 4, 4);
+  if i == 0 && n > 0 {
+    return EBUSY;                           // the completion ring is full
+  }
+  return i;
+}
+
+/// io_uring_register(fd, opcode, arg, nr_args): only the probe.
+fn ur_register(k: &mut Kernel, pid: u64, fd: u64, opcode: u64, arg: u64, nr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let f = ur_file(k, pid, fd);
+  if f >= NO_FILE {
+    return EBADF;
+  }
+  if ur_find(k, f) >= URING_N {
+    return EOPNOTSUPP;
+  }
+  if opcode % 4294967296 != IORING_REGISTER_PROBE {
+    return EINVAL;
+  }
+  let cnt = smaller(nr % 4294967296, IORING_OP_LAST + 1);
+  if arg == 0 || arg >= 0x800000000000 {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < 16 + 8 * (IORING_OP_LAST + 1)
+    invariant i <= 16 + 8 * (IORING_OP_LAST + 1) && kok(k)
+  {
+    bset(&mut k.fs.xfer, i, 0);
+    i = i + 1;
+  }
+  bset(&mut k.fs.xfer, 0, cast[u8](IORING_OP_LAST));
+  bset(&mut k.fs.xfer, 1, cast[u8](cnt));
+  let mut op = 0;
+  while op < cnt
+    invariant op <= cnt && cnt <= IORING_OP_LAST + 1 && kok(k)
+  {
+    if op <= 3 || op == 22 || op == 23 {
+      bset(&mut k.fs.xfer, 16 + 8 * op + 2, 1);   // IO_URING_OP_SUPPORTED
+    }
+    bset(&mut k.fs.xfer, 16 + 8 * op, cast[u8](op));
+    op = op + 1;
+  }
+  let total = 16 + 8 * cnt;
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, k.fs.xfer, total) != total {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// System call 425 .. 427 of process pid, a..e the arguments.
+fn lx_uring_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u64) -> u64
+  requires con_ok(con) && kok(k) && pid < NPROC
+  ensures kok(k) && con_ok(con)
+{
+  let mut r = ENOSYS;
+  if n == LX_IO_URING_SETUP {
+    r = ur_setup(&mut k, pid, a % 4294967296, b);
+  } else if n == LX_IO_URING_ENTER {
+    r = ur_enter(&mut con, &mut k, pid, a % 4294967296, b, d);
+  } else {
+    r = ur_register(&mut k, pid, a % 4294967296, b, c, d);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
+/// mmap of a ring: the offset the program gives is one of liburing's three,
+/// and the one in the file is where that part of the ring is. A file that is
+/// not a ring keeps its offset.
+fn ur_mmap_off(k: &Kernel, f: u64, off: u64) -> u64
+  requires kok(k)
+{
+  let s = ur_find(k, f);
+  if s >= URING_N {
+    return off;
+  }
+  if off == 0 || off == IORING_OFF_CQ_RING {
+    return 0;
+  }
+  if off == IORING_OFF_SQES {
+    return get(k.sys, ursl(s, 5));
+  }
+  return 0xFFFFFFFFFFFFF000;                // no such part: the mapping fails
+}
