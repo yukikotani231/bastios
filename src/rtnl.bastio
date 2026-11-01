@@ -1467,6 +1467,25 @@ fn nic_nf_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
   }
 }
 
+/// The generic netlink messages in b[0..len) sent on socket q: how many
+/// bytes were taken (whole messages).
+fn nic_genl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return len; },
+    Nic::Up(mut n) => {
+      let mut r = len;
+      if q < NLS && len <= blen(b) {
+        r = genl_request(&mut n, q, b, len, admin);
+      }
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
 fn nic_nl_close(c: &mut Nic, q: u64)
   requires nic_ok(c)
   ensures nic_ok(c)
