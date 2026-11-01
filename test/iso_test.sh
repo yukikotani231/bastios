@@ -2592,6 +2592,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The viewer's header says how long the file is.
+        mark = len(out)
+        q.stdin.write(b"printf 'one\\ntwo\\nthree\\n' > /tmp/ct/f.txt; bwm -n -c bfiles /tmp/ct/f.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ct/f.txt", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = "(3 lines, 14 bytes)" in lines[0]
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) the bfiles viewer's header gives the lines and bytes")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
         time.sleep(1)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()

@@ -72,6 +72,7 @@ static char bf_vpath[PATH_MAX];
 static char bf_vtext[BF_VIEWMAX];
 static const char *bf_vline[BF_MAXLINES];       /* each line of the file, cut at COLS characters */
 static int bf_nvline, bf_vtop;
+static int bf_vlines;                           /* lines in it (a last line without a newline counts) */
 static size_t bf_vlen;                          /* bytes in bf_vtext */
 static int bf_editing, bf_modified;
 static size_t bf_cur;                           /* the cursor, as an offset in bf_vtext */
@@ -301,6 +302,12 @@ static void bf_load_file(const char *path)
     }
     bf_vtext[n] = 0;
     bf_vlen = n;
+    bf_vlines = 0;
+    for (size_t k = 0; k < n; k++)
+        if (bf_vtext[k] == '\n')
+            bf_vlines++;
+    if (n > 0 && bf_vtext[n - 1] != '\n')
+        bf_vlines++;
     bf_nvline = 0;
     bf_vtop = 0;
     size_t i = 0;
@@ -344,8 +351,13 @@ static void bf_paint(void)
             snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
         else if (bf_confirm)
             snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
-        else
+        else {
             snprintf(h, sizeof h, "%s", bf_vpath);
+            char cnt[40];                               /* how big the file is, when there is room left of the edge */
+            int cl = snprintf(cnt, sizeof cnt, "  (%d line%s, %zu bytes)", bf_vlines, bf_vlines == 1 ? "" : "s", bf_vlen);
+            if (strlen(h) + (size_t)cl <= BF_COLS && strlen(h) + (size_t)cl < sizeof h)
+                strcat(h, cnt);
+        }
         bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming || bf_finding ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
