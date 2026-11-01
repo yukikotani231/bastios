@@ -136,7 +136,7 @@ fn nl_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   if t != SOCK_RAW && t != SOCK_DGRAM {
     return 18446744073709551522;            // ESOCKTNOSUPPORT
   }
-  if proto != NETLINK_ROUTE {
+  if proto != NETLINK_ROUTE && proto != NETLINK_NETFILTER {
     return EPROTONOSUPPORT;
   }
   // The first socket of a process takes its pid as port id, as on Linux;
@@ -153,6 +153,7 @@ fn nl_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   if q >= NLS {
     return ENOBUFS;
   }
+  nic_nl_set_proto(&mut k.nic, q, proto);
   let h = ofd_new(&mut k, OF_NETLINK, q);
   if h >= OFD_N {
     nic_nl_close(&mut k.nic, q);
@@ -279,6 +280,9 @@ fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if nic_nl_proto(k.nic, q) == NETLINK_NETFILTER {
+    return nf_send(&mut k, pid, q, buf, n);
+  }
   if n > XFER {
     return EMSGSIZE;
   }
@@ -290,6 +294,35 @@ fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
   let admin = net_admin(k, pid);
   let ptgt = nl_peer_target(k, pid, n);
   nic_nl_request(&mut k.nic, q, k.fs.xfer, n, tgt, ptgt, admin);
+  return n;
+}
+
+/// send on a NETLINK_NETFILTER socket: the nf_tables messages in buf[0..n].
+/// A request is read in pieces of XFER bytes, each of whole messages, so a
+/// batch can be longer than that; one message cannot.
+fn nf_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let admin = net_admin(k, pid);
+  let mut at = 0;
+  while at < n
+    invariant kok(k) && at <= n && pid < NPROC
+  {
+    let piece = smaller(n - at, XFER);
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, wrap_add(buf, at), &mut k.fs.xfer, piece) != piece {
+      return EFAULT;
+    }
+    netns_gc(&mut k);
+    let took = nic_nf_request(&mut k.nic, q, k.fs.xfer, piece, admin);
+    if took == 0 || took > piece {
+      if piece == n - at {
+        return n;               // the rest is not a whole message: dropped
+      }
+      return EMSGSIZE;          // one message longer than XFER
+    }
+    at = at + took;
+  }
   return n;
 }
 

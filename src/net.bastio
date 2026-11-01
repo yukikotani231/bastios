@@ -162,13 +162,26 @@ const NAME_ETH0: u64 = 0x30687465;     // "eth0"
 const CAP_NET_ADMIN: u64 = 12;          // configuring interfaces, addresses, routes
 const CAP_NET_RAW: u64 = 13;            // raw sockets (ping)
 const NLS: u64 = 32;                   // netlink sockets (src/rtnl.bastio)
-const NLQ: u64 = 8192;                 // the answers each can queue, in bytes
-const NL_W: u64 = 5;                   // words per socket:
+const NLQ: u64 = 16384;                // the answers each can queue, in bytes
+const NL_W: u64 = 6;                   // words per socket:
 const NL_USED: u64 = 0;
 const NL_LEN: u64 = 1;                 //   bytes queued
 const NL_PORT: u64 = 2;                //   its port id
 const NL_NS: u64 = 3;                  //   its namespace
 const NL_RAW: u64 = 4;                 //   1: what is queued is one raw mq_notify cookie (32 bytes), not rtnetlink messages
+const NL_PROTO: u64 = 5;               //   its netlink protocol (NETLINK_ROUTE or NETLINK_NETFILTER)
+const NFS: u64 = 9;                    // the packet filter's rulesets and the spare one a batch is copied to (src/nft.bastio)
+const NFP: u64 = 16384;                // bytes of rule text in each
+const NFSB: u64 = 21504;               // bytes in all in each (rule text, set elements' keys, sets' user data)
+const NF_WORDS: u64 = 17528;           // words of tables, chains, rules, sets and bookkeeping
+const NF_REGS: u64 = 64;               // bytes of registers
+const NCT_WORDS: u64 = 4096;           // words of tracked flows
+const NX_SKIP: u64 = 3;                // the packet filter's word that says the output hook is not to run
+const NF_PRE: u64 = 0;                 // the hooks
+const NF_IN: u64 = 1;
+const NF_FWD: u64 = 2;
+const NF_OUT: u64 = 3;
+const NF_POST: u64 = 4;
 const NATN: u64 = 256;                 // masqueraded flows (src/netns.bastio)
 const NAT_W: u64 = 5;                  // words per flow:
 const NAT_PROTO: u64 = 0;              //   IP_TCP, IP_UDP or IP_ICMP; 0: free
@@ -267,6 +280,15 @@ struct Net {
   nl_full: bool,      // ... and whether something did not fit
   nat: Buf,           // masqueraded flows, NAT_W words each
   nat_next: u64,      // the flow replaced when every one is in use
+  nfw: Buf,           // the packet filter's tables, chains and rules (src/nft.bastio)
+  nfb: Bytes,         // the text of its rules
+  nfr: Bytes,         // the registers rules compute in
+  ctw: Buf,           // tracked flows, CT_W words each
+}
+
+/// The packet filter's tables are all there (src/nft.bastio).
+spec fn nf_ok(n: &Net) -> bool {
+  len(n.nfw) == NF_WORDS && blen(n.nfb) == NFS * NFSB && blen(n.nfr) == NF_REGS && len(n.ctw) == NCT_WORDS
 }
 
 spec fn net_ok(n: &Net) -> bool {
@@ -281,7 +303,9 @@ spec fn net_ok(n: &Net) -> bool {
   && len(n.ifs) == IFN * IF_W && len(n.nss) == NNET * NS_W && n.ns < NNET && len(n.lo_if) == LOQ
   && blen(n.nlq) == NLS * NLQ && len(n.nls) == NLS * NL_W
   && len(n.nat) == NATN * NAT_W
+  && nf_ok(n)
 }
+
 
 // ---------------------------------------------------------------- bytes
 // Network byte order: most significant byte first.
@@ -664,6 +688,20 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
   requires net_ok(n) && flen <= FRAME_MAX
   ensures net_ok(n)
 {
+  if !nf_out(&mut n, ip, flen) {
+    return true;
+  }
+  let skip = nf_x(n, NX_SKIP);
+  nf_xset(&mut n, NX_SKIP, 1);
+  let r = reply_raw(&mut n, ip, flen);
+  nf_xset(&mut n, NX_SKIP, skip);
+  return r;
+}
+
+fn reply_raw(n: &mut Net, ip: u64, flen: u64) -> bool
+  requires net_ok(n) && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
   if is_local(n, ip) {
     return lo_send(&mut n, flen);
   }
@@ -672,7 +710,7 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
     if hop > IP_MAX || flen < 14 {
       return false;
     }
-    return send_via(&mut n, hop, flen);
+    return send_via_raw(&mut n, hop, flen);
   }
   if is_v6tok(ip) {
     return v6_out(&mut n, flen);
@@ -687,6 +725,18 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
 /// TCP sends it again. A frame for this machine goes round the loopback
 /// queue instead.
 fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
+  requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  if !nf_out(&mut n, hop, flen) {
+    return true;                      // dropped by a rule: as if lost on the way
+  }
+  return send_via_raw(&mut n, hop, flen);
+}
+
+/// send_via without the output hook (for a frame that has been through it, or
+/// that a reject rule makes: that one must not be able to reach the hook again).
+fn send_via_raw(n: &mut Net, hop: u64, flen: u64) -> bool
   requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= NET_BUF
   ensures net_ok(n)
 {
@@ -872,28 +922,49 @@ fn icmp_unreach(n: &mut Net)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  icmp_unreach_code(&mut n, 3);
+}
+
+/// icmp_unreach with another code (a reject rule asks for them).
+fn icmp_unreach_code(n: &mut Net, code: u64)
+  requires net_ok(n) && code <= 15
+  ensures net_ok(n)
+{
+  let src = icmp_unreach_frame(&mut n, code);
+  if src != 0 {
+    reply_send(&mut n, src, 70);
+  }
+}
+
+/// Builds the message in the outgoing frame and returns the address to send
+/// it to, or 0 if there is to be none (a packet filter's reject sends it
+/// without running the output hook again, so it cannot recurse).
+fn icmp_unreach_frame(n: &mut Net, code: u64) -> u64
+  requires net_ok(n) && code <= 15
+  ensures net_ok(n)
+{
   let src = be32(n.pkt, 26);
   if is_v6tok(src) || src == 0 {
-    return;
+    return 0;
   }
   if n.now / 100 != n.icmp_sec {
     n.icmp_sec = n.now / 100;
     n.icmp_n = 0;
   }
   if n.icmp_n >= ICMP_RATE {
-    return;
+    return 0;
   }
   n.icmp_n = n.icmp_n + 1;
   let smac = be48(n.pkt, 6);
   eth_header(&mut n, smac, ETH_IP);
   ip_header(&mut n, 56, IP_ICMP, src);
   bset(&mut n.out, 34, 3);            // destination unreachable ...
-  bset(&mut n.out, 35, 3);            // ... port
+  bset(&mut n.out, 35, cast[u8](code));   // ... port, normally
   put16(&mut n.out, 36, 0);
   put32(&mut n.out, 38, 0);
   bcopy(&mut n.out, 42, n.pkt, 14, 28);
   put16(&mut n.out, 36, csum(n.out, 34, 36));
-  reply_send(&mut n, src, 70);
+  return src;
 }
 
 /// A UDP datagram for us (total: the IP length, checked against the
@@ -984,6 +1055,9 @@ fn ip_in(n: &mut Net, frame_len: u64)
   if flen > FRAME_MAX && !(mine && n.lo_in && cast[u64](bget(n.pkt, 23)) == IP_TCP) {
     return;
   }
+  if !nf_hook(&mut n, NF_PRE, 0, flen, n.in_if, NO_IF) {
+    return;
+  }
   // A namespace that forwards passes on what comes in on a virtual
   // interface for elsewhere; namespace 0 masquerades what goes out of the
   // card, and turns the answers back (src/netns.bastio).
@@ -1009,6 +1083,9 @@ fn ip_in(n: &mut Net, frame_len: u64)
   }
   let proto = cast[u64](bget(n.pkt, 23));
   if 14 + total > FRAME_MAX && proto != IP_TCP {
+    return;
+  }
+  if !nf_hook(&mut n, NF_IN, 0, flen, n.in_if, NO_IF) {
     return;
   }
   if proto == IP_ICMP {
@@ -1329,7 +1406,9 @@ fn ping_send(n: &mut Net, mac: u64)
     i = i + 1;
   }
   put16(&mut n.out, 36, csum(n.out, 34, total - 20));
-  net_send(&mut n, 14 + total);
+  if nf_out(&mut n, n.ping_ip, 14 + total) {
+    net_send(&mut n, 14 + total);
+  }
   n.ping_state = PING_ECHO;
 }
 
@@ -2150,7 +2229,8 @@ fn net_up(d: Card) -> Nic
     v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_lo: 0, dns6_hi: 0, dns6_lo: 0, rs_n: 0, rs_until: 0,
     ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,
     nlq: balloc(NLS * NLQ), nls: alloc(NLS * NL_W), nl_at: 0, nl_lim: 0, nl_msg: 0, nl_full: false,
-    nat: alloc(NATN * NAT_W), nat_next: 0 };
+    nat: alloc(NATN * NAT_W), nat_next: 0,
+    nfw: alloc(NF_WORDS), nfb: balloc(NFS * NFSB), nfr: balloc(NF_REGS), ctw: alloc(NCT_WORDS) };
   netns_init(&mut n);
   n.iid = v6_iid(card_mac(n.dev));
   // The address comes from DHCP, sought from now on.
@@ -2511,6 +2591,10 @@ fn net_dismantle(n: Net, m: &mut Mem) -> Card
   bfree(n.nlq);
   free(n.nls);
   free(n.nat);
+  free(n.nfw);
+  bfree(n.nfb);
+  bfree(n.nfr);
+  free(n.ctw);
   free(n.v6);
   return n.dev;
 }
