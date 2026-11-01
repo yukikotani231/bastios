@@ -1,0 +1,3268 @@
+// A packet filter with nf_tables' interface: the NETLINK_NETFILTER sockets
+// `nft` and iptables-nft talk to, and the hooks in the network stack
+// (src/net.bastio) that run the rules.
+//
+// What a ruleset holds. Each network namespace that has one has a slot in
+// n.nfw (words) and n.nfb (bytes): up to NFTN tables, NFCN chains and NFRN rules
+// in all, and NFP bytes of rule text. A rule is kept as the attribute list the
+// client sent (NFTA_RULE_EXPRESSIONS), byte for byte, in the pool; listing the
+// rules sends it back and the packet path reads it in place. So what `nft list
+// ruleset` prints is what was added, and nothing is compiled that could
+// differ from it. A rule is checked when it is added: every expression must be
+// one this file runs, with registers, lengths and jump targets that fit, or the
+// request fails with NE_OPNOTSUPP or NE_INVAL. A rule is never accepted and then
+// ignored.
+//
+// Expressions run: payload (read), cmp, bitwise, meta (length, protocol, nfproto,
+// l4proto, mark, iif, oif, iifname, oifname), ct (state), immediate (a verdict
+// or a constant), counter, log and notrack (which do nothing observable). Chains:
+// filter type, hooks prerouting, input, forward, output and postrouting, with
+// jump, goto and return. Families inet, ip and ip6. Not here yet: sets, maps,
+// NAT, reject, limit, quota, objects, flowtables, rules that change a packet.
+//
+// A batch is all or nothing, as on Linux: the ruleset is copied to the spare
+// slot at NFNL_MSG_BATCH_BEGIN and put back at the end if any message in it
+// failed.
+//
+// Connection tracking is the small table n.ctw: a flow is NEW until a packet
+// comes back the other way, then ESTABLISHED. It exists only where a ruleset
+// uses `ct`. ICMP errors are not RELATED to the flow that caused them.
+//
+// IPv6 is carried inside the stack as IPv4 frames with a token for an address
+// (src/net6.bastio): a rule on an IPv6 header's address never matches such a
+// packet; ports, protocol and state work.
+
+const NFSL: u64 = 8;                  // rulesets (network namespaces that have one)
+const NFTN: u64 = 8;                   // tables in a ruleset
+const NFCN: u64 = 32;                  // chains
+const NFRN: u64 = 128;                 // rules
+const NFTW: u64 = 6;                    // words per table:
+const NT_USED: u64 = 0;
+const NT_FAM: u64 = 1;                 //   NFPROTO_*
+const NT_HAND: u64 = 2;
+const NT_N0: u64 = 3;                  //   its name, two words
+const NT_N1: u64 = 4;
+const NT_FLAGS: u64 = 5;
+const NFCW: u64 = 10;                   // words per chain:
+const NC_USED: u64 = 0;
+const NC_TAB: u64 = 1;                 //   its table's slot
+const NC_HAND: u64 = 2;
+const NC_N0: u64 = 3;
+const NC_N1: u64 = 4;
+const NC_HOOK: u64 = 5;                //   hook number + 1 (0: not a base chain)
+const NC_PRIO: u64 = 6;                //   priority + 2^31
+const NC_TYPE: u64 = 7;                //   0: filter
+const NC_POL: u64 = 8;                 //   policy + 1 (0 and 2: accept; 1: drop)
+const NC_USE: u64 = 9;
+const NFRW: u64 = 7;                    // words per rule:
+const NR_CH: u64 = 0;                  //   its chain's slot + 1 (0: free)
+const NR_HAND: u64 = 1;
+const NR_OFF: u64 = 2;                 //   where its text is in the pool
+const NR_LEN: u64 = 3;
+const NR_TOK: u64 = 5;                //   the tokens of its limit, in 1/(100 * unit) of a packet or byte
+const NR_LAST: u64 = 6;               //   the tick they were last counted at, + 1 (0: not yet)
+const NFSN: u64 = 16;                 // sets in a ruleset
+const NSW: u64 = 10;                  // words per set:
+const NST_USED: u64 = 0;
+const NST_TAB: u64 = 1;                //   its table's slot
+const NST_N0: u64 = 2;                 //   its name
+const NST_N1: u64 = 3;
+const NST_FLAGS: u64 = 4;              //   NFT_SET_*
+const NST_KTYPE: u64 = 5;
+const NST_KLEN: u64 = 6;               //   bytes in a key (1 to 16)
+const NST_ID: u64 = 7;                 //   the id a request used to name it, in the batch that made it (0: none)
+const NST_HAND: u64 = 8;
+const NST_UDLEN: u64 = 9;              //   bytes of user data kept (at NFP + NFEN * 16 + 64 * set)
+const NFEN: u64 = 256;                // set elements in a ruleset
+const NELW: u64 = 2;                  // words per element:
+const NEL_SET: u64 = 0;                //   its set's slot + 1 (0: free)
+const NEL_FLAGS: u64 = 1;              //   NFT_SET_ELEM_INTERVAL_END (1) or 0
+const NF_KEYS: u64 = 16384;           // the elements' keys in a slot's bytes: 16 each
+const NF_UDATA: u64 = 20480;          // the sets' user data: 64 bytes each
+const NF_HDR: u64 = 8;                // a slot starts with:
+const NH_NS: u64 = 0;                  //   its namespace + 1 (0: free)
+const NH_GEN: u64 = 1;
+const NH_HAND: u64 = 2;                //   the next handle
+const NH_USED: u64 = 3;                //   bytes of the pool in use
+const NH_CT: u64 = 4;                  //   1: some rule uses ct
+const NF_TB: u64 = 8;                 // then NFTN tables,
+const NF_CB: u64 = 56;                // NFCN chains (NF_TB + NFTN * NFTW),
+const NF_RB: u64 = 376;               // NFRN rules (NF_CB + NFCN * NFCW)
+const NF_SB: u64 = 1272;              // then NFSN sets (NF_RB + NFRN * NFRW),
+const NF_EB: u64 = 1432;              // then NFEN set elements (NF_SB + NFSN * NSW)
+const NF_W: u64 = 1944;               // words in a slot (NF_EB + NFEN * NELW)
+const NF_X: u64 = 17496;              // after the slots: NFS * NF_W
+const NX_BATCH: u64 = 0;               //   1 inside a batch
+const NX_FAIL: u64 = 1;                //   1 when a message in it failed
+const NX_NS: u64 = 2;                  //   the namespace the batch is in, + 1
+const NX_ANY: u64 = 4;                 //   rulesets that have a base chain
+const NX_CTSLOT: u64 = 5;              //   the flow the last packet touched (ct_track), + 1
+const NX_CTWAS: u64 = 6;               //   and its state before, + 1 (0: it is new)
+const NX_CTST: u64 = 7;                //   ct state computed at the packet's first hook
+const NX_STK: u64 = 8;                 //   a jump stack: NF_DEPTH pairs (chain, next rule)
+const NF_DEPTH: u64 = 8;
+
+const NCTN: u64 = 512;                 // tracked flows
+const NCT_W: u64 = 8;                  // words per flow:
+const NCT_TAG: u64 = 0;                //   protocol + 256 (0: free)
+const NCT_NS: u64 = 1;
+const NCT_A: u64 = 2;                  //   the smaller endpoint (address * 65536 + port)
+const NCT_B: u64 = 3;                  //   the larger
+const NCT_DIR: u64 = 4;                //   0: the first packet came from A
+const NCT_STATE: u64 = 5;              //   1: one direction seen, 2: both
+const NCT_UNTIL: u64 = 6;              //   the tick it ends at
+const NCT_PROBE: u64 = 8;
+
+const NFPROTO_INET: u64 = 1;
+const NFPROTO_IPV4: u64 = 2;
+const NFPROTO_IPV6: u64 = 10;
+const NF_DROP: u64 = 0;
+const NF_ACCEPT: u64 = 1;
+const NFT_CONTINUE: u64 = 4294967295;   // -1
+const NFT_BREAK: u64 = 4294967294;      // -2
+const NFT_JUMP: u64 = 4294967293;       // -3
+const NFT_GOTO: u64 = 4294967292;       // -4
+const NFT_RETURN: u64 = 4294967291;     // -5
+
+const NFT_MSG_NEWSET: u64 = 9;
+const NFT_MSG_GETSET: u64 = 10;
+const NFT_MSG_DELSET: u64 = 11;
+const NFT_MSG_NEWSETELEM: u64 = 12;
+const NFT_MSG_GETSETELEM: u64 = 13;
+const NFT_MSG_DELSETELEM: u64 = 14;
+const NFT_SET_ANONYMOUS: u64 = 1;
+const NFT_SET_INTERVAL: u64 = 4;
+const NFT_SET_CONCAT: u64 = 128;
+const XN_LOOKUP: u64 = 0x70756b6f6f6c;
+const XN_LIMIT: u64 = 0x74696d696c;
+const XN_REJECT: u64 = 0x7463656a6572;
+const NFNL_SUBSYS_NFTABLES: u64 = 10;
+const NFNL_MSG_BATCH_BEGIN: u64 = 16;
+const NFNL_MSG_BATCH_END: u64 = 17;
+const NFT_MSG_NEWTABLE: u64 = 0;
+const NFT_MSG_GETTABLE: u64 = 1;
+const NFT_MSG_DELTABLE: u64 = 2;
+const NFT_MSG_NEWCHAIN: u64 = 3;
+const NFT_MSG_GETCHAIN: u64 = 4;
+const NFT_MSG_DELCHAIN: u64 = 5;
+const NFT_MSG_NEWRULE: u64 = 6;
+const NFT_MSG_GETRULE: u64 = 7;
+const NFT_MSG_DELRULE: u64 = 8;
+const NFT_MSG_NEWGEN: u64 = 15;
+const NFT_MSG_GETGEN: u64 = 16;
+const NFT_MSG_MAX: u64 = 28;
+const NLM_F_EXCL: u64 = 0x200;
+const NLM_F_APPEND: u64 = 0x800;
+const NLA_NESTED: u64 = 0x8000;
+const NETLINK_NETFILTER: u64 = 12;
+const NFE_NOENT: u64 = 2;
+const NFE_BUSY: u64 = 16;
+const NFE_NOTEMPTY: u64 = 39;
+const NFE_NAMETOOLONG: u64 = 36;
+const NFE_NOBUFS: u64 = 105;
+
+// Names of expressions: their first eight bytes, low byte first.
+const XN_PAYLOAD: u64 = 0x64616f6c796170;
+const XN_CMP: u64 = 0x706d63;
+const XN_BITWISE: u64 = 0x65736977746962;
+const XN_BYTEORDER: u64 = 0x6564726f65747962;       // "byteorde": the name has nine letters
+const XN_META: u64 = 0x6174656d;
+const XN_CT: u64 = 0x7463;
+const XN_IMMEDIATE: u64 = 0x74616964656d6d69;      // "immediat": the name has nine letters
+const XN_COUNTER: u64 = 0x7265746e756f63;
+const XN_LOG: u64 = 0x676f6c;
+const XN_NOTRACK: u64 = 0x6b636172746f6e;
+const NF_FILTER: u64 = 0x7265746c6966;
+
+// ---------------------------------------------------------------- the tables
+
+fn nf_h(n: &Net, s: u64, f: u64) -> u64
+  requires net_ok(n) && s < NFS && f < NF_HDR
+{
+  return get(n.nfw, s * NF_W + f);
+}
+
+fn nf_hset(n: &mut Net, s: u64, f: u64, v: u64)
+  requires net_ok(n) && s < NFS && f < NF_HDR
+  ensures net_ok(n)
+{
+  n.nfw = set(n.nfw, s * NF_W + f, v);
+}
+
+fn nf_t(n: &Net, s: u64, t: u64, f: u64) -> u64
+  requires net_ok(n) && s < NFS && t < NFTN && f < NFTW
+{
+  return get(n.nfw, s * NF_W + NF_TB + t * NFTW + f);
+}
+
+fn nf_tset(n: &mut Net, s: u64, t: u64, f: u64, v: u64)
+  requires net_ok(n) && s < NFS && t < NFTN && f < NFTW
+  ensures net_ok(n)
+{
+  n.nfw = set(n.nfw, s * NF_W + NF_TB + t * NFTW + f, v);
+}
+
+fn nf_c(n: &Net, s: u64, c: u64, f: u64) -> u64
+  requires net_ok(n) && s < NFS && c < NFCN && f < NFCW
+{
+  return get(n.nfw, s * NF_W + NF_CB + c * NFCW + f);
+}
+
+fn nf_cset(n: &mut Net, s: u64, c: u64, f: u64, v: u64)
+  requires net_ok(n) && s < NFS && c < NFCN && f < NFCW
+  ensures net_ok(n)
+{
+  n.nfw = set(n.nfw, s * NF_W + NF_CB + c * NFCW + f, v);
+}
+
+fn nf_r(n: &Net, s: u64, r: u64, f: u64) -> u64
+  requires net_ok(n) && s < NFS && r < NFRN && f < NFRW
+{
+  return get(n.nfw, s * NF_W + NF_RB + r * NFRW + f);
+}
+
+fn nf_rset(n: &mut Net, s: u64, r: u64, f: u64, v: u64)
+  requires net_ok(n) && s < NFS && r < NFRN && f < NFRW
+  ensures net_ok(n)
+{
+  n.nfw = set(n.nfw, s * NF_W + NF_RB + r * NFRW + f, v);
+}
+
+/// Where rule r's text starts in its slot's pool, how long it is, and how much
+/// of the pool is in use: never past the pool.
+fn nf_roff(n: &Net, s: u64, r: u64) -> u64
+  requires net_ok(n) && s < NFS && r < NFRN
+  ensures result <= NFP
+{
+  return smaller(nf_r(n, s, r, NR_OFF), NFP);
+}
+
+fn nf_rlen(n: &Net, s: u64, r: u64) -> u64
+  requires net_ok(n) && s < NFS && r < NFRN
+  ensures result <= NFP
+{
+  return smaller(nf_r(n, s, r, NR_LEN), NFP);
+}
+
+fn nf_used(n: &Net, s: u64) -> u64
+  requires net_ok(n) && s < NFS
+  ensures result <= NFP
+{
+  return smaller(nf_h(n, s, NH_USED), NFP);
+}
+
+fn nf_x(n: &Net, f: u64) -> u64
+  requires net_ok(n) && f < 32
+{
+  return get(n.nfw, NF_X + f);
+}
+
+fn nf_xset(n: &mut Net, f: u64, v: u64)
+  requires net_ok(n) && f < 32
+  ensures net_ok(n)
+{
+  n.nfw = set(n.nfw, NF_X + f, v);
+}
+
+/// Empties slot s.
+fn nf_wipe(n: &mut Net, s: u64)
+  requires net_ok(n) && s < NFS
+  ensures net_ok(n)
+{
+  let mut i = 0;
+  while i < NF_W
+    invariant i <= NF_W && net_ok(n)
+  {
+    n.nfw = set(n.nfw, s * NF_W + i, 0);
+    i = i + 1;
+  }
+}
+
+/// The slot of namespace ns's ruleset, or NFSL.
+fn nf_slot(n: &Net, ns: u64) -> u64
+  requires net_ok(n) && ns < NNET
+  ensures result <= NFSL
+{
+  let mut s = 0;
+  while s < NFSL
+    invariant s <= NFSL && net_ok(n)
+  {
+    if nf_h(n, s, NH_NS) == ns + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return NFSL;
+}
+
+/// The slot of namespace ns's ruleset, made if it has none; NFSL if there is no
+/// room for another.
+fn nf_slot_make(n: &mut Net, ns: u64) -> u64
+  requires net_ok(n) && ns < NNET
+  ensures net_ok(n) && result <= NFSL
+{
+  let have = nf_slot(n, ns);
+  if have < NFSL {
+    return have;
+  }
+  let mut s = 0;
+  while s < NFSL
+    invariant s <= NFSL && net_ok(n)
+  {
+    if nf_h(n, s, NH_NS) == 0 {
+      nf_wipe(&mut n, s);
+      nf_hset(&mut n, s, NH_NS, ns + 1);
+      nf_hset(&mut n, s, NH_HAND, 1);
+      return s;
+    }
+    s = s + 1;
+  }
+  return NFSL;
+}
+
+/// Counts the base chains that have a hook, for the fast path of the hooks.
+fn nf_recount(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut any = 0;
+  let mut s = 0;
+  while s < NFSL
+    invariant s <= NFSL && any <= 1024 && net_ok(n)
+  {
+    if nf_h(n, s, NH_NS) != 0 {
+      let mut c = 0;
+      while c < NFCN
+        invariant c <= NFCN && any <= 1024 && net_ok(n)
+      {
+        if nf_c(n, s, c, NC_USED) == 1 && nf_c(n, s, c, NC_HOOK) != 0 && any < 1024 {
+          any = any + 1;
+        }
+        c = c + 1;
+      }
+    }
+    s = s + 1;
+  }
+  nf_xset(&mut n, NX_ANY, any);
+}
+
+/// Namespace ns ended: its ruleset goes.
+fn nf_ns_end(n: &mut Net, ns: u64)
+  requires net_ok(n) && ns < NNET
+  ensures net_ok(n)
+{
+  let s = nf_slot(n, ns);
+  if s < NFSL {
+    nf_wipe(&mut n, s);
+    nf_recount(&mut n);
+  }
+}
+
+fn nf_find_table(n: &Net, s: u64, fam: u64, w0: u64, w1: u64) -> u64
+  requires net_ok(n) && s < NFS
+  ensures result <= NFTN
+{
+  let mut t = 0;
+  while t < NFTN
+    invariant t <= NFTN && net_ok(n)
+  {
+    if nf_t(n, s, t, NT_USED) == 1 && nf_t(n, s, t, NT_FAM) == fam && nf_t(n, s, t, NT_N0) == w0 && nf_t(n, s, t, NT_N1) == w1 {
+      return t;
+    }
+    t = t + 1;
+  }
+  return NFTN;
+}
+
+fn nf_find_table_h(n: &Net, s: u64, fam: u64, h: u64) -> u64
+  requires net_ok(n) && s < NFS
+  ensures result <= NFTN
+{
+  let mut t = 0;
+  while t < NFTN
+    invariant t <= NFTN && net_ok(n)
+  {
+    if nf_t(n, s, t, NT_USED) == 1 && nf_t(n, s, t, NT_FAM) == fam && nf_t(n, s, t, NT_HAND) == h {
+      return t;
+    }
+    t = t + 1;
+  }
+  return NFTN;
+}
+
+fn nf_find_chain(n: &Net, s: u64, t: u64, w0: u64, w1: u64) -> u64
+  requires net_ok(n) && s < NFS && t < NFTN
+  ensures result <= NFCN
+{
+  let mut c = 0;
+  while c < NFCN
+    invariant c <= NFCN && net_ok(n)
+  {
+    if nf_c(n, s, c, NC_USED) == 1 && nf_c(n, s, c, NC_TAB) == t && nf_c(n, s, c, NC_N0) == w0 && nf_c(n, s, c, NC_N1) == w1 {
+      return c;
+    }
+    c = c + 1;
+  }
+  return NFCN;
+}
+
+fn nf_find_chain_h(n: &Net, s: u64, t: u64, h: u64) -> u64
+  requires net_ok(n) && s < NFS && t < NFTN
+  ensures result <= NFCN
+{
+  let mut c = 0;
+  while c < NFCN
+    invariant c <= NFCN && net_ok(n)
+  {
+    if nf_c(n, s, c, NC_USED) == 1 && nf_c(n, s, c, NC_TAB) == t && nf_c(n, s, c, NC_HAND) == h {
+      return c;
+    }
+    c = c + 1;
+  }
+  return NFCN;
+}
+
+fn nf_find_rule(n: &Net, s: u64, h: u64) -> u64
+  requires net_ok(n) && s < NFS
+  ensures result <= NFRN
+{
+  let mut r = 0;
+  while r < NFRN
+    invariant r <= NFRN && net_ok(n)
+  {
+    if nf_r(n, s, r, NR_CH) != 0 && nf_r(n, s, r, NR_HAND) == h {
+      return r;
+    }
+    r = r + 1;
+  }
+  return NFRN;
+}
+
+/// How many rules chain c has.
+fn nf_chain_rules(n: &Net, s: u64, c: u64) -> u64
+  requires net_ok(n) && s < NFS && c < NFCN
+  ensures result <= NFRN
+{
+  let mut k = 0;
+  let mut r = 0;
+  while r < NFRN
+    invariant r <= NFRN && k <= r && net_ok(n)
+  {
+    if nf_r(n, s, r, NR_CH) == c + 1 {
+      k = k + 1;
+    }
+    r = r + 1;
+  }
+  return k;
+}
+
+/// Takes rule r out: its text leaves the pool.
+fn nf_rule_drop(n: &mut Net, s: u64, r: u64)
+  requires net_ok(n) && s < NFSL && r < NFRN
+  ensures net_ok(n)
+{
+  if nf_r(n, s, r, NR_CH) == 0 {
+    return;
+  }
+  let off = nf_roff(n, s, r);
+  let l = nf_rlen(n, s, r);
+  let used = nf_used(n, s);
+  if l <= used && off <= used - l {
+    let tail = used - l - off;
+    bmove(&mut n.nfb, s * NFSB + off, s * NFSB + off + l, tail);
+    let mut q = 0;
+    while q < NFRN
+      invariant q <= NFRN && net_ok(n)
+    {
+      let qo = nf_roff(n, s, q);
+      if nf_r(n, s, q, NR_CH) != 0 && qo > off && qo >= l {
+        nf_rset(&mut n, s, q, NR_OFF, qo - l);
+      }
+      q = q + 1;
+    }
+    nf_hset(&mut n, s, NH_USED, used - l);
+  }
+  nf_rset(&mut n, s, r, NR_CH, 0);
+}
+
+/// Takes chain c and its rules out.
+fn nf_chain_drop(n: &mut Net, s: u64, c: u64)
+  requires net_ok(n) && s < NFSL && c < NFCN
+  ensures net_ok(n)
+{
+  let mut r = 0;
+  while r < NFRN
+    invariant r <= NFRN && net_ok(n)
+  {
+    if nf_r(n, s, r, NR_CH) == c + 1 {
+      nf_rule_drop(&mut n, s, r);
+    }
+    r = r + 1;
+  }
+  nf_cset(&mut n, s, c, NC_USED, 0);
+}
+
+/// Takes table t, its chains and its rules out.
+fn nf_table_drop(n: &mut Net, s: u64, t: u64)
+  requires net_ok(n) && s < NFSL && t < NFTN
+  ensures net_ok(n)
+{
+  let mut c = 0;
+  while c < NFCN
+    invariant c <= NFCN && net_ok(n)
+  {
+    if nf_c(n, s, c, NC_USED) == 1 && nf_c(n, s, c, NC_TAB) == t {
+      nf_chain_drop(&mut n, s, c);
+    }
+    c = c + 1;
+  }
+  let mut k = 0;
+  while k < NFSN
+    invariant k <= NFSN && net_ok(n)
+  {
+    if nf_s(n, s, k, NST_USED) == 1 && nf_s(n, s, k, NST_TAB) == t {
+      nf_set_drop(&mut n, s, k);
+    }
+    k = k + 1;
+  }
+  nf_tset(&mut n, s, t, NT_USED, 0);
+}
+
+fn nf_new_handle(n: &mut Net, s: u64) -> u64
+  requires net_ok(n) && s < NFS
+  ensures net_ok(n)
+{
+  let h = nf_h(n, s, NH_HAND);
+  nf_hset(&mut n, s, NH_HAND, wrap_add(h, 1));
+  return h;
+}
+
+// ---------------------------------------------------------------- reading a request
+
+/// The big-endian u32 attribute t at from..to, or `none`.
+fn nfa_be32(b: &Bytes, from: u64, to: u64, t: u64, none: u64) -> u64
+  requires to <= blen(b)
+  ensures result <= 4294967295 || result == none
+{
+  let a = nla_find(b, from, to, t);
+  if nla_len(b, a) < 4 {
+    return none;
+  }
+  return be32(b, a);
+}
+
+/// The big-endian u64 attribute t at from..to, or `none`.
+fn nfa_be64(b: &Bytes, from: u64, to: u64, t: u64, none: u64) -> u64
+  requires to <= blen(b)
+{
+  let a = nla_find(b, from, to, t);
+  if nla_len(b, a) < 8 {
+    return none;
+  }
+  return be64(b, a);
+}
+
+/// An attribute's payload, as the two-word name it holds: 0 and 0 when there is
+/// none or it does not fit a name (one to fifteen bytes).
+fn nfa_name0(b: &Bytes, from: u64, to: u64, t: u64) -> u64
+  requires to <= blen(b)
+{
+  return nla_name(b, nla_find(b, from, to, t), 0);
+}
+
+fn nfa_name1(b: &Bytes, from: u64, to: u64, t: u64) -> u64
+  requires to <= blen(b)
+{
+  return nla_name(b, nla_find(b, from, to, t), 1);
+}
+
+/// The registers' offset in n.nfr for register number r (8.. are the 4-byte
+/// registers, 1 to 4 the 16-byte ones), or NF_REGS if r is not one.
+fn reg_off(r: u64) -> u64
+  ensures result <= NF_REGS
+{
+  if r >= 8 && r < 24 {
+    return (r - 8) * 4;
+  }
+  if r >= 1 && r <= 4 {
+    return (r - 1) * 16;
+  }
+  return NF_REGS;
+}
+
+/// The data value of attribute a (NFTA_DATA_*): where its bytes start, 0 if it
+/// holds no value.
+fn nf_value(b: &Bytes, a: u64) -> u64
+  ensures result == 0 || (4 <= result && result <= blen(b))
+{
+  let l = nla_len(b, a);
+  if l < 4 {
+    return 0;
+  }
+  return nla_find(b, a, a + l, 1);
+}
+
+// ---------------------------------------------------------------- checking a rule
+
+/// Is the expression list at from..to something nf_eval runs? 0 or an errno.
+/// Chains named by a jump or goto must exist in table t of slot s.
+fn nf_check(n: &Net, b: &Bytes, from: u64, to: u64, s: u64, t: u64) -> u64
+  requires net_ok(n) && from <= to && to <= blen(b) && s < NFS && t < NFTN
+{
+  let mut at = from;
+  let mut count = 0;
+  while at < to && to - at >= 4
+    invariant at <= to && to <= blen(b) && net_ok(n) && count <= 64
+  {
+    let l = rd16(b, at);
+    if l < 4 || l > to - at || count >= 64 {
+      return NE_INVAL;
+    }
+    count = count + 1;
+    let e = nf_check_one(n, b, at + 4, at + l, s, t);
+    if e != 0 {
+      return e;
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > to - at {
+      return 0;
+    }
+    at = at + step;
+  }
+  return 0;
+}
+
+/// One expression, its attributes at from..to.
+fn nf_check_one(n: &Net, b: &Bytes, from: u64, to: u64, s: u64, t: u64) -> u64
+  requires net_ok(n) && to <= blen(b) && s < NFS && t < NFTN && from <= to
+{
+  let na = nla_find(b, from, to, 1);
+  let nl = nla_len(b, na);
+  if nl == 0 || nl > 10 {
+    return NE_INVAL;
+  }
+  let name = nla_word(b, na);
+  let da = nla_find(b, from, to, 2);
+  let dl = nla_len(b, da);
+  let dend = da + dl;
+  if name == XN_PAYLOAD && nl == 8 {
+    let dreg = nfa_be32(b, da, dend, 1, 0);
+    let base = nfa_be32(b, da, dend, 2, 9);
+    let off = nfa_be32(b, da, dend, 3, 65536);
+    let ln = nfa_be32(b, da, dend, 4, 0);
+    if nla_find(b, da, dend, 5) != 0 || nla_find(b, da, dend, 6) != 0 {
+      return NE_OPNOTSUPP;                       // a payload write
+    }
+    let ro = reg_off(dreg);
+    if base > 2 || off >= 256 || ln == 0 || ln > 16 || ro + (ln + 3) / 4 * 4 > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_CMP && nl == 4 {
+    let sreg = nfa_be32(b, da, dend, 1, 0);
+    let op = nfa_be32(b, da, dend, 2, 9);
+    let v = nf_value(b, nla_find(b, da, dend, 3));
+    let vl = nla_len(b, v);
+    let ro = reg_off(sreg);
+    if op > 5 || v == 0 || vl == 0 || vl > 16 || ro + vl > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_BITWISE && nl == 8 {
+    let sreg = nfa_be32(b, da, dend, 1, 0);
+    let dreg = nfa_be32(b, da, dend, 2, 0);
+    let ln = nfa_be32(b, da, dend, 3, 0);
+    let op = nfa_be32(b, da, dend, 6, 0);
+    let m = nf_value(b, nla_find(b, da, dend, 4));
+    let x = nf_value(b, nla_find(b, da, dend, 5));
+    if op != 0 {
+      return NE_OPNOTSUPP;                       // shifts
+    }
+    if m == 0 || x == 0 || ln == 0 || ln > 16 || nla_len(b, m) < ln || nla_len(b, x) < ln
+      || reg_off(sreg) + ln > NF_REGS || reg_off(dreg) + ln > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_BYTEORDER && nl == 10 {
+    let sreg = nfa_be32(b, da, dend, 1, 0);
+    let dreg = nfa_be32(b, da, dend, 2, 0);
+    let op = nfa_be32(b, da, dend, 3, 9);
+    let ln = nfa_be32(b, da, dend, 4, 0);
+    let sz = nfa_be32(b, da, dend, 5, 0);
+    if op > 1 || (sz != 2 && sz != 4 && sz != 8) || ln == 0 || ln > 16 || ln % sz != 0
+      || reg_off(sreg) + ln > NF_REGS || reg_off(dreg) + ln > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_META && nl == 5 {
+    if nla_find(b, da, dend, 3) != 0 {
+      return NE_OPNOTSUPP;                       // setting a meta value
+    }
+    let key = nfa_be32(b, da, dend, 2, 99);
+    let dreg = nfa_be32(b, da, dend, 1, 0);
+    let w = meta_len(key);
+    if w == 0 {
+      return NE_OPNOTSUPP;
+    }
+    if reg_off(dreg) + (w + 3) / 4 * 4 > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_CT && nl == 3 {
+    if nla_find(b, da, dend, 4) != 0 {
+      return NE_OPNOTSUPP;
+    }
+    let key = nfa_be32(b, da, dend, 2, 99);
+    let dreg = nfa_be32(b, da, dend, 1, 0);
+    if key != 0 {
+      return NE_OPNOTSUPP;                       // only ct state
+    }
+    if reg_off(dreg) + 4 > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_IMMEDIATE && nl == 10 {
+    let dreg = nfa_be32(b, da, dend, 1, 99);
+    let d = nla_find(b, da, dend, 2);
+    let dl2 = nla_len(b, d);
+    if d == 0 || dl2 == 0 {
+      return NE_INVAL;
+    }
+    if dreg == 0 {
+      let v = nla_find(b, d, d + dl2, 2);
+      let vl = nla_len(b, v);
+      if v == 0 || vl == 0 {
+        return NE_INVAL;
+      }
+      let code = nfa_be32(b, v, v + vl, 1, 99);
+      if code == NF_DROP || code == NF_ACCEPT || code == NFT_CONTINUE || code == NFT_BREAK || code == NFT_RETURN {
+        return 0;
+      }
+      if code == NFT_JUMP || code == NFT_GOTO {
+        let ca = nla_find(b, v, v + vl, 2);
+        if ca == 0 {
+          return NE_INVAL;
+        }
+        let c = nf_find_chain(n, s, t, nla_name(b, ca, 0), nla_name(b, ca, 1));
+        if c >= NFCN {
+          return NFE_NOENT;
+        }
+        return 0;
+      }
+      return NE_INVAL;
+    }
+    let v = nf_value(b, d);
+    let vl = nla_len(b, v);
+    if v == 0 || vl == 0 || vl > 16 || reg_off(dreg) + vl > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_COUNTER && nl == 8 {
+    return 0;
+  }
+  if name == XN_LIMIT && nl == 6 {
+    let rate = nfa_be64(b, da, dend, 1, 0);
+    let unit = nfa_be64(b, da, dend, 2, 0);
+    if rate == 0 || rate > 4294967295 || unit == 0 || unit > 604800 || nfa_be32(b, da, dend, 4, 0) > 1 || nfa_be32(b, da, dend, 5, 0) > 1 {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if name == XN_REJECT && nl == 7 {
+    let ty = nfa_be32(b, da, dend, 1, 99);
+    let ca = nla_find(b, da, dend, 2);
+    let mut code = 0;
+    if nla_len(b, ca) >= 1 {
+      code = rd8(b, ca);
+    }
+    if ty == 0 && code <= 15 {
+      return 0;
+    }
+    if ty == 1 {
+      return 0;
+    }
+    if ty == 2 && code <= 3 {
+      return 0;
+    }
+    return NE_INVAL;
+  }
+  if name == XN_LOOKUP && nl == 7 {
+    if nla_find(b, da, dend, 3) != 0 {
+      return NE_OPNOTSUPP;                     // a map
+    }
+    let k = nf_set_pick(n, b, da, dend, s, t, 1, 4);
+    if k >= NFSN {
+      return NFE_NOENT;
+    }
+    if reg_off(nfa_be32(b, da, dend, 2, 0)) + smaller(nf_s(n, s, k, NST_KLEN), 16) > NF_REGS {
+      return NE_INVAL;
+    }
+    return 0;
+  }
+  if (name == XN_LOG && nl == 4) || (name == XN_NOTRACK && nl == 8) {
+    return 0;
+  }
+  return NE_OPNOTSUPP;
+}
+
+/// The length in bytes of the meta key `key`'s value, 0 if it is not one we have.
+fn meta_len(key: u64) -> u64
+  ensures result <= 16
+{
+  if key == 0 || key == 3 || key == 4 || key == 5 {
+    return 4;                                  // len, mark, iif, oif
+  }
+  if key == 2 {
+    return 2;                                  // protocol
+  }
+  if key == 15 || key == 16 {
+    return 1;                                  // nfproto, l4proto
+  }
+  if key == 6 || key == 7 {
+    return 16;                                 // iifname, oifname
+  }
+  return 0;
+}
+
+/// Does the expression list at from..to use ct?
+fn nf_uses_ct(b: &Bytes, from: u64, to: u64) -> bool
+  requires from <= to && to <= blen(b)
+{
+  let mut at = from;
+  while at < to && to - at >= 4
+    invariant at <= to && to <= blen(b)
+  {
+    let l = rd16(b, at);
+    if l < 4 || l > to - at {
+      return false;
+    }
+    let na = nla_find(b, at + 4, at + l, 1);
+    if nla_len(b, na) == 3 && nla_word(b, na) == XN_CT {
+      return true;
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > to - at {
+      return false;
+    }
+    at = at + step;
+  }
+  return false;
+}
+
+// ---------------------------------------------------------------- writing answers
+
+fn nl_be16(n: &mut Net, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_b(&mut n, v / 256 % 256);
+  nl_b(&mut n, v % 256);
+}
+
+fn nl_be32(n: &mut Net, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_be16(&mut n, v / 65536 % 65536);
+  nl_be16(&mut n, v % 65536);
+}
+
+fn nla_be32(n: &mut Net, t: u64, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 4);
+  nl_be32(&mut n, v);
+}
+
+fn nla_be64(n: &mut Net, t: u64, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 8);
+  nl_be32(&mut n, v / 4294967296 % 4294967296);
+  nl_be32(&mut n, v % 4294967296);
+}
+
+/// Starts a nested attribute: the position its length is filled in at.
+fn nla_nest(n: &mut Net, t: u64) -> u64
+  requires net_ok(n) && t < 16384
+  ensures net_ok(n)
+{
+  let at = n.nl_at;
+  nla_head(&mut n, t + NLA_NESTED, 0);
+  return at;
+}
+
+fn nla_nest_end(n: &mut Net, at: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if n.nl_full || at >= n.nl_at || at >= blen(n.nlq) - 2 || n.nl_at - at > 65535 {
+    return;
+  }
+  let l = n.nl_at - at;
+  bset(&mut n.nlq, at, cast[u8](l % 256));
+  bset(&mut n.nlq, at + 1, cast[u8](l / 256 % 256));
+}
+
+/// The header of a message that is part of an answer: type (subsystem
+/// NFNL_SUBSYS_NFTABLES, message m), then the nfgenmsg with family fam.
+fn nf_msg(n: &mut Net, m: u64, flags: u64, seq: u64, port: u64, fam: u64)
+  requires net_ok(n) && m < 256 && fam < 256
+  ensures net_ok(n)
+{
+  nf_msg_res(&mut n, m, flags, seq, port, fam, 0);
+}
+
+fn nf_msg_res(n: &mut Net, m: u64, flags: u64, seq: u64, port: u64, fam: u64, res: u64)
+  requires net_ok(n) && m < 256 && fam < 256
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, NFNL_SUBSYS_NFTABLES * 256 + m, flags, seq, port);
+  nl_b(&mut n, fam);
+  nl_b(&mut n, 0);
+  nl_be16(&mut n, res % 65536);
+}
+
+fn nl_table(n: &mut Net, s: u64, t: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && s < NFS && t < NFTN
+  ensures net_ok(n)
+{
+  nf_msg(&mut n, NFT_MSG_NEWTABLE, flags, seq, port, smaller(nf_t(n, s, t, NT_FAM), 255));
+  nla_str(&mut n, 1, nf_t(n, s, t, NT_N0), nf_t(n, s, t, NT_N1));
+  nla_be32(&mut n, 3, nf_t(n, s, t, NT_FLAGS));
+  let mut chains = 0;
+  let mut c = 0;
+  while c < NFCN
+    invariant c <= NFCN && chains <= c && net_ok(n)
+  {
+    if nf_c(n, s, c, NC_USED) == 1 && nf_c(n, s, c, NC_TAB) == t {
+      chains = chains + 1;
+    }
+    c = c + 1;
+  }
+  nla_be32(&mut n, 4, chains);
+  nla_be64(&mut n, 5, nf_t(n, s, t, NT_HAND));
+  nl_end(&mut n);
+}
+
+fn nl_chain(n: &mut Net, s: u64, c: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && s < NFS && c < NFCN
+  ensures net_ok(n)
+{
+  let t = smaller(nf_c(n, s, c, NC_TAB), NFTN - 1);
+  nf_msg(&mut n, NFT_MSG_NEWCHAIN, flags, seq, port, smaller(nf_t(n, s, t, NT_FAM), 255));
+  nla_str(&mut n, 1, nf_t(n, s, t, NT_N0), nf_t(n, s, t, NT_N1));
+  nla_str(&mut n, 3, nf_c(n, s, c, NC_N0), nf_c(n, s, c, NC_N1));
+  nla_be64(&mut n, 2, nf_c(n, s, c, NC_HAND));
+  let hook = nf_c(n, s, c, NC_HOOK);
+  if hook != 0 {
+    let h = nla_nest(&mut n, 4);
+    nla_be32(&mut n, 1, hook - 1);
+    nla_be32(&mut n, 2, nf_c(n, s, c, NC_PRIO) % 4294967296);
+    nla_nest_end(&mut n, h);
+    nla_be32(&mut n, 5, nfpick(nf_c(n, s, c, NC_POL) == 1, NF_DROP, NF_ACCEPT));
+    nla_str(&mut n, 7, NF_FILTER, 0);
+  }
+  let mut use_n = 0;
+  let mut r = 0;
+  while r < NFRN
+    invariant r <= NFRN && use_n <= r && net_ok(n)
+  {
+    if nf_r(n, s, r, NR_CH) == c + 1 {
+      use_n = use_n + 1;
+    }
+    r = r + 1;
+  }
+  nla_be32(&mut n, 6, use_n);
+  nl_end(&mut n);
+}
+
+fn nl_rule(n: &mut Net, s: u64, r: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && s < NFS && r < NFRN
+  ensures net_ok(n)
+{
+  let c = smaller(nf_r(n, s, r, NR_CH), NFCN);
+  if c == 0 {
+    return;
+  }
+  let t = smaller(nf_c(n, s, c - 1, NC_TAB), NFTN - 1);
+  nf_msg(&mut n, NFT_MSG_NEWRULE, flags, seq, port, smaller(nf_t(n, s, t, NT_FAM), 255));
+  nla_str(&mut n, 1, nf_t(n, s, t, NT_N0), nf_t(n, s, t, NT_N1));
+  nla_str(&mut n, 2, nf_c(n, s, c - 1, NC_N0), nf_c(n, s, c - 1, NC_N1));
+  nla_be64(&mut n, 3, nf_r(n, s, r, NR_HAND));
+  let off = nf_roff(n, s, r);
+  let l = nf_rlen(n, s, r);
+  if l <= NFP && off <= NFP - l && l <= 65531 {
+    nla_head(&mut n, 4 + NLA_NESTED, l);
+    let mut i = 0;
+    while i < l
+      invariant i <= l && l <= NFP && off <= NFP - l && s < NFS && net_ok(n)
+    {
+      nl_b(&mut n, cast[u64](bget(n.nfb, s * NFSB + off + i)));
+      i = i + 1;
+    }
+    nl_pad(&mut n);
+  }
+  nl_end(&mut n);
+}
+
+// ---------------------------------------------------------------- messages
+
+fn nfpick(c: bool, a: u64, b: u64) -> u64
+  ensures (c && result == a) || (!c && result == b)
+{
+  if c {
+    return a;
+  }
+  return b;
+}
+
+/// The slot the request is about: namespace ns's, or NFSL.
+fn nf_ruleset(n: &Net, ns: u64) -> u64
+  requires net_ok(n) && ns < NNET
+  ensures result <= NFSL
+{
+  return nf_slot(n, ns);
+}
+
+/// NFT_MSG_NEWTABLE.
+fn nf_newtable(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, fl: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  if fam != NFPROTO_INET && fam != NFPROTO_IPV4 && fam != NFPROTO_IPV6 {
+    return NE_OPNOTSUPP;
+  }
+  let a = nla_find(b, at + 20, end, 1);
+  let w0 = nla_name(b, a, 0);
+  let w1 = nla_name(b, a, 1);
+  if a == 0 || w0 == 0 {
+    return nfpick(nla_len(b, a) > 15, NFE_NAMETOOLONG, NE_INVAL);
+  }
+  let s0 = nf_slot(n, ns);
+  if s0 < NFSL {
+    let t = nf_find_table(n, s0, fam, w0, w1);
+    if t < NFTN {
+      if fl / NLM_F_EXCL % 2 == 1 {
+        return NE_EXIST;
+      }
+      nf_tset(&mut n, s0, t, NT_FLAGS, nfa_be32(b, at + 20, end, 3, nf_t(n, s0, t, NT_FLAGS)));
+      return 0;
+    }
+  }
+  let s = nf_slot_make(&mut n, ns);
+  if s >= NFSL {
+    return NE_NOSPC;
+  }
+  let mut t = 0;
+  while t < NFTN && nf_t(n, s, t, NT_USED) == 1
+    invariant t <= NFTN && net_ok(n)
+  {
+    t = t + 1;
+  }
+  if t >= NFTN {
+    return NE_NOSPC;
+  }
+  nf_tset(&mut n, s, t, NT_USED, 1);
+  nf_tset(&mut n, s, t, NT_FAM, fam);
+  nf_tset(&mut n, s, t, NT_HAND, nf_new_handle(&mut n, s));
+  nf_tset(&mut n, s, t, NT_N0, w0);
+  nf_tset(&mut n, s, t, NT_N1, w1);
+  nf_tset(&mut n, s, t, NT_FLAGS, nfa_be32(b, at + 20, end, 3, 0));
+  return 0;
+}
+
+/// NFT_MSG_DELTABLE: the table named (or whose handle is given); with neither,
+/// every table of the family (all of them for NFPROTO_UNSPEC).
+fn nf_deltable(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  let a = nla_find(b, at + 20, end, 1);
+  let h = nfa_be64(b, at + 20, end, 5, 0);
+  if a == 0 && h == 0 {
+    if s < NFSL {
+      let mut t = 0;
+      while t < NFTN
+        invariant t <= NFTN && net_ok(n)
+      {
+        if nf_t(n, s, t, NT_USED) == 1 && (fam == 0 || nf_t(n, s, t, NT_FAM) == fam) {
+          nf_table_drop(&mut n, s, t);
+        }
+        t = t + 1;
+      }
+    }
+    return 0;
+  }
+  if s >= NFSL {
+    return NFE_NOENT;
+  }
+  let mut t = NFTN;
+  if a != 0 {
+    t = nf_find_table(n, s, fam, nla_name(b, a, 0), nla_name(b, a, 1));
+  } else {
+    t = nf_find_table_h(n, s, fam, h);
+  }
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  nf_table_drop(&mut n, s, t);
+  return 0;
+}
+
+/// NFT_MSG_GETTABLE: a dump, or the table named.
+fn nf_gettable(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, dump: bool, seq: u64, port: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  if dump {
+    if s < NFSL {
+      let mut t = 0;
+      while t < NFTN
+        invariant t <= NFTN && net_ok(n)
+      {
+        if nf_t(n, s, t, NT_USED) == 1 && (fam == 0 || nf_t(n, s, t, NT_FAM) == fam) {
+          nl_table(&mut n, s, t, NLM_F_MULTI, seq, port);
+        }
+        t = t + 1;
+      }
+    }
+    nl_done(&mut n, seq, port);
+    return 0;
+  }
+  let a = nla_find(b, at + 20, end, 1);
+  if s >= NFSL || a == 0 {
+    return NFE_NOENT;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, a, 0), nla_name(b, a, 1));
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  nl_table(&mut n, s, t, 0, seq, port);
+  return 0;
+}
+
+/// NFT_MSG_NEWCHAIN.
+fn nf_newchain(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, fl: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  let ta = nla_find(b, at + 20, end, 1);
+  if s >= NFSL || ta == 0 {
+    return NFE_NOENT;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  let ca = nla_find(b, at + 20, end, 3);
+  let w0 = nla_name(b, ca, 0);
+  let w1 = nla_name(b, ca, 1);
+  if w0 == 0 {
+    return nfpick(nla_len(b, ca) > 15, NFE_NAMETOOLONG, NE_INVAL);
+  }
+  let ha = nla_find(b, at + 20, end, 4);
+  let hl = nla_len(b, ha);
+  let mut hook = 0;
+  let mut prio = 2147483648;
+  let mut pol = 0;
+  if ha != 0 {
+    let hn = nfa_be32(b, ha, ha + hl, 1, 99);
+    if hn > NF_POST || nla_find(b, ha, ha + hl, 3) != 0 {
+      return nfpick(hn > NF_POST, NE_INVAL, NE_OPNOTSUPP);      // a device hook
+    }
+    let tyl = nla_len(b, nla_find(b, at + 20, end, 7));
+    if tyl == 0 || nla_word(b, nla_find(b, at + 20, end, 7)) != NF_FILTER || tyl != 7 {
+      return NE_OPNOTSUPP;                                          // nat, route
+    }
+    hook = hn + 1;
+    let pr = nfa_be32(b, ha, ha + hl, 2, 0);
+    prio = (pr + 2147483648) % 4294967296;
+    let p = nfa_be32(b, at + 20, end, 5, NF_ACCEPT);
+    if p != NF_ACCEPT && p != NF_DROP {
+      return NE_INVAL;
+    }
+    pol = p + 1;
+  }
+  let have = nf_find_chain(n, s, t, w0, w1);
+  if have < NFCN {
+    if fl / NLM_F_EXCL % 2 == 1 {
+      return NE_EXIST;
+    }
+    if hook != 0 && nf_c(n, s, have, NC_HOOK) != 0 {
+      nf_cset(&mut n, s, have, NC_POL, pol);
+    }
+    nf_recount(&mut n);
+    return 0;
+  }
+  let mut c = 0;
+  while c < NFCN && nf_c(n, s, c, NC_USED) == 1
+    invariant c <= NFCN && net_ok(n)
+  {
+    c = c + 1;
+  }
+  if c >= NFCN {
+    return NE_NOSPC;
+  }
+  nf_cset(&mut n, s, c, NC_USED, 1);
+  nf_cset(&mut n, s, c, NC_TAB, t);
+  nf_cset(&mut n, s, c, NC_HAND, nf_new_handle(&mut n, s));
+  nf_cset(&mut n, s, c, NC_N0, w0);
+  nf_cset(&mut n, s, c, NC_N1, w1);
+  nf_cset(&mut n, s, c, NC_HOOK, hook);
+  nf_cset(&mut n, s, c, NC_PRIO, prio);
+  nf_cset(&mut n, s, c, NC_TYPE, 0);
+  nf_cset(&mut n, s, c, NC_POL, pol);
+  nf_recount(&mut n);
+  return 0;
+}
+
+/// The chain a request names (NFTA_CHAIN_TABLE, then NFTA_CHAIN_NAME or the
+/// handle): its table in `tout` is not returned; the pair is packed as
+/// table * 64 + chain, or NFCN * 64 + NFCN when there is none.
+fn nf_pick_chain(n: &Net, b: &Bytes, from: u64, end: u64, s: u64, fam: u64, tt: u64, tn: u64, hh: u64) -> u64
+  requires net_ok(n) && end <= blen(b) && s < NFS
+{
+  let ta = nla_find(b, from, end, tt);
+  if ta == 0 {
+    return NFCN * 64 + NFCN;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+  if t >= NFTN {
+    return NFCN * 64 + NFCN;
+  }
+  let ca = nla_find(b, from, end, tn);
+  let mut c = NFCN;
+  if ca != 0 {
+    c = nf_find_chain(n, s, t, nla_name(b, ca, 0), nla_name(b, ca, 1));
+  } else {
+    let h = nfa_be64(b, from, end, hh, 0);
+    if h != 0 {
+      c = nf_find_chain_h(n, s, t, h);
+    }
+  }
+  return t * 64 + c;
+}
+
+/// NFT_MSG_DELCHAIN.
+fn nf_delchain(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  if s >= NFSL {
+    return NFE_NOENT;
+  }
+  let p = nf_pick_chain(n, b, at + 20, end, s, fam, 1, 3, 2);
+  let c = p % 64;
+  if c >= NFCN {
+    return NFE_NOENT;
+  }
+  if nf_chain_rules(n, s, c) != 0 {
+    return NFE_BUSY;
+  }
+  nf_chain_drop(&mut n, s, c);
+  nf_recount(&mut n);
+  return 0;
+}
+
+/// NFT_MSG_GETCHAIN.
+fn nf_getchain(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, dump: bool, seq: u64, port: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  if dump {
+    if s < NFSL {
+      let mut c = 0;
+      while c < NFCN
+        invariant c <= NFCN && net_ok(n)
+      {
+        if nf_c(n, s, c, NC_USED) == 1 {
+          let t = smaller(nf_c(n, s, c, NC_TAB), NFTN - 1);
+          if fam == 0 || nf_t(n, s, t, NT_FAM) == fam {
+            nl_chain(&mut n, s, c, NLM_F_MULTI, seq, port);
+          }
+        }
+        c = c + 1;
+      }
+    }
+    nl_done(&mut n, seq, port);
+    return 0;
+  }
+  if s >= NFSL {
+    return NFE_NOENT;
+  }
+  let p = nf_pick_chain(n, b, at + 20, end, s, fam, 1, 3, 2);
+  let c = p % 64;
+  if c >= NFCN {
+    return NFE_NOENT;
+  }
+  nl_chain(&mut n, s, c, 0, seq, port);
+  return 0;
+}
+
+/// Makes room for a rule at position `at_r` of the rules array: the rules from
+/// there move up one. False if the array is full.
+fn nf_rule_slot(n: &mut Net, s: u64, at_r: u64) -> bool
+  requires net_ok(n) && s < NFSL && at_r < NFRN
+  ensures net_ok(n)
+{
+  if nf_r(n, s, NFRN - 1, NR_CH) != 0 {
+    return false;
+  }
+  let mut r = NFRN - 1;
+  while r > at_r
+    invariant r <= NFRN - 1 && at_r <= r && net_ok(n)
+  {
+    let mut f = 0;
+    while f < NFRW
+      invariant f <= NFRW && 1 <= r && r <= NFRN - 1 && net_ok(n)
+    {
+      nf_rset(&mut n, s, r, f, nf_r(n, s, r - 1, f));
+      f = f + 1;
+    }
+    r = r - 1;
+  }
+  if at_r < NFRN {
+    nf_rset(&mut n, s, at_r, NR_CH, 0);
+  }
+  return true;
+}
+
+/// NFT_MSG_NEWRULE: appended to its chain with NLM_F_APPEND, else put first; after
+/// or before the rule NFTA_RULE_POSITION names, if it does.
+fn nf_newrule(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, fl: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  if s >= NFSL {
+    return NFE_NOENT;
+  }
+  let p = nf_pick_chain(n, b, at + 20, end, s, fam, 1, 2, 99);
+  let t = p / 64;
+  let c = p % 64;
+  if c >= NFCN || t >= NFTN {
+    return NFE_NOENT;
+  }
+  let ea = nla_find(b, at + 20, end, 4);
+  let el = nla_len(b, ea);
+  let mut e = nf_check(n, b, ea, ea + el, s, t);
+  if ea == 0 {
+    e = 0;
+  }
+  if e != 0 {
+    return e;
+  }
+  let used = nf_used(n, s);
+  if el > NFP || used > NFP - el {
+    return NE_NOSPC;
+  }
+  // Where in the rules array it goes.
+  let pos = nfa_be64(b, at + 20, end, 6, 0);
+  let append = fl / NLM_F_APPEND % 2 == 1;
+  let mut where_r = NFRN;
+  let mut first = NFRN;
+  let mut last = NFRN;
+  let mut r = 0;
+  while r < NFRN
+    invariant r <= NFRN && net_ok(n)
+  {
+    if nf_r(n, s, r, NR_CH) == c + 1 {
+      if first == NFRN {
+        first = r;
+      }
+      last = r;
+      if pos != 0 && nf_r(n, s, r, NR_HAND) == pos {
+        where_r = r;
+      }
+    }
+    r = r + 1;
+  }
+  let mut slot = NFRN;
+  if pos != 0 {
+    if where_r >= NFRN {
+      return NFE_NOENT;
+    }
+    if append {
+      slot = where_r + 1;           // after it
+    } else {
+      slot = where_r;               // before it
+    }
+  } else if append {
+    if last < NFRN {
+      slot = last + 1;
+    } else {
+      slot = NFRN;
+    }
+  } else if first < NFRN {
+    slot = first;
+  }
+  if slot >= NFRN {
+    // The chain has no rules: the first free place.
+    let mut q = 0;
+    while q < NFRN && nf_r(n, s, q, NR_CH) != 0
+      invariant q <= NFRN && net_ok(n)
+    {
+      q = q + 1;
+    }
+    slot = q;
+    if slot >= NFRN {
+      return NE_NOSPC;
+    }
+  } else if !nf_rule_slot(&mut n, s, slot) {
+    return NE_NOSPC;
+  }
+  bcopy(&mut n.nfb, s * NFSB + used, b, ea, el);
+  nf_patch_lookups(&mut n, s, t, s * NFSB + used, s * NFSB + used + el);
+  nf_rset(&mut n, s, slot, NR_CH, c + 1);
+  nf_rset(&mut n, s, slot, NR_HAND, nf_new_handle(&mut n, s));
+  nf_rset(&mut n, s, slot, NR_OFF, used);
+  nf_rset(&mut n, s, slot, NR_LEN, el);
+  nf_hset(&mut n, s, NH_USED, used + el);
+  if ea != 0 && nf_uses_ct(b, ea, ea + el) {
+    nf_hset(&mut n, s, NH_CT, 1);
+  }
+  return 0;
+}
+
+/// A lookup in a rule that names an anonymous set by id gets the set's real
+/// name written over the placeholder ("__set%d"), so that the rule text says
+/// what the set is called when it is listed.
+fn nf_patch_lookups(n: &mut Net, s: u64, t: u64, from: u64, to: u64)
+  requires net_ok(n) && s < NFSL && t < NFTN && from <= to && to <= blen(n.nfb)
+  ensures net_ok(n)
+{
+  let mut at = from;
+  while at < to && to - at >= 4
+    invariant at <= to && to <= blen(n.nfb) && net_ok(n)
+  {
+    let l = rd16(n.nfb, at);
+    if l < 4 || l > to - at {
+      return;
+    }
+    let na = nla_find(n.nfb, at + 4, at + l, 1);
+    if nla_len(n.nfb, na) == 7 && nla_word(n.nfb, na) == XN_LOOKUP {
+      let da = nla_find(n.nfb, at + 4, at + l, 2);
+      let dl = nla_len(n.nfb, da);
+      let k = nf_set_pick(n, n.nfb, da, da + dl, s, t, 1, 4);
+      let sa = nla_find(n.nfb, da, da + dl, 1);
+      let sl = nla_len(n.nfb, sa);
+      if k < NFSN && sl >= 8 && sa + sl <= blen(n.nfb) {
+        let w0 = nf_s(n, s, k, NST_N0);
+        let w1 = nf_s(n, s, k, NST_N1);
+        let mut i = 0;
+        while i < sl && i < 16
+          invariant i <= sl && i <= 16 && sa + sl <= blen(n.nfb) && net_ok(n)
+        {
+          let ch = name_byte(w0, w1, i);
+          bset(&mut n.nfb, sa + i, cast[u8](ch));
+          i = i + 1;
+        }
+      }
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > to - at {
+      return;
+    }
+    at = at + step;
+  }
+}
+
+/// NFT_MSG_DELRULE: the rule whose handle is given; with no handle every rule
+/// of the chain, of the table, or of the family.
+fn nf_delrule(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  if s >= NFSL {
+    return nfpick(nla_find(b, at + 20, end, 1) == 0, 0, NFE_NOENT);
+  }
+  let ta = nla_find(b, at + 20, end, 1);
+  let h = nfa_be64(b, at + 20, end, 3, 0);
+  if ta == 0 {
+    // Every table of the family (or of all families).
+    let mut r = 0;
+    while r < NFRN
+      invariant r <= NFRN && net_ok(n)
+    {
+      let ch = nf_r(n, s, r, NR_CH);
+      if ch != 0 && ch <= NFCN {
+        let t = smaller(nf_c(n, s, ch - 1, NC_TAB), NFTN - 1);
+        if fam == 0 || nf_t(n, s, t, NT_FAM) == fam {
+          nf_rule_drop(&mut n, s, r);
+        }
+      }
+      r = r + 1;
+    }
+    return 0;
+  }
+  let p = nf_pick_chain(n, b, at + 20, end, s, fam, 1, 2, 99);
+  let t = p / 64;
+  let c = p % 64;
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  if h != 0 {
+    let r = nf_find_rule(n, s, h);
+    if r >= NFRN || c >= NFCN || nf_r(n, s, r, NR_CH) != c + 1 {
+      return NFE_NOENT;
+    }
+    nf_rule_drop(&mut n, s, r);
+    return 0;
+  }
+  let mut r = 0;
+  while r < NFRN
+    invariant r <= NFRN && net_ok(n)
+  {
+    let ch = nf_r(n, s, r, NR_CH);
+    if ch != 0 && ch <= NFCN {
+      let ct = nf_c(n, s, ch - 1, NC_TAB);
+      if ct == t && (c >= NFCN || ch == c + 1) {
+        nf_rule_drop(&mut n, s, r);
+      }
+    }
+    r = r + 1;
+  }
+  return 0;
+}
+
+/// NFT_MSG_GETRULE (a dump): the rules of the table and chain the request names,
+/// or all of them.
+fn nf_getrule(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, seq: u64, port: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  if s < NFSL {
+    let ta = nla_find(b, at + 20, end, 1);
+    let mut t = NFTN;
+    let mut c = NFCN;
+    if ta != 0 {
+      let p = nf_pick_chain(n, b, at + 20, end, s, fam, 1, 2, 99);
+      t = p / 64;
+      c = p % 64;
+    }
+    let mut r = 0;
+    while r < NFRN
+      invariant r <= NFRN && net_ok(n)
+    {
+      let ch = nf_r(n, s, r, NR_CH);
+      if ch != 0 && ch <= NFCN {
+        let ct = smaller(nf_c(n, s, ch - 1, NC_TAB), NFTN - 1);
+        let mut want = fam == 0 || nf_t(n, s, ct, NT_FAM) == fam;
+        if ta != 0 && (t >= NFTN || ct != t || (c < NFCN && ch != c + 1)) {
+          want = false;
+        }
+        if want {
+          nl_rule(&mut n, s, r, NLM_F_MULTI, seq, port);
+        }
+      }
+      r = r + 1;
+    }
+  }
+  nl_done(&mut n, seq, port);
+  return 0;
+}
+
+/// NFT_MSG_GETGEN: the generation id and who changed the ruleset last.
+fn nf_getgen(n: &mut Net, ns: u64, seq: u64, port: u64)
+  requires net_ok(n) && ns < NNET
+  ensures net_ok(n)
+{
+  let s = nf_slot(n, ns);
+  let mut gen = 0;
+  if s < NFSL {
+    gen = nf_h(n, s, NH_GEN);
+  }
+  nf_msg_res(&mut n, NFT_MSG_NEWGEN, 0, seq, port, 0, gen);
+  nla_be32(&mut n, 1, gen % 4294967296);
+  nla_be32(&mut n, 2, 0);
+  nl_end(&mut n);
+}
+
+/// The ruleset of the namespace is copied to the spare slot ...
+fn nf_snapshot(n: &mut Net, ns: u64)
+  requires net_ok(n) && ns < NNET
+  ensures net_ok(n)
+{
+  let s = nf_slot(n, ns);
+  nf_wipe(&mut n, NFSL);
+  nf_xset(&mut n, NX_NS, ns + 1);
+  if s >= NFSL {
+    return;
+  }
+  let mut i = 0;
+  while i < NF_W
+    invariant i <= NF_W && s < NFSL && net_ok(n)
+  {
+    n.nfw = set(n.nfw, NFSL * NF_W + i, get(n.nfw, s * NF_W + i));
+    i = i + 1;
+  }
+  bmove(&mut n.nfb, NFSL * NFSB, s * NFSB, NFSB);
+}
+
+/// ... and put back.
+fn nf_restore(n: &mut Net, ns: u64)
+  requires net_ok(n) && ns < NNET
+  ensures net_ok(n)
+{
+  let s = nf_slot(n, ns);
+  if nf_h(n, NFSL, NH_NS) == 0 {
+    if s < NFSL {
+      nf_wipe(&mut n, s);
+    }
+    nf_recount(&mut n);
+    return;
+  }
+  let mut d = s;
+  if d >= NFSL {
+    d = nf_slot_make(&mut n, ns);
+  }
+  if d < NFSL {
+    let mut i = 0;
+    while i < NF_W
+      invariant i <= NF_W && d < NFSL && net_ok(n)
+    {
+      n.nfw = set(n.nfw, d * NF_W + i, get(n.nfw, NFSL * NF_W + i));
+      i = i + 1;
+    }
+    bmove(&mut n.nfb, d * NFSB, NFSL * NFSB, NFSB);
+  }
+  nf_recount(&mut n);
+}
+
+// ---------------------------------------------------------------- the requests
+
+/// Commits the batch: the generation moves on. A ruleset with no tables goes.
+fn nf_commit(n: &mut Net, ns: u64)
+  requires net_ok(n) && ns < NNET
+  ensures net_ok(n)
+{
+  let s = nf_slot(n, ns);
+  if s < NFSL {
+    let mut k = 0;
+    while k < NFSN
+      invariant k <= NFSN && net_ok(n)
+    {
+      nf_sset(&mut n, s, k, NST_ID, 0);
+      k = k + 1;
+    }
+    nf_hset(&mut n, s, NH_GEN, wrap_add(nf_h(n, s, NH_GEN), 1));
+    let mut any = false;
+    let mut t = 0;
+    while t < NFTN
+      invariant t <= NFTN && net_ok(n)
+    {
+      if nf_t(n, s, t, NT_USED) == 1 {
+        any = true;
+      }
+      t = t + 1;
+    }
+    if !any {
+      nf_wipe(&mut n, s);
+    }
+  }
+  nf_wipe(&mut n, NFSL);
+  nf_recount(&mut n);
+}
+
+/// The nf_tables messages in b[0..len), answered on socket q. Returns how many
+/// bytes were taken: whole messages only.
+fn nf_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires net_ok(n) && q < NLS && len <= blen(b)
+  ensures net_ok(n)
+{
+  let was = n.ns;
+  let ns = get(n.nls, q * NL_W + NL_NS);
+  let port = get(n.nls, q * NL_W + NL_PORT);
+  if ns >= NNET || !ns_live(n, ns) {
+    return len;
+  }
+  nlw_open(&mut n, q);
+  let mut at = 0;
+  let mut go = true;
+  while go && at < len && len - at >= 16
+    invariant at <= len && len <= blen(b) && net_ok(n) && ns < NNET
+  {
+    let ml = rd32(b, at);
+    if ml < 16 {
+      go = false;
+      at = len;
+    } else if ml > len - at {
+      go = false;
+    } else {
+      let kind = rd16(b, at + 4);
+      let fl = rd16(b, at + 6);
+      let seq = rd32(b, at + 8);
+      let end = at + ml;
+      let msg = kind % 256;
+      let mut e = 0;
+      let mut quiet = false;
+      if kind == NFNL_MSG_BATCH_BEGIN || kind == NFNL_MSG_BATCH_END {
+        quiet = true;
+        if !admin {
+          e = NE_PERM;
+          quiet = false;
+        } else if kind == NFNL_MSG_BATCH_BEGIN {
+          nf_snapshot(&mut n, ns);
+          nf_xset(&mut n, NX_BATCH, 1);
+          nf_xset(&mut n, NX_FAIL, 0);
+        } else if nf_x(n, NX_BATCH) == 1 {
+          if nf_x(n, NX_FAIL) == 1 {
+            nf_restore(&mut n, ns);
+            nf_wipe(&mut n, NFSL);
+          } else {
+            nf_commit(&mut n, ns);
+          }
+          nf_xset(&mut n, NX_BATCH, 0);
+        }
+      } else if kind < 16 {
+        // NLMSG_NOOP, _ERROR, _DONE: nothing to do.
+        quiet = true;
+      } else if kind / 256 != NFNL_SUBSYS_NFTABLES || ml < 20 {
+        e = NE_OPNOTSUPP;
+      } else if !admin {
+        e = NE_PERM;
+      } else {
+        let dump = fl / 256 % 4 != 0;
+        let inbatch = nf_x(n, NX_BATCH) == 1;
+        let write = msg == NFT_MSG_NEWTABLE || msg == NFT_MSG_DELTABLE || msg == NFT_MSG_NEWCHAIN
+          || msg == NFT_MSG_DELCHAIN || msg == NFT_MSG_NEWRULE || msg == NFT_MSG_DELRULE
+          || msg == NFT_MSG_NEWSET || msg == NFT_MSG_DELSET || msg == NFT_MSG_NEWSETELEM || msg == NFT_MSG_DELSETELEM;
+        if write && !inbatch {
+          nf_snapshot(&mut n, ns);
+        }
+        if msg == NFT_MSG_NEWTABLE {
+          e = nf_newtable(&mut n, b, at, end, ns, fl);
+        } else if msg == NFT_MSG_DELTABLE {
+          e = nf_deltable(&mut n, b, at, end, ns);
+        } else if msg == NFT_MSG_GETTABLE {
+          e = nf_gettable(&mut n, b, at, end, ns, dump, seq, port);
+        } else if msg == NFT_MSG_NEWCHAIN {
+          e = nf_newchain(&mut n, b, at, end, ns, fl);
+        } else if msg == NFT_MSG_DELCHAIN {
+          e = nf_delchain(&mut n, b, at, end, ns);
+        } else if msg == NFT_MSG_GETCHAIN {
+          e = nf_getchain(&mut n, b, at, end, ns, dump, seq, port);
+        } else if msg == NFT_MSG_NEWRULE {
+          e = nf_newrule(&mut n, b, at, end, ns, fl);
+        } else if msg == NFT_MSG_DELRULE {
+          e = nf_delrule(&mut n, b, at, end, ns);
+        } else if msg == NFT_MSG_GETRULE {
+          e = nf_getrule(&mut n, b, at, end, ns, seq, port);
+        } else if msg == NFT_MSG_NEWSET {
+          e = nf_newset(&mut n, b, at, end, ns, fl);
+        } else if msg == NFT_MSG_DELSET {
+          e = nf_delset(&mut n, b, at, end, ns);
+        } else if msg == NFT_MSG_GETSET {
+          e = nf_getset(&mut n, b, at, end, ns, dump, seq, port);
+        } else if msg == NFT_MSG_NEWSETELEM {
+          e = nf_setelem(&mut n, b, at, end, ns, fl, false);
+        } else if msg == NFT_MSG_DELSETELEM {
+          e = nf_setelem(&mut n, b, at, end, ns, fl, true);
+        } else if msg == NFT_MSG_GETSETELEM {
+          e = nf_getsetelem(&mut n, b, at, end, ns, seq, port);
+        } else if msg == NFT_MSG_GETGEN {
+          nf_getgen(&mut n, ns, seq, port);
+        } else if dump {
+          // sets, objects, flowtables: none are kept, so the dump is empty
+          nl_done(&mut n, seq, port);
+        } else {
+          e = NE_OPNOTSUPP;
+        }
+        if write && !inbatch {
+          if e != 0 {
+            nf_restore(&mut n, ns);
+            nf_wipe(&mut n, NFSL);
+          } else {
+            nf_commit(&mut n, ns);
+          }
+        }
+        if write {
+          nf_recount(&mut n);
+          if e != 0 && inbatch {
+            nf_xset(&mut n, NX_FAIL, 1);
+          }
+        }
+        if dump || msg == NFT_MSG_GETGEN || msg == NFT_MSG_GETTABLE || msg == NFT_MSG_GETCHAIN || msg == NFT_MSG_GETSET {
+          quiet = e == 0 && (dump || msg == NFT_MSG_GETGEN || fl / NLM_F_ACK % 2 == 0);
+        }
+      }
+      n.ns = ns;
+      if e != 0 || (!quiet && fl / NLM_F_ACK % 2 == 1) {
+        nl_error(&mut n, b, at, e, port);
+      }
+      let step = (ml + 3) / 4 * 4;
+      if step > len - at {
+        at = end;
+        go = false;
+      } else {
+        at = at + step;
+      }
+    }
+  }
+  nlw_close(&mut n, q);
+  n.ns = was;
+  return at;
+}
+
+// ---------------------------------------------------------------- connection tracking
+
+/// Byte o of the frame being filtered: n.pkt (w == 0) or n.out.
+fn fb(n: &Net, w: u64, o: u64) -> u64
+  requires net_ok(n) && o < NET_BUF
+  ensures result <= 255
+{
+  if w == 0 {
+    return cast[u64](bget(n.pkt, o));
+  }
+  return cast[u64](bget(n.out, o));
+}
+
+fn fb16(n: &Net, w: u64, o: u64) -> u64
+  requires net_ok(n) && o + 2 <= NET_BUF
+  ensures result <= 65535
+{
+  return fb(n, w, o) * 256 + fb(n, w, o + 1);
+}
+
+fn fb32(n: &Net, w: u64, o: u64) -> u64
+  requires net_ok(n) && o + 4 <= NET_BUF
+  ensures result <= IP_MAX
+{
+  return fb16(n, w, o) * 65536 + fb16(n, w, o + 2);
+}
+
+/// Is the packet one of the IPv6 traffic the stack carries as IPv4 frames?
+fn nf_is6(n: &Net, w: u64) -> bool
+  requires net_ok(n)
+{
+  return is_v6tok(fb32(n, w, 26)) || is_v6tok(fb32(n, w, 30));
+}
+
+/// Ticks a flow lasts after its last packet.
+fn ct_life(proto: u64, st: u64) -> u64
+  ensures result <= 100000
+{
+  if st < 2 {
+    return 6000;
+  }
+  if proto == IP_TCP {
+    return 30000;
+  }
+  if proto == IP_UDP {
+    return 18000;
+  }
+  return 3000;
+}
+
+/// The flow of the packet (frame in w, flen bytes): its state as ct state has
+/// it (2 established, 8 new), and the flow is noted or moved on. What was done is
+/// kept in the extra words so that ct_undo can take it back if the packet is
+/// dropped: NX_CTSLOT is the slot + 1 (0: nothing to undo), NX_CTWAS what the slot
+/// held before (0: it was free or ended).
+fn ct_track(n: &mut Net, w: u64, flen: u64) -> u64
+  requires net_ok(n) && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  let proto = fb(n, w, 23);
+  let src = fb32(n, w, 26);
+  let dst = fb32(n, w, 30);
+  let mut sp = 0;
+  let mut dp = 0;
+  if flen >= 38 && (proto == IP_TCP || proto == IP_UDP) {
+    sp = fb16(n, w, 34);
+    dp = fb16(n, w, 36);
+  }
+  if flen >= 42 && proto == IP_ICMP && (fb(n, w, 34) == ICMP_ECHO || fb(n, w, 34) == ICMP_ECHO_REPLY) {
+    sp = fb16(n, w, 38);
+    dp = sp;
+  }
+  let a = src * 65536 + sp;
+  let bb = dst * 65536 + dp;
+  let mut x = a;
+  let mut y = bb;
+  if a > bb {
+    x = bb;
+    y = a;
+  }
+  let from_a = a <= bb;
+  let tag = proto + 256;
+  let h = net_mix(x * 31 + y * 17 + proto * 7 + n.ns) % NCTN;
+  let now = n.now;
+  nf_xset(&mut n, NX_CTSLOT, 0);
+  // Look for the flow, a free or ended place, and the one that ends first.
+  let mut i = 0;
+  let mut free = NCTN;
+  let mut oldest = h;
+  let mut old_until = 18446744073709551615;
+  while i < NCT_PROBE
+    invariant i <= NCT_PROBE && free <= NCTN && oldest < NCTN && net_ok(n)
+  {
+    let e = (h + i) % NCTN;
+    let t = get(n.ctw, e * NCT_W + NCT_TAG);
+    let until = get(n.ctw, e * NCT_W + NCT_UNTIL);
+    if t == tag && get(n.ctw, e * NCT_W + NCT_NS) == n.ns && get(n.ctw, e * NCT_W + NCT_A) == x && get(n.ctw, e * NCT_W + NCT_B) == y && until > now {
+      let st = smaller(get(n.ctw, e * NCT_W + NCT_STATE), 2);
+      let orig = from_a == (get(n.ctw, e * NCT_W + NCT_DIR) == 0);
+      nf_xset(&mut n, NX_CTSLOT, e + 1);
+      nf_xset(&mut n, NX_CTWAS, st + 1);
+      n.ctw = set(n.ctw, e * NCT_W + NCT_UNTIL, wrap_add(now, ct_life(proto, 2)));
+      if orig && st < 2 {
+        n.ctw = set(n.ctw, e * NCT_W + NCT_UNTIL, wrap_add(now, ct_life(proto, 1)));
+        return 8;
+      }
+      if !orig {
+        n.ctw = set(n.ctw, e * NCT_W + NCT_STATE, 2);
+      }
+      return 2;
+    }
+    if (t == 0 || until <= now) && free == NCTN {
+      free = e;
+    }
+    if until < old_until {
+      old_until = until;
+      oldest = e;
+    }
+    i = i + 1;
+  }
+  let mut e = free;
+  if e >= NCTN {
+    e = oldest;
+  }
+  n.ctw = set(n.ctw, e * NCT_W + NCT_TAG, tag);
+  n.ctw = set(n.ctw, e * NCT_W + NCT_NS, n.ns);
+  n.ctw = set(n.ctw, e * NCT_W + NCT_A, x);
+  n.ctw = set(n.ctw, e * NCT_W + NCT_B, y);
+  if from_a {
+    n.ctw = set(n.ctw, e * NCT_W + NCT_DIR, 0);
+  } else {
+    n.ctw = set(n.ctw, e * NCT_W + NCT_DIR, 1);
+  }
+  n.ctw = set(n.ctw, e * NCT_W + NCT_STATE, 1);
+  n.ctw = set(n.ctw, e * NCT_W + NCT_UNTIL, wrap_add(now, ct_life(proto, 1)));
+  nf_xset(&mut n, NX_CTSLOT, e + 1);
+  nf_xset(&mut n, NX_CTWAS, 0);
+  return 8;
+}
+
+/// The packet was dropped: its effect on the flow is taken back.
+fn ct_undo(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let sl = nf_x(n, NX_CTSLOT);
+  if sl == 0 || sl > NCTN {
+    return;
+  }
+  let e = sl - 1;
+  let was = nf_x(n, NX_CTWAS);
+  if was == 0 {
+    n.ctw = set(n.ctw, e * NCT_W + NCT_TAG, 0);
+  } else {
+    n.ctw = set(n.ctw, e * NCT_W + NCT_STATE, was - 1);
+  }
+  nf_xset(&mut n, NX_CTSLOT, 0);
+}
+
+// ---------------------------------------------------------------- running the rules
+
+fn reg_put(r: &mut Bytes, ro: u64, i: u64, v: u64)
+  requires blen(r) == NF_REGS && ro < NF_REGS && i < NF_REGS - ro
+  ensures blen(r) == old(blen(r))
+{
+  bset(&mut r, ro + i, cast[u8](v % 256));
+}
+
+fn reg_get(r: &Bytes, ro: u64, i: u64) -> u64
+  requires blen(r) == NF_REGS && ro < NF_REGS && i < NF_REGS - ro
+  ensures result <= 255
+{
+  return cast[u64](bget(r, ro + i));
+}
+
+/// Zero from byte `from` of the value up to the next multiple of four.
+fn reg_pad(r: &mut Bytes, ro: u64, from: u64, l: u64)
+  requires blen(r) == NF_REGS && ro < NF_REGS && from <= l && l <= 16 && ro + (l + 3) / 4 * 4 <= NF_REGS
+  ensures blen(r) == old(blen(r))
+{
+  let mut i = from;
+  while i < (l + 3) / 4 * 4
+    invariant i <= (l + 3) / 4 * 4 && ro + (l + 3) / 4 * 4 <= NF_REGS && l <= 16 && blen(r) == NF_REGS
+  {
+    bset(&mut r, ro + i, 0);
+    i = i + 1;
+  }
+}
+
+/// payload: copies the header bytes into a register. False when the packet is
+/// too short, or it is a kind of packet whose header it cannot read.
+fn ex_payload(n: &mut Net, w: u64, flen: u64, dreg: u64, base: u64, off: u64, l: u64) -> bool
+  requires net_ok(n) && flen <= NET_BUF && base <= 2 && off < 256 && 1 <= l && l <= 16
+  ensures net_ok(n)
+{
+  let ro = reg_off(dreg);
+  if ro + (l + 3) / 4 * 4 > NF_REGS {
+    return false;
+  }
+  let mut at = off;
+  if base == 0 {
+    if w != 0 {
+      return false;                 // the Ethernet header of a packet being sent is not built yet
+    }
+  } else if base == 1 {
+    if nf_is6(n, w) {
+      return false;                 // IPv6 packets are IPv4 frames here
+    }
+    at = 14 + off;
+  } else {
+    at = 34 + off;
+  }
+  if at + l > flen || at + l > NET_BUF {
+    return false;
+  }
+  let mut i = 0;
+  while i < l
+    invariant i <= l && l <= 16 && at + l <= NET_BUF && ro + (l + 3) / 4 * 4 <= NF_REGS && net_ok(n)
+  {
+    let v = fb(n, w, at + i);
+    reg_put(&mut n.nfr, ro, i, v);
+    i = i + 1;
+  }
+  reg_pad(&mut n.nfr, ro, l, l);
+  return true;
+}
+
+/// cmp: the register against the value; ops are eq, neq, lt, lte, gt, gte,
+/// byte by byte from the first as memcmp does.
+fn ex_cmp(rg: &Bytes, b: &Bytes, sreg: u64, op: u64, v: u64, l: u64) -> bool
+  requires blen(rg) == NF_REGS && op <= 5 && v + l <= blen(b) && l <= 16
+{
+  let ro = reg_off(sreg);
+  if ro + l > NF_REGS {
+    return false;
+  }
+  let mut i = 0;
+  let mut c = 0;            // 0 equal so far, 1 register greater, 2 smaller
+  while i < l && c == 0
+    invariant i <= l && l <= 16 && v + l <= blen(b) && ro + l <= NF_REGS && blen(rg) == NF_REGS && c <= 2
+  {
+    let r = reg_get(rg, ro, i);
+    let d = cast[u64](bget(b, v + i));
+    if r > d {
+      c = 1;
+    } else if r < d {
+      c = 2;
+    }
+    i = i + 1;
+  }
+  if op == 0 {
+    return c == 0;
+  }
+  if op == 1 {
+    return c != 0;
+  }
+  if op == 2 {
+    return c == 2;
+  }
+  if op == 3 {
+    return c != 1;
+  }
+  if op == 4 {
+    return c == 1;
+  }
+  return c != 2;
+}
+
+/// bitwise: dreg = (sreg & mask) ^ xor over l bytes.
+fn ex_bitwise(rg: &mut Bytes, b: &Bytes, sreg: u64, dreg: u64, l: u64, m: u64, x: u64)
+  requires blen(rg) == NF_REGS && l <= 16 && m + l <= blen(b) && x + l <= blen(b)
+  ensures blen(rg) == old(blen(rg))
+{
+  let so = reg_off(sreg);
+  let d = reg_off(dreg);
+  if so + l > NF_REGS || d + l > NF_REGS {
+    return;
+  }
+  let mut i = 0;
+  while i < l
+    invariant i <= l && l <= 16 && m + l <= blen(b) && x + l <= blen(b) && so + l <= NF_REGS && d + l <= NF_REGS && blen(rg) == NF_REGS
+  {
+    let r = reg_get(rg, so, i);
+    let mk = cast[u64](bget(b, m + i));
+    let xr = cast[u64](bget(b, x + i));
+    reg_put(&mut rg, d, i, (r & mk) ^ xr);
+    i = i + 1;
+  }
+}
+
+/// byteorder: reverses the bytes of each size-byte unit (the host keeps its
+/// numbers low byte first, the wire high byte first, so ntoh and hton are the
+/// same swap).
+fn ex_byteorder(rg: &mut Bytes, sreg: u64, dreg: u64, l: u64, sz: u64)
+  requires blen(rg) == NF_REGS && l <= 16
+  ensures blen(rg) == old(blen(rg))
+{
+  let so = reg_off(sreg);
+  let d = reg_off(dreg);
+  if sz < 2 || sz > 8 || so + l > NF_REGS || d + l > NF_REGS {
+    return;
+  }
+  let mut base = 0;
+  while base + sz <= l
+    invariant base + sz <= l + sz && l <= 16 && 2 <= sz && sz <= 8 && so + l <= NF_REGS && d + l <= NF_REGS && blen(rg) == NF_REGS
+  {
+    let mut j = 0;
+    while j < sz / 2
+      invariant j <= sz / 2 && 2 <= sz && sz <= 8 && base + sz <= l && l <= 16 && so + l <= NF_REGS && d + l <= NF_REGS && blen(rg) == NF_REGS
+    {
+      let a = reg_get(rg, so, base + j);
+      let z = reg_get(rg, so, base + sz - 1 - j);
+      reg_put(&mut rg, d, base + j, z);
+      reg_put(&mut rg, d, base + sz - 1 - j, a);
+      j = j + 1;
+    }
+    base = base + sz;
+  }
+}
+
+/// meta: loads a value about the packet.
+fn ex_meta(n: &mut Net, w: u64, flen: u64, key: u64, dreg: u64, iif: u64, oif: u64)
+  requires net_ok(n) && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  let ro = reg_off(dreg);
+  let l = meta_len(key);
+  if l == 0 || ro + (l + 3) / 4 * 4 > NF_REGS {
+    return;
+  }
+  let mut v = 0;
+  let mut ifc = NO_IF;
+  if key == 0 && flen >= 18 {
+    v = fb16(n, w, 16);
+  } else if key == 4 {
+    ifc = iif;
+  } else if key == 5 {
+    ifc = oif;
+  } else if key == 15 {
+    if nf_is6(n, w) {
+      v = NFPROTO_IPV6;
+    } else {
+      v = NFPROTO_IPV4;
+    }
+  } else if key == 16 {
+    v = fb(n, w, 23);
+  }
+  if key == 2 {
+    // the Ethernet type, as the two bytes of the wire
+    if nf_is6(n, w) {
+      reg_put(&mut n.nfr, ro, 0, 0x86);
+      reg_put(&mut n.nfr, ro, 1, 0xDD);
+    } else {
+      reg_put(&mut n.nfr, ro, 0, 0x08);
+      reg_put(&mut n.nfr, ro, 1, 0x00);
+    }
+    reg_pad(&mut n.nfr, ro, 2, 2);
+    return;
+  }
+  if key == 6 || key == 7 {
+    let i = nfpick(key == 6, iif, oif);
+    if ro + 16 > NF_REGS {
+      return;
+    }
+    let mut k = 0;
+    while k < 16
+      invariant k <= 16 && ro + 16 <= NF_REGS && net_ok(n)
+    {
+      let mut ch = 0;
+      if i < IFN {
+        ch = name_byte(iw(n, i, IF_NAME), iw(n, i, IF_NAME + 1), k);
+      }
+      reg_put(&mut n.nfr, ro, k, ch);
+      k = k + 1;
+    }
+    return;
+  }
+  if key == 4 || key == 5 {
+    v = 0;
+    if ifc < IFN {
+      v = if_index(n, ifc);
+    }
+  }
+  // the value, as the machine keeps a number: low byte first (one byte for
+  // nfproto and l4proto)
+  if l > 4 {
+    return;
+  }
+  let mut k = 0;
+  while k < l
+    invariant k <= l && l <= 4 && ro + (l + 3) / 4 * 4 <= NF_REGS && net_ok(n)
+  {
+    reg_put(&mut n.nfr, ro, k, v / nfpow256(k) % 256);
+    k = k + 1;
+  }
+  reg_pad(&mut n.nfr, ro, l, l);
+}
+
+fn nfpow256(k: u64) -> u64
+  ensures 1 <= result
+{
+  if k == 0 {
+    return 1;
+  }
+  if k == 1 {
+    return 256;
+  }
+  if k == 2 {
+    return 65536;
+  }
+  return 16777216;
+}
+
+/// reject: the packet in n.pkt is answered: with a TCP reset (type 1), or with an
+/// ICMP destination unreachable of the code asked for (type 0), or one of the
+/// four codes nft calls icmpx (type 2). The answer is not filtered again.
+fn ex_reject(n: &mut Net, ty: u64, code: u64)
+  requires net_ok(n) && code <= 255
+  ensures net_ok(n)
+{
+  let skip = nf_x(n, NX_SKIP);
+  nf_xset(&mut n, NX_SKIP, 1);
+  let total = be16(n.pkt, 16);
+  if ty == 1 {
+    let thl = cast[u64](bget(n.pkt, 46)) / 16 * 4;
+    if cast[u64](bget(n.pkt, 23)) == IP_TCP && total >= 20 + thl && thl >= 20 && total <= NET_BUF - 14 {
+      tcp_refuse(&mut n, cast[u64](bget(n.pkt, 47)), total - 20 - thl);
+    }
+  } else if ty == 0 && code <= 15 {
+    icmp_unreach_code(&mut n, code);
+  } else if ty == 2 {
+    // icmpx: no route, port unreachable, host unreachable, admin prohibited
+    let mut c = 3;
+    if code == 0 {
+      c = 0;
+    } else if code == 2 {
+      c = 1;
+    } else if code == 3 {
+      c = 13;
+    }
+    icmp_unreach_code(&mut n, c);
+  }
+  nf_xset(&mut n, NX_SKIP, skip);
+}
+
+/// counter: adds the packet to the rule's counts, which live in the rule's
+/// text.
+fn ex_counter(n: &mut Net, da: u64, dend: u64, plen: u64)
+  requires net_ok(n) && dend <= blen(n.nfb)
+  ensures net_ok(n)
+{
+  let ba = nla_find(n.nfb, da, dend, 1);
+  if nla_len(n.nfb, ba) >= 8 {
+    let v = wrap_add(be64(n.nfb, ba), plen);
+    put64(&mut n.nfb, ba, v);
+  }
+  let pa = nla_find(n.nfb, da, dend, 2);
+  if nla_len(n.nfb, pa) >= 8 {
+    let v = wrap_add(be64(n.nfb, pa), 1);
+    put64(&mut n.nfb, pa, v);
+  }
+}
+
+/// Runs the rule whose text is at b[from..to): the verdict that ends it and,
+/// for a jump or goto, the chain, as code + 2^32 * (chain + 1). NFT_CONTINUE
+/// when it ran off its end, NFT_BREAK when an expression did not match.
+fn nf_rule_eval(n: &mut Net, s: u64, r: u64, tb: u64, from: u64, to: u64, w: u64, flen: u64, iif: u64, oif: u64, ctst: u64) -> u64
+  requires net_ok(n) && s < NFSL && r < NFRN && tb < NFTN && from <= to && to <= blen(n.nfb) && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  let plen = fb16(n, w, 16);
+  let mut at = from;
+  while at < to && to - at >= 4
+    invariant at <= to && to <= blen(n.nfb) && net_ok(n) && s < NFSL && tb < NFTN
+  {
+    let l = rd16(n.nfb, at);
+    if l < 4 || l > to - at {
+      return NFT_BREAK;
+    }
+    let na = nla_find(n.nfb, at + 4, at + l, 1);
+    let name = nla_word(n.nfb, na);
+    let da = nla_find(n.nfb, at + 4, at + l, 2);
+    let dl = nla_len(n.nfb, da);
+    let dend = da + dl;
+    if name == XN_PAYLOAD {
+      let base = nfa_be32(n.nfb, da, dend, 2, 9);
+      let off = nfa_be32(n.nfb, da, dend, 3, 65536);
+      let ln = nfa_be32(n.nfb, da, dend, 4, 0);
+      if base > 2 || off >= 256 || ln == 0 || ln > 16 {
+        return NFT_BREAK;
+      }
+      if !ex_payload(&mut n, w, flen, nfa_be32(n.nfb, da, dend, 1, 0), base, off, ln) {
+        return NFT_BREAK;
+      }
+    } else if name == XN_CMP {
+      let op = nfa_be32(n.nfb, da, dend, 2, 9);
+      let v = nf_value(n.nfb, nla_find(n.nfb, da, dend, 3));
+      let vl = nla_len(n.nfb, v);
+      if op > 5 || v == 0 || vl > 16 {
+        return NFT_BREAK;
+      }
+      if !ex_cmp(n.nfr, n.nfb, nfa_be32(n.nfb, da, dend, 1, 0), op, v, vl) {
+        return NFT_BREAK;
+      }
+    } else if name == XN_BITWISE {
+      let ln = nfa_be32(n.nfb, da, dend, 3, 0);
+      let m = nf_value(n.nfb, nla_find(n.nfb, da, dend, 4));
+      let x = nf_value(n.nfb, nla_find(n.nfb, da, dend, 5));
+      if ln > 16 || m == 0 || x == 0 || nla_len(n.nfb, m) < ln || nla_len(n.nfb, x) < ln {
+        return NFT_BREAK;
+      }
+      ex_bitwise(&mut n.nfr, n.nfb, nfa_be32(n.nfb, da, dend, 1, 0), nfa_be32(n.nfb, da, dend, 2, 0), ln, m, x);
+    } else if name == XN_BYTEORDER {
+      let ln = nfa_be32(n.nfb, da, dend, 4, 0);
+      if ln > 16 {
+        return NFT_BREAK;
+      }
+      ex_byteorder(&mut n.nfr, nfa_be32(n.nfb, da, dend, 1, 0), nfa_be32(n.nfb, da, dend, 2, 0), ln, nfa_be32(n.nfb, da, dend, 5, 0));
+    } else if name == XN_META {
+      ex_meta(&mut n, w, flen, nfa_be32(n.nfb, da, dend, 2, 99), nfa_be32(n.nfb, da, dend, 1, 0), iif, oif);
+    } else if name == XN_CT {
+      let ro = reg_off(nfa_be32(n.nfb, da, dend, 1, 0));
+      if ro + 4 <= NF_REGS {
+        reg_put(&mut n.nfr, ro, 0, ctst);
+        reg_put(&mut n.nfr, ro, 1, 0);
+        reg_put(&mut n.nfr, ro, 2, 0);
+        reg_put(&mut n.nfr, ro, 3, 0);
+      }
+    } else if name == XN_IMMEDIATE {
+      let dreg = nfa_be32(n.nfb, da, dend, 1, 99);
+      let d = nla_find(n.nfb, da, dend, 2);
+      let dl2 = nla_len(n.nfb, d);
+      if dreg == 0 {
+        let v = nla_find(n.nfb, d, d + dl2, 2);
+        let vl = nla_len(n.nfb, v);
+        let code = nfa_be32(n.nfb, v, v + vl, 1, NFT_BREAK);
+        if code == NFT_JUMP || code == NFT_GOTO {
+          let ca = nla_find(n.nfb, v, v + vl, 2);
+          let c = nf_find_chain(n, s, tb, nla_name(n.nfb, ca, 0), nla_name(n.nfb, ca, 1));
+          if c >= NFCN {
+            return NFT_BREAK;
+          }
+          return code + 4294967296 * (c + 1);
+        }
+        return code;
+      }
+      let v = nf_value(n.nfb, d);
+      let vl = nla_len(n.nfb, v);
+      let ro = reg_off(dreg);
+      if v != 0 && vl <= 16 && ro + vl <= NF_REGS {
+        let mut i = 0;
+        while i < vl
+          invariant i <= vl && vl <= 16 && v + vl <= blen(n.nfb) && ro + vl <= NF_REGS && net_ok(n)
+        {
+          let ch = cast[u64](bget(n.nfb, v + i));
+          reg_put(&mut n.nfr, ro, i, ch);
+          i = i + 1;
+        }
+      }
+    } else if name == XN_COUNTER {
+      ex_counter(&mut n, da, dend, plen);
+    } else if name == XN_LIMIT {
+      let rate = smaller(nfa_be64(n.nfb, da, dend, 1, 0), 4294967295);
+      let unit = smaller(nfa_be64(n.nfb, da, dend, 2, 1), 604800);
+      let burst = nfa_be32(n.nfb, da, dend, 3, 0);
+      let bytes = nfa_be32(n.nfb, da, dend, 4, 0) == 1;
+      let inv = nfa_be32(n.nfb, da, dend, 5, 0) % 2 == 1;
+      if rate == 0 || unit == 0 {
+        return NFT_BREAK;
+      }
+      let sc = 100 * unit;
+      let cap = (rate + burst) * sc;
+      let last = nf_r(n, s, r, NR_LAST);
+      let mut tok = cap;
+      if last != 0 {
+        let past = nf_r(n, s, r, NR_TOK);
+        let mut elapsed = 0;
+        if n.now >= last {
+          elapsed = smaller(n.now - last + 1, sc + 1);
+        }
+        tok = smaller(smaller(past, cap) + elapsed * rate, cap);
+      }
+      let mut cost = sc;
+      if bytes {
+        cost = plen * sc;
+      }
+      let ok = tok >= cost;
+      if ok {
+        tok = tok - cost;
+      }
+      nf_rset(&mut n, s, r, NR_TOK, tok);
+      nf_rset(&mut n, s, r, NR_LAST, wrap_add(n.now, 1));
+      if ok == inv {
+        return NFT_BREAK;
+      }
+    } else if name == XN_REJECT {
+      if w == 0 {
+        let ca = nla_find(n.nfb, da, dend, 2);
+        let mut code = 0;
+        if nla_len(n.nfb, ca) >= 1 {
+          code = rd8(n.nfb, ca);
+        }
+        ex_reject(&mut n, nfa_be32(n.nfb, da, dend, 1, 99), code);
+      }
+      return NF_DROP;
+    } else if name == XN_LOOKUP {
+      let sa = nla_find(n.nfb, da, dend, 1);
+      let k = nf_find_set(n, s, tb, nla_name(n.nfb, sa, 0), nla_name(n.nfb, sa, 1));
+      let ro = reg_off(nfa_be32(n.nfb, da, dend, 2, 0));
+      let inv = nfa_be32(n.nfb, da, dend, 5, 0) % 2 == 1;
+      if k >= NFSN || ro >= NF_REGS {
+        return NFT_BREAK;
+      }
+      if nf_set_has(n, s, k, ro) == inv {
+        return NFT_BREAK;
+      }
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > to - at {
+      return NFT_CONTINUE;
+    }
+    at = at + step;
+  }
+  return NFT_CONTINUE;
+}
+
+/// Runs base chain c of ruleset s on the packet: NF_ACCEPT or NF_DROP. Jumps
+/// and gotos are followed with a stack of NF_DEPTH.
+fn nf_run(n: &mut Net, s: u64, c0: u64, w: u64, flen: u64, iif: u64, oif: u64, ctst: u64) -> u64
+  requires net_ok(n) && s < NFSL && c0 < NFCN && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  let mut cc = c0;
+  let mut rp = 0;
+  let mut d = 0;
+  let mut steps = 0;
+  while steps < 2048
+    invariant steps <= 2048 && cc < NFCN && rp <= NFRN && d <= NF_DEPTH && net_ok(n)
+  {
+    steps = steps + 1;
+    // The next rule of this chain.
+    let mut r = rp;
+    while r < NFRN && nf_r(n, s, r, NR_CH) != cc + 1
+      invariant r <= NFRN && net_ok(n)
+    {
+      r = r + 1;
+    }
+    let mut v = NFT_CONTINUE;
+    let mut ended = false;
+    if r >= NFRN {
+      ended = true;
+    } else {
+      rp = r + 1;
+      let off = nf_roff(n, s, r);
+      let ln = nf_rlen(n, s, r);
+      let tb = smaller(nf_c(n, s, cc, NC_TAB), NFTN - 1);
+      if ln <= NFP && off <= NFP - ln {
+        v = nf_rule_eval(&mut n, s, r, tb, s * NFSB + off, s * NFSB + off + ln, w, flen, iif, oif, ctst);
+      }
+    }
+    let code = v % 4294967296;
+    if !ended && code == NF_ACCEPT {
+      return NF_ACCEPT;
+    }
+    if !ended && code == NF_DROP {
+      return NF_DROP;
+    }
+    if !ended && code == NFT_JUMP && d < NF_DEPTH {
+      let tgt = v / 4294967296;
+      if tgt >= 1 && tgt <= NFCN {
+        n.nfw = set(n.nfw, NF_X + NX_STK + d * 2, cc);
+        n.nfw = set(n.nfw, NF_X + NX_STK + d * 2 + 1, rp);
+        d = d + 1;
+        cc = tgt - 1;
+        rp = 0;
+      }
+    } else if !ended && code == NFT_GOTO {
+      let tgt = v / 4294967296;
+      if tgt >= 1 && tgt <= NFCN {
+        cc = tgt - 1;
+        rp = 0;
+      }
+    } else if ended || code == NFT_RETURN {
+      if d > 0 {
+        d = d - 1;
+        cc = smaller(get(n.nfw, NF_X + NX_STK + d * 2), NFCN - 1);
+        rp = smaller(get(n.nfw, NF_X + NX_STK + d * 2 + 1), NFRN);
+      } else {
+        // the end of the base chain: its policy
+        if nf_c(n, s, c0, NC_POL) == 1 {
+          return NF_DROP;
+        }
+        return NF_ACCEPT;
+      }
+    }
+  }
+  return NF_DROP;           // a loop of jumps that does not end
+}
+
+/// Does chain c of ruleset s apply to the packet (its family)?
+fn nf_chain_applies(n: &Net, s: u64, c: u64, w: u64) -> bool
+  requires net_ok(n) && s < NFSL && c < NFCN
+{
+  let t = smaller(nf_c(n, s, c, NC_TAB), NFTN - 1);
+  let fam = nf_t(n, s, t, NT_FAM);
+  if fam == NFPROTO_INET {
+    return true;
+  }
+  if fam == NFPROTO_IPV6 {
+    return nf_is6(n, w);
+  }
+  return !nf_is6(n, w);
+}
+
+/// The hook `hook` on the packet in frame w (flen bytes, Ethernet header
+/// included), which came in on interface iif and goes out on oif (NO_IF when
+/// not known yet): true if it may go on. The base chains of the hook run in
+/// priority order; any drop stops the packet.
+fn nf_hook(n: &mut Net, hook: u64, w: u64, flen: u64, iif: u64, oif: u64) -> bool
+  requires net_ok(n) && hook <= NF_POST && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  if nf_x(n, NX_ANY) == 0 || flen < 34 {
+    return true;
+  }
+  let s = nf_slot(n, n.ns);
+  if s >= NFSL {
+    return true;
+  }
+  let mut ctst = 0;
+  if nf_h(n, s, NH_CT) == 1 {
+    if hook == NF_PRE || hook == NF_OUT {
+      ctst = ct_track(&mut n, w, flen);
+      nf_xset(&mut n, NX_CTST, ctst);
+    } else {
+      ctst = nf_x(n, NX_CTST);
+    }
+  }
+  let mut done = 0;                    // key + 1 of the chain run last
+  let mut round = 0;
+  let mut ok = true;
+  while ok && round < NFCN
+    invariant round <= NFCN && net_ok(n)
+  {
+    round = round + 1;
+    let mut best = NFCN;
+    let mut best_key = 18446744073709551615;
+    let mut c = 0;
+    while c < NFCN
+      invariant c <= NFCN && best <= NFCN && net_ok(n)
+    {
+      if nf_c(n, s, c, NC_USED) == 1 && nf_c(n, s, c, NC_HOOK) == hook + 1 {
+        let key = smaller(nf_c(n, s, c, NC_PRIO), 4294967295) * 64 + c;
+        if key + 1 > done && key < best_key && nf_chain_applies(n, s, c, w) {
+          best = c;
+          best_key = key;
+        }
+      }
+      c = c + 1;
+    }
+    if best >= NFCN {
+      round = NFCN;
+    } else {
+      done = wrap_add(best_key, 1);
+      if nf_run(&mut n, s, best, w, flen, iif, oif, ctst) == NF_DROP {
+        ok = false;
+      }
+    }
+  }
+  if !ok {
+    ct_undo(&mut n);
+  }
+  return ok;
+}
+
+// ---------------------------------------------------------------- where the stack calls the hooks
+
+/// A packet this machine sends (frame n.out, flen bytes, for next hop `hop`)
+/// passes the output and postrouting hooks: true if it may go. Forwarded
+/// packets have been through forward and postrouting already (NX_SKIP).
+fn nf_out(n: &mut Net, hop: u64, flen: u64) -> bool
+  requires net_ok(n) && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  if nf_x(n, NX_ANY) == 0 || nf_x(n, NX_SKIP) == 1 || flen < 34 {
+    return true;
+  }
+  if bget(n.out, 14) / 16 != 4 {
+    return true;                  // ARP and the like
+  }
+  let mut oif = NO_IF;
+  if hop <= IP_MAX {
+    if is_local(n, hop) {
+      oif = ns_lo(n);
+    } else {
+      oif = route_if(n, hop);
+      if oif >= IFN && n.ns == 0 {
+        oif = IF_ETH;
+      }
+    }
+  }
+  if !nf_hook(&mut n, NF_OUT, 1, flen, NO_IF, oif) {
+    return false;
+  }
+  return nf_hook(&mut n, NF_POST, 1, flen, NO_IF, oif);
+}
+
+/// A packet that came back through masquerading is another flow once its
+/// addresses are turned round: its state is worked out again, on n.out.
+fn nf_retrack(n: &mut Net, flen: u64)
+  requires net_ok(n) && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  if nf_x(n, NX_ANY) == 0 {
+    return;
+  }
+  let s = nf_slot(n, n.ns);
+  if s < NFSL && nf_h(n, s, NH_CT) == 1 && flen >= 34 {
+    ct_undo(&mut n);
+    let st = ct_track(&mut n, 1, flen);
+    nf_xset(&mut n, NX_CTST, st);
+  }
+}
+
+// ---------------------------------------------------------------- sets
+
+
+fn nf_s(n: &Net, s: u64, k: u64, f: u64) -> u64
+  requires net_ok(n) && s < NFS && k < NFSN && f < NSW
+{
+  return get(n.nfw, s * NF_W + NF_SB + k * NSW + f);
+}
+
+fn nf_sset(n: &mut Net, s: u64, k: u64, f: u64, v: u64)
+  requires net_ok(n) && s < NFS && k < NFSN && f < NSW
+  ensures net_ok(n)
+{
+  n.nfw = set(n.nfw, s * NF_W + NF_SB + k * NSW + f, v);
+}
+
+fn nf_e(n: &Net, s: u64, e: u64, f: u64) -> u64
+  requires net_ok(n) && s < NFS && e < NFEN && f < NELW
+{
+  return get(n.nfw, s * NF_W + NF_EB + e * NELW + f);
+}
+
+fn nf_eset(n: &mut Net, s: u64, e: u64, f: u64, v: u64)
+  requires net_ok(n) && s < NFS && e < NFEN && f < NELW
+  ensures net_ok(n)
+{
+  n.nfw = set(n.nfw, s * NF_W + NF_EB + e * NELW + f, v);
+}
+
+/// The key bytes of element e: byte i.
+fn nf_key(n: &Net, s: u64, e: u64, i: u64) -> u64
+  requires net_ok(n) && s < NFS && e < NFEN && i < 16
+  ensures result <= 255
+{
+  return cast[u64](bget(n.nfb, s * NFSB + NF_KEYS + e * 16 + i));
+}
+
+fn nf_find_set(n: &Net, s: u64, t: u64, w0: u64, w1: u64) -> u64
+  requires net_ok(n) && s < NFS && t < NFTN
+  ensures result <= NFSN
+{
+  let mut k = 0;
+  while k < NFSN
+    invariant k <= NFSN && net_ok(n)
+  {
+    if nf_s(n, s, k, NST_USED) == 1 && nf_s(n, s, k, NST_TAB) == t && nf_s(n, s, k, NST_N0) == w0 && nf_s(n, s, k, NST_N1) == w1 {
+      return k;
+    }
+    k = k + 1;
+  }
+  return NFSN;
+}
+
+fn nf_find_set_id(n: &Net, s: u64, t: u64, id: u64) -> u64
+  requires net_ok(n) && s < NFS && t < NFTN
+  ensures result <= NFSN
+{
+  if id == 0 {
+    return NFSN;
+  }
+  let mut k = 0;
+  while k < NFSN
+    invariant k <= NFSN && net_ok(n)
+  {
+    if nf_s(n, s, k, NST_USED) == 1 && nf_s(n, s, k, NST_TAB) == t && nf_s(n, s, k, NST_ID) == id {
+      return k;
+    }
+    k = k + 1;
+  }
+  return NFSN;
+}
+
+/// The set a request names in table t: the name at attribute `tn`, else the
+/// id at `ti`.
+fn nf_set_pick(n: &Net, b: &Bytes, from: u64, end: u64, s: u64, t: u64, tn: u64, ti: u64) -> u64
+  requires net_ok(n) && end <= blen(b) && s < NFS && t < NFTN
+  ensures result <= NFSN
+{
+  let na = nla_find(b, from, end, tn);
+  if na != 0 {
+    let k = nf_find_set(n, s, t, nla_name(b, na, 0), nla_name(b, na, 1));
+    if k < NFSN {
+      return k;
+    }
+  }
+  return nf_find_set_id(n, s, t, nfa_be32(b, from, end, ti, 0));
+}
+
+/// Takes set k and its elements out.
+fn nf_set_drop(n: &mut Net, s: u64, k: u64)
+  requires net_ok(n) && s < NFSL && k < NFSN
+  ensures net_ok(n)
+{
+  let mut e = 0;
+  while e < NFEN
+    invariant e <= NFEN && net_ok(n)
+  {
+    if nf_e(n, s, e, NEL_SET) == k + 1 {
+      nf_eset(&mut n, s, e, NEL_SET, 0);
+    }
+    e = e + 1;
+  }
+  nf_sset(&mut n, s, k, NST_USED, 0);
+}
+
+fn nl_set(n: &mut Net, s: u64, k: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && s < NFS && k < NFSN
+  ensures net_ok(n)
+{
+  let t = smaller(nf_s(n, s, k, NST_TAB), NFTN - 1);
+  nf_msg(&mut n, NFT_MSG_NEWSET, flags, seq, port, smaller(nf_t(n, s, t, NT_FAM), 255));
+  nla_str(&mut n, 1, nf_t(n, s, t, NT_N0), nf_t(n, s, t, NT_N1));
+  nla_str(&mut n, 2, nf_s(n, s, k, NST_N0), nf_s(n, s, k, NST_N1));
+  nla_be32(&mut n, 3, nf_s(n, s, k, NST_FLAGS) % 4294967296);
+  nla_be32(&mut n, 4, nf_s(n, s, k, NST_KTYPE) % 4294967296);
+  nla_be32(&mut n, 5, nf_s(n, s, k, NST_KLEN) % 4294967296);
+  nla_be32(&mut n, 10, nf_s(n, s, k, NST_ID) % 4294967296);
+  let ul = smaller(nf_s(n, s, k, NST_UDLEN), 64);
+  if ul > 0 {
+    nla_head(&mut n, 13, ul);
+    let mut i = 0;
+    while i < ul
+      invariant i <= ul && ul <= 64 && s < NFS && k < NFSN && net_ok(n)
+    {
+      nl_b(&mut n, cast[u64](bget(n.nfb, s * NFSB + NF_UDATA + k * 64 + i)));
+      i = i + 1;
+    }
+    nl_pad(&mut n);
+  }
+  nla_be64(&mut n, 16, nf_s(n, s, k, NST_HAND));
+  nl_end(&mut n);
+}
+
+/// The elements of set k, as one NEWSETELEM message.
+fn nl_setelems(n: &mut Net, s: u64, k: u64, seq: u64, port: u64)
+  requires net_ok(n) && s < NFS && k < NFSN
+  ensures net_ok(n)
+{
+  let t = smaller(nf_s(n, s, k, NST_TAB), NFTN - 1);
+  nf_msg(&mut n, NFT_MSG_NEWSETELEM, NLM_F_MULTI, seq, port, smaller(nf_t(n, s, t, NT_FAM), 255));
+  nla_str(&mut n, 1, nf_t(n, s, t, NT_N0), nf_t(n, s, t, NT_N1));
+  nla_str(&mut n, 2, nf_s(n, s, k, NST_N0), nf_s(n, s, k, NST_N1));
+  let list = nla_nest(&mut n, 3);
+  let kl = smaller(nf_s(n, s, k, NST_KLEN), 16);
+  let mut e = 0;
+  while e < NFEN
+    invariant e <= NFEN && kl <= 16 && net_ok(n)
+  {
+    if nf_e(n, s, e, NEL_SET) == k + 1 {
+      let el = nla_nest(&mut n, 1);
+      let ky = nla_nest(&mut n, 1);
+      nla_head(&mut n, 1, kl);
+      let mut i = 0;
+      while i < kl
+        invariant i <= kl && kl <= 16 && net_ok(n)
+      {
+        nl_b(&mut n, nf_key(n, s, e, i));
+        i = i + 1;
+      }
+      nl_pad(&mut n);
+      nla_nest_end(&mut n, ky);
+      if nf_e(n, s, e, NEL_FLAGS) == 1 {
+        nla_be32(&mut n, 3, 1);
+      }
+      nla_nest_end(&mut n, el);
+    }
+    e = e + 1;
+  }
+  nla_nest_end(&mut n, list);
+  nl_end(&mut n);
+}
+
+/// The first "__setN" name no set of the table has: two words.
+fn nf_anon_name(n: &Net, s: u64, t: u64) -> u64
+  requires net_ok(n) && s < NFS && t < NFTN
+  ensures result < 100
+{
+  let mut i = 0;
+  while i < 99
+    invariant i <= 99 && net_ok(n)
+  {
+    if nf_find_set(n, s, t, anon_w0(i), 0) >= NFSN {
+      return i;
+    }
+    i = i + 1;
+  }
+  return 99;
+}
+
+/// "__set" and the number i (0 to 99): the name's first eight bytes, low byte first.
+fn anon_w0(i: u64) -> u64
+  requires i < 100
+{
+  // "__set" is 5f 5f 73 65 74; then one or two digits.
+  let base = 0x7465735f5f;
+  if i < 10 {
+    return base + (48 + i) * 1099511627776;
+  }
+  return base + (48 + i / 10) * 1099511627776 + (48 + i % 10) * 281474976710656;
+}
+
+/// NFT_MSG_NEWSET.
+fn nf_newset(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, fl: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  let ta = nla_find(b, at + 20, end, 1);
+  if s >= NFSL || ta == 0 {
+    return NFE_NOENT;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  let na = nla_find(b, at + 20, end, 2);
+  let mut w0 = nla_name(b, na, 0);
+  let w1 = nla_name(b, na, 1);
+  let flags = nfa_be32(b, at + 20, end, 3, 0);
+  let klen = nfa_be32(b, at + 20, end, 5, 0);
+  let id = nfa_be32(b, at + 20, end, 10, 0);
+  if w0 == 0 {
+    return nfpick(nla_len(b, na) > 15, NFE_NAMETOOLONG, NE_INVAL);
+  }
+  if nla_find(b, at + 20, end, 6) != 0 || nla_find(b, at + 20, end, 7) != 0 || flags / 8 % 2 == 1 {
+    return NE_OPNOTSUPP;                   // a map
+  }
+  if flags / 16 % 2 == 1 || flags / 32 % 2 == 1 || flags / 64 % 2 == 1 || flags / 256 % 2 == 1 {
+    return NE_OPNOTSUPP;                   // timeouts, dynamic sets, object maps, expressions
+  }
+  if klen == 0 || klen > 16 || (flags / 4 % 2 == 1 && flags / 128 % 2 == 1) {
+    return nfpick(klen > 16 || klen == 0, NE_OPNOTSUPP, NE_INVAL);
+  }
+  // A name with "%d" in it asks the kernel for a name of its own.
+  let anon = flags % 2 == 1;
+  if anon && nla_len(b, na) >= 4 && nla_word(b, na) == 0x64257465735f5f {
+    w0 = anon_w0(nf_anon_name(n, s, t));
+  } else {
+    let have = nf_find_set(n, s, t, w0, w1);
+    if have < NFSN {
+      if fl / NLM_F_EXCL % 2 == 1 {
+        return NE_EXIST;
+      }
+      return 0;
+    }
+  }
+  let mut k = 0;
+  while k < NFSN && nf_s(n, s, k, NST_USED) == 1
+    invariant k <= NFSN && net_ok(n)
+  {
+    k = k + 1;
+  }
+  if k >= NFSN {
+    return NE_NOSPC;
+  }
+  nf_sset(&mut n, s, k, NST_USED, 1);
+  nf_sset(&mut n, s, k, NST_TAB, t);
+  nf_sset(&mut n, s, k, NST_N0, w0);
+  nf_sset(&mut n, s, k, NST_N1, nfpick(anon && nla_word(b, na) == 0x64257465735f5f, 0, w1));
+  nf_sset(&mut n, s, k, NST_FLAGS, flags);
+  nf_sset(&mut n, s, k, NST_KTYPE, nfa_be32(b, at + 20, end, 4, 0));
+  nf_sset(&mut n, s, k, NST_KLEN, klen);
+  nf_sset(&mut n, s, k, NST_ID, id);
+  nf_sset(&mut n, s, k, NST_HAND, nf_new_handle(&mut n, s));
+  let ua = nla_find(b, at + 20, end, 13);
+  let ul = smaller(nla_len(b, ua), 64);
+  nf_sset(&mut n, s, k, NST_UDLEN, ul);
+  if ul > 0 {
+    bcopy(&mut n.nfb, s * NFSB + NF_UDATA + k * 64, b, ua, ul);
+  }
+  return 0;
+}
+
+/// NFT_MSG_DELSET.
+fn nf_delset(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  let ta = nla_find(b, at + 20, end, 1);
+  if s >= NFSL || ta == 0 {
+    return NFE_NOENT;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  let k = nf_set_pick(n, b, at + 20, end, s, t, 2, 10);
+  if k >= NFSN {
+    return NFE_NOENT;
+  }
+  if nf_set_used(n, s, k) {
+    return NFE_BUSY;
+  }
+  nf_set_drop(&mut n, s, k);
+  return 0;
+}
+
+/// Does a rule look set k up?
+fn nf_set_used(n: &Net, s: u64, k: u64) -> bool
+  requires net_ok(n) && s < NFSL && k < NFSN
+{
+  let mut r = 0;
+  while r < NFRN
+    invariant r <= NFRN && net_ok(n)
+  {
+    if nf_r(n, s, r, NR_CH) != 0 {
+      let off = nf_roff(n, s, r);
+      let l = nf_rlen(n, s, r);
+      if off + l <= NFP && nf_rule_looks_up(n, s * NFSB + off, s * NFSB + off + l, s, k) {
+        return true;
+      }
+    }
+    r = r + 1;
+  }
+  return false;
+}
+
+/// Does the rule text at from..to hold a lookup of set k?
+fn nf_rule_looks_up(n: &Net, from: u64, to: u64, s: u64, k: u64) -> bool
+  requires net_ok(n) && from <= to && to <= blen(n.nfb) && s < NFSL && k < NFSN
+{
+  let mut at = from;
+  while at < to && to - at >= 4
+    invariant at <= to && to <= blen(n.nfb) && net_ok(n)
+  {
+    let l = rd16(n.nfb, at);
+    if l < 4 || l > to - at {
+      return false;
+    }
+    let na = nla_find(n.nfb, at + 4, at + l, 1);
+    if nla_len(n.nfb, na) == 7 && nla_word(n.nfb, na) == XN_LOOKUP {
+      let da = nla_find(n.nfb, at + 4, at + l, 2);
+      let dl = nla_len(n.nfb, da);
+      let sa = nla_find(n.nfb, da, da + dl, 1);
+      let t = smaller(nf_s(n, s, k, NST_TAB), NFTN - 1);
+      if sa != 0 && nla_name(n.nfb, sa, 0) == nf_s(n, s, k, NST_N0) && nla_name(n.nfb, sa, 1) == nf_s(n, s, k, NST_N1) && t < NFTN {
+        return true;
+      }
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > to - at {
+      return false;
+    }
+    at = at + step;
+  }
+  return false;
+}
+
+/// NFT_MSG_GETSET: a dump, or the set named.
+fn nf_getset(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, dump: bool, seq: u64, port: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  if dump {
+    if s < NFSL {
+      let ta = nla_find(b, at + 20, end, 1);
+      let mut want_t = NFTN;
+      if ta != 0 {
+        want_t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+      }
+      let mut k = 0;
+      while k < NFSN
+        invariant k <= NFSN && net_ok(n)
+      {
+        if nf_s(n, s, k, NST_USED) == 1 {
+          let t = smaller(nf_s(n, s, k, NST_TAB), NFTN - 1);
+          let mut want = fam == 0 || nf_t(n, s, t, NT_FAM) == fam;
+          if ta != 0 && t != want_t {
+            want = false;
+          }
+          if want {
+            nl_set(&mut n, s, k, NLM_F_MULTI, seq, port);
+          }
+        }
+        k = k + 1;
+      }
+    }
+    nl_done(&mut n, seq, port);
+    return 0;
+  }
+  let ta = nla_find(b, at + 20, end, 1);
+  if s >= NFSL || ta == 0 {
+    return NFE_NOENT;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  let k = nf_set_pick(n, b, at + 20, end, s, t, 2, 10);
+  if k >= NFSN {
+    return NFE_NOENT;
+  }
+  nl_set(&mut n, s, k, 0, seq, port);
+  return 0;
+}
+
+/// NFT_MSG_GETSETELEM (a dump): the elements of the set the request names, or of
+/// every set.
+fn nf_getsetelem(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, seq: u64, port: u64) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  let ta = nla_find(b, at + 20, end, 1);
+  if s >= NFSL || ta == 0 {
+    nl_done(&mut n, seq, port);
+    return 0;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  let k = nf_set_pick(n, b, at + 20, end, s, t, 2, 4);
+  if k >= NFSN {
+    return NFE_NOENT;
+  }
+  nl_setelems(&mut n, s, k, seq, port);
+  nl_done(&mut n, seq, port);
+  return 0;
+}
+
+/// The element of set k whose key is the l bytes at b[v..] and whose flags are
+/// `flags`, or NFEN.
+fn nf_find_elem(n: &Net, s: u64, k: u64, b: &Bytes, v: u64, l: u64, flags: u64) -> u64
+  requires net_ok(n) && s < NFS && k < NFSN && v + l <= blen(b) && l <= 16
+  ensures result <= NFEN
+{
+  let mut e = 0;
+  while e < NFEN
+    invariant e <= NFEN && net_ok(n)
+  {
+    if nf_e(n, s, e, NEL_SET) == k + 1 && nf_e(n, s, e, NEL_FLAGS) == flags {
+      let mut same = true;
+      let mut i = 0;
+      while i < l && same
+        invariant i <= l && l <= 16 && v + l <= blen(b) && net_ok(n)
+      {
+        if nf_key(n, s, e, i) != cast[u64](bget(b, v + i)) {
+          same = false;
+        }
+        i = i + 1;
+      }
+      if same {
+        return e;
+      }
+    }
+    e = e + 1;
+  }
+  return NFEN;
+}
+
+/// NFT_MSG_NEWSETELEM (del: DELSETELEM).
+fn nf_setelem(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, fl: u64, del: bool) -> u64
+  requires net_ok(n) && ns < NNET && end <= blen(b) && at + 20 <= end
+  ensures net_ok(n)
+{
+  let fam = rd8(b, at + 16);
+  let s = nf_slot(n, ns);
+  let ta = nla_find(b, at + 20, end, 1);
+  if s >= NFSL || ta == 0 {
+    return NFE_NOENT;
+  }
+  let t = nf_find_table(n, s, fam, nla_name(b, ta, 0), nla_name(b, ta, 1));
+  if t >= NFTN {
+    return NFE_NOENT;
+  }
+  let k = nf_set_pick(n, b, at + 20, end, s, t, 2, 4);
+  if k >= NFSN {
+    return NFE_NOENT;
+  }
+  let la = nla_find(b, at + 20, end, 3);
+  let ll = nla_len(b, la);
+  let kl = smaller(nf_s(n, s, k, NST_KLEN), 16);
+  let mut a = la;
+  let lend = la + ll;
+  while la != 0 && a < lend && lend - a >= 4
+    invariant a <= lend && lend <= blen(b) && kl <= 16 && net_ok(n) && s < NFSL && k < NFSN
+  {
+    let l = rd16(b, a);
+    if l < 4 || l > lend - a {
+      return NE_INVAL;
+    }
+    let ea = a + 4;
+    let eend = a + l;
+    if nla_find(b, ea, eend, 2) != 0 || nla_find(b, ea, eend, 4) != 0 || nla_find(b, ea, eend, 10) != 0 {
+      return NE_OPNOTSUPP;                 // map data, timeouts, concatenated ranges
+    }
+    let flags = nfa_be32(b, ea, eend, 3, 0);
+    let v = nf_value(b, nla_find(b, ea, eend, 1));
+    let vl = nla_len(b, v);
+    if v == 0 || vl != kl || flags > 1 {
+      return NE_INVAL;
+    }
+    let have = nf_find_elem(n, s, k, b, v, vl, flags);
+    if del {
+      if have >= NFEN {
+        return NFE_NOENT;
+      }
+      nf_eset(&mut n, s, have, NEL_SET, 0);
+    } else if have < NFEN {
+      if fl / NLM_F_EXCL % 2 == 1 {
+        return NE_EXIST;
+      }
+    } else {
+      let mut e = 0;
+      while e < NFEN && nf_e(n, s, e, NEL_SET) != 0
+        invariant e <= NFEN && net_ok(n)
+      {
+        e = e + 1;
+      }
+      if e >= NFEN {
+        return NE_NOSPC;
+      }
+      nf_eset(&mut n, s, e, NEL_SET, k + 1);
+      nf_eset(&mut n, s, e, NEL_FLAGS, flags);
+      let mut i = 0;
+      while i < vl
+        invariant i <= vl && vl <= 16 && v + vl <= blen(b) && net_ok(n)
+      {
+        bset(&mut n.nfb, s * NFSB + NF_KEYS + e * 16 + i, bget(b, v + i));
+        i = i + 1;
+      }
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > lend - a {
+      a = lend;
+    } else {
+      a = a + step;
+    }
+  }
+  return 0;
+}
+
+/// Does set k hold the key in the registers at ro (klen bytes)?
+fn nf_set_has(n: &Net, s: u64, k: u64, ro: u64) -> bool
+  requires net_ok(n) && s < NFSL && k < NFSN && ro < NF_REGS
+{
+  let kl = smaller(nf_s(n, s, k, NST_KLEN), 16);
+  if ro + kl > NF_REGS {
+    return false;
+  }
+  let interval = nf_s(n, s, k, NST_FLAGS) / 4 % 2 == 1;
+  // best: the element with the greatest key not above the register's, for an
+  // interval set; a set that is not one wants a key that is equal.
+  let mut best = NFEN;
+  let mut e = 0;
+  while e < NFEN
+    invariant e <= NFEN && best <= NFEN && kl <= 16 && ro + kl <= NF_REGS && net_ok(n)
+  {
+    if nf_e(n, s, e, NEL_SET) == k + 1 {
+      // 0 equal, 1 element above the register, 2 element below it
+      let mut c = 0;
+      let mut i = 0;
+      while i < kl && c == 0
+        invariant i <= kl && kl <= 16 && ro + kl <= NF_REGS && c <= 2 && net_ok(n)
+      {
+        let kb = nf_key(n, s, e, i);
+        let rb = reg_get(n.nfr, ro, i);
+        if kb > rb {
+          c = 1;
+        } else if kb < rb {
+          c = 2;
+        }
+        i = i + 1;
+      }
+      if !interval {
+        if c == 0 {
+          return true;
+        }
+      } else if c != 1 {
+        // The element is at or below the register: the greatest such one counts.
+        if best >= NFEN || nf_key_above(n, s, e, best, kl) {
+          best = e;
+        }
+      }
+    }
+    e = e + 1;
+  }
+  if !interval || best >= NFEN {
+    return false;
+  }
+  return nf_e(n, s, best, NEL_FLAGS) == 0;
+}
+
+/// Is element e's key above (or, equal, an end marker below) element f's?
+fn nf_key_above(n: &Net, s: u64, e: u64, f: u64, kl: u64) -> bool
+  requires net_ok(n) && s < NFS && e < NFEN && f < NFEN && kl <= 16
+{
+  let mut i = 0;
+  while i < kl
+    invariant i <= kl && kl <= 16 && net_ok(n)
+  {
+    let a = nf_key(n, s, e, i);
+    let b = nf_key(n, s, f, i);
+    if a > b {
+      return true;
+    }
+    if a < b {
+      return false;
+    }
+    i = i + 1;
+  }
+  // The same key: a begin and an end marker at one key mean the next interval
+  // starts where the last one ended, so the begin counts.
+  return nf_e(n, s, e, NEL_FLAGS) == 0;
+}
