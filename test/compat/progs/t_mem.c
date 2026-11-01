@@ -268,6 +268,33 @@ int main(void) {
         }
         EXPECT("FUTEX_WAKE_OP wakes a waiter of the second word when the old value compares", c > 0 && a == 1 && b == 1 && w[1] == 1);
     }
+#ifdef __x86_64__
+    {
+        /* arch_prctl(ARCH_SET_GS), which wasm2c's "segue" (Firefox's sandboxed libraries) uses: the base
+           %gs addresses with is kept per process, across switches to a process with another one. */
+        static long mine[2] = {0x1234, 0}, other[2] = {0x5678, 0};
+        unsigned long got = 0;
+        long v = 0, w = 0;
+        long r = syscall(SYS_arch_prctl, 0x1001, mine);
+        __asm__ volatile ("movq %%gs:0, %0" : "=r"(v));
+        pid_t c = fork();
+        if (c == 0) {
+            syscall(SYS_arch_prctl, 0x1001, other);
+            long x = 0;
+            for (int i = 0; i < 50; i++) sched_yield();
+            __asm__ volatile ("movq %%gs:0, %0" : "=r"(x));
+            _exit(x == 0x5678 ? 0 : 1);
+        }
+        for (int i = 0; i < 50; i++) sched_yield();
+        __asm__ volatile ("movq %%gs:0, %0" : "=r"(w));
+        int cst = 1;
+        int ok = c > 0 && waitpid(c, &cst, 0) == c && WIFEXITED(cst) && WEXITSTATUS(cst) == 0;
+        EXPECT("ARCH_SET_GS sets the base %gs addresses with, and a process keeps its own", r == 0 && v == 0x1234 && w == 0x1234 && ok);
+        EXPECT("ARCH_GET_GS gives it back", syscall(SYS_arch_prctl, 0x1004, &got) == 0 && got == (unsigned long)mine);
+        EXPECT("ARCH_SET_GS with a base that is not canonical is EPERM",
+               syscall(SYS_arch_prctl, 0x1001, 0x8000000000000000UL) == -1 && errno == EPERM);
+    }
+#endif
     EXPECT("mlock", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED && mlock(q, 4096) == 0);
     {
         int ok = 1;

@@ -27,6 +27,7 @@ const INFO_FB: u64 = 9;          // the boot loader's framebuffer, at any addres
 const INFO_ACPI: u64 = 8;        // 0 where the RSDP came from, 1 its revision, 2 + 2k / 3 + 2k table k's signature / address
 const MEM_REGIONS: u64 = 128;    // boot/multiboot.c keeps at most this many
 const ACPI_TABLES: u64 = 64;     // the most tables listed
+const INFO_GSBASE: u64 = 13;     // not a query: sets the GS base the processor runs the user with (0 is the answer), when it differs from the one it holds
 const INFO_BYTE: u64 = 256;      // INFO_CMDLINE past the end
 
 /// Does the boot command line have the word `w` (between spaces, or at

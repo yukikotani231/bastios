@@ -700,6 +700,9 @@ t_mem: an 8 MiB stack: 6 MiB of locals in a function
 t_mem: file for mapping
 t_mem: fork: parent and child each see only their own writes (copy-on-write), read(2) into a shared page, a second thread, mprotect and MADV_DONTNEED
 t_mem: futex across fork on a MAP_SHARED page
+t_mem: ARCH_GET_GS gives it back
+t_mem: ARCH_SET_GS sets the base %gs addresses with, and a process keeps its own
+t_mem: ARCH_SET_GS with a base that is not canonical is EPERM
 t_mem: FUTEX_WAKE_OP changes the second word
 t_mem: FUTEX_WAKE_OP with an unknown operation is ENOSYS
 t_mem: FUTEX_WAKE_OP wakes a waiter of the second word when the old value compares
@@ -1427,6 +1430,7 @@ t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
 t_sock2: SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener
 t_sock2: SO_ERROR is 0
 t_sock2: SO_KEEPALIVE
+t_sock2: getsockopt gives the length of the value, 4, for an int option
 t_sock2: SO_RCVBUF and SO_SNDBUF
 t_sock2: a read without SA_RESTART is EINTR
 t_sock2: connect to a closed port is ECONNREFUSED

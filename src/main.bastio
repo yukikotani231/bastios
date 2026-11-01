@@ -422,6 +422,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           put_space(&mut s.k.spaces, p, Space::Mapped(sp));
           regs_load(&mut cpu, s.k.procs, p, 18);
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
+          boot_info(cpu, INFO_GSBASE, pget(s.k.procs, p, F_GSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
           return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), vppid: lx_ppid(s.k, p), rg: reap_gen(s.k), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
         },
@@ -1070,6 +1071,7 @@ fn syscall_turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, v
             put_space(&mut s.k.spaces, p, Space::Mapped(sp));
             regs_load(&mut cpu, s.k.procs, p, 18);
             cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
+            boot_info(cpu, INFO_GSBASE, pget(s.k.procs, p, F_GSBASE));
             pset(&mut s.k.procs, p, F_STATE, RUNNING);
             let mut w = reap_gen(s.k) * 2;
             if other {
