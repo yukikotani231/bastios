@@ -1086,6 +1086,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
+  lx_fill(&mut k, 0, 4);                    // the value's other bytes are not part of the length
   bset(&mut k.fs.xfer, 0, cast[u8](n));
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, k.fs.xfer, 4) != 4 {
     return EFAULT;

@@ -17,6 +17,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 ### Added
 
 - X11 programs run on BastiOS: Alpine's Xvfb and xterm work unmodified, and `bx11` shows the X screen in a `bwm` window and sends the window's keys and pointer events to it (docs/x11.md; the compat suite has an `x11` lane).
+- Firefox's start-up gets further: `getsockopt` of an integer option gives a length of 4, not 4100 (Firefox aborted on a socket buffer size of 0 read from it), and `arch_prctl(ARCH_SET_GS)` and `ARCH_GET_GS` work (Firefox's sandboxed libraries use the GS base). The kernel keeps a GS base per process; boot/ grows by 10 lines.
 - `futex` supports `FUTEX_WAKE_OP`, which musl's condition variables use: Qt 6 programs such as QDirStat hung at start-up without it, and now run on the `bwm` desktop through `bx11`.
 - `chown` of a device node by root (xterm does it to its pseudo-terminal) is accepted instead of failing with `EPERM`; the node keeps no owner.
 - In the `bwm` Run prompt (Alt-F2) Ctrl-U clears the line and Ctrl-W takes off the last word.

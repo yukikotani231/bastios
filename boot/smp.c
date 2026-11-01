@@ -870,6 +870,15 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
         return t && mapped(t, 36) ? rd32(t) : 0;           /* its signature, 0 if out of reach */
     }
     case 9: return bst_boot_framebuffer(i);                /* the framebuffer, anywhere: as boot_fb */
+    case 13: {                                             /* the user's GS base (ARCH_SET_GS), written when it differs from the processor's */
+        uint64_t *held = (uint64_t *)(this_core() + CORE_GSB);
+        uint64_t v = i <= 0x00007FFFFFFFFFFFull ? i : 0;
+        if (*held != (v | 1ull << 63)) {
+            *held = v | 1ull << 63;
+            wrmsr(0xC0000101, v);                          /* GS_BASE: the user's while the kernel runs (KERNEL_GS_BASE holds the kernel's) */
+        }
+        return 0;
+    }
     case 12: return hw_random(i);                          /* RDSEED / RDRAND: 0 what there is, else a word */
     }
     return 0;
