@@ -1528,6 +1528,7 @@ t_uring: a NOP completes with its user data
 t_uring: a full completion ring stops the kernel taking requests
 t_uring: a head written back to zero does not run old requests again
 t_uring: a read comes back
+t_uring: a ring can be added to an epoll set
 t_uring: a tail far ahead is limited to the ring
 t_uring: a write goes to the file
 t_uring: an index past the end of the array is dropped, not run
@@ -1543,6 +1544,7 @@ t_uring: other register calls are refused
 t_uring: readahead on a ring is EINVAL
 t_uring: readv and writev take vectors
 t_uring: several requests at once complete in order
+t_uring: splice from a ring is EINVAL
 t_uring: the mapping stays valid after the descriptor is closed
 t_uring: the probe lists the operations
 t_uring: the ring has the sizes asked for, and the single-map feature

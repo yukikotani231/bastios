@@ -6,6 +6,7 @@
 #define _GNU_SOURCE
 #include "compat.h"
 #include <fcntl.h>
+#include <sys/epoll.h>
 #include <stdint.h>
 #include <sys/mman.h>
 #include <sys/syscall.h>
@@ -93,6 +94,13 @@ int main(void) {
 
     EXPECT("io_uring_setup returns a ring", (rfd = ring_open(8)) >= 0);
     EXPECT("readahead on a ring is EINVAL", syscall(SYS_readahead, rfd, 0, 4096) == -1 && errno == EINVAL);
+    {
+        int p[2], ep = epoll_create1(0);
+        struct epoll_event ev = { .events = EPOLLIN };
+        EXPECT("a ring can be added to an epoll set", ep >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, rfd, &ev) == 0);
+        EXPECT("splice from a ring is EINVAL", pipe(p) == 0 && splice(rfd, 0, p[1], 0, 16, 0) == -1 && errno == EINVAL);
+        if (ep >= 0) close(ep);
+    }
     EXPECT("the ring has the sizes asked for, and the single-map feature",
            p.sq_entries == 8 && p.cq_entries == 16 && (p.features & 1) && *u32at(p.sq_off.mask) == 7 && *u32at(p.cq_off.mask) == 15);
     EXPECT("entries are rounded up to a power of two", ({ struct params q; memset(&q, 0, sizeof q); int g = syscall(SYS_uring_setup, 5, &q); int ok = g >= 0 && q.sq_entries == 8; if (g >= 0) close(g); ok; }));
