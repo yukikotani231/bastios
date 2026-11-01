@@ -15,13 +15,13 @@ ok
 
 == x11: Xvfb listens on a UNIX socket and keeps its screen in a file
 # timeout 120
-$ bb chroot /disk/x /usr/bin/Xvfb :0 -screen 0 640x480x24 -ac -fbdir /tmp/fb >/disk/xlog 2>&1 & bb sleep 8; test -S /disk/x/tmp/.X11-unix/X0 && echo socket; bb ls /disk/x/tmp/fb
+$ bb chroot /disk/x /usr/bin/Xvfb :0 -screen 0 640x480x24 -ac -fbdir /tmp/fb >/disk/xlog 2>&1 & bb sleep 8; test -S /disk/x/tmp/.X11-unix/X0 && echo socket; test -f /disk/x/tmp/fb/Xvfb_screen0 && echo screen
 socket
-Xvfb_screen0
+screen
 
 == x11: xterm draws on the X screen and takes the keys bwm sends through bx11
 # timeout 300
-$ bb mount --bind /disk/x/tmp/.X11-unix /disk/t/tmp/.X11-unix; bb mkdir -p /tmp/.X11-unix; bb mount --bind /disk/x/tmp/.X11-unix /tmp/.X11-unix; DISPLAY=:0 bb chroot /disk/t /usr/bin/xterm -e /bin/sh -c 'read v; echo got $v > /tmp/got; sleep 1' >/disk/tlog 2>&1 & /disk/fakebwm 30 'abc\r' >/disk/fb.out 2>&1 & bb sleep 2; /disk/bx11 -f /disk/x/tmp/fb/Xvfb_screen0 >/disk/bx.out 2>&1 & bb sleep 50; bb cat /disk/fb.out /disk/bx.out /disk/t/tmp/got
+$ bb mount --bind /disk/x/tmp/.X11-unix /disk/t/tmp/.X11-unix; bb mkdir -p /tmp/.X11-unix; bb mount --bind /disk/x/tmp/.X11-unix /tmp/.X11-unix; DISPLAY=:0 bb chroot /disk/t /usr/bin/xterm -e /bin/sh -c 'read v; echo got $v > /tmp/got; sleep 1' >/disk/tlog 2>&1 & /disk/fakebwm 30 'abc\r' >/disk/fb.out 2>&1 & bb sleep 2; /disk/bx11 -f /disk/x/tmp/fb/Xvfb_screen0 >/disk/bx.out 2>&1 & bb sleep 50; bb cat /disk/fb.out /disk/bx.out; bb cat /disk/t/tmp/got || { bb cat /disk/tlog /disk/xlog; bb ps; }
 fakebwm: listening
 fakebwm: window 640x480 X11
 fakebwm: pixels drawn
