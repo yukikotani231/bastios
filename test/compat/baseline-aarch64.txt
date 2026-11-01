@@ -1634,6 +1634,7 @@ t_uring: errors are in the completion: bad descriptor, unknown opcode, pipe
 t_uring: fsync completes
 t_uring: io_uring_setup returns a ring
 t_uring: other register calls are refused
+t_uring: readahead on a ring is EINVAL
 t_uring: readv and writev take vectors
 t_uring: several requests at once complete in order
 t_uring: the mapping stays valid after the descriptor is closed

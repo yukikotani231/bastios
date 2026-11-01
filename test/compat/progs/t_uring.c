@@ -92,6 +92,7 @@ int main(void) {
     int f = open("/tmp/uring.dat", O_RDWR | O_CREAT | O_TRUNC, 0600);
 
     EXPECT("io_uring_setup returns a ring", (rfd = ring_open(8)) >= 0);
+    EXPECT("readahead on a ring is EINVAL", syscall(SYS_readahead, rfd, 0, 4096) == -1 && errno == EINVAL);
     EXPECT("the ring has the sizes asked for, and the single-map feature",
            p.sq_entries == 8 && p.cq_entries == 16 && (p.features & 1) && *u32at(p.sq_off.mask) == 7 && *u32at(p.cq_off.mask) == 15);
     EXPECT("entries are rounded up to a power of two", ({ struct params q; memset(&q, 0, sizeof q); int g = syscall(SYS_uring_setup, 5, &q); int ok = g >= 0 && q.sq_entries == 8; if (g >= 0) close(g); ok; }));
