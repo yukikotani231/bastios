@@ -72,6 +72,24 @@ $ dc network create nn >/dev/null 2>&1; dc run -d --name nsrv --network nn ctr /
 $ dc network create nn2 >/dev/null 2>&1; dc run -d --name dsrv --network nn2 ctr /bin/busybox sleep 120 >/dev/null 2>&1; dc run --rm --network nn2 ctr /bin/busybox ping -c 1 -W 5 dsrv 2>&1 | bb grep -c '1 packets received'; dc rm -f dsrv >/dev/null 2>&1; dc network rm nn2 >/dev/null 2>&1
 1
 
+== docker: --add-host and --dns reach the container's hosts and resolv.conf
+$ dc run --rm --add-host foo:1.2.3.4 --dns 9.9.9.9 ctr /bin/busybox sh -c 'grep foo /etc/hosts; grep nameserver /etc/resolv.conf' 2>&1 | bb tr '\t' ' '
+1.2.3.4 foo
+nameserver 9.9.9.9
+
+== docker: a container joins a second network while it runs
+$ dc network create nc1 >/dev/null 2>&1; dc run -d --name cn ctr /bin/busybox sleep 120 >/dev/null 2>&1; dc network connect nc1 cn >/dev/null 2>&1; dc exec cn /bin/busybox ip -o -4 addr show | bb grep -c ' eth'; dc network disconnect nc1 cn >/dev/null 2>&1; dc exec cn /bin/busybox ip -o -4 addr show | bb grep -c ' eth'; dc rm -f cn >/dev/null 2>&1; dc network rm nc1 >/dev/null 2>&1
+2
+1
+
+== docker: a container on the host network sees the host's interfaces
+$ dc run --rm --network host ctr /bin/busybox ip link show docker0 2>&1 | bb grep -c '^[0-9]*: docker0'
+1
+
+== docker: a published UDP port reaches the container
+$ dc run -d --name pu -p 8084:8085/udp ctr /bin/busybox nc -u -l -p 8085 >/dev/null 2>&1; bb sleep 2; echo from-udp | bb nc -u -w 2 127.0.0.1 8084 >/dev/null 2>&1; bb sleep 1; dc logs pu 2>&1; dc rm -f pu >/dev/null 2>&1
+from-udp
+
 == docker: a built image runs and its exit is seen
 $ bb mkdir -p /disk/p/tmp/b && printf 'FROM ctr\nRUN /bin/busybox echo built > /built.txt\nCMD ["/bin/busybox","cat","/built.txt"]\n' > /disk/p/tmp/b/Dockerfile && dc build --network=none -t bimg /tmp/b >/dev/null 2>&1; dc run --rm --network=none bimg 2>&1
 built
