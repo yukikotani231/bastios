@@ -119,6 +119,10 @@ static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
 static int nz;
 static int next_id = 1;
 static void touch_bar(void);
+static long long now_ms(void);
+static char notice[40];                  /* a short message in the task bar (no room for a window, say) */
+static long long notice_due;             /* when it goes; 0 when none shows */
+#define NOTICE_MS 3000
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
@@ -516,6 +520,15 @@ static void draw_bar(void)
         char im[16];
         snprintf(im, sizeof im, "%s %.3s", ime_on == 2 ? "Kata" : "Kana", ime_buf);
         text(scene, ix + 4, y0 + 4, im, rgb(255, 255, 255));
+    }
+    if (notice_due && now_ms() >= notice_due)
+        notice_due = 0;
+    if (notice_due && !run_on) {                          /* the notice covers the window buttons too */
+        int x0 = BTN_X0, x1 = (int)W - MENU_W - 12 - CLOCK_W - (ime_on == 3 ? IME_W_KANJI : ime_on ? IME_W : 0) - 4;
+        fill(scene, x0, y0 + 3, x1, H - 3, rgb(150, 60, 40));
+        char nb[40];
+        snprintf(nb, sizeof nb, "%.*s", (x1 - x0 - 8) / CELL_W > 0 ? (x1 - x0 - 8) / CELL_W : 0, notice);
+        text(scene, x0 + 4, y0 + 4, nb, rgb(255, 255, 255));
     }
     if (run_on) {                                         /* the prompt covers the window buttons */
         int x0 = BTN_X0, x1 = (int)W - MENU_W - 12 - CLOCK_W - (ime_on == 3 ? IME_W_KANJI : ime_on ? IME_W : 0) - 4;
@@ -1102,6 +1115,11 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         if (py > (int)H - BAR_H - (c.h + TITLE_H + BORDER)) py = (int)H - BAR_H - (c.h + TITLE_H + BORDER);
         struct win *w = win_new(px < 0 ? 0 : px, py < 0 ? 0 : py, c.w, c.h, c.title, i);
         if (!w) {
+            snprintf(notice, sizeof notice, "No room for another window (%d)", MAXWIN);
+            notice_due = now_ms() + NOTICE_MS;
+            touch_bar();
+            printf("bwm: no room for a window\n");
+            fflush(stdout);
             if (mf >= 0)
                 close(mf);
             drop_client(i);
@@ -2101,6 +2119,15 @@ int main(int argc, char **argv)
             long long d = quit_due - now_ms();
             if (wait < 0 || d < wait)
                 wait = d < 0 ? 0 : (int)d;
+        }
+        if (notice_due) {                                     /* draw the task bar again when the notice goes */
+            long long d = notice_due - now_ms();
+            if (wait < 0 || d < wait)
+                wait = d < 0 ? 0 : (int)d;
+            if (d <= 0) {
+                notice_due = 0;
+                touch_bar();
+            }
         }
         if (grab_outside(buttons, my)) {
             long long d = scroll_due - now_ms();
