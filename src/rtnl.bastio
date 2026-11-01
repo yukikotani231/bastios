@@ -1287,6 +1287,7 @@ fn nl_open(n: &mut Net, ns: u64, port: u64) -> u64
       n.nls = set(n.nls, q * NL_W + NL_USED, 1);
       n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
       n.nls = set(n.nls, q * NL_W + NL_RAW, 0);
+      n.nls = set(n.nls, q * NL_W + NL_PROTO, 0);
       n.nls = set(n.nls, q * NL_W + NL_PORT, port);
       n.nls = set(n.nls, q * NL_W + NL_NS, ns);
       return q;
@@ -1412,6 +1413,56 @@ fn nic_nl_open(c: &mut Nic, ns: u64, port: u64) -> u64
       let q = nl_open(&mut n, ns, port);
       c = Nic::Up(n);
       return q;
+    },
+  }
+}
+
+/// Socket q speaks protocol `proto` (NETLINK_NETFILTER; it starts as NETLINK_ROUTE).
+fn nic_nl_set_proto(c: &mut Nic, q: u64, proto: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if q < NLS {
+        n.nls = set(n.nls, q * NL_W + NL_PROTO, proto);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// Socket q's protocol.
+fn nic_nl_proto(c: &Nic, q: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if q < NLS {
+        return get(n.nls, q * NL_W + NL_PROTO);
+      }
+      return 0;
+    },
+  }
+}
+
+/// The nf_tables messages in b[0..len) sent on socket q: how many bytes were
+/// taken (whole messages).
+fn nic_nf_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return len; },
+    Nic::Up(mut n) => {
+      let mut r = len;
+      if q < NLS && len <= blen(b) {
+        r = nf_request(&mut n, q, b, len, admin);
+      }
+      c = Nic::Up(n);
+      return r;
     },
   }
 }

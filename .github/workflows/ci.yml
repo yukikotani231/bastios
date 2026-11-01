@@ -539,13 +539,17 @@ jobs:
             disks: alpine.img debian.img node.img jdk.img ruby.img x11.img rust.img podman.img gitsuite.tar
           # The Python lane alone takes longer than all of the above (its
           # test suites run for 25 minutes under emulation), so it has
-          # runners of its own, two: python2 repeats the set-up and runs the
-          # packages with extension modules.
+          # runners of its own, three: python2 and python3 repeat the set-up;
+          # python2 runs the packages with extension modules and python3 the
+          # two longest test suites (pytest's own and more-itertools').
           - part: python
             lanes: python
             disks: alpine.img python.img
           - part: python2
             lanes: python2
+            disks: alpine.img python.img
+          - part: python3
+            lanes: python3
             disks: alpine.img python.img
           - part: containers
             lanes: docker

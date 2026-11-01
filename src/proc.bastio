@@ -13,6 +13,7 @@ import "net.bastio";
 import "tcp.bastio";
 import "netns.bastio";
 import "rtnl.bastio";
+import "nft.bastio";
 import "snd.bastio";
 
 // The most processes; the tables grow to it (new_pid). Raising it: the

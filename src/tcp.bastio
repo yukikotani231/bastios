@@ -579,8 +579,21 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
   requires net_ok(n) && dlen <= NET_BUF
   ensures net_ok(n)
 {
+  let src = tcp_refuse_frame(&mut n, flags, dlen);
+  if src != 0 {
+    reply_send(&mut n, src, 54);
+  }
+}
+
+/// Builds the reset in the outgoing frame and returns the address to send
+/// it to, or 0 if there is to be none. (A packet filter's reject sends it
+/// without running the output hook again, so it cannot recurse.)
+fn tcp_refuse_frame(n: &mut Net, flags: u64, dlen: u64) -> u64
+  requires net_ok(n) && dlen <= NET_BUF
+  ensures net_ok(n)
+{
   if flags % 8 >= TF_RST {
-    return;                           // never answer a reset
+    return 0;                         // never answer a reset
   }
   let src = be32(n.pkt, 26);
   let smac = be48(n.pkt, 6);
@@ -612,7 +625,7 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
   put16(&mut n.out, 48, 0);
   put32(&mut n.out, 50, 0);
   put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, src), src, IP_TCP, 20));
-  reply_send(&mut n, src, 54);
+  return src;
 }
 
 // ---------------------------------------------------------------- the table

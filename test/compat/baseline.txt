@@ -846,6 +846,23 @@ t_net: getaddrinfo localhost finds ::1 (/etc/hosts)
 t_net: getaddrinfo numeric
 t_net: getsockopt SO_TYPE
 t_net: inet_pton
+t_nft: a batch makes a table, a chain and rules
+t_nft: a batch with a rule that cannot run changes nothing
+t_nft: a named set: a rule drops what the set holds, and elements can be removed
+t_nft: a rule drops TCP to its port
+t_nft: a rule drops UDP to its port
+t_nft: a table that exists is refused with NLM_F_EXCL
+t_nft: connection state: only answers to a connection made here come in
+t_nft: deleting the table lifts its rules
+t_nft: generation id
+t_nft: limit lets a burst through and then drops
+t_nft: netlink netfilter socket
+t_nft: nft 1.0.9 loads a ruleset with limit, jump, reject, ct and notrack
+t_nft: nft 1.0.9 loads a ruleset with sets, intervals and counters
+t_nft: reject answers at once instead of dropping
+t_nft: stale references: a set a rule uses cannot go, and a vanished jump target is skipped
+t_nft: the rule's counter counted the dropped packets
+t_nft: the table, the chain and the rules are listed
 t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd
 t_pidapi: waitid(P_PIDFD) on it reports the child's status
 t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL
