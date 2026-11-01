@@ -8,6 +8,9 @@
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 #define FUTEX_CMP_REQUEUE 4
+#define FUTEX_WAKE_OP 5
+#define FUTEX_OP(op, oparg, cmp, cmparg) \
+    ((unsigned)(((op) & 0xf) << 28 | ((cmp) & 0xf) << 24 | ((oparg) & 0xfff) << 12 | ((cmparg) & 0xfff)))
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>
@@ -223,6 +226,47 @@ int main(void) {
         int *gone = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
         EXPECT("FUTEX_WAKE on an unmapped word is EFAULT", gone != MAP_FAILED && munmap(gone, 4096) == 0 &&
                syscall(SYS_futex, gone, FUTEX_WAKE, 1, 0, 0, 0) == -1 && errno == EFAULT);
+    }
+    {
+        /* FUTEX_WAKE_OP, the call musl's condition variables and Qt use:
+           it changes the word at addr2, then wakes waiters of addr and, if
+           the old word compares, of addr2. */
+        volatile int *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        int ok = w != MAP_FAILED;
+        if (ok) {
+            w[0] = 0; w[1] = 5; w[2] = 0;
+            long r1 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(1, 3, 0, 5));  /* w1 += 3 */
+            ok = r1 == 0 && w[1] == 8;
+            long r2 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(2 | 8, 4, 1, 0));  /* w1 |= 1 << 4 */
+            ok = ok && r2 == 0 && w[1] == 24;
+            long r3 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(3, 8, 0, 0));  /* w1 &= ~8 */
+            ok = ok && r3 == 0 && w[1] == 16;
+            long r4 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(4, -1, 5, -1));  /* w1 ^= -1 */
+            ok = ok && r4 == 0 && w[1] == ~16;
+        }
+        EXPECT("FUTEX_WAKE_OP changes the second word", ok);
+        EXPECT("FUTEX_WAKE_OP with an unknown operation is ENOSYS", ok &&
+               syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(7, 1, 0, 0)) == -1 && errno == ENOSYS);
+        pid_t c = -1;
+        long a = -1, b = -1;
+        if (ok) {
+            w[0] = 0; w[1] = 0; w[2] = 0;
+            c = fork();
+            if (c == 0) {
+                struct timespec ts = {5, 0};
+                __sync_fetch_and_add(&w[2], 1);
+                long r = syscall(SYS_futex, (int *)w + 1, FUTEX_WAIT, 0, &ts, 0, 0);
+                _exit(r == 0 ? 0 : 1);
+            }
+            for (int i = 0; i < 3000000 && w[2] < 1; i++) sched_yield();
+            struct timespec d = {0, 200000000};
+            nanosleep(&d, 0);
+            /* wake nobody on w[0]; set w[1] to 1 and, as the old value is
+               0 == 0, wake the child that waits on w[1] */
+            a = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(0, 1, 0, 0));
+            b = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        }
+        EXPECT("FUTEX_WAKE_OP wakes a waiter of the second word when the old value compares", c > 0 && a == 1 && b == 1 && w[1] == 1);
     }
     EXPECT("mlock", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED && mlock(q, 4096) == 0);
     {
