@@ -983,6 +983,7 @@ fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, na
     if a >= IFN {
       return NE_NOSPC;
     }
+    wg_clear(&mut n, a);
     if_make(&mut n, a, IFK_WG, ns, name0, name1);
     return 0;
   }

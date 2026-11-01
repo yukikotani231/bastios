@@ -296,6 +296,7 @@ fn if_drop(n: &mut Net, i: u64)
   }
   let k = iw(n, i, IF_KIND);
   let p = iw(n, i, IF_PEER);
+  wg_clear(&mut n, i);
   iset(&mut n, i, IF_KIND, IFK_FREE);
   iset(&mut n, i, IF_FLAGS, 0);
   if k == IFK_VETH && 2 <= p && p < IFN && iw(n, p, IF_KIND) == IFK_VETH {

@@ -1,7 +1,7 @@
 // Generic netlink (NETLINK_GENERIC): the controller family "nlctrl", which
 // programs ask which family number a name has (CTRL_CMD_GETFAMILY, by name,
-// by number, or as a dump). Other families (WireGuard's, for one) are listed
-// in the tables below as they are added; a message for a number nothing has
+// by number, or as a dump), and "wireguard" (src/wgdev.bastio). Other
+// families are listed in the tables below as they are added; a message for a number nothing has
 // claimed is answered ENOENT, as Linux does.
 //
 // What is not done: multicast groups (a family has none to list), the
@@ -17,7 +17,9 @@ const CTRL_ATTR_FAMILY_NAME: u64 = 2;
 const CTRL_ATTR_VERSION: u64 = 3;
 const CTRL_ATTR_HDRSIZE: u64 = 4;
 const CTRL_ATTR_MAXATTR: u64 = 5;
-const GENL_FAMILIES: u64 = 1;             // nlctrl
+const GENL_ID_WG: u64 = 17;
+const WG_CMD_GET_DEVICE: u64 = 0;
+const GENL_FAMILIES: u64 = 2;             // nlctrl and wireguard
 const NE_NOENT: u64 = 2;
 
 /// The family number of family i.
@@ -30,22 +32,34 @@ fn gl_id(i: u64) -> u64
 /// The first and second eight bytes of family i's name, low byte first.
 fn gl_name0(i: u64) -> u64
 {
+  if i == 1 {
+    return 8241997880008796535;           // "wireguar", then "d"
+  }
   return 119238834744430;                 // "nlctrl"
 }
 
 fn gl_name1(i: u64) -> u64
 {
+  if i == 1 {
+    return 100;
+  }
   return 0;
 }
 
 fn gl_version(i: u64) -> u64
 {
+  if i == 1 {
+    return 1;
+  }
   return 2;
 }
 
 /// The largest attribute number family i understands.
 fn gl_maxattr(i: u64) -> u64
 {
+  if i == 1 {
+    return 8;
+  }
   return 10;
 }
 
@@ -144,10 +158,13 @@ fn genl_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
       let mut quiet = false;
       if kind < 16 {
         quiet = true;                     // NLMSG_NOOP, _ERROR, _DONE
-      } else if kind != GENL_ID_CTRL {
+      } else if kind != GENL_ID_CTRL && kind != GENL_ID_WG {
         e = NE_NOENT;                     // no such family
       } else if ml < 20 {
         e = NE_INVAL;
+      } else if kind == GENL_ID_WG {
+        e = wg_request(&mut n, b, at, end, fl, seq, port, admin);
+        quiet = e == 0 && rd8(b, at + 16) == WG_CMD_GET_DEVICE;
       } else if rd8(b, at + 16) != CTRL_CMD_GETFAMILY {
         e = NE_OPNOTSUPP;
       } else if fl / 256 % 4 == 3 {
