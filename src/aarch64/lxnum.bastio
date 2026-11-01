@@ -265,6 +265,8 @@ fn lx_number(n: u64) -> u64
   if n == 293 { return LX_RSEQ; }
   if n == 424 { return LX_PIDFD_SEND_SIGNAL; }
   if n == 425 { return LX_IO_URING_SETUP; }
+  if n == 426 { return LX_IO_URING_ENTER; }
+  if n == 427 { return LX_IO_URING_REGISTER; }
   if n == 428 { return LX_OPEN_TREE; }
   if n == 429 { return LX_MOVE_MOUNT; }
   if n == 430 { return LX_FSOPEN; }

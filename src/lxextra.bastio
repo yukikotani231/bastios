@@ -147,8 +147,8 @@ fn lx_extra_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
     let d = fd_look(k, pid, a);
     if d.kind == K_BAD || (d.kind == K_FILE && fget(k.fs.ftab, d.x, FD_MODE) / O_READ % 2 == 0) {
       r = EBADF;
-    } else if d.kind != K_FILE {
-      r = EINVAL;                           // nothing to read ahead from
+    } else if d.kind != K_FILE || ur_find(k, row_file(k.fs, d.x)) < URING_N {
+      r = EINVAL;                           // nothing to read ahead from (a ring is no file)
     }
   } else if n == LX_SYNC_FILE_RANGE {
     let d = fd_look(k, pid, a);
@@ -156,7 +156,8 @@ fn lx_extra_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
       r = EINVAL;
     } else if d.kind == K_BAD {
       r = EBADF;
-    } else if d.kind != K_FILE && d.kind != K_DIR && !(d.kind == K_DEV && is_loop(d.x)) {
+    } else if (d.kind != K_FILE && d.kind != K_DIR && !(d.kind == K_DEV && is_loop(d.x)))
+      || (d.kind == K_FILE && ur_find(k, row_file(k.fs, d.x)) < URING_N) {
       r = ESPIPE;                           // a pipe, socket or character device
     } else {
       sync_files(&mut k);
