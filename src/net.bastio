@@ -149,6 +149,7 @@ const IFK_LO: u64 = 1;
 const IFK_ETH: u64 = 2;                // the network card (slot 1)
 const IFK_VETH: u64 = 3;
 const IFK_BRIDGE: u64 = 4;
+const IFK_WG: u64 = 5;                // a WireGuard device
 
 const IF_ETH: u64 = 1;                 // the card's slot
 const IFF_UP: u64 = 1;                 // Linux's interface flags
