@@ -1,0 +1,347 @@
+// FICLONE, FICLONERANGE and FIDEDUPERANGE (the reflink ioctls).
+//
+// On Linux these make two files share blocks. Here a file's bytes are never
+// shared: a clone copies the range, so afterwards the two files hold equal
+// bytes that change independently, which is all a program can see through
+// the interface, and a deduplication only compares. What is not done as on
+// Linux: no space is saved, and a file on another file system is not told
+// apart (Linux says EXDEV).
+//
+// Nothing here keeps a reference into another file's data: each chunk is
+// read into the transfer buffer and written out again before the next one,
+// the source offset is read once and checked, and the destination's own
+// offset is put back afterwards (a clone does not move it).
+
+const FICLONE: u64 = 0x40049409;        // _IOW(0x94, 9, int): the argument is the source descriptor
+const FICLONERANGE: u64 = 0x4020940D;   // _IOW(0x94, 13, struct file_clone_range)
+const FIDEDUPERANGE: u64 = 0xC0189436;  // _IOWR(0x94, 54, struct file_dedupe_range)
+const RL_BLOCK: u64 = 4096;             // the block size ranges must be aligned to
+const RL_MAX: u64 = 0x100000;           // the most one deduplication compares per destination (Linux does 16 MiB; the caller sees the shorter count)
+const RL_DESTS: u64 = 64;               // the most destinations of one FIDEDUPERANGE
+const RL_SAME: u64 = 0;                 // FILE_DEDUPE_RANGE_SAME
+const RL_DIFFERS: u64 = 1;              // FILE_DEDUPE_RANGE_DIFFERS
+
+fn is_reflink_ioctl(req: u64) -> bool {
+  return req == FICLONE || req == FICLONERANGE || req == FIDEDUPERANGE;
+}
+
+/// Copies len bytes of file row s from soff to file row d at doff, a chunk
+/// at a time; 0, or -errno (the disk is full or read-only). The offsets and
+/// the length are already checked. Where the destination's position was is
+/// put back.
+fn rl_copy(k: &mut Kernel, s: u64, d: u64, soff: u64, doff: u64, len: u64) -> u64
+  requires kok(k) && s < FD_ROWS && d < FD_ROWS && soff < 0x8000000000000000 && doff < 0x8000000000000000 && len < 0x8000000000000000
+  ensures kok(k)
+{
+  let f = vfs_row_file(k.fs, s);
+  let pos = vfs_offset(k.fs, d);
+  let mut done = 0;
+  let mut err = 0;
+  while done < len && err == 0
+    invariant done <= len && len < 0x8000000000000000 && kok(k) && s < FD_ROWS && d < FD_ROWS
+  {
+    let step = smaller(XFER, len - done);
+    let got = vfs_read_at(&mut k.fs, f, sat_add(soff, done), step);
+    if got == NO_FD || got != step {
+      err = EIO;                            // the source got shorter, or went
+    } else if !vfs_seek(&mut k.fs, d, sat_add(doff, done)) {
+      err = ENOSPC;
+    } else if vfs_write(&mut k.fs, &mut k.mem, d, got) != got {
+      err = ENOSPC;
+    } else {
+      done = done + got;
+    }
+  }
+  vfs_seek(&mut k.fs, d, pos);
+  return err;
+}
+
+/// Whether the kernel may clone from descriptor row s to row d, as
+/// generic_file_rw_checks orders them: modes, then kinds. 0 if so, else
+/// -errno. sk and dk are the kinds of the two descriptors.
+fn rl_checks(k: &Kernel, sk: u64, s: u64, dk: u64, d: u64) -> u64
+  requires kok(k)
+{
+  if sk == K_BAD {
+    return EBADF;
+  }
+  if (sk == K_FILE && (s >= FD_ROWS || fget(k.fs.ftab, s, FD_MODE) / O_READ % 2 == 0)) || dk != K_FILE
+     || d >= FD_ROWS || fget(k.fs.ftab, d, FD_MODE) / O_WRITE % 2 == 0 || fget(k.fs.ftab, d, FD_MODE) / O_APPEND % 2 == 1 {
+    return EBADF;                           // not open for reading or for writing, or the destination appends
+  }
+  if sk == K_DIR {
+    return EISDIR;
+  }
+  if sk != K_FILE {
+    return EINVAL;
+  }
+  return 0;
+}
+
+/// FICLONE: the destination (descriptor fd) becomes a copy of the whole
+/// file srcfd names, whatever it held before.
+fn lx_ficlone(k: &mut Kernel, pid: u64, fd: u64, srcfd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if srcfd >= LXNFD {
+    return EBADF;
+  }
+  let sd = fd_look(k, pid, srcfd);
+  let dd = fd_look(k, pid, fd);
+  let bad = rl_checks(k, sd.kind, sd.x, dd.kind, dd.x);
+  if bad != 0 {
+    return bad;
+  }
+  if sd.x >= FD_ROWS || dd.x >= FD_ROWS {
+    return EBADF;
+  }
+  let sf = vfs_row_file(k.fs, sd.x);
+  if sf == vfs_row_file(k.fs, dd.x) {
+    return 0;                               // a file cloned onto itself stays as it is
+  }
+  let size = vfs_size(&mut k.fs, sf);
+  if size >= 0x8000000000000000 {
+    return EIO;
+  }
+  let r = rl_copy(&mut k, sd.x, dd.x, 0, 0, size);
+  if r != 0 {
+    return r;
+  }
+  if !vfs_truncate(&mut k.fs, &mut k.mem, dd.x, size) {
+    return ENOSPC;
+  }
+  return 0;
+}
+
+/// FICLONERANGE: struct file_clone_range {s64 src_fd; u64 src_offset;
+/// u64 src_length; u64 dest_offset} at arg. A length of 0 means to the end
+/// of the source. Offsets and length must be multiples of the block size
+/// unless the range ends at the source's end.
+fn lx_ficlonerange(k: &mut Kernel, pid: u64, fd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 32) != 32 {
+    return EFAULT;
+  }
+  let srcfd = get_u64(k.fs.xfer, 0);
+  let soff = get_u64(k.fs.xfer, 8);
+  let mut len = get_u64(k.fs.xfer, 16);
+  let doff = get_u64(k.fs.xfer, 24);
+  if srcfd >= LXNFD {
+    return EBADF;
+  }
+  let sd = fd_look(k, pid, srcfd);
+  let dd = fd_look(k, pid, fd);
+  let bad = rl_checks(k, sd.kind, sd.x, dd.kind, dd.x);
+  if bad != 0 {
+    return bad;
+  }
+  if sd.x >= FD_ROWS || dd.x >= FD_ROWS {
+    return EBADF;
+  }
+  if soff >= 0x8000000000000000 || doff >= 0x8000000000000000 || len >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let sf = vfs_row_file(k.fs, sd.x);
+  let size = vfs_size(&mut k.fs, sf);
+  if size >= 0x8000000000000000 {
+    return EIO;
+  }
+  if soff > size {
+    return EINVAL;
+  }
+  let mut to_end = len == 0;
+  if to_end {
+    len = size - soff;
+  }
+  if len > size - soff {
+    return EINVAL;                          // past the end of the source
+  }
+  to_end = soff + len == size;
+  if soff % RL_BLOCK != 0 || doff % RL_BLOCK != 0 || (len % RL_BLOCK != 0 && !to_end) {
+    return EINVAL;
+  }
+  if doff > 0x7FFFFFFFFFFFFFFF - len {
+    return EFBIG;
+  }
+  if len == 0 {
+    return 0;
+  }
+  if sf == vfs_row_file(k.fs, dd.x) {
+    if soff == doff {
+      return 0;
+    }
+    if soff < doff + len && doff < soff + len {
+      return EINVAL;                        // the two ranges overlap in one file
+    }
+  }
+  return rl_copy(&mut k, sd.x, dd.x, soff, doff, len);
+}
+
+/// Whether the clen bytes of file sf at soff equal those of file df at
+/// doff (both ranges are inside the files). A chunk of the source is held
+/// in a local while the destination's is read, never as a reference.
+fn rl_same(k: &mut Kernel, sf: u64, soff: u64, df: u64, doff: u64, clen: u64) -> bool
+  requires kok(k) && soff < 0x8000000000000000 && doff < 0x8000000000000000 && clen <= RL_MAX
+  ensures kok(k)
+{
+  let mut keep = alloc(XFER);
+  let mut done = 0;
+  let mut same = true;
+  while done < clen && same
+    invariant done <= clen && clen <= RL_MAX && kok(k) && len(keep) == XFER
+  {
+    let step = smaller(XFER, clen - done);
+    let a = vfs_read_at(&mut k.fs, sf, sat_add(soff, done), step);
+    if a != step {
+      same = false;
+    } else {
+      let mut i = 0;
+      while i < step
+        invariant i <= step && step <= XFER && len(keep) == XFER && blen(k.fs.xfer) >= XFER
+      {
+        keep = set(keep, i, cast[u64](bget(k.fs.xfer, i)));
+        i = i + 1;
+      }
+      let b = vfs_read_at(&mut k.fs, df, sat_add(doff, done), step);
+      if b != step {
+        same = false;
+      }
+      i = 0;
+      while i < step && same
+        invariant i <= step && step <= XFER && len(keep) == XFER && blen(k.fs.xfer) >= XFER
+      {
+        if get(keep, i) != cast[u64](bget(k.fs.xfer, i)) {
+          same = false;
+        }
+        i = i + 1;
+      }
+    }
+    done = done + step;
+  }
+  free(keep);
+  return same;
+}
+
+/// One destination of FIDEDUPERANGE: RL_SAME or RL_DIFFERS, or -errno for
+/// this destination alone. clen is what is compared (already cut to the
+/// source's end and to RL_MAX).
+fn rl_dedupe_one(k: &mut Kernel, pid: u64, s: u64, soff: u64, clen: u64, ssize: u64, destfd: u64, doff: u64) -> u64
+  requires kok(k) && pid < NPROC && s < FD_ROWS && soff < 0x8000000000000000 && clen <= RL_MAX
+  ensures kok(k)
+{
+  if destfd >= LXNFD {
+    return EBADF;
+  }
+  let dd = fd_look(k, pid, destfd);
+  if dd.kind == K_BAD || dd.kind == K_DIR || (dd.kind == K_FILE && (dd.x >= FD_ROWS || fget(k.fs.ftab, dd.x, FD_MODE) / O_WRITE % 2 == 0)) {
+    return EBADF;
+  }
+  if dd.kind != K_FILE || dd.x >= FD_ROWS || doff >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let sf = vfs_row_file(k.fs, s);
+  let df = vfs_row_file(k.fs, dd.x);
+  let dsize = vfs_size(&mut k.fs, df);
+  if dsize >= 0x8000000000000000 || doff > dsize || clen > dsize - doff {
+    return EINVAL;                          // the destination range is not inside the destination
+  }
+  if soff % RL_BLOCK != 0 || doff % RL_BLOCK != 0 || (clen % RL_BLOCK != 0 && !(soff + clen == ssize && doff + clen == dsize)) {
+    return EINVAL;
+  }
+  if sf == df && soff < doff + clen && doff < soff + clen {
+    return EINVAL;                          // the ranges overlap in one file
+  }
+  if rl_same(&mut k, sf, soff, df, doff, clen) {
+    return RL_SAME;
+  }
+  return RL_DIFFERS;
+}
+
+/// FIDEDUPERANGE: struct file_dedupe_range {u64 src_offset; u64 src_length;
+/// u16 dest_count; u16 reserved1; u32 reserved2; then dest_count of
+/// {s64 dest_fd; u64 dest_offset; u64 bytes_deduped; s32 status; u32
+/// reserved}} at arg. The call answers 0 and puts each destination's
+/// outcome in its entry. Nothing is shared here: SAME only says the bytes
+/// are equal.
+fn lx_fideduperange(k: &mut Kernel, pid: u64, fd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if arg >= 0x800000000000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 24) != 24 {
+    return EFAULT;
+  }
+  let soff = get_u64(k.fs.xfer, 0);
+  let len = get_u64(k.fs.xfer, 8);
+  let w = get_u64(k.fs.xfer, 16);
+  let count = w % 65536;
+  if w / 65536 != 0 || soff >= 0x8000000000000000 || len >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let sd = fd_look(k, pid, fd);
+  if sd.kind == K_DIR {
+    return EISDIR;
+  }
+  if sd.kind != K_FILE || sd.x >= FD_ROWS {
+    return EINVAL;
+  }
+  if fget(k.fs.ftab, sd.x, FD_MODE) / O_READ % 2 == 0 {
+    return EBADF;
+  }
+  if count > RL_DESTS {
+    return EINVAL;
+  }
+  let ssize = vfs_size(&mut k.fs, vfs_row_file(k.fs, sd.x));
+  if ssize >= 0x8000000000000000 {
+    return EIO;
+  }
+  let mut clen = smaller(len, RL_MAX);
+  if soff >= ssize {
+    clen = 0;
+  } else if clen > ssize - soff {
+    clen = ssize - soff;                    // the source ends first: compare what there is
+  }
+  let mut i = 0;
+  while i < count
+    invariant i <= count && count <= RL_DESTS && clen <= RL_MAX && kok(k) && pid < NPROC
+  {
+    let at = arg + 24 + 32 * i;
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, at, &mut k.fs.xfer, 32) != 32 {
+      return EFAULT;
+    }
+    let destfd = get_u64(k.fs.xfer, 0);
+    let doff = get_u64(k.fs.xfer, 8);
+    let res = get_u64(k.fs.xfer, 24);
+    if res / 4294967296 != 0 {
+      return EINVAL;                        // the reserved word must be 0
+    }
+    let st = rl_dedupe_one(&mut k, pid, sd.x, soff, clen, ssize, destfd, doff);
+    let mut bytes = 0;
+    if st == RL_SAME {
+      bytes = clen;
+    }
+    xfer_u64(&mut k.fs.xfer, 0, bytes);
+    xfer_u64(&mut k.fs.xfer, 8, st % 4294967296);
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, at + 16, k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    i = i + 1;
+  }
+  return 0;
+}
+
+/// The reflink ioctls on descriptor fd.
+fn lx_reflink_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == FICLONE {
+    return lx_ficlone(&mut k, pid, fd, arg);
+  }
+  if req == FICLONERANGE {
+    return lx_ficlonerange(&mut k, pid, fd, arg);
+  }
+  return lx_fideduperange(&mut k, pid, fd, arg);
+}

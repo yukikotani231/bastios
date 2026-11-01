@@ -430,6 +430,10 @@ t_file: read into a buffer that ends at an unmapped page returns what fits
 t_file: read into a read-only buffer is EFAULT
 t_file: read into an unmapped buffer is EFAULT
 t_file: read sees a store through a shared mapping
+t_file: open with O_DIRECT is accepted and F_GETFL reports it
+t_file: O_DIRECT can be cleared and set again with F_SETFL
+t_file: O_DIRECT does not disturb O_ASYNC or O_NONBLOCK
+t_file: an aligned O_DIRECT write and read come back
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
@@ -1275,6 +1279,28 @@ t_pty: ttyname of the slave
 t_pty: typing echoes back, CR read as LF
 t_pty: unlockpt lets it open
 t_pty: with both ends closed its /dev/pts entry is gone
+t_reflink: FICLONE does not move the destination's offset
+t_reflink: FICLONE from a bad descriptor is EBADF
+t_reflink: FICLONE from a directory is EISDIR
+t_reflink: FICLONE from a pipe is EINVAL
+t_reflink: FICLONE makes the destination a copy of the source
+t_reflink: FICLONE of a file onto itself is a no-op
+t_reflink: FICLONE onto a descriptor opened read-only is EBADF
+t_reflink: FICLONE onto an O_APPEND descriptor is EBADF
+t_reflink: FICLONERANGE copies a block-aligned range
+t_reflink: FICLONERANGE past the end of the source is EINVAL
+t_reflink: FICLONERANGE with a bad pointer is EFAULT
+t_reflink: FICLONERANGE with a length of 0 copies to the end of the source
+t_reflink: FICLONERANGE with an unaligned offset is EINVAL
+t_reflink: FICLONERANGE with overlapping ranges in one file is EINVAL
+t_reflink: FIDEDUPERANGE gives each destination its own status
+t_reflink: FIDEDUPERANGE says DIFFERS for ranges that differ
+t_reflink: FIDEDUPERANGE says SAME for equal ranges
+t_reflink: FIDEDUPERANGE with a reserved field set is EINVAL
+t_reflink: FIDEDUPERANGE with an unaligned offset is EINVAL for that destination
+t_reflink: FIDEDUPERANGE with no destinations does nothing
+t_reflink: an ordinary ioctl number is still ENOTTY on a file
+t_reflink: the copy changes independently of the source
 t_rootro: unshare a mount namespace
 t_rootro: bind the rootfs onto itself
 t_rootro: make the bind private

@@ -1127,6 +1127,7 @@ const F_UNLCK: u64 = 2;
 const LO_CLOEXEC: u64 = 0x80000;
 const LO_PATH: u64 = 0x200000;         // a handle for the name only: no permission needed
 const LO_NOFOLLOW: u64 = 0x20000;      // a symbolic link at the end is ELOOP
+const LO_DIRECT: u64 = 0x4000;        // O_DIRECT on x86-64: kept for F_GETFL, not enforced
 const LO_NOATIME: u64 = 0x40000;       // for the owner and root only
 
 const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24

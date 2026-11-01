@@ -1321,6 +1321,7 @@ fn lx_open_orphan(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     return ENFILE;
   }
   of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  of_set(&mut k.ofd, h, OF_ASYNC, flags / LO_DIRECT % 2 * 2);   // O_DIRECT is kept for F_GETFL, not enforced
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -1643,7 +1644,8 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
     vfs_close(&mut k.fs, &mut k.mem, row);
     return ENFILE;
   }
-  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // kept for F_GETFL only
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  of_set(&mut k.ofd, h, OF_ASYNC, flags / LO_DIRECT % 2 * 2);   // O_DIRECT is kept for F_GETFL, not enforced   // kept for F_GETFL only
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -1737,7 +1739,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if m / O_APPEND % 2 == 1 {
       fl = fl + LO_APPEND;
     }
-    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC;
+    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC + of_get(k.ofd, h, OF_ASYNC) / 2 % 2 * LO_DIRECT;
   }
   if cmd == F_SETFL && row < FD_ROWS {
     // O_APPEND takes effect; O_NONBLOCK is only reported back (a file never blocks).
@@ -1748,7 +1750,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     fset(&mut k.fs.ftab, row, FD_MODE, nm);
     of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
-    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2);
+    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2 + arg / LO_DIRECT % 2 * 2);
     return 0;
   }
   if cmd == F_GETFL {

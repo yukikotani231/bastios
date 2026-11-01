@@ -1246,6 +1246,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     let r = lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
     return r;
   }
+  if is_reflink_ioctl(req % 0x100000000) {
+    return lx_reflink_ioctl(&mut k, pid, fd, req % 0x100000000, arg);   // src/lxreflink.bastio
+  }
   if d.kind == K_SECCOMP && d.x < SC_N {
     return sc_ioctl(&mut k, pid, d.x, pipe_nonblock(k, pid, fd), req % 0x100000000, arg);   // src/lxseccomp.bastio
   }
