@@ -18,6 +18,9 @@ ALPINE_X86_PKGS ?= dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d5
 ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
 DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
 JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c1602330a80b5f2d2fcfa0aa97c4e
+# Xvfb (slieb/xvfb-run, Alpine 3.5) and xterm (jbonds/xterm, Alpine 3.6) for x11.txt.
+X11_SERVER_IMAGE := slieb/xvfb-run@sha256:295c246aa1da131a977d23eb20d6bfe58fed6728edc3a8c0cee13c6570547982
+X11_CLIENT_IMAGE := jbonds/xterm@sha256:bac17f91159dffccecd9d3c73bea2c16c6b2de0f98cb81803e157dabb401c2ec
 RUBY_IMAGE ?= library/ruby@sha256:730b265fc537e93f4ad335031ba95f8a9df88dc75bd9462968b92f368a115f6d
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191

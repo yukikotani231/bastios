@@ -109,6 +109,14 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   starts threads and writes machine code at run time, so this lane boots the
   guest with 1 GiB of memory, and the cases change the disk, so `run.py` runs
   them on a copy.
+- `x11.txt`: X11, from a disk (`x11disk.py`): the roots of two Alpine images,
+  one with the Xvfb X server (`X11_SERVER_IMAGE`) and one with xterm
+  (`X11_CLIENT_IMAGE`), unpacked in the guest and entered with chroot, sharing
+  the X socket through a bind mount. `bx11` (`user/bx11.c`), the program that
+  shows an X screen in a bwm window and sends the window's keys and pointer
+  events to X through the XTEST extension, runs against `fakebwm`, a stand-in
+  for bwm that takes the window and types into it: the cases check that xterm
+  draws into the window and receives what is typed.
 - `ruby.txt`: Ruby, from a disk (`rubydisk.py`): the root of the official
   `ruby:3.4-alpine` image (`RUBY_IMAGE`), unpacked in the guest and entered with
   `chroot`. The cases run `rbprogs/*.rb` (served at `HOSTURL/rbprogs/`; the
