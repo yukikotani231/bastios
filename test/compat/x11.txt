@@ -37,3 +37,12 @@ fakebwm: window 320x240 X11 :1
 fakebwm: pixels drawn
 fakebwm: typed
 got2 xyz
+
+== x11: a GTK 3 program, PuTTY, draws its window on the X screen
+# timeout 300
+$ bb mkdir -p /disk/g; bb tar -xf /disk/gtk.tar -C /disk/g; /disk/fakebwm 200 'x' >/disk/fb3.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/g -d 2 -g 800x600 -b /disk/bx11 /usr/bin/putty >/disk/pt.out 2>&1 & until bb grep -q typed /disk/fb3.out; do bb sleep 1; done; bb cat /disk/fb3.out; bb ps | bb grep -q '{gmain}' && echo alive || bb cat /disk/pt.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :2
+fakebwm: pixels drawn
+fakebwm: typed
+alive

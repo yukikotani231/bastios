@@ -1725,6 +1725,7 @@ x11: x11: Xvfb listens on a UNIX socket and keeps its screen in a file
 x11: x11: unpack the server and the client roots
 x11: x11: xterm draws on the X screen and takes the keys bwm sends through bx11
 x11: x11: x11start runs a program on a second display and a smaller screen
+x11: x11: a GTK 3 program, PuTTY, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
