@@ -28,3 +28,12 @@ fakebwm: pixels drawn
 fakebwm: typed
 bx11: window 1, screen 640x480
 got abc
+
+== x11: x11start runs a program on a second display and a smaller screen
+# timeout 300
+$ /disk/fakebwm 120 'xyz\r' >/disk/fb2.out 2>&1 & bb sleep 2; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/t -d 1 -g 320x240 -b /disk/bx11 xterm -e /bin/sh -c 'read v; echo got2 $v > /tmp/got2; sleep 1' >/disk/xs.out 2>&1; bb cat /disk/fb2.out; bb cat /disk/t/tmp/got2 || bb cat /disk/xs.out
+fakebwm: listening
+fakebwm: window 320x240 X11 :1
+fakebwm: pixels drawn
+fakebwm: typed
+got2 xyz

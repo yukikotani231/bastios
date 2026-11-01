@@ -1032,8 +1032,8 @@ build/compat/bx11: user/bx11.c user/bwmlib.h user/bwmproto.h | build/compat
 build/compat/fakebwm: test/compat/x11/fakebwm.c user/bwmlib.h user/bwmproto.h | build/compat
 	$(MUSLCC) -static-pie -O2 -Wno-unused-function -o $@ $<
 
-build/compat/x11.img: test/compat/x11disk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/bx11 build/compat/fakebwm
-	test/compat/x11disk.py $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm --cache $(ALPINE_CACHE)
+build/compat/x11.img: test/compat/x11/x11start.sh test/compat/x11disk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/bx11 build/compat/fakebwm
+	test/compat/x11disk.py $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
 
 # Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
 # Java disk as /opt/jdtls.
