@@ -18,14 +18,21 @@
 // cannot change what is hashed by writing the memory it sent. That is the
 // property the in-place cipher bugs of Linux's algif_* modules lacked.
 //
+// AEADs (type "aead": gcm(aes), rfc7539(chacha20,poly1305)) are given their
+// ALG_SET_OP, ALG_SET_IV and ALG_SET_AEAD_ASSOCLEN in the control messages of
+// sendmsg; the message is the associated data and the text (or ciphertext and
+// tag), and the read gives the associated data again, then the result, all of
+// it or none. A wrong tag is EBADMSG and no text comes out.
+//
 // ALG_N sockets at most, each with ALG_BUF bytes of message. Not done:
-// ciphers and AEADs (skcipher, aead), the request cmsgs (ALG_SET_OP, ...
-// are ignored on a hash), sendfile and splice into the socket, and md5 and
-// sha1, which the libraries here do not have. An hmac key may be ALG_KEYMAX
+// skcipher, sendfile and splice into the socket, and md5 and sha1, which the
+// libraries here do not have. An hmac key may be ALG_KEYMAX
 // bytes.
 
 import "core/sha256.bastio";
 import "core/sha512.bastio";
+import "core/aesgcm.bastio";
+import "core/chacha20poly1305.bastio";
 
 const SOL_ALG: u64 = 279;
 const ALG_SET_KEY: u64 = 1;
@@ -38,12 +45,25 @@ const ALG_KEYSET: u64 = 3;              // 1: a key was set
 const ALG_KEY: u64 = 4;                 // the key, ALG_KEYW words of 8 bytes
 const ALG_KEYW: u64 = 16;
 const ALG_MLEN: u64 = 20;               // bytes of message so far
+const ALG_OP: u64 = 21;                 // an AEAD: 0 no operation set, 1 decrypt, 2 encrypt (ALG_SET_OP + 1)
+const ALG_ASSOC: u64 = 22;              // an AEAD: the length of the associated data
+const ALG_IVSET: u64 = 23;              // an AEAD: 1 when ALG_SET_IV was given
+const ALG_IV: u64 = 24;                 // an AEAD: the 12-byte IV, two words
+const ALG_SET_IV: u64 = 2;
+const ALG_SET_OP: u64 = 3;
+const ALG_SET_AEAD_ASSOCLEN: u64 = 4;
+const ALG_SET_AEAD_AUTHSIZE: u64 = 5;
+const ALG_TAG: u64 = 16;
+const ALG_MSGHDR: u64 = 56;             // struct msghdr (MSGHDR in src/lxmsg.bastio)
+const EBADMSG: u64 = 18446744073709551542;   // 2^64 - 74
 
 const ALG_SHA256: u64 = 1;
 const ALG_SHA384: u64 = 2;
 const ALG_SHA512: u64 = 3;
 const ALG_HMAC256: u64 = 4;
 const ALG_HMAC384: u64 = 5;
+const ALG_GCM: u64 = 6;                 // aead: gcm(aes); the algorithms from here on are AEADs
+const ALG_CHACHA: u64 = 7;              // aead: rfc7539(chacha20,poly1305)
 
 fn algr(s: u64, f: u64) -> u64
   requires s < ALG_N && f < ALG_W
@@ -205,11 +225,17 @@ fn alg_by_name(x: &Bytes) -> u64
   if xfer_is(x, 24, 24 + n, "hmac(sha384)") {
     return ALG_HMAC384;
   }
+  if xfer_is(x, 24, 24 + n, "gcm(aes)") {
+    return ALG_GCM;
+  }
+  if xfer_is(x, 24, 24 + n, "rfc7539(chacha20,poly1305)") {
+    return ALG_CHACHA;
+  }
   return 0;
 }
 
-/// bind(fd, struct sockaddr_alg): the type must be "hash" and the name one
-/// of the algorithms above.
+/// bind(fd, struct sockaddr_alg): the type "hash" with one of the hashes, or
+/// "aead" with gcm(aes) or rfc7539(chacha20,poly1305).
 fn alg_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -229,12 +255,14 @@ fn alg_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   if rd16(k.fs.xfer, 0) != AF_ALG {
     return EINVAL;
   }
-  if !xfer_is(k.fs.xfer, 2, 6, "hash") || bget(k.fs.xfer, 6) != 0 {
+  let hash = xfer_is(k.fs.xfer, 2, 6, "hash") && bget(k.fs.xfer, 6) == 0;
+  let aead = xfer_is(k.fs.xfer, 2, 6, "aead") && bget(k.fs.xfer, 6) == 0;
+  if !hash && !aead {
     return ENOENT;
   }
   let id = alg_by_name(k.fs.xfer);
-  if id == 0 {
-    return ENOENT;
+  if id == 0 || (hash && id >= ALG_GCM) || (aead && id < ALG_GCM) {
+    return ENOENT;                          // no such algorithm of that type
   }
   alg_set(&mut k, s, ALG_ID, id);
   alg_set(&mut k, s, ALG_ST, 2);
@@ -243,7 +271,18 @@ fn alg_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
 
 /// Whether algorithm id is an hmac.
 fn alg_keyed(id: u64) -> bool {
-  return id == ALG_HMAC256 || id == ALG_HMAC384;
+  return id == ALG_HMAC256 || id == ALG_HMAC384 || id >= ALG_GCM;
+}
+
+/// Whether n bytes is a key length algorithm id takes.
+fn alg_keylen_ok(id: u64, n: u64) -> bool {
+  if id == ALG_GCM {
+    return n == 16 || n == 32;
+  }
+  if id == ALG_CHACHA {
+    return n == 32;
+  }
+  return n <= ALG_KEYMAX;
 }
 
 /// setsockopt(fd, SOL_ALG, ALG_SET_KEY, key, n) on a bound socket.
@@ -255,14 +294,23 @@ fn alg_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: 
   if s >= ALG_N {
     return ENOTSOCK;
   }
-  if level % 4294967296 != SOL_ALG || name != ALG_SET_KEY || alg_get(k, s, ALG_ST) != 2 {
+  if level % 4294967296 != SOL_ALG || alg_get(k, s, ALG_ST) != 2 {
     return ENOPROTOOPT;
   }
   let n = len % 4294967296;
+  if name == ALG_SET_AEAD_AUTHSIZE && alg_get(k, s, ALG_ID) >= ALG_GCM {
+    if n != ALG_TAG {
+      return EINVAL;                        // only the full 16-byte tag
+    }
+    return 0;
+  }
+  if name != ALG_SET_KEY {
+    return ENOPROTOOPT;
+  }
   if !alg_keyed(alg_get(k, s, ALG_ID)) {
     return ENOSYS;                          // a hash with no key: as Linux says
   }
-  if n > ALG_KEYMAX {
+  if n > ALG_KEYMAX || !alg_keylen_ok(alg_get(k, s, ALG_ID), n) {
     return EINVAL;
   }
   lx_fill(&mut k, 0, ALG_KEYMAX);
@@ -411,6 +459,9 @@ fn alg_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
   if n == 0 {
     return 0;
   }
+  if alg_get(k, s, ALG_ID) >= ALG_GCM {
+    return alg_aead_recv(&mut k, pid, s, buf, n);
+  }
   let mlen = smaller(alg_get(k, s, ALG_MLEN), ALG_BUF);
   let msg = bytes_slice(k.algb, s * ALG_BUF, s * ALG_BUF + mlen);
   let id = alg_get(k, s, ALG_ID);
@@ -426,4 +477,233 @@ fn alg_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
   }
   alg_set(&mut k, s, ALG_MLEN, 0);
   return got;
+}
+
+/// The 12-byte IV of slot s.
+fn alg_iv_bytes(k: &Kernel, s: u64) -> Bytes
+  requires kok(k) && s < ALG_N
+  ensures blen(result) == 12
+{
+  let mut iv = balloc(12);
+  let lo = alg_get(k, s, ALG_IV);
+  let hi = alg_get(k, s, ALG_IV + 1);
+  let mut i = 0;
+  while i < 12
+    invariant i <= 12 && blen(iv) == 12
+  {
+    if i < 8 {
+      bset(&mut iv, i, cast[u8](lo / (1 << (8 * i)) % 256));
+    } else {
+      bset(&mut iv, i, cast[u8](hi / (1 << (8 * (i - 8))) % 256));
+    }
+    i = i + 1;
+  }
+  return iv;
+}
+
+/// Seals (enc) or opens body under the AEAD id; None if the key or IV does
+/// not fit it or, opening, the tag is wrong.
+fn alg_aead(id: u64, enc: bool, key: &Bytes, iv: &Bytes, aad: &Bytes, body: &Bytes) -> Option[Bytes] {
+  if blen(iv) != 12 || blen(body) >= 274877906944 || blen(aad) >= 274877906944 {
+    return Option[Bytes]::None;
+  }
+  if id == ALG_GCM && (blen(key) == 16 || blen(key) == 32) {
+    if enc {
+      return Option[Bytes]::Some(gcm_seal(key, iv, aad, body));
+    }
+    return gcm_open(key, iv, aad, body);
+  }
+  if id == ALG_CHACHA && blen(key) == 32 {
+    if enc {
+      return Option[Bytes]::Some(aead_seal(key, iv, aad, body));
+    }
+    return aead_open(key, iv, aad, body);
+  }
+  return Option[Bytes]::None;
+}
+
+/// recv on an accepted AEAD socket. The message sent is the associated data
+/// and then the text (encrypting) or the ciphertext and its tag
+/// (decrypting). The result is the associated data again and then the
+/// ciphertext and tag, or the text; the buffer must hold all of it. A tag
+/// that does not match is EBADMSG and nothing of the text is given. The
+/// message is used up either way.
+fn alg_aead_recv(k: &mut Kernel, pid: u64, s: u64, buf: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && s < ALG_N
+  ensures kok(k)
+{
+  let op = alg_get(k, s, ALG_OP);
+  if op == 0 || alg_get(k, s, ALG_IVSET) != 1 {
+    return EINVAL;
+  }
+  let mlen = smaller(alg_get(k, s, ALG_MLEN), ALG_BUF);
+  let assoc = alg_get(k, s, ALG_ASSOC);
+  let enc = op == 2;
+  if assoc > mlen || (!enc && mlen - assoc < ALG_TAG) {
+    return EINVAL;
+  }
+  let mut outlen = mlen + ALG_TAG;
+  if !enc {
+    if mlen < ALG_TAG {
+      return EINVAL;
+    }
+    outlen = mlen - ALG_TAG;
+  }
+  if n < outlen {
+    return EINVAL;                          // the whole result or none
+  }
+  let msg = bytes_slice(k.algb, s * ALG_BUF, s * ALG_BUF + mlen);
+  let aad = bytes_slice(msg, 0, assoc);
+  let body = bytes_slice(msg, assoc, mlen);
+  let key = alg_key_bytes(k, s);
+  let iv = alg_iv_bytes(k, s);
+  let res = alg_aead(alg_get(k, s, ALG_ID), enc, key, iv, aad, body);
+  bfree(body);
+  bfree(msg);
+  bfree(iv);
+  bfree(key);
+  alg_set(&mut k, s, ALG_MLEN, 0);          // used up, with its operation
+  alg_set(&mut k, s, ALG_OP, 0);
+  alg_set(&mut k, s, ALG_IVSET, 0);
+  alg_set(&mut k, s, ALG_ASSOC, 0);
+  match res {
+    Option::None => {
+      bfree(aad);
+      return EBADMSG;
+    },
+    Option::Some(out) => {
+      if blen(out) > ALG_BUF + ALG_TAG || assoc > ALG_BUF {
+        bfree(out);
+        bfree(aad);
+        return EINVAL;                      // cannot happen: out is the message and a tag, at most
+      }
+      let total = assoc + blen(out);
+      let mut full = balloc(total);
+      bytes_copy_span(&mut full, 0, aad, 0, assoc);
+      bytes_copy_span(&mut full, assoc, out, 0, blen(out));
+      let r = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, full, total);
+      bfree(full);
+      bfree(out);
+      bfree(aad);
+      if r != total {
+        return EFAULT;
+      }
+      return total;
+    },
+  }
+}
+
+/// The control messages of a sendmsg on an AEAD socket: ALG_SET_OP,
+/// ALG_SET_IV (12 bytes) and ALG_SET_AEAD_ASSOCLEN.
+fn alg_cmsgs(k: &mut Kernel, pid: u64, s: u64, ctl: u64, clen: u64) -> u64
+  requires kok(k) && pid < NPROC && s < ALG_N
+  ensures kok(k)
+{
+  if ctl > 0xFFFFFFFFFFFF0000 || clen > 4096 {
+    return EINVAL;
+  }
+  let mut pos = 0;
+  let mut i = 0;
+  while i < 16 && pos + 16 <= clen
+    invariant i <= 16 && pos <= clen && clen <= 4096 && ctl <= 0xFFFFFFFFFFFF0000 && s < ALG_N && kok(k)
+  {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + pos, &mut k.fs.xfer, 16) != 16 {
+      return EFAULT;
+    }
+    let len = get_u64(k.fs.xfer, 0);
+    let lt = get_u64(k.fs.xfer, 8);
+    if len < 16 || len > clen - pos {
+      return EINVAL;
+    }
+    if lt % 4294967296 == SOL_ALG {
+      let t = lt / 4294967296;
+      if len < 20 {
+        return EINVAL;
+      }
+      lx_fill(&mut k, 0, 16);
+      if t == ALG_SET_IV {
+        if len < 32 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + pos + 16, &mut k.fs.xfer, 16) != 16 {
+          return EINVAL;
+        }
+        if rd32(k.fs.xfer, 0) != 12 {
+          return EINVAL;
+        }
+        alg_set(&mut k, s, ALG_IV, rd64(k.fs.xfer, 4));
+        alg_set(&mut k, s, ALG_IV + 1, rd32(k.fs.xfer, 12));
+        alg_set(&mut k, s, ALG_IVSET, 1);
+      } else {
+        if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + pos + 16, &mut k.fs.xfer, 4) != 4 {
+          return EFAULT;
+        }
+        let v = rd32(k.fs.xfer, 0);
+        if t == ALG_SET_OP {
+          if v > 1 {
+            return EINVAL;
+          }
+          alg_set(&mut k, s, ALG_OP, v + 1);
+        } else if t == ALG_SET_AEAD_ASSOCLEN {
+          alg_set(&mut k, s, ALG_ASSOC, v);
+        } else {
+          return EINVAL;
+        }
+      }
+    }
+    pos = smaller(pos + (len + 7) / 8 * 8, clen);   // the last message may be unpadded
+    i = i + 1;
+  }
+  return 0;
+}
+
+/// sendmsg on an accepted socket: the control messages of an AEAD, then
+/// each buffer in turn joins the message.
+fn alg_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = alg_of(k, pid, fd);
+  if s >= ALG_N {
+    return ENOTSOCK;
+  }
+  if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, msg, &mut k.fs.xfer, ALG_MSGHDR) != ALG_MSGHDR {
+    return EFAULT;
+  }
+  let iov = get_u64(k.fs.xfer, 16);
+  let cnt = get_u64(k.fs.xfer, 24);
+  let ctl = get_u64(k.fs.xfer, 32);
+  let clen = get_u64(k.fs.xfer, 40);
+  if cnt > 1024 {
+    return EMSGSIZE;
+  }
+  if alg_get(k, s, ALG_ST) != 3 {
+    return EOPNOTSUPP;
+  }
+  if ctl != 0 && alg_get(k, s, ALG_ID) >= ALG_GCM {
+    let r = alg_cmsgs(&mut k, pid, s, ctl, clen);
+    if r != 0 {
+      return r;
+    }
+  }
+  let mut done = 0;
+  let mut i = 0;
+  while i < cnt
+    invariant i <= cnt && cnt <= 1024 && s < ALG_N && kok(k)
+  {
+    if !iov_at(&mut k, pid, iov, i) {
+      return EFAULT;
+    }
+    let base = get_u64(k.fs.xfer, 0);
+    let len = get_u64(k.fs.xfer, 8);
+    if len > 0 {
+      let r = alg_send(&mut k, pid, fd, base, len);
+      if r > 0x7FFFFFFFFFFFFFFF {
+        if done == 0 {
+          return r;
+        }
+        return done;
+      }
+      done = sat_add(done, r);
+    }
+    i = i + 1;
+  }
+  return done;
 }
