@@ -2108,3 +2108,4 @@ t_wgcfg: the private key is shown clamped
 t_wgcfg: the public key is X25519 of the private key (RFC 7748)
 t_wgcfg: two allowed IPs
 t_wgcfg: two peers
+t_mem: MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again
