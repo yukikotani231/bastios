@@ -560,6 +560,15 @@ def run_program(env, prog, timeout):
     """Runs /disk/PROG, rerunning past hangs. Returns its checks, in order:
     dicts with name, result (pass / fail / hang / crash), detail, syscalls."""
     checks, skip, rounds = [], 0, 0
+    # A program that has to wait for real time to pass says so in its first
+    # lines: "compat-timeout: SECONDS".
+    try:
+        for line in open(os.path.join(HERE, "progs", prog + ".c")).readlines()[:3]:
+            m = re.search(r"compat-timeout:\s*(\d+)", line)
+            if m:
+                timeout = max(timeout, int(m.group(1)))
+    except OSError:
+        pass
     while rounds < 20:
         rounds += 1
         pre = f"COMPAT_SKIP={skip} " if skip else ""

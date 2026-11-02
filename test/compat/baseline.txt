@@ -2166,3 +2166,25 @@ t_wgtun: the child stops
 t_wgtun: the child reports
 t_wgtun: the child took each packet once, and none that was not allowed
 t_wgtun: its last handshake time is set once a packet came
+t_wgtimer: sockets
+t_wgtimer: a child in a new network namespace
+t_wgtimer: the child is ready
+t_wgtimer: a veth pair, one end in the child's namespace
+t_wgtimer: the parent's end has an address
+t_wgtimer: a device with an address
+t_wgtimer: go
+t_wgtimer: keys are traded
+t_wgtimer: the child is set up
+t_wgtimer: the peer is set up with the relay as its endpoint
+t_wgtimer: a client socket
+t_wgtimer: the tunnel comes up
+t_wgtimer: a last handshake time
+t_wgtimer: a keep-alive interval of 1 s
+t_wgtimer: keep-alives were sent on time
+t_wgtimer: the session is renewed after 120 s
+t_wgtimer: and carries traffic
+t_wgtimer: the keep-alive is switched off
+t_wgtimer: the first packet after 180 s without a renewal is not carried
+t_wgtimer: a new handshake follows and the tunnel works again
+t_wgtimer: with a later last handshake time
+t_wgtimer: the child stops

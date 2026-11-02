@@ -27,6 +27,8 @@ import "core/wgnoise.bastio";
 
 const REKEY_TICKS: u64 = 1000;            // 10 s (Linux: 5 s)
 const HS_TRIES: u64 = 9;
+const REKEY_AFTER: u64 = 12000;          // 120 s: the initiator starts a new handshake when it sends
+const REJECT_AFTER: u64 = 18000;         // 180 s: a session older than this carries nothing
 const WG_ENT: u64 = 40;
 const MSG_INIT: u64 = 148;
 const MSG_RESP: u64 = 92;
@@ -137,7 +139,7 @@ fn wg_hs_wipe(n: &mut Net, p: u64)
 
 /// Sets peer p's session from keys (send || receive), our index lidx and
 /// the peer's ridx.
-fn wg_session(n: &mut Net, p: u64, keys: &Bytes, lidx: u64, ridx: u64, ticks: u64)
+fn wg_session(n: &mut Net, p: u64, keys: &Bytes, lidx: u64, ridx: u64, ticks: u64, init: u64)
   requires net_ok(n) && p < WGPN && blen(keys) == 64
   ensures net_ok(n)
 {
@@ -146,7 +148,9 @@ fn wg_session(n: &mut Net, p: u64, keys: &Bytes, lidx: u64, ridx: u64, ticks: u6
   wps(&mut n, p, WGP_LIDX, lidx);
   wps(&mut n, p, WGP_RIDX, ridx);
   wps(&mut n, p, WGP_SCTR, 0);
-  wps(&mut n, p, WGP_SBORN, ticks);
+  wps(&mut n, p, WGP_SBORN, n.now);          // the stack's clock, which the timers read
+  wps(&mut n, p, WGP_ISINIT, init);
+  wps(&mut n, p, WGP_LTX, n.now);
   wps(&mut n, p, WGP_SVALID, 1);
   wps(&mut n, p, WGP_CONF, 0);
   wps(&mut n, p, WGP_RMAX, 0);
@@ -243,7 +247,7 @@ fn wg_respond(n: &mut Net, i: u64, p: u64, who: &Bytes, st: &mut Bytes, msg: &By
       wps(&mut n, p, WGP_TAI_HI, load_be64(who, 32));
       wps(&mut n, p, WGP_TAI_LO, cast[u64](load_be32(who, 40)));
       wg_set_endpoint(&mut n, p, src_ip, src_port);
-      wg_session(&mut n, p, keys, idx, ridx, ticks);
+      wg_session(&mut n, p, keys, idx, ridx, ticks, 0);
       if blen(full) == MSG_RESP {
         wg_send_peer(&mut n, i, p, full, MSG_RESP);
       }
@@ -322,7 +326,7 @@ fn wg_on_resp(n: &mut Net, i: u64, msg: &Bytes, wall: u64, ticks: u64)
       let body = bytes_slice(msg, 0, 60);
       let mut keys = balloc(64);
       if wgn_consume_response(&mut st, epriv, spriv, psk, body, &mut keys) {
-        wg_session(&mut n, p, keys, wpw(n, p, WGP_HIDX), cast[u64](load_le32(msg, 4)), ticks);
+        wg_session(&mut n, p, keys, wpw(n, p, WGP_HIDX), cast[u64](load_le32(msg, 4)), ticks, 1);
         wps(&mut n, p, WGP_LHS, wall);
         wps(&mut n, p, WGP_CONF, 1);
         wg_hs_wipe(&mut n, p);
@@ -346,6 +350,34 @@ fn wg_on_resp(n: &mut Net, i: u64, msg: &Bytes, wall: u64, ticks: u64)
 const WG_MTU: u64 = 1420;
 const SESSION_MAX: u64 = 1152921504606846976;    // 2^60 packets: well short of the protocol's limit
 
+/// Is peer p's session set and younger than REJECT_AFTER?
+fn wg_fresh(n: &Net, p: u64) -> bool
+  requires net_ok(n) && p < WGPN
+{
+  let born = wpw(n, p, WGP_SBORN);
+  return wpw(n, p, WGP_SVALID) == 1 && n.now >= born && n.now - born < REJECT_AFTER;
+}
+
+/// Ends peer p's session: its keys and counters are zeroed. A peer with a
+/// persistent keep-alive then asks for a new handshake.
+fn wg_session_end(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let mut k = 0;
+  while k < 8
+    invariant k <= 8 && net_ok(n)
+  {
+    wps(&mut n, p, WGP_SK + k, 0);
+    k = k + 1;
+  }
+  wps(&mut n, p, WGP_SCTR, 0);
+  wps(&mut n, p, WGP_SVALID, 0);
+  if wpw(n, p, WGP_KEEP) != 0 {
+    wps(&mut n, p, WGP_WANT, 1);
+  }
+}
+
 /// Encrypts plain (a multiple of 16 bytes, at most WG_MTU rounded up) with
 /// peer p's sending key and the next counter, and sends it to the peer's
 /// endpoint as a transport message. The device is marked busy meanwhile, so
@@ -356,7 +388,7 @@ fn wg_seal_send(n: &mut Net, i: u64, p: u64, plain: &Bytes) -> bool
   ensures net_ok(n)
 {
   let ctr = wpw(n, p, WGP_SCTR);
-  if wpw(n, p, WGP_SVALID) != 1 || ctr >= SESSION_MAX {
+  if !wg_fresh(n, p) || ctr >= SESSION_MAX {
     return false;
   }
   let key = wg_pbytes(n, p, WGP_SK, 4);
@@ -374,6 +406,11 @@ fn wg_seal_send(n: &mut Net, i: u64, p: u64, plain: &Bytes) -> bool
   let sent = wg_send_out(&mut n, i, p, msg, blen(msg));
   wds(&mut n, i, WGD_BUSY, 0);
   if sent {
+    wps(&mut n, p, WGP_LTX, n.now);
+    let born = wpw(n, p, WGP_SBORN);
+    if wpw(n, p, WGP_ISINIT) == 1 && wpw(n, p, WGP_HS) == 0 && n.now >= born && n.now - born >= REKEY_AFTER {
+      wps(&mut n, p, WGP_WANT, 1);       // a session this old is renewed by the side that started it
+    }
     let tx = wpw(n, p, WGP_TX);
     let len = blen(msg);
     if tx <= 18446744073709551615 - len {
@@ -409,7 +446,7 @@ fn wg_tx(n: &mut Net, i: u64, dst: u64, flen: u64) -> bool
   if p >= WGPN {
     return false;
   }
-  if wpw(n, p, WGP_SVALID) != 1 {
+  if !wg_fresh(n, p) {
     if wpw(n, p, WGP_HS) == 0 {
       wps(&mut n, p, WGP_WANT, 1);
     } else if wpw(n, p, WGP_TRIES) >= HS_TRIES {
@@ -548,7 +585,7 @@ fn wg_on_data(n: &mut Net, i: u64, buf: &Bytes, len: u64, src_ip: u64, src_port:
     return;
   }
   let ctr = load_le64(buf, 8);
-  if ctr >= SESSION_MAX || !wg_win_ok(n, p, ctr) {
+  if !wg_fresh(n, p) || ctr >= SESSION_MAX || !wg_win_ok(n, p, ctr) {
     return;
   }
   let key = wg_pbytes(n, p, WGP_RK, 4);
@@ -627,6 +664,49 @@ fn wg_wants(n: &Net, p: u64, ticks: u64) -> bool
     && sent <= 18446744073709551615 - REKEY_TICKS && ticks >= sent + REKEY_TICKS;
 }
 
+/// Does peer p need its timers run: a session to end, or a keep-alive to send?
+fn wg_timer_due(n: &Net, p: u64) -> bool
+  requires net_ok(n) && p < WGPN
+{
+  let owner = wpw(n, p, WGP_OWNER);
+  if owner == 0 || owner > IFN || wpw(n, p, WGP_SVALID) != 1 {
+    return false;
+  }
+  if !wg_fresh(n, p) {
+    return true;
+  }
+  let keep = wpw(n, p, WGP_KEEP);
+  let last = wpw(n, p, WGP_LTX);
+  return keep != 0 && keep <= 65535 && n.now >= last && n.now - last >= keep * 100;
+}
+
+/// Runs the timers of every peer: a session past REJECT_AFTER ends, and a
+/// persistent keep-alive that is due is sent.
+fn wg_timers(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wg_timer_due(n, p) {
+      if !wg_fresh(n, p) {
+        wg_session_end(&mut n, p);
+      } else {
+        let owner = wpw(n, p, WGP_OWNER);
+        if owner >= 1 && owner <= IFN {
+          let empty = balloc(0);
+          wg_seal_send(&mut n, owner - 1, p, empty);
+          bfree(empty);
+          wps(&mut n, p, WGP_LTX, n.now);    // also when it could not go: try again after a full interval
+        }
+      }
+    }
+    p = p + 1;
+  }
+}
+
 /// Whether device i has a socket that is open and bound.
 fn wg_live(n: &Net, i: u64) -> bool
   requires net_ok(n) && i < IFN
@@ -653,7 +733,7 @@ fn wg_due(n: &Net, ticks: u64) -> bool
   while p < WGPN
     invariant p <= WGPN && net_ok(n)
   {
-    if wg_wants(n, p, ticks) {
+    if wg_wants(n, p, ticks) || wg_timer_due(n, p) {
       return true;
     }
     p = p + 1;
@@ -716,6 +796,7 @@ fn wg_run(n: &mut Net, wall: u64, ticks: u64, ent: &Bytes)
   requires net_ok(n) && blen(ent) == WG_ENT
   ensures net_ok(n)
 {
+  wg_timers(&mut n);
   let mut p = 0;
   while p < WGPN
     invariant p <= WGPN && net_ok(n) && blen(ent) == WG_ENT
