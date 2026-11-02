@@ -46,3 +46,12 @@ fakebwm: window 800x600 X11 :2
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a Qt 5 program, MediaInfo, draws its window on the X screen
+# timeout 300
+$ bb mkdir -p /disk/q; bb tar -xf /disk/qt.tar -C /disk/q; /disk/fakebwm 200 'x' >/disk/fb4.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/q -d 3 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/mediainfo-gui >/disk/mi.out 2>&1 & until bb grep -q typed /disk/fb4.out; do bb sleep 1; done; bb cat /disk/fb4.out; bb ps | bb grep -q '{QXcbEventQueue}' && echo alive || bb cat /disk/mi.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :3
+fakebwm: pixels drawn
+fakebwm: typed
+alive
