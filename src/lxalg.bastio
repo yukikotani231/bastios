@@ -1,0 +1,429 @@
+// AF_ALG: the kernel's hash functions for a program, as Linux gives them.
+//
+//   fd = socket(AF_ALG, SOCK_SEQPACKET, 0);
+//   bind(fd, {AF_ALG, "hash", 0, 0, "sha256"});    // or sha384, sha512,
+//                                                  // hmac(sha256), hmac(sha384)
+//   setsockopt(fd, SOL_ALG, ALG_SET_KEY, key, n);  // hmac only
+//   op = accept(fd, 0, 0);
+//   send(op, data, n, MSG_MORE); ...               // the message, in pieces
+//   read(op, digest, size);                        // the digest; a new message begins
+//
+// The socket that is bound holds the algorithm and the key. An accepted
+// socket has a copy of both and the data sent to it so far. Nothing is
+// hashed until the digest is read: then the whole message is hashed from a
+// copy of the bytes the program sent. Nothing a program gives the kernel is
+// ever kept as a reference: the data are copied in at send and the digest is
+// copied out at read, so no page of a program (or of a file it splices or
+// sends) is used by the hash function after the call returns, and a program
+// cannot change what is hashed by writing the memory it sent. That is the
+// property the in-place cipher bugs of Linux's algif_* modules lacked.
+//
+// ALG_N sockets at most, each with ALG_BUF bytes of message. Not done:
+// ciphers and AEADs (skcipher, aead), the request cmsgs (ALG_SET_OP, ...
+// are ignored on a hash), sendfile and splice into the socket, and md5 and
+// sha1, which the libraries here do not have. An hmac key may be ALG_KEYMAX
+// bytes.
+
+import "core/sha256.bastio";
+import "core/sha512.bastio";
+
+const SOL_ALG: u64 = 279;
+const ALG_SET_KEY: u64 = 1;
+const ENOKEY: u64 = 18446744073709551490;   // 2^64 - 126
+
+const ALG_ST: u64 = 0;                  // 0 free, 1 made, 2 bound, 3 accepted
+const ALG_ID: u64 = 1;                  // the algorithm: ALG_SHA256 ...
+const ALG_KLEN: u64 = 2;                // key length
+const ALG_KEYSET: u64 = 3;              // 1: a key was set
+const ALG_KEY: u64 = 4;                 // the key, ALG_KEYW words of 8 bytes
+const ALG_KEYW: u64 = 16;
+const ALG_MLEN: u64 = 20;               // bytes of message so far
+
+const ALG_SHA256: u64 = 1;
+const ALG_SHA384: u64 = 2;
+const ALG_SHA512: u64 = 3;
+const ALG_HMAC256: u64 = 4;
+const ALG_HMAC384: u64 = 5;
+
+fn algr(s: u64, f: u64) -> u64
+  requires s < ALG_N && f < ALG_W
+  ensures result < SYS_LEN
+{
+  return SYS_ALG + s * ALG_W + f;
+}
+
+fn alg_get(k: &Kernel, s: u64, f: u64) -> u64
+  requires kok(k) && s < ALG_N && f < ALG_W
+{
+  return get(k.sys, algr(s, f));
+}
+
+fn alg_set(k: &mut Kernel, s: u64, f: u64, v: u64)
+  requires kok(k) && s < ALG_N && f < ALG_W
+  ensures kok(k)
+{
+  k.sys = set(k.sys, algr(s, f), v);
+}
+
+/// The slot of the AF_ALG socket fd, or ALG_N.
+fn alg_of(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= ALG_N
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N || of_get(k.ofd, h, 0) != OF_ALG {
+    return ALG_N;
+  }
+  let s = of_get(k.ofd, h, 2);
+  if s >= ALG_N {
+    return ALG_N;
+  }
+  return s;
+}
+
+fn is_alg(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return alg_of(k, pid, fd) < ALG_N;
+}
+
+/// Gives slot s back: its key is erased.
+fn alg_free(k: &mut Kernel, s: u64)
+  requires kok(k) && s < ALG_N
+  ensures kok(k)
+{
+  let mut f = 0;
+  while f < ALG_W
+    invariant f <= ALG_W && kok(k)
+  {
+    alg_set(&mut k, s, f, 0);
+    f = f + 1;
+  }
+}
+
+/// A free slot, or ALG_N.
+fn alg_slot(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= ALG_N
+{
+  let mut s = 0;
+  while s < ALG_N
+    invariant s <= ALG_N
+  {
+    if alg_get(k, s, ALG_ST) == 0 {
+      return s;
+    }
+    s = s + 1;
+  }
+  return ALG_N;
+}
+
+/// A new socket in slot s as a descriptor of pid, with the flags of
+/// socket(2) or accept4(2) in kind.
+fn alg_install(k: &mut Kernel, pid: u64, s: u64, kind: u64) -> u64
+  requires kok(k) && pid < NPROC && s < ALG_N
+  ensures kok(k)
+{
+  let h = ofd_new(&mut k, OF_ALG, s);
+  if h >= OFD_N {
+    alg_free(&mut k, s);
+    return ENFILE;
+  }
+  of_set(&mut k.ofd, h, 3, kind / SOCK_NONBLOCK % 2);
+  let fd = fd_install(&mut k, pid, h);
+  if fd >= LXNFD {
+    return fd;
+  }
+  if kind / SOCK_CLOEXEC % 2 == 1 {
+    fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
+  }
+  return fd;
+}
+
+/// socket(AF_ALG, SOCK_SEQPACKET, 0).
+fn alg_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if kind % 16 != SOCK_SEQPACKET {
+    return 18446744073709551522;            // ESOCKTNOSUPPORT
+  }
+  if proto != 0 {
+    return EINVAL;
+  }
+  let s = alg_slot(k);
+  if s >= ALG_N {
+    return ENOMEM;
+  }
+  alg_free(&mut k, s);
+  alg_set(&mut k, s, ALG_ST, 1);
+  return alg_install(&mut k, pid, s, kind);
+}
+
+/// Closes the description of slot s.
+fn alg_close(k: &mut Kernel, s: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if s < ALG_N {
+    alg_free(&mut k, s);
+  }
+}
+
+/// The length of the NUL-ended name at byte 24 of the transfer buffer
+/// (at most 64).
+fn alg_name_len(x: &Bytes) -> u64
+  requires blen(x) >= 88
+  ensures result <= 64
+{
+  let mut n = 0;
+  while n < 64 && bget(x, 24 + n) != 0
+    invariant n <= 64
+  {
+    n = n + 1;
+  }
+  return n;
+}
+
+/// The algorithm a name stands for, or 0.
+fn alg_by_name(x: &Bytes) -> u64
+  requires blen(x) >= 88
+{
+  let n = alg_name_len(x);
+  if xfer_is(x, 24, 24 + n, "sha256") {
+    return ALG_SHA256;
+  }
+  if xfer_is(x, 24, 24 + n, "sha384") {
+    return ALG_SHA384;
+  }
+  if xfer_is(x, 24, 24 + n, "sha512") {
+    return ALG_SHA512;
+  }
+  if xfer_is(x, 24, 24 + n, "hmac(sha256)") {
+    return ALG_HMAC256;
+  }
+  if xfer_is(x, 24, 24 + n, "hmac(sha384)") {
+    return ALG_HMAC384;
+  }
+  return 0;
+}
+
+/// bind(fd, struct sockaddr_alg): the type must be "hash" and the name one
+/// of the algorithms above.
+fn alg_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = alg_of(k, pid, fd);
+  if s >= ALG_N {
+    return ENOTSOCK;
+  }
+  if alg_get(k, s, ALG_ST) != 1 || alen < 24 || alen > 4096 {
+    return EINVAL;
+  }
+  let take = smaller(alen, 88);
+  lx_fill(&mut k, 0, 88);
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, addr, &mut k.fs.xfer, take) != take {
+    return EFAULT;
+  }
+  if rd16(k.fs.xfer, 0) != AF_ALG {
+    return EINVAL;
+  }
+  if !xfer_is(k.fs.xfer, 2, 6, "hash") || bget(k.fs.xfer, 6) != 0 {
+    return ENOENT;
+  }
+  let id = alg_by_name(k.fs.xfer);
+  if id == 0 {
+    return ENOENT;
+  }
+  alg_set(&mut k, s, ALG_ID, id);
+  alg_set(&mut k, s, ALG_ST, 2);
+  return 0;
+}
+
+/// Whether algorithm id is an hmac.
+fn alg_keyed(id: u64) -> bool {
+  return id == ALG_HMAC256 || id == ALG_HMAC384;
+}
+
+/// setsockopt(fd, SOL_ALG, ALG_SET_KEY, key, n) on a bound socket.
+fn alg_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = alg_of(k, pid, fd);
+  if s >= ALG_N {
+    return ENOTSOCK;
+  }
+  if level % 4294967296 != SOL_ALG || name != ALG_SET_KEY || alg_get(k, s, ALG_ST) != 2 {
+    return ENOPROTOOPT;
+  }
+  let n = len % 4294967296;
+  if !alg_keyed(alg_get(k, s, ALG_ID)) {
+    return ENOSYS;                          // a hash with no key: as Linux says
+  }
+  if n > ALG_KEYMAX {
+    return EINVAL;
+  }
+  lx_fill(&mut k, 0, ALG_KEYMAX);
+  if n > 0 && copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, n) != n {
+    lx_fill(&mut k, 0, ALG_KEYMAX);
+    return EFAULT;
+  }
+  let mut w = 0;
+  while w < ALG_KEYW
+    invariant w <= ALG_KEYW && kok(k)
+  {
+    alg_set(&mut k, s, ALG_KEY + w, rd64(k.fs.xfer, w * 8));
+    w = w + 1;
+  }
+  lx_fill(&mut k, 0, ALG_KEYMAX);           // the key is not left in the transfer buffer
+  alg_set(&mut k, s, ALG_KLEN, n);
+  alg_set(&mut k, s, ALG_KEYSET, 1);
+  return 0;
+}
+
+/// accept(fd) on a bound socket: a socket with the algorithm, a copy of the
+/// key and an empty message.
+fn alg_accept(k: &mut Kernel, pid: u64, fd: u64, kind: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = alg_of(k, pid, fd);
+  if s >= ALG_N {
+    return ENOTSOCK;
+  }
+  if alg_get(k, s, ALG_ST) != 2 {
+    return EINVAL;
+  }
+  let id = alg_get(k, s, ALG_ID);
+  if alg_keyed(id) && alg_get(k, s, ALG_KEYSET) != 1 {
+    return ENOKEY;
+  }
+  let t = alg_slot(k);
+  if t >= ALG_N {
+    return ENOMEM;
+  }
+  alg_free(&mut k, t);
+  alg_set(&mut k, t, ALG_ID, id);
+  alg_set(&mut k, t, ALG_KLEN, alg_get(k, s, ALG_KLEN));
+  alg_set(&mut k, t, ALG_KEYSET, alg_get(k, s, ALG_KEYSET));
+  let mut w = 0;
+  while w < ALG_KEYW
+    invariant w <= ALG_KEYW && kok(k)
+  {
+    alg_set(&mut k, t, ALG_KEY + w, alg_get(k, s, ALG_KEY + w));
+    w = w + 1;
+  }
+  alg_set(&mut k, t, ALG_ST, 3);
+  return alg_install(&mut k, pid, t, kind);
+}
+
+/// send on an accepted socket: n bytes at buf join the message.
+fn alg_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = alg_of(k, pid, fd);
+  if s >= ALG_N {
+    return ENOTSOCK;
+  }
+  if alg_get(k, s, ALG_ST) != 3 {
+    return EOPNOTSUPP;
+  }
+  let have = alg_get(k, s, ALG_MLEN);
+  if have > ALG_BUF || n > ALG_BUF - have {
+    return EMSGSIZE;                        // more than the socket holds
+  }
+  if buf > 0xFFFFFFFFFFFF0000 {
+    return EFAULT;
+  }
+  let mut done = 0;
+  while done < n
+    invariant done <= n && buf <= 0xFFFFFFFFFFFF0000 && n <= ALG_BUF - have && have <= ALG_BUF && s < ALG_N && kok(k)
+  {
+    let chunk = smaller(n - done, XFER);
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + done, &mut k.fs.xfer, chunk) != chunk {
+      return EFAULT;                        // nothing of this call joins the message
+    }
+    bcopy(&mut k.algb, s * ALG_BUF + have + done, k.fs.xfer, 0, chunk);
+    done = done + chunk;
+  }
+  alg_set(&mut k, s, ALG_MLEN, have + n);
+  return n;
+}
+
+/// The key of slot s as bytes.
+fn alg_key_bytes(k: &Kernel, s: u64) -> Bytes
+  requires kok(k) && s < ALG_N
+{
+  let n = smaller(alg_get(k, s, ALG_KLEN), ALG_KEYMAX);
+  let mut full = balloc(ALG_KEYMAX);
+  let mut w = 0;
+  while w < ALG_KEYW
+    invariant w <= ALG_KEYW && blen(full) == ALG_KEYMAX && s < ALG_N && kok(k)
+  {
+    store_le64(&mut full, w * 8, alg_get(k, s, ALG_KEY + w));
+    w = w + 1;
+  }
+  let key = bytes_slice(full, 0, n);
+  let mut z = 0;
+  while z < ALG_KEYMAX
+    invariant z <= ALG_KEYMAX && blen(full) == ALG_KEYMAX
+  {
+    bset(&mut full, z, 0);
+    z = z + 1;
+  }
+  bfree(full);
+  return key;
+}
+
+/// The digest of msg under algorithm id (key only for an hmac).
+fn alg_digest(id: u64, key: &Bytes, msg: &Bytes) -> Bytes {
+  if id == ALG_SHA256 {
+    return sha256(msg);
+  }
+  if id == ALG_SHA384 {
+    return sha384(msg);
+  }
+  if id == ALG_SHA512 {
+    return sha512(msg);
+  }
+  if id == ALG_HMAC256 {
+    return hmac_sha256(key, msg);
+  }
+  return hmac_sha384(key, msg);
+}
+
+/// recv on an accepted socket: the digest of the message so far, at most n
+/// bytes of it; the next message begins.
+fn alg_recv(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let s = alg_of(k, pid, fd);
+  if s >= ALG_N {
+    return ENOTSOCK;
+  }
+  if alg_get(k, s, ALG_ST) != 3 {
+    return EOPNOTSUPP;
+  }
+  if n == 0 {
+    return 0;
+  }
+  let mlen = smaller(alg_get(k, s, ALG_MLEN), ALG_BUF);
+  let msg = bytes_slice(k.algb, s * ALG_BUF, s * ALG_BUF + mlen);
+  let id = alg_get(k, s, ALG_ID);
+  let key = alg_key_bytes(k, s);
+  let digest = alg_digest(id, key, msg);
+  let got = smaller(n, blen(digest));
+  let r = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, digest, got);
+  bfree(digest);
+  bfree(key);
+  bfree(msg);
+  if r != got {
+    return EFAULT;                          // the message stays for another try
+  }
+  alg_set(&mut k, s, ALG_MLEN, 0);
+  return got;
+}
