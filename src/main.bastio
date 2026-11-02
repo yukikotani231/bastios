@@ -42,6 +42,7 @@ import "lxmisc.bastio";
 import "lxkeys.bastio";
 import "lxaio.bastio";
 import "lxuring.bastio";
+import "lxalg.bastio";
 import "lxreflink.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
@@ -2029,6 +2030,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.sigsave);
   free(sys.k.ux);
   bfree(sys.k.uxb);
+  bfree(sys.k.algb);
   bfree(sys.k.lexb);
   free(sys.k.mns);
   free(sys.k.scf);

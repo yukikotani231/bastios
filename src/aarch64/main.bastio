@@ -40,6 +40,7 @@ import "lxmisc.bastio";
 import "lxkeys.bastio";
 import "lxaio.bastio";
 import "lxuring.bastio";
+import "lxalg.bastio";
 import "lxreflink.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
@@ -844,6 +845,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.sigsave);
   free(s.k.ux);
   bfree(s.k.uxb);
+  bfree(s.k.algb);
   bfree(s.k.lexb);
   free(s.k.mns);
   free(s.k.scf);

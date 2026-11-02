@@ -301,7 +301,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
       return SK_WAIT;                       // the last one is not received yet
     }
   }
-  let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
+  let dgram = !is_tcp(k, pid, fd) && !is_alg(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));   // buffers sent to a hash socket join one message
   if dgram && !unix && !is_nl(k, pid, fd) {
     return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen, flags);
   }
@@ -370,7 +370,7 @@ fn recv_hlim(k: &mut Kernel, pid: u64, fd: u64, ctl: u64, clen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k) && result <= 25
 {
-  if ctl == 0 || ctl > 0xFFFFFFFFFFFF0000 || clen < 24 || is_tcp(k, pid, fd) || is_unix(k, pid, fd) || is_nl(k, pid, fd) {
+  if ctl == 0 || ctl > 0xFFFFFFFFFFFF0000 || clen < 24 || is_tcp(k, pid, fd) || is_unix(k, pid, fd) || is_nl(k, pid, fd) || is_alg(k, pid, fd) {
     return 0;
   }
   let h = fd_ofd(k, pid, fd);
