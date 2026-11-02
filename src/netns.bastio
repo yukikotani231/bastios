@@ -391,6 +391,7 @@ fn ns_end(n: &mut Net, s: u64)
     t = t + 1;
   }
   nf_ns_end(&mut n, s);
+  xs_ns_end(&mut n, s);                    // src/xfrm.bastio
   nsset(&mut n, s, NS_USED, 0);
 }
 

@@ -2237,3 +2237,26 @@ t_wgtimer: the first packet after 180 s without a renewal is not carried
 t_wgtimer: a new handshake follows and the tunnel works again
 t_wgtimer: with a later last handshake time
 t_wgtimer: the child stops
+t_xfrm: AH is refused
+t_xfrm: a 96-bit tag is EINVAL
+t_xfrm: a NETLINK_XFRM socket opens
+t_xfrm: a dump lists both
+t_xfrm: a key length that is neither AES-128 nor AES-256 is EINVAL
+t_xfrm: a message with no algorithm is EINVAL
+t_xfrm: a network namespace has associations of its own
+t_xfrm: a program that is not privileged cannot add, read or delete
+t_xfrm: a truncated message is EINVAL
+t_xfrm: an AES-256 one with another SPI is added
+t_xfrm: an algorithm the kernel does not have is ENOENT
+t_xfrm: an association can be replaced
+t_xfrm: an association is deleted, and then it is ESRCH
+t_xfrm: an association with an AES-128 key is added
+t_xfrm: an unauthenticated cipher is refused
+t_xfrm: flush removes them all
+t_xfrm: reading one by its id gives its SPI, mode, reqid and algorithm
+t_xfrm: reading one that is not there is ESRCH
+t_xfrm: replacing one that is not there is ESRCH
+t_xfrm: room for associations is limited, and flushing gives it back
+t_xfrm: the key comes back as it was given
+t_xfrm: the same SPI to another destination is another association
+t_xfrm: the same one again is EEXIST
