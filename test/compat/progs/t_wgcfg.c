@@ -5,6 +5,8 @@
  * Constants are spelled out: the C library lacks linux/wireguard.h. */
 #define _GNU_SOURCE
 #include "compat.h"
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <stdint.h>
 #include <sys/socket.h>
@@ -198,6 +200,16 @@ static int count(struct nla *a) {
     return n;
 }
 
+
+/* Binds a UDP socket to port; returns 0 or -errno. keep: leave it open. */
+static int udp_hold(int port, int *keep) {
+    int u = socket(AF_INET, SOCK_DGRAM, 0);
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons(port)};
+    int e = bind(u, (void *)&a, sizeof a) == 0 ? 0 : -errno;
+    if (keep && e == 0) *keep = u; else close(u);
+    return e;
+}
+
 int main(void) {
     setup();
     int r = socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
@@ -256,6 +268,7 @@ int main(void) {
         a = find(20, anslen, DEV_FWMARK);
         EXPECT("the firewall mark", a && *(uint32_t *)(a + 1) == 7);
     }
+    EXPECT("the listen port is taken by the device", udp_hold(51820, NULL) == -EADDRINUSE);
     struct nla *peers = find(20, anslen, DEV_PEERS);
     EXPECT("one peer", count(peers) == 1);
     struct nla *el = peers ? (void *)(ans + off(peers) + 4) : NULL;
@@ -338,6 +351,31 @@ int main(void) {
     }
     EXPECT("more allowed IPs than a peer holds is ENOSPC", talk(g, 0) == 28);
 
+    /* Moving the listen port: the new one is taken, the old one freed. */
+    {
+        uint16_t p2 = 51821;
+        set_open(id, "wgc0");
+        put(DEV_LISTEN_PORT, &p2, 2);
+        EXPECT("the port is changed", talk(g, 0) == 0);
+        EXPECT("the old port is free", udp_hold(51820, NULL) == 0);
+        EXPECT("the new one is taken", udp_hold(51821, NULL) == -EADDRINUSE);
+        int held = -1;
+        uint16_t p3 = 51822;
+        EXPECT("a port that a socket holds", udp_hold(51822, &held) == 0);
+        set_open(id, "wgc0");
+        put(DEV_LISTEN_PORT, &p3, 2);
+        EXPECT("is refused with EADDRINUSE", talk(g, 0) == 98);
+        EXPECT("and the device keeps its port", udp_hold(51821, NULL) == -EADDRINUSE);
+        close(held);
+        set_open(id, "wgc0");
+        uint16_t p0 = 0;
+        put(DEV_LISTEN_PORT, &p0, 2);
+        EXPECT("port 0 gives the port up", talk(g, 0) == 0 && udp_hold(51821, NULL) == 0);
+        set_open(id, "wgc0");
+        put(DEV_LISTEN_PORT, &p2, 2);
+        EXPECT("it can be taken again", talk(g, 0) == 0 && udp_hold(51821, NULL) == -EADDRINUSE);
+    }
+
     /* Removing a peer, replacing them all. */
     set_open(id, "wgc0");
     peer_one(2, PF_REMOVE_ME, 0, NULL, NULL);
@@ -366,6 +404,7 @@ int main(void) {
 
     /* A device made again starts empty. */
     EXPECT("the device is deleted", del_link(r, "wgc0") == 0);
+    EXPECT("deleting it frees its port", udp_hold(51821, NULL) == 0);
     EXPECT("a new one is made", add_link(r, "wgc0") == 0);
     e = get(g, id, "wgc0");
     EXPECT("it holds no key and no peers",

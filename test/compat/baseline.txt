@@ -2108,3 +2108,40 @@ t_wgcfg: the private key is shown clamped
 t_wgcfg: the public key is X25519 of the private key (RFC 7748)
 t_wgcfg: two allowed IPs
 t_wgcfg: two peers
+t_wgcfg: a port that a socket holds
+t_wgcfg: and the device keeps its port
+t_wgcfg: deleting it frees its port
+t_wgcfg: is refused with EADDRINUSE
+t_wgcfg: it can be taken again
+t_wgcfg: port 0 gives the port up
+t_wgcfg: the listen port is taken by the device
+t_wgcfg: the new one is taken
+t_wgcfg: the old port is free
+t_wgcfg: the port is changed
+t_wghs: a capture socket
+t_wghs: a message of an unknown type gets none
+t_wghs: a peer without a keep-alive starts nothing
+t_wghs: a pre-shared key that differs breaks the handshake
+t_wghs: a response for another index is dropped
+t_wghs: a response with a bad mac1 is dropped
+t_wghs: a short initiation gets none
+t_wghs: an initiation is sent: 148 bytes, type 1
+t_wghs: an initiation with a bad mac1 gets no answer
+t_wghs: devices are made
+t_wghs: it completes
+t_wghs: mac1 is set and mac2 is zero (no cookie yet)
+t_wghs: more devices
+t_wghs: sockets
+t_wghs: the answer is addressed to the initiator's index
+t_wghs: the real initiation is answered: 92 bytes, type 2
+t_wghs: the responder learned the initiator's address
+t_wghs: the responder shows no handshake before a packet arrives
+t_wghs: the response completes the handshake
+t_wghs: the same initiation again is not answered (replay)
+t_wghs: the same response again changes nothing
+t_wghs: wga has no handshake yet
+t_wghs: wga's peer points at the capture socket
+t_wghs: wgb knows wga
+t_wghs: wgc starts a handshake with wgd
+t_wghs: wgd knows wgc
+t_wghs: wge, unknown to wgd, gets nowhere
