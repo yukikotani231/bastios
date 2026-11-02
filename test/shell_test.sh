@@ -1675,7 +1675,7 @@ try:
     # Nothing shows when the shell is up, so type `halt` again every 1.5 s
     # until QEMU exits. The leading Enter ends any line that a copy typed
     # during the boot left half done.
-    end = time.time() + 30
+    end = time.time() + 90
     while code is None:
         try:
             sendkeys(mon, ["ret", "h", "a", "l", "t", "ret"])

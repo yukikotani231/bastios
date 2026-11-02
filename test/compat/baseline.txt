@@ -2072,3 +2072,38 @@ t_wg: its MTU is 1420
 t_wg: its kind is wireguard
 t_wg: netlink socket
 t_wg: the refused devices were not made
+t_wgcfg: GET without a dump is EOPNOTSUPP
+t_wgcfg: REPLACE_PEERS
+t_wgcfg: SET_DEVICE with a key, a port and a peer
+t_wgcfg: a /33 allowed IP is EINVAL
+t_wgcfg: a device is made
+t_wgcfg: a dump without a device is EBADR
+t_wgcfg: a new one is made
+t_wgcfg: a peer is removed
+t_wgcfg: a second peer is added
+t_wgcfg: a short private key is EINVAL
+t_wgcfg: an IPv6 allowed IP is EAFNOSUPPORT
+t_wgcfg: an ordinary link is not a wireguard device
+t_wgcfg: an unknown command is EOPNOTSUPP
+t_wgcfg: an unknown device is ENODEV
+t_wgcfg: it holds no key and no peers
+t_wgcfg: leaves none
+t_wgcfg: more allowed IPs than a peer holds is ENOSPC
+t_wgcfg: nlctrl knows the wireguard family
+t_wgcfg: one peer
+t_wgcfg: sockets
+t_wgcfg: the device is deleted
+t_wgcfg: the dump shows the device
+t_wgcfg: the firewall mark
+t_wgcfg: the first is 10.0.0.0/24
+t_wgcfg: the first peer lost the network it shared (the address is masked)
+t_wgcfg: the keep-alive interval
+t_wgcfg: the listen port
+t_wgcfg: the others stay
+t_wgcfg: the peer's endpoint
+t_wgcfg: the peer's pre-shared key
+t_wgcfg: the peer's public key
+t_wgcfg: the private key is shown clamped
+t_wgcfg: the public key is X25519 of the private key (RFC 7748)
+t_wgcfg: two allowed IPs
+t_wgcfg: two peers
