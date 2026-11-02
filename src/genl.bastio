@@ -136,12 +136,18 @@ fn genl_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
   requires net_ok(n) && q < NLS && len <= blen(b)
   ensures net_ok(n)
 {
+  let was = n.ns;
+  let ns = get(n.nls, q * NL_W + NL_NS);
   let port = get(n.nls, q * NL_W + NL_PORT);
+  if ns >= NNET || !ns_live(n, ns) {
+    return len;
+  }
+  n.ns = ns;                              // the socket's namespace, as rtnetlink does
   nlw_open(&mut n, q);
   let mut at = 0;
   let mut go = true;
   while go && at < len && len - at >= 16
-    invariant at <= len && len <= blen(b) && net_ok(n)
+    invariant at <= len && len <= blen(b) && net_ok(n) && ns < NNET
   {
     let ml = rd32(b, at);
     if ml < 16 {
@@ -210,5 +216,6 @@ fn genl_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
     }
   }
   nlw_close(&mut n, q);
+  n.ns = was;
   return at;
 }
