@@ -2107,3 +2107,13 @@ t_wgcfg: the private key is shown clamped
 t_wgcfg: the public key is X25519 of the private key (RFC 7748)
 t_wgcfg: two allowed IPs
 t_wgcfg: two peers
+t_wgcfg: a port that a socket holds
+t_wgcfg: and the device keeps its port
+t_wgcfg: deleting it frees its port
+t_wgcfg: is refused with EADDRINUSE
+t_wgcfg: it can be taken again
+t_wgcfg: port 0 gives the port up
+t_wgcfg: the listen port is taken by the device
+t_wgcfg: the new one is taken
+t_wgcfg: the old port is free
+t_wgcfg: the port is changed

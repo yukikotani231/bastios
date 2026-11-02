@@ -1064,6 +1064,9 @@ fn rt_move(n: &mut Net, i: u64, tgt: u64) -> u64
     return NE_EXIST;
   }
   iset(&mut n, i, IF_NS, tgt);
+  if k == IFK_WG {
+    wg_rebind(&mut n, i);
+  }
   iset(&mut n, i, IF_FLAGS, 0);
   iset(&mut n, i, IF_IP, 0);
   iset(&mut n, i, IF_SPAN, 0);

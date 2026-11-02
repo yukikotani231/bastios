@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- A WireGuard device holds its listen port: setting it opens a UDP socket in the device's namespace, so no other socket can bind that port (a port that is taken is refused with `EADDRINUSE` and the old one stays), and deleting the device, setting port 0 or moving it to another namespace frees or moves the port.
 - A WireGuard device can be configured with `wg set` and read with `wg show`: the generic netlink family `wireguard` takes `WG_CMD_SET_DEVICE` (private key, from which the public key is derived with X25519; listen port; firewall mark; peers with public and pre-shared keys, an IPv4 endpoint, keep-alive and up to 8 IPv4 allowed IPs each, `REMOVE_ME`, `REPLACE_PEERS`, `REPLACE_ALLOWEDIPS`) and `WG_CMD_GET_DEVICE` as a dump. An allowed IP belongs to one peer of a device. Both need `CAP_NET_ADMIN`. The device still carries no traffic.
 - `ip link add wg0 type wireguard` makes a WireGuard device: a layer-3 link (no link-layer address, MTU 1420) that can be listed, addressed, brought up and deleted through rtnetlink. It carries no traffic yet: keys, peers and the handshake come in later changes.
 - Generic netlink (`socket(AF_NETLINK, SOCK_RAW, NETLINK_GENERIC)`): the controller family `nlctrl` answers `CTRL_CMD_GETFAMILY` by name or by id and in a dump, with its id, name, version and largest attribute; other family ids are ENOENT. This is how a program finds the families added later (WireGuard).

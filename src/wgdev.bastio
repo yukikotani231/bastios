@@ -54,6 +54,8 @@ const WGD_MARK: u64 = 1;
 const WGD_PRIV: u64 = 2;                  // four words
 const WGD_PUB: u64 = 6;                   // four words
 const WGD_HAS_KEY: u64 = 10;
+const WGD_SOCK: u64 = 11;                 // the UDP socket's slot + 1 (0: none)
+const NE_ADDRINUSE: u64 = 98;
 // Peer words.
 const WGP_OWNER: u64 = 0;
 const WGP_PUB: u64 = 1;                   // four words
@@ -92,11 +94,97 @@ fn wps(n: &mut Net, p: u64, f: u64, v: u64)
   n.wgp = set(n.wgp, p * WGP_W + f, v);
 }
 
+/// Closes device i's UDP socket, if it has one.
+fn wg_unbind(n: &mut Net, i: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let w = wdw(n, i, WGD_SOCK);
+  if w != 0 {
+    let s = w - 1;
+    if s < SOCKS && udp_is_open(n, s) {
+      sk_set(&mut n, s, S_OPEN, 0);
+      sk_set(&mut n, s, S_PORT, 0);
+      sk_set(&mut n, s, S_COUNT, 0);
+      sk_set(&mut n, s, S_CORK, 0);
+    }
+    wds(&mut n, i, WGD_SOCK, 0);
+  }
+}
+
+/// Opens a UDP socket in device i's namespace bound to `port` (not 0):
+/// its slot, or SOCKS if the port is taken or no socket is free.
+fn wg_open_socket(n: &mut Net, i: u64, port: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n) && result <= SOCKS
+{
+  let was = n.ns;
+  let ns = iw(n, i, IF_NS);
+  if ns >= NNET || port == 0 || port > 65535 {
+    return SOCKS;
+  }
+  n.ns = ns;
+  let s = udp_open(&mut n);
+  if s >= SOCKS {
+    n.ns = was;
+    return SOCKS;
+  }
+  if !udp_bind(&mut n, s, port) {
+    sk_set(&mut n, s, S_OPEN, 0);
+    sk_set(&mut n, s, S_PORT, 0);
+    n.ns = was;
+    return SOCKS;
+  }
+  n.ns = was;
+  return s;
+}
+
+/// Makes `port` device i's listen port: a new socket is bound first, so a
+/// port that is taken leaves the old one in place. 0 or an errno.
+fn wg_set_port(n: &mut Net, i: u64, port: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  if port == 0 {
+    wg_unbind(&mut n, i);
+    wds(&mut n, i, WGD_PORT, 0);
+    return 0;
+  }
+  if wdw(n, i, WGD_PORT) == port && wdw(n, i, WGD_SOCK) != 0 {
+    return 0;
+  }
+  let s = wg_open_socket(&mut n, i, port);
+  if s >= SOCKS {
+    return NE_ADDRINUSE;
+  }
+  wg_unbind(&mut n, i);
+  wds(&mut n, i, WGD_SOCK, s + 1);
+  wds(&mut n, i, WGD_PORT, port);
+  return 0;
+}
+
+/// Device i has moved to another namespace: its socket is made again there
+/// (the port is kept even if the new namespace has it taken, with no socket).
+fn wg_rebind(n: &mut Net, i: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  wg_unbind(&mut n, i);
+  let port = wdw(n, i, WGD_PORT);
+  if port != 0 {
+    let s = wg_open_socket(&mut n, i, port);
+    if s < SOCKS {
+      wds(&mut n, i, WGD_SOCK, s + 1);
+    }
+  }
+}
+
 /// Forgets everything about device i and frees its peers.
 fn wg_clear(n: &mut Net, i: u64)
   requires net_ok(n) && i < IFN
   ensures net_ok(n)
 {
+  wg_unbind(&mut n, i);
   let mut f = 0;
   while f < WG_W
     invariant f <= WG_W && net_ok(n)
@@ -625,7 +713,10 @@ fn wg_set(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
     if nla_len(b, la) < 2 {
       return NE_INVAL;
     }
-    wds(&mut n, i, WGD_PORT, rd16(b, la));
+    let e = wg_set_port(&mut n, i, rd16(b, la));
+    if e != 0 {
+      return e;
+    }
   }
   let ma = nla_find(b, from, end, WGDEVICE_A_FWMARK);
   if ma != 0 {
