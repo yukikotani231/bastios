@@ -295,7 +295,16 @@ static void relay(void) {
         if (poll(pf, 2, -1) < 1) continue;
         if (pf[1].revents & POLLIN) {
             char c;
-            if (read(relay_ctl, &c, 1) == 1) tamper = 1;
+            if (read(relay_ctl, &c, 1) == 1 && c == 'T') tamper = 1;
+            if (c == 'G') {
+                /* malformed data messages for the child: an index nobody has,
+                 * and one cut short */
+                uint8_t g1[48] = {4, 0, 0, 0, 0xef, 0xbe, 0xad, 0xde}, g2[20] = {4};
+                struct sockaddr_in cto = {.sin_family = AF_INET, .sin_port = htons(51872)};
+                cto.sin_addr.s_addr = ip4(192, 168, 77, 2);
+                sendto(u, g1, sizeof g1, 0, (void *)&cto, sizeof cto);
+                sendto(u, g2, sizeof g2, 0, (void *)&cto, sizeof cto);
+            }
             continue;
         }
         int n = recvfrom(u, m, sizeof m, 0, (void *)&from, &fl);
@@ -457,6 +466,11 @@ int main(void) {
         answered += n >= 1;
     }
     EXPECT("five more are echoed", all);
+    {
+        int n = write(cp[1], "G", 1) == 1 ? ask(u, seq++, 300, 2500) : -1;
+        EXPECT("data messages for an unknown index and a cut short one are ignored", n == 1);
+        answered += n >= 1;
+    }
     EXPECT("a packet with one bit changed is not taken",
            write(cp[1], "T", 1) == 1 && ask(u, seq++, 200, 2500) == 0);
     {
