@@ -2166,6 +2166,8 @@ t_wgtun: the child stops
 t_wgtun: the child reports
 t_wgtun: the child took each packet once, and none that was not allowed
 t_wgtun: its last handshake time is set once a packet came
+t_wgtun: a packet with one bit changed is not taken
+t_wgtun: and the next one is
 t_wgtimer: sockets
 t_wgtimer: a child in a new network namespace
 t_wgtimer: the child is ready
