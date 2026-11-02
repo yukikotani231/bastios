@@ -55,6 +55,7 @@ const WGD_PRIV: u64 = 2;                  // four words
 const WGD_PUB: u64 = 6;                   // four words
 const WGD_HAS_KEY: u64 = 10;
 const WGD_SOCK: u64 = 11;                 // the UDP socket's slot + 1 (0: none)
+const WGD_BUSY: u64 = 12;                 // 1 while a packet is being sent through the device (no recursion)
 const NE_ADDRINUSE: u64 = 98;
 // Peer words.
 const WGP_OWNER: u64 = 0;
@@ -84,6 +85,10 @@ const WGP_SK: u64 = 44;                   // the sending key (four words)
 const WGP_RK: u64 = 48;                   // the receiving key (four words)
 const WGP_SCTR: u64 = 52;                 // the next sending counter
 const WGP_SBORN: u64 = 53;                // tick it was made at
+const WGP_RMAX: u64 = 54;                 // the replay window: the highest counter taken + 1 (0: none),
+const WGP_RWIN: u64 = 55;                 //   and 16 words of bits for the 1024 counters up to it, by counter mod 1024
+const WGP_CONF: u64 = 71;                 // 1: the session has carried a packet from the peer
+const WIN_BITS: u64 = 1024;
 const ALLOWED_SET: u64 = 1099511627776;   // 1 << 40
 const END_SET: u64 = 281474976710656;     // 1 << 48
 
@@ -497,6 +502,40 @@ fn wg_mask(ip: u64, plen: u64) -> u64
 {
   let sh = 32 - plen;
   return (ip >> sh) << sh;
+}
+
+/// The peer of device i that owns the longest allowed-IP prefix (of at
+/// least minp bits) holding ip, or WGPN.
+fn wg_peer_for(n: &Net, i: u64, ip: u64, minp: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= WGPN
+{
+  if ip > 4294967295 {
+    return WGPN;
+  }
+  let mut best = WGPN;
+  let mut bl = 0;
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && best <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 {
+      let mut k = 0;
+      while k < WG_ALLOWED
+        invariant k <= WG_ALLOWED && best <= WGPN && net_ok(n)
+      {
+        let w = wpw(n, p, WGP_ALLOWED + k);
+        let plen = w / 4294967296 % 256;
+        if w / ALLOWED_SET % 2 == 1 && plen <= 32 && plen >= minp && plen + 1 > bl && wg_mask(ip, plen) == w % 4294967296 {
+          best = p;
+          bl = plen + 1;
+        }
+        k = k + 1;
+      }
+    }
+    p = p + 1;
+  }
+  return best;
 }
 
 /// Gives allowed IP ip/plen to peer p of device i, taking it from any other

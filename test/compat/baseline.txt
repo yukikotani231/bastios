@@ -2145,3 +2145,24 @@ t_wghs: wgb knows wga
 t_wghs: wgc starts a handshake with wgd
 t_wghs: wgd knows wgc
 t_wghs: wge, unknown to wgd, gets nowhere
+t_wgtun: sockets
+t_wgtun: a child in a new network namespace
+t_wgtun: the child is ready
+t_wgtun: a veth pair, one end in the child's namespace
+t_wgtun: the parent's end has an address
+t_wgtun: a device with an address
+t_wgtun: go
+t_wgtun: keys are traded
+t_wgtun: the child is set up
+t_wgtun: the peer is set up with the relay as its endpoint
+t_wgtun: a client socket
+t_wgtun: five more are echoed
+t_wgtun: a packet sent twice by the relay is taken once
+t_wgtun: a datagram of 1392 bytes (the largest the tunnel takes in one piece)
+t_wgtun: the peer shows traffic both ways and a handshake
+t_wgtun: the child narrows the parent's allowed IPs
+t_wgtun: a packet from an address the peer may not use is dropped
+t_wgtun: the child stops
+t_wgtun: the child reports
+t_wgtun: the child took each packet once, and none that was not allowed
+t_wgtun: its last handshake time is set once a packet came
