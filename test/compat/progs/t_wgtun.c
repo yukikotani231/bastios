@@ -278,6 +278,7 @@ static int udp_on(uint32_t ip, int port) {
     return u;
 }
 
+static int relay_ctl = -1;
 static void relay(void) {
     /* Between the parent's device (127.0.0.1:51871) and the child's
      * (192.168.77.2:51872): encrypted packets from the parent go twice, and
@@ -285,16 +286,40 @@ static void relay(void) {
     int u = udp_on(0, 51880);
     uint8_t first[1600];
     int firstlen = 0;
+    int tamper = 0;
     for (;;) {
         uint8_t m[1600];
         struct sockaddr_in from;
         socklen_t fl = sizeof from;
+        struct pollfd pf[2] = {{u, POLLIN, 0}, {relay_ctl, POLLIN, 0}};
+        if (poll(pf, 2, -1) < 1) continue;
+        if (pf[1].revents & POLLIN) {
+            char c;
+            if (read(relay_ctl, &c, 1) == 1 && c == 'T') tamper = 1;
+            if (c == 'G') {
+                /* malformed data messages for the child: an index nobody has,
+                 * and one cut short */
+                uint8_t g1[48] = {4, 0, 0, 0, 0xef, 0xbe, 0xad, 0xde}, g2[20] = {4};
+                struct sockaddr_in cto = {.sin_family = AF_INET, .sin_port = htons(51872)};
+                cto.sin_addr.s_addr = ip4(192, 168, 77, 2);
+                sendto(u, g1, sizeof g1, 0, (void *)&cto, sizeof cto);
+                sendto(u, g2, sizeof g2, 0, (void *)&cto, sizeof cto);
+            }
+            continue;
+        }
         int n = recvfrom(u, m, sizeof m, 0, (void *)&from, &fl);
         if (n <= 0) continue;
         struct sockaddr_in to = {.sin_family = AF_INET};
         if (from.sin_addr.s_addr == htonl(0x7f000001)) {
             to.sin_port = htons(51872);
             to.sin_addr.s_addr = ip4(192, 168, 77, 2);
+            if (tamper && m[0] == 4 && n > 32) {
+                /* one flipped bit in the sealed data: not to be taken */
+                m[n - 1] ^= 1;
+                tamper = 0;
+                sendto(u, m, n, 0, (void *)&to, sizeof to);
+                continue;
+            }
             sendto(u, m, n, 0, (void *)&to, sizeof to);
             if (m[0] == 4 && n > 32) {
                 sendto(u, m, n, 0, (void *)&to, sizeof to);
@@ -417,7 +442,10 @@ int main(void) {
     pubkey(g, id, "wgt0", mine);
     EXPECT("keys are traded", read(out[0], theirs, 32) == 32 && write(in[1], mine, 32) == 32);
     EXPECT("the child is set up", read(out[0], &x, 1) == 1 && x == 'y');
+    int cp[2];
+    if (pipe(cp) != 0) return 1;
     if ((rl = fork()) == 0) {
+        relay_ctl = cp[0];
         relay();
         _exit(0);
     }
@@ -438,6 +466,18 @@ int main(void) {
         answered += n >= 1;
     }
     EXPECT("five more are echoed", all);
+    {
+        int n = write(cp[1], "G", 1) == 1 ? ask(u, seq++, 300, 2500) : -1;
+        EXPECT("data messages for an unknown index and a cut short one are ignored", n == 1);
+        answered += n >= 1;
+    }
+    EXPECT("a packet with one bit changed is not taken",
+           write(cp[1], "T", 1) == 1 && ask(u, seq++, 200, 2500) == 0);
+    {
+        int n = ask(u, seq++, 200, 2500);
+        EXPECT("and the next one is", n == 1);
+        answered += n >= 1;
+    }
     EXPECT("a packet sent twice by the relay is taken once", !twice);
     {
         int n = ask(u, seq++, 1392, 2500);
