@@ -127,6 +127,16 @@ fn route_if(n: &Net, ip: u64) -> u64
         return i;
       }
     }
+    // A WireGuard device takes its own subnet and what its peers are allowed
+    // to own (a /0 is not a route here: it would swallow the way to the peers).
+    if k == IFK_WG && iw(n, i, IF_NS) == n.ns && if_up(n, i) {
+      if if_ip(n, i) != 0 && ip / if_span(n, i) == if_ip(n, i) / if_span(n, i) {
+        return i;
+      }
+      if wg_peer_for(n, i, ip, 1) < WGPN {
+        return i;
+      }
+    }
     i = i + 1;
   }
   return NO_IF;

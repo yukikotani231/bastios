@@ -2109,3 +2109,86 @@ t_wgcfg: the public key is X25519 of the private key (RFC 7748)
 t_wgcfg: two allowed IPs
 t_wgcfg: two peers
 t_mem: MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again
+t_wgcfg: a port that a socket holds
+t_wgcfg: and the device keeps its port
+t_wgcfg: deleting it frees its port
+t_wgcfg: is refused with EADDRINUSE
+t_wgcfg: it can be taken again
+t_wgcfg: port 0 gives the port up
+t_wgcfg: the listen port is taken by the device
+t_wgcfg: the new one is taken
+t_wgcfg: the old port is free
+t_wgcfg: the port is changed
+t_wghs: a capture socket
+t_wghs: a message of an unknown type gets none
+t_wghs: a peer without a keep-alive starts nothing
+t_wghs: a pre-shared key that differs breaks the handshake
+t_wghs: a response for another index is dropped
+t_wghs: a response with a bad mac1 is dropped
+t_wghs: a short initiation gets none
+t_wghs: an initiation is sent: 148 bytes, type 1
+t_wghs: an initiation with a bad mac1 gets no answer
+t_wghs: devices are made
+t_wghs: it completes
+t_wghs: mac1 is set and mac2 is zero (no cookie yet)
+t_wghs: more devices
+t_wghs: sockets
+t_wghs: the answer is addressed to the initiator's index
+t_wghs: the real initiation is answered: 92 bytes, type 2
+t_wghs: the responder learned the initiator's address
+t_wghs: the responder shows no handshake before a packet arrives
+t_wghs: the response completes the handshake
+t_wghs: the same initiation again is not answered (replay)
+t_wghs: the same response again changes nothing
+t_wghs: wga has no handshake yet
+t_wghs: wga's peer points at the capture socket
+t_wghs: wgb knows wga
+t_wghs: wgc starts a handshake with wgd
+t_wghs: wgd knows wgc
+t_wghs: wge, unknown to wgd, gets nowhere
+t_wgtun: sockets
+t_wgtun: a child in a new network namespace
+t_wgtun: the child is ready
+t_wgtun: a veth pair, one end in the child's namespace
+t_wgtun: the parent's end has an address
+t_wgtun: a device with an address
+t_wgtun: go
+t_wgtun: keys are traded
+t_wgtun: the child is set up
+t_wgtun: the peer is set up with the relay as its endpoint
+t_wgtun: a client socket
+t_wgtun: five more are echoed
+t_wgtun: a packet sent twice by the relay is taken once
+t_wgtun: a datagram of 1392 bytes (the largest the tunnel takes in one piece)
+t_wgtun: the peer shows traffic both ways and a handshake
+t_wgtun: the child narrows the parent's allowed IPs
+t_wgtun: a packet from an address the peer may not use is dropped
+t_wgtun: the child stops
+t_wgtun: the child reports
+t_wgtun: the child took each packet once, and none that was not allowed
+t_wgtun: its last handshake time is set once a packet came
+t_wgtun: a packet with one bit changed is not taken
+t_wgtun: and the next one is
+t_wgtun: data messages for an unknown index and a cut short one are ignored
+t_wgtimer: sockets
+t_wgtimer: a child in a new network namespace
+t_wgtimer: the child is ready
+t_wgtimer: a veth pair, one end in the child's namespace
+t_wgtimer: the parent's end has an address
+t_wgtimer: a device with an address
+t_wgtimer: go
+t_wgtimer: keys are traded
+t_wgtimer: the child is set up
+t_wgtimer: the peer is set up with the relay as its endpoint
+t_wgtimer: a client socket
+t_wgtimer: the tunnel comes up
+t_wgtimer: a last handshake time
+t_wgtimer: a keep-alive interval of 1 s
+t_wgtimer: keep-alives were sent on time
+t_wgtimer: the session is renewed after 120 s
+t_wgtimer: and carries traffic
+t_wgtimer: the keep-alive is switched off
+t_wgtimer: the first packet after 180 s without a renewal is not carried
+t_wgtimer: a new handshake follows and the tunnel works again
+t_wgtimer: with a later last handshake time
+t_wgtimer: the child stops

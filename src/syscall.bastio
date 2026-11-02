@@ -830,6 +830,26 @@ fn pow16(e: u64) -> u64
   return 4096;
 }
 
+/// Runs WireGuard's handshakes when something is waiting (src/wgproto.bastio).
+fn wg_pass(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  if !nic_wg_due(k.nic, k.ticks) {
+    return;
+  }
+  let mut ent = balloc(WG_ENT);
+  let mut w = 0;
+  while w < 5
+    invariant w <= 5 && blen(ent) == WG_ENT && kok(k)
+  {
+    store_le64(&mut ent, w * 8, rng_next(&mut k));
+    w = w + 1;
+  }
+  nic_wg(&mut k.nic, wall_ns(k), k.ticks, ent);
+  bfree(ent);
+}
+
 /// Runs the network's timers (DHCP retries) and wakes the process whose
 /// ping has finished, if one has, with its result. Called on every
 /// scheduler pass, after the card is polled.
@@ -838,6 +858,7 @@ fn net_wake(k: &mut Kernel)
   ensures kok(k)
 {
   nic_tick(&mut k.nic, k.ticks);
+  wg_pass(&mut k);
   if nic_dns_take(&mut k.nic) {
     write_resolv(&mut k, nic_info(k.nic, 4), nic_v6_state(k.nic, 5), nic_v6_state(k.nic, 6));
   }
