@@ -11,6 +11,12 @@
 #include <sys/socket.h>
 #include <sys/uio.h>
 
+#ifndef EBADMSG
+#define EBADMSG 74
+#endif
+#ifndef ENOKEY
+#define ENOKEY 126
+#endif
 #ifndef AF_ALG
 #define AF_ALG 38
 #endif
@@ -75,6 +81,61 @@ static const char *digest(const char *name, const void *key, int klen, const voi
     hex(d, want, out);
     close(op);
     return out;
+}
+
+#define ALG_SET_IV 2
+#define ALG_SET_OP 3
+#define ALG_SET_AEAD_ASSOCLEN 4
+#define ALG_SET_AEAD_AUTHSIZE 5
+
+/* One AEAD request on OP: the control messages, IN (the associated data and
+ * then the text, or the ciphertext and tag), and the answer read into OUT.
+ * Returns what read gave, or -errno of the send or read. */
+static long aead_run(int op, int enc, const unsigned char *iv, unsigned ivlen, unsigned assoclen,
+                     const void *in, int inlen, void *out, int outcap) {
+    union { char b[256]; struct cmsghdr a; } ctl;
+    memset(&ctl, 0, sizeof ctl);
+    struct msghdr m;
+    memset(&m, 0, sizeof m);
+    struct iovec v = { (void *)in, inlen };
+    m.msg_iov = &v;
+    m.msg_iovlen = 1;
+    m.msg_control = ctl.b;
+    struct cmsghdr *c = (struct cmsghdr *)ctl.b;
+    size_t used = 0;
+    c->cmsg_level = SOL_ALG;
+    c->cmsg_type = ALG_SET_OP;
+    c->cmsg_len = CMSG_LEN(4);
+    *(uint32_t *)CMSG_DATA(c) = enc ? 1 : 0;
+    used += CMSG_SPACE(4);
+    c = (struct cmsghdr *)(ctl.b + used);
+    c->cmsg_level = SOL_ALG;
+    c->cmsg_type = ALG_SET_IV;
+    c->cmsg_len = CMSG_LEN(4 + ivlen);
+    *(uint32_t *)CMSG_DATA(c) = ivlen;
+    memcpy(CMSG_DATA(c) + 4, iv, ivlen);
+    used += CMSG_SPACE(4 + ivlen);
+    c = (struct cmsghdr *)(ctl.b + used);
+    c->cmsg_level = SOL_ALG;
+    c->cmsg_type = ALG_SET_AEAD_ASSOCLEN;
+    c->cmsg_len = CMSG_LEN(4);
+    *(uint32_t *)CMSG_DATA(c) = assoclen;
+    used += CMSG_SPACE(4);
+    m.msg_controllen = used;
+    if (sendmsg(op, &m, 0) < 0) return -errno;
+    long r = read(op, out, outcap);
+    return r < 0 ? -errno : r;
+}
+
+static int aead_op(const char *name, const void *key, int klen) {
+    int s = bound("aead", name);
+    if (s < 0) return -1;
+    if (key && setsockopt(s, SOL_ALG, ALG_SET_KEY, key, klen) < 0) { close(s); return -1; }
+    int op = accept(s, NULL, NULL);
+    int e = errno;
+    close(s);
+    errno = e;
+    return op;
 }
 
 #define SHA256_ABC "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
@@ -243,5 +304,181 @@ int main(void) {
         if (again >= 0) close(again);
         r;
     }));
+    {
+        static const unsigned char zero[32];
+        static const unsigned char gct[32] = {
+            0x03, 0x88, 0xda, 0xce, 0x60, 0xb6, 0xa3, 0x92, 0xf3, 0x28, 0xc2, 0xb9, 0x71, 0xb2, 0xfe, 0x78,
+            0xab, 0x6e, 0x47, 0xd4, 0x2c, 0xec, 0x13, 0xbd, 0xf5, 0x3a, 0x67, 0xb2, 0x12, 0x57, 0xbd, 0xdf };
+        unsigned char out[128], back[128];
+        EXPECT("gcm(aes) seals the NIST test case 2", ({
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 1, zero, 12, 0, zero, 16, out, sizeof out);
+            close(op);
+            r == 32 && memcmp(out, gct, 32) == 0;
+        }));
+        EXPECT("gcm(aes) opens it again", ({
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 0, zero, 12, 0, gct, 32, back, sizeof back);
+            close(op);
+            r == 16 && memcmp(back, zero, 16) == 0;
+        }));
+        EXPECT("gcm(aes) with a 32-byte key and associated data comes back, and the data come first", ({
+            unsigned char key[32], in[40];
+            memset(key, 7, 32);
+            memcpy(in, "ASSOCIAT", 8);
+            memset(in + 8, 'p', 32);
+            int op = aead_op("gcm(aes)", key, 32);
+            long r = aead_run(op, 1, zero, 12, 8, in, 40, out, sizeof out);
+            long r2 = r > 0 ? aead_run(op, 0, zero, 12, 8, out, r, back, sizeof back) : -1;
+            close(op);
+            r == 56 && memcmp(out, "ASSOCIAT", 8) == 0 && r2 == 40 && memcmp(back, in, 40) == 0;
+        }));
+        EXPECT("a changed associated datum is EBADMSG", ({
+            unsigned char in[24];
+            memcpy(in, "ASSOCIAT", 8);
+            memset(in + 8, 'p', 16);
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 1, zero, 12, 8, in, 24, out, sizeof out);
+            out[0] ^= 1;
+            long r2 = aead_run(op, 0, zero, 12, 8, out, r, back, sizeof back);
+            close(op);
+            r == 40 && r2 == -EBADMSG;
+        }));
+        EXPECT("a changed tag is EBADMSG and no text comes out", ({
+            unsigned char bad[32];
+            memcpy(bad, gct, 32);
+            bad[31] ^= 0x80;
+            memset(back, 0x5a, sizeof back);
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 0, zero, 12, 0, bad, 32, back, sizeof back);
+            close(op);
+            r == -EBADMSG && back[0] == 0x5a && back[15] == 0x5a;
+        }));
+        EXPECT("a changed ciphertext byte is EBADMSG", ({
+            unsigned char bad[32];
+            memcpy(bad, gct, 32);
+            bad[3] ^= 1;
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 0, zero, 12, 0, bad, 32, back, sizeof back);
+            close(op);
+            r == -EBADMSG;
+        }));
+        EXPECT("a request with no operation is EINVAL", ({
+            int op = aead_op("gcm(aes)", zero, 16);
+            send(op, zero, 16, 0);
+            long r = read(op, out, sizeof out);
+            int e = errno;
+            close(op);
+            r < 0 && e == EINVAL;
+        }));
+        EXPECT("a result buffer too small is EINVAL", ({
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 1, zero, 12, 0, zero, 16, out, 31);
+            close(op);
+            r == -EINVAL;
+        }));
+        EXPECT("an IV that is not 12 bytes is EINVAL", ({
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 1, zero, 8, 0, zero, 16, out, sizeof out);
+            close(op);
+            r == -EINVAL;
+        }));
+        EXPECT("associated data longer than the message is EINVAL", ({
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 1, zero, 12, 17, zero, 16, out, sizeof out);
+            close(op);
+            r == -EINVAL;
+        }));
+        EXPECT("a ciphertext shorter than a tag is EINVAL", ({
+            int op = aead_op("gcm(aes)", zero, 16);
+            long r = aead_run(op, 0, zero, 12, 0, zero, 15, back, sizeof back);
+            close(op);
+            r == -EINVAL;
+        }));
+        EXPECT("the text is copied: changing the buffer after the send changes nothing", ({
+            unsigned char buf[16];
+            memset(buf, 0, 16);
+            int op = aead_op("gcm(aes)", zero, 16);
+            union { char b[64]; struct cmsghdr a; } ctl;
+            memset(&ctl, 0, sizeof ctl);
+            struct msghdr m;
+            memset(&m, 0, sizeof m);
+            struct iovec v = { buf, 16 };
+            m.msg_iov = &v;
+            m.msg_iovlen = 1;
+            m.msg_control = ctl.b;
+            struct cmsghdr *c = (struct cmsghdr *)ctl.b;
+            c->cmsg_level = SOL_ALG;
+            c->cmsg_type = ALG_SET_OP;
+            c->cmsg_len = CMSG_LEN(4);
+            *(uint32_t *)CMSG_DATA(c) = 1;
+            m.msg_controllen = CMSG_SPACE(4);
+            int ok = sendmsg(op, &m, 0) == 16;
+            memset(buf, 0xff, 16);
+            /* no IV yet: give it in a second message with no data */
+            struct msghdr m2;
+            memset(&m2, 0, sizeof m2);
+            memset(&ctl, 0, sizeof ctl);
+            c = (struct cmsghdr *)ctl.b;
+            c->cmsg_level = SOL_ALG;
+            c->cmsg_type = ALG_SET_IV;
+            c->cmsg_len = CMSG_LEN(16);
+            *(uint32_t *)CMSG_DATA(c) = 12;
+            m2.msg_control = ctl.b;
+            m2.msg_controllen = CMSG_SPACE(16);
+            ok = ok && sendmsg(op, &m2, 0) == 0;
+            long r = read(op, out, sizeof out);
+            close(op);
+            ok && r == 32 && memcmp(out, gct, 32) == 0;
+        }));
+        EXPECT("rfc7539(chacha20,poly1305) opens what it sealed, with associated data", ({
+            unsigned char key[32], iv[12], in[30];
+            memset(key, 3, 32);
+            memset(iv, 9, 12);
+            memcpy(in, "header", 6);
+            memset(in + 6, 'x', 24);
+            int op = aead_op("rfc7539(chacha20,poly1305)", key, 32);
+            long r = aead_run(op, 1, iv, 12, 6, in, 30, out, sizeof out);
+            long r2 = r > 0 ? aead_run(op, 0, iv, 12, 6, out, r, back, sizeof back) : -1;
+            close(op);
+            r == 46 && memcmp(out, "header", 6) == 0 && memcmp(out + 6, in + 6, 24) != 0
+                && r2 == 30 && memcmp(back, in, 30) == 0;
+        }));
+        EXPECT("rfc7539 refuses a changed tag", ({
+            unsigned char key[32], iv[12], in[8];
+            memset(key, 3, 32);
+            memset(iv, 9, 12);
+            memset(in, 'x', 8);
+            int op = aead_op("rfc7539(chacha20,poly1305)", key, 32);
+            long r = aead_run(op, 1, iv, 12, 0, in, 8, out, sizeof out);
+            out[r - 1] ^= 1;
+            long r2 = aead_run(op, 0, iv, 12, 0, out, r, back, sizeof back);
+            close(op);
+            r == 24 && r2 == -EBADMSG;
+        }));
+        EXPECT("AEAD key lengths are checked", ({
+            char k24[24] = { 0 };
+            int s = bound("aead", "gcm(aes)");
+            int a = setsockopt(s, SOL_ALG, ALG_SET_KEY, k24, 24) < 0 && errno == EINVAL;
+            close(s);
+            s = bound("aead", "rfc7539(chacha20,poly1305)");
+            int b = setsockopt(s, SOL_ALG, ALG_SET_KEY, zero, 16) < 0 && errno == EINVAL;
+            close(s);
+            a && b;
+        }));
+        EXPECT("an AEAD with no key cannot be accepted", ({ int s = bound("aead", "gcm(aes)"); int op = accept(s, NULL, NULL); int r = op < 0 && errno == ENOKEY; close(s); r; }));
+        EXPECT("the tag size can be set to 16 and not to 8", ({
+            int s = bound("aead", "gcm(aes)");
+            int a = setsockopt(s, SOL_ALG, ALG_SET_AEAD_AUTHSIZE, NULL, 16) == 0;
+            int b = setsockopt(s, SOL_ALG, ALG_SET_AEAD_AUTHSIZE, NULL, 8) < 0 && errno == EINVAL;
+            close(s);
+            a && b;
+        }));
+        EXPECT("a hash name under type aead, and an AEAD name under type hash, are ENOENT", ({
+            int a = bound("aead", "sha256") < 0 && errno == ENOENT;
+            int b = bound("hash", "gcm(aes)") < 0 && errno == ENOENT;
+            a && b;
+        }));
+    }
     return done();
 }

@@ -270,6 +270,9 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;                           // before the header, as on Linux
   }
+  if is_alg(k, pid, fd) {
+    return alg_sendmsg(&mut k, pid, fd, msg);   // src/lxalg.bastio
+  }
   if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
     return EFAULT;
   }
