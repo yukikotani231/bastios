@@ -16,6 +16,15 @@
 #include <time.h>
 #include <sys/wait.h>
 
+static long memfree_kb(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    char l[128];
+    long v = -1;
+    while (f && fgets(l, sizeof l, f))
+        if (!strncmp(l, "MemFree:", 8)) { v = atol(l + 8); break; }
+    if (f) fclose(f);
+    return v;
+}
 static char *cow_buf;
 static volatile int fast_phase;
 static char *fast_page;
@@ -499,6 +508,34 @@ int main(void) {
            }
            *stop = 1;
            if (c > 0) waitpid(c, 0, 0);
+           ok; }));
+    /* MADV_DONTNEED gives private pages back: jemalloc (Firefox) and glibc's
+     * malloc hand memory back this way, and a kernel that kept the pages made
+     * Firefox grow to gigabytes. */
+    EXPECT("MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again", ({
+           size_t sz = 64u << 20;
+           long free0 = memfree_kb();
+           char *p = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = p != MAP_FAILED;
+           if (ok) {
+               for (size_t i = 0; i < sz; i += 4096) p[i] = 1;
+               long used = free0 - memfree_kb();
+               ok = used > 56 * 1024;                       /* the pages are in memory */
+               ok = ok && madvise(p, sz, MADV_DONTNEED) == 0;
+               long back = memfree_kb() - (free0 - used);
+               ok = ok && back > 56 * 1024;                 /* and nearly all come back */
+               ok = ok && p[0] == 0 && p[sz / 2] == 0 && p[sz - 4096] == 0;
+               for (size_t i = 0; i < sz; i += 4096) p[i] = 2;   /* they work again */
+               ok = ok && p[4096] == 2 && p[sz - 4096] == 2;
+               pid_t c = fork();                            /* a copy-on-write page too */
+               if (c == 0) {
+                   madvise(p, sz, MADV_DONTNEED);
+                   _exit(p[8192] == 0 && p[sz - 4096] == 0 ? 0 : 1);
+               }
+               int st = 0;
+               ok = ok && c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && p[8192] == 2;
+               ok = ok && munmap(p, sz) == 0;
+           }
            ok; }));
     return done();
 }
