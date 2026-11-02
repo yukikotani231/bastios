@@ -65,6 +65,25 @@ const WGP_KEEP: u64 = 10;
 const WGP_ALLOWED: u64 = 11;              // WG_ALLOWED words: ip | length << 32 | 1 << 40
 const WGP_RX: u64 = 19;
 const WGP_TX: u64 = 20;
+// Handshake and session words (src/wgproto.bastio).
+const WGP_HS: u64 = 21;                   // 1: an initiation is out, waiting for the response
+const WGP_HIDX: u64 = 22;                 // our index in that initiation
+const WGP_HE: u64 = 23;                   // its ephemeral private key (four words), then
+const WGP_HC: u64 = 27;                   //   the chaining key (four) and
+const WGP_HH: u64 = 31;                   //   the hash (four)
+const WGP_HT: u64 = 35;                   // tick it was sent at
+const WGP_WANT: u64 = 36;                 // 1: start a handshake as soon as possible
+const WGP_TRIES: u64 = 37;                // initiations sent since the last answer
+const WGP_TAI_HI: u64 = 38;               // the newest initiation timestamp accepted: seconds
+const WGP_TAI_LO: u64 = 39;               //   and nanoseconds
+const WGP_LHS: u64 = 40;                  // wall clock (ns) of the last completed handshake
+const WGP_SVALID: u64 = 41;               // 1: a session is set
+const WGP_LIDX: u64 = 42;                 // our index in it
+const WGP_RIDX: u64 = 43;                 // the peer's
+const WGP_SK: u64 = 44;                   // the sending key (four words)
+const WGP_RK: u64 = 48;                   // the receiving key (four words)
+const WGP_SCTR: u64 = 52;                 // the next sending counter
+const WGP_SBORN: u64 = 53;                // tick it was made at
 const ALLOWED_SET: u64 = 1099511627776;   // 1 << 40
 const END_SET: u64 = 281474976710656;     // 1 << 48
 
@@ -92,6 +111,20 @@ fn wps(n: &mut Net, p: u64, f: u64, v: u64)
   ensures net_ok(n)
 {
   n.wgp = set(n.wgp, p * WGP_W + f, v);
+}
+
+/// Frees peer p and erases everything it held, session keys included.
+fn wg_peer_wipe(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let mut f = 0;
+  while f < WGP_W
+    invariant f <= WGP_W && net_ok(n)
+  {
+    wps(&mut n, p, f, 0);
+    f = f + 1;
+  }
 }
 
 /// Closes device i's UDP socket, if it has one.
@@ -197,7 +230,7 @@ fn wg_clear(n: &mut Net, i: u64)
     invariant p <= WGPN && net_ok(n)
   {
     if wpw(n, p, WGP_OWNER) == i + 1 {
-      wps(&mut n, p, WGP_OWNER, 0);
+      wg_peer_wipe(&mut n, p);
     }
     p = p + 1;
   }
@@ -296,8 +329,8 @@ fn wg_put_peer(n: &mut Net, p: u64, idx: u64)
   nl_16(&mut n, wpw(n, p, WGP_KEEP) % 65536);
   nl_pad(&mut n);
   nla_head(&mut n, WGPEER_A_LAST_HANDSHAKE, 16);
-  nl_w64(&mut n, 0);
-  nl_w64(&mut n, 0);
+  nl_w64(&mut n, wpw(n, p, WGP_LHS) / 1000000000);
+  nl_w64(&mut n, wpw(n, p, WGP_LHS) % 1000000000);
   nla_head(&mut n, WGPEER_A_RX_BYTES, 8);
   nl_w64(&mut n, wpw(n, p, WGP_RX));
   nla_head(&mut n, WGPEER_A_TX_BYTES, 8);
@@ -564,7 +597,7 @@ fn wg_peer_set(n: &mut Net, i: u64, b: &Bytes, from: u64, to: u64) -> u64
   let mut p = wg_peer_find(n, i, b, ka);
   if flags / WGPEER_F_REMOVE_ME % 2 == 1 {
     if p < WGPN {
-      wps(&mut n, p, WGP_OWNER, 0);
+      wg_peer_wipe(&mut n, p);
     }
     return 0;
   }
@@ -622,6 +655,9 @@ fn wg_peer_set(n: &mut Net, i: u64, b: &Bytes, from: u64, to: u64) -> u64
       return NE_INVAL;
     }
     wps(&mut n, p, WGP_KEEP, rd16(b, ka2));
+    if rd16(b, ka2) != 0 {
+      wps(&mut n, p, WGP_WANT, 1);       // a persistent keep-alive brings the tunnel up at once
+    }
   }
   let aa = nla_find(b, from, to, WGPEER_A_ALLOWEDIPS);
   if aa != 0 {
@@ -667,7 +703,7 @@ fn wg_set(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
       invariant p <= WGPN && net_ok(n)
     {
       if wpw(n, p, WGP_OWNER) == i + 1 {
-        wps(&mut n, p, WGP_OWNER, 0);
+        wg_peer_wipe(&mut n, p);
       }
       p = p + 1;
     }
