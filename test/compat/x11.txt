@@ -55,3 +55,12 @@ fakebwm: window 800x600 X11 :3
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a larger Qt 5 program, KeePassXC, draws its window on the X screen
+# timeout 400
+$ bb mkdir -p /disk/k; bb tar -xf /disk/qt2.tar -C /disk/k; /disk/fakebwm 300 'x' >/disk/fb5.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/k -d 4 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/keepassxc >/disk/kp.out 2>&1 & until bb grep -q typed /disk/fb5.out; do bb sleep 1; done; bb cat /disk/fb5.out; bb ps | bb grep -q '/usr/bin/keepassxc' && echo alive || bb cat /disk/kp.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :4
+fakebwm: pixels drawn
+fakebwm: typed
+alive
