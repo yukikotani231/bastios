@@ -1635,6 +1635,7 @@ t_thread: exit_group while another thread runs keeps its code
 t_thread: gettid differs in a thread
 t_thread: pthread_create + join
 t_thread: pthread_detach
+t_thread: a thread reads the leader's maps, cmdline, auxv and statm and finds the group's memory
 t_thread: thread-local storage
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
