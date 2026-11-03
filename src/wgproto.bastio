@@ -150,12 +150,43 @@ fn wg_hs_wipe(n: &mut Net, p: u64)
   wps(&mut n, p, WGP_HS, 0);
 }
 
+/// The session peer p is about to lose becomes its previous one, if it is
+/// still young enough to take packets: it only receives from then on.
+fn wg_demote(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  if !wg_fresh(n, p) {
+    wg_prev_wipe(&mut n, p);
+    return;
+  }
+  wvs(&mut n, p, WGV_VALID, 1);
+  wvs(&mut n, p, WGV_LIDX, wpw(n, p, WGP_LIDX));
+  wvs(&mut n, p, WGV_BORN, wpw(n, p, WGP_SBORN));
+  wvs(&mut n, p, WGV_RMAX, wpw(n, p, WGP_RMAX));
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && net_ok(n)
+  {
+    wvs(&mut n, p, WGV_RK + k, wpw(n, p, WGP_RK + k));
+    k = k + 1;
+  }
+  let mut w = 0;
+  while w < 16
+    invariant w <= 16 && net_ok(n)
+  {
+    wvs(&mut n, p, WGV_RWIN + w, wpw(n, p, WGP_RWIN + w));
+    w = w + 1;
+  }
+}
+
 /// Sets peer p's session from keys (send || receive), our index lidx and
 /// the peer's ridx.
 fn wg_session(n: &mut Net, p: u64, keys: &Bytes, lidx: u64, ridx: u64, ticks: u64, init: u64)
   requires net_ok(n) && p < WGPN && blen(keys) == 64
   ensures net_ok(n)
 {
+  wg_demote(&mut n, p);
   wg_peer_key(&mut n, p, WGP_SK, keys, 0);
   wg_peer_key(&mut n, p, WGP_RK, keys, 32);
   wps(&mut n, p, WGP_LIDX, lidx);
@@ -584,6 +615,7 @@ fn wg_session_end(n: &mut Net, p: u64)
   }
   wps(&mut n, p, WGP_SCTR, 0);
   wps(&mut n, p, WGP_SVALID, 0);
+  wg_prev_wipe(&mut n, p);
   if wpw(n, p, WGP_KEEP) != 0 {
     wps(&mut n, p, WGP_WANT, 1);
   }
@@ -758,6 +790,124 @@ fn wg_peer_session(n: &Net, i: u64, idx: u64) -> u64
   return WGPN;
 }
 
+/// The peer of device i whose previous session has our index idx.
+fn wg_peer_prev(n: &Net, i: u64, idx: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= WGPN
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 && wvw(n, p, WGV_VALID) == 1 && wvw(n, p, WGV_LIDX) == idx {
+      return p;
+    }
+    p = p + 1;
+  }
+  return WGPN;
+}
+
+/// wg_win_ok for the previous session.
+fn wg_prev_ok(n: &Net, p: u64, ctr: u64) -> bool
+  requires net_ok(n) && p < WGPN
+{
+  if ctr >= SESSION_MAX {
+    return false;
+  }
+  let m = wvw(n, p, WGV_RMAX);
+  if ctr >= m {
+    return true;
+  }
+  if m - 1 - ctr >= WIN_BITS {
+    return false;
+  }
+  let b = ctr % WIN_BITS;
+  return wvw(n, p, WGV_RWIN + b / 64) / (1 << (b % 64)) % 2 == 0;
+}
+
+/// wg_win_set for the previous session.
+fn wg_prev_set(n: &mut Net, p: u64, ctr: u64)
+  requires net_ok(n) && p < WGPN && ctr < SESSION_MAX
+  ensures net_ok(n)
+{
+  let m = wvw(n, p, WGV_RMAX);
+  if ctr >= m {
+    let d = ctr - m + 1;
+    if d >= WIN_BITS {
+      let mut k = 0;
+      while k < 16
+        invariant k <= 16 && net_ok(n)
+      {
+        wvs(&mut n, p, WGV_RWIN + k, 0);
+        k = k + 1;
+      }
+    } else {
+      let mut j = 0;
+      while j < d
+        invariant j <= d && d < WIN_BITS && m <= ctr && ctr < SESSION_MAX && net_ok(n)
+      {
+        let c = (m + j) % WIN_BITS;
+        let w = wvw(n, p, WGV_RWIN + c / 64);
+        let bit = 1 << (c % 64);
+        if w / bit % 2 == 1 {
+          wvs(&mut n, p, WGV_RWIN + c / 64, w - bit);
+        }
+        j = j + 1;
+      }
+    }
+    wvs(&mut n, p, WGV_RMAX, ctr + 1);
+  }
+  let b = ctr % WIN_BITS;
+  let w = wvw(n, p, WGV_RWIN + b / 64);
+  let bit = 1 << (b % 64);
+  if w / bit % 2 == 0 {
+    wvs(&mut n, p, WGV_RWIN + b / 64, w + bit);
+  }
+}
+
+/// A transport message for the previous session of peer p, if that is
+/// still younger than REJECT_AFTER. It is delivered like any other; the
+/// session it is under stays receive-only and never confirms anything.
+fn wg_on_prev(n: &mut Net, i: u64, p: u64, buf: &Bytes, len: u64, src_ip: u64, src_port: u64)
+  requires net_ok(n) && i < IFN && p < WGPN && len <= blen(buf) && len >= 32 && len <= WG_MTU + 48
+  ensures net_ok(n)
+{
+  let born = wvw(n, p, WGV_BORN);
+  let ctr = load_le64(buf, 8);
+  if n.now < born || n.now - born >= REJECT_AFTER || ctr >= SESSION_MAX || !wg_prev_ok(n, p, ctr) {
+    return;
+  }
+  let mut key = balloc(32);
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && blen(key) == 32 && net_ok(n)
+  {
+    store_le64(&mut key, k * 8, wvw(n, p, WGV_RK + k));
+    k = k + 1;
+  }
+  let mut nonce = balloc(12);
+  store_le64(&mut nonce, 4, ctr);
+  let aad = balloc(0);
+  let sealed = bytes_slice(buf, 16, len);
+  match aead_open(key, nonce, aad, sealed) {
+    Option::None => {},
+    Option::Some(plain) => {
+      wg_prev_set(&mut n, p, ctr);
+      wg_set_endpoint(&mut n, p, src_ip, src_port);
+      let rx = wpw(n, p, WGP_RX);
+      if rx <= 18446744073709551615 - len {
+        wps(&mut n, p, WGP_RX, rx + len);
+      }
+      wg_deliver(&mut n, i, p, plain);
+      bfree(plain);
+    },
+  }
+  bfree(sealed);
+  bfree(aad);
+  bfree(nonce);
+  bfree(key);
+}
+
 /// An opened packet from peer p of device i: if it is IPv4 from an address
 /// the peer owns, it is taken in by the stack as if it had arrived on the
 /// device.
@@ -791,8 +941,13 @@ fn wg_on_data(n: &mut Net, i: u64, buf: &Bytes, len: u64, src_ip: u64, src_port:
   if len < 32 || (len - 32) % 16 != 0 || len > WG_MTU + 48 {
     return;
   }
-  let p = wg_peer_session(n, i, cast[u64](load_le32(buf, 4)));
+  let idx = cast[u64](load_le32(buf, 4));
+  let p = wg_peer_session(n, i, idx);
   if p >= WGPN {
+    let q = wg_peer_prev(n, i, idx);
+    if q < WGPN {
+      wg_on_prev(&mut n, i, q, buf, len, src_ip, src_port);
+    }
     return;
   }
   let ctr = load_le64(buf, 8);

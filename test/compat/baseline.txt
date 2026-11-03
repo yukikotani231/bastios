@@ -2312,6 +2312,30 @@ t_wghs: wgb knows wga
 t_wghs: wgc starts a handshake with wgd
 t_wghs: wgd knows wgc
 t_wghs: wge, unknown to wgd, gets nowhere
+t_wgprev: a child in a new network namespace
+t_wgprev: a client socket
+t_wgprev: a device with an address
+t_wgprev: a last handshake time
+t_wgprev: a packet sent under the old keys is still taken after the rekey, and echoed once
+t_wgprev: a veth pair, one end in the child's namespace
+t_wgprev: go
+t_wgprev: it is not taken once the old session is 180 s old
+t_wgprev: keys are traded
+t_wgprev: nothing came back while they were held
+t_wgprev: sockets
+t_wgprev: the child is ready
+t_wgprev: the child is set up
+t_wgprev: the child stops
+t_wgprev: the first old packet is released twice
+t_wgprev: the parent's end has an address
+t_wgprev: the peer is set up with the relay as its endpoint
+t_wgprev: the relay's control socket
+t_wgprev: the second old packet is released late
+t_wgprev: the session is renewed
+t_wgprev: the tunnel carries new traffic
+t_wgprev: the tunnel comes up
+t_wgprev: the tunnel still works
+t_wgprev: two messages are held
 t_wgtun: sockets
 t_wgtun: a child in a new network namespace
 t_wgtun: the child is ready
