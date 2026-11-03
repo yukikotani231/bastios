@@ -257,6 +257,21 @@ int main(void) {
            struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
            memcpy(CMSG_DATA(h), fds, sizeof fds);
            sendmsg(sv[0], &m, 0) == -1 && errno == EBADF; }));
+    EXPECT("SCM_RIGHTS with no descriptors in it (Firefox's IPC sends such a header) sends the bytes alone, on a stream and a seqpacket pair", ({
+           int ok = 1;
+           int types[2] = {SOCK_STREAM, SOCK_SEQPACKET};
+           for (int t = 0; t < 2 && ok; t++) {
+               int s2[2]; ok = socketpair(AF_UNIX, types[t], 0, s2) == 0;
+               char cb[CMSG_SPACE(sizeof(int))] = {0}; struct iovec v = {"hello", 5};
+               struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = CMSG_LEN(0)};
+               struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(0);
+               ok = ok && sendmsg(s2[0], &m, 0) == 5;
+               char got[8] = {0}, rb[CMSG_SPACE(sizeof(int))]; struct iovec rv = {got, sizeof got};
+               struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+               ok = ok && recvmsg(s2[1], &r, 0) == 5 && memcmp(got, "hello", 5) == 0 && r.msg_controllen == 0;
+               close(s2[0]); close(s2[1]);
+           }
+           ok; }));
     EXPECT("SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener", ({
            struct sockaddr_un ua = {.sun_family = AF_UNIX}; strcpy(ua.sun_path, "/tmp/t_scm.sock"); unlink(ua.sun_path);
            int ls = socket(AF_UNIX, SOCK_STREAM, 0); int ok = ls >= 0 && bind(ls, (void *)&ua, sizeof ua) == 0 && listen(ls, 4) == 0;
