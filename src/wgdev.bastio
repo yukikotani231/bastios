@@ -91,6 +91,16 @@ const WGP_ISINIT: u64 = 72;               // 1: we started the handshake of the 
 const WGP_LTX: u64 = 73;                  // tick of the last packet sent to the peer
 const WGP_CONF: u64 = 71;                 // 1: the session has carried a packet from the peer
 const WIN_BITS: u64 = 1024;
+// Cookie state words (Net.wgp after the policies): per device
+const WGC_CSEC: u64 = 0;                  // the cookie secret (four words), made from fresh random bytes
+const WGC_CSECT: u64 = 4;                 // tick it was made at, plus 1 (0: none yet)
+const WGC_LOADW: u64 = 5;                 // start tick of the second initiations are counted in
+const WGC_LOADN: u64 = 6;                 //   and how many came in it
+const WGC_BUSYU: u64 = 7;                 // the device is busy (asks for cookies) until this tick
+// and per peer
+const WGC_COOKIE: u64 = 0;                // the cookie the peer last sent us (two words),
+const WGC_COOKT: u64 = 2;                 //   the tick it came at, plus 1 (0: none),
+const WGC_MAC1: u64 = 3;                  //   and the mac1 (two words) of the last initiation we sent: what a cookie reply is read against
 const ALLOWED_SET: u64 = 1099511627776;   // 1 << 40
 const END_SET: u64 = 281474976710656;     // 1 << 48
 
@@ -120,11 +130,44 @@ fn wps(n: &mut Net, p: u64, f: u64, v: u64)
   n.wgp = set(n.wgp, p * WGP_W + f, v);
 }
 
+fn wcd(n: &Net, i: u64, f: u64) -> u64
+  requires net_ok(n) && i < IFN && f < WGC_DW
+{
+  return get(n.wgp, WGC_DBASE + i * WGC_DW + f);
+}
+
+fn wcds(n: &mut Net, i: u64, f: u64, v: u64)
+  requires net_ok(n) && i < IFN && f < WGC_DW
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, WGC_DBASE + i * WGC_DW + f, v);
+}
+
+fn wcpw(n: &Net, p: u64, f: u64) -> u64
+  requires net_ok(n) && p < WGPN && f < WGC_PW
+{
+  return get(n.wgp, WGC_PBASE + p * WGC_PW + f);
+}
+
+fn wcps(n: &mut Net, p: u64, f: u64, v: u64)
+  requires net_ok(n) && p < WGPN && f < WGC_PW
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, WGC_PBASE + p * WGC_PW + f, v);
+}
+
 /// Frees peer p and erases everything it held, session keys included.
 fn wg_peer_wipe(n: &mut Net, p: u64)
   requires net_ok(n) && p < WGPN
   ensures net_ok(n)
 {
+  let mut c = 0;
+  while c < WGC_PW
+    invariant c <= WGC_PW && net_ok(n)
+  {
+    wcps(&mut n, p, c, 0);
+    c = c + 1;
+  }
   let mut f = 0;
   while f < WGP_W
     invariant f <= WGP_W && net_ok(n)
@@ -231,6 +274,13 @@ fn wg_clear(n: &mut Net, i: u64)
   {
     wds(&mut n, i, f, 0);
     f = f + 1;
+  }
+  let mut c = 0;
+  while c < WGC_DW
+    invariant c <= WGC_DW && net_ok(n)
+  {
+    wcds(&mut n, i, c, 0);       // the cookie secret goes too
+    c = c + 1;
   }
   let mut p = 0;
   while p < WGPN
@@ -657,6 +707,13 @@ fn wg_peer_set(n: &mut Net, i: u64, b: &Bytes, from: u64, to: u64) -> u64
     {
       wps(&mut n, p, f, 0);
       f = f + 1;
+    }
+    let mut c = 0;
+    while c < WGC_PW
+      invariant c <= WGC_PW && net_ok(n)
+    {
+      wcps(&mut n, p, c, 0);
+      c = c + 1;
     }
     wps(&mut n, p, WGP_OWNER, i + 1);
     wg_peer_key(&mut n, p, WGP_PUB, b, ka);
