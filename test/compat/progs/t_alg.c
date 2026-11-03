@@ -151,7 +151,7 @@ int main(void) {
     EXPECT("socket(AF_ALG, SOCK_SEQPACKET) makes a socket", ({ int s = socket(AF_ALG, SOCK_SEQPACKET, 0); int r = s >= 0; if (r) close(s); r; }));
     EXPECT("a datagram AF_ALG socket is refused", ({ int s = socket(AF_ALG, SOCK_DGRAM, 0); int r = s < 0 && errno == ESOCKTNOSUPPORT; if (s >= 0) close(s); r; }));
     EXPECT("an unknown algorithm is ENOENT", ({ int s = bound("hash", "nosuchhash"); s < 0 && errno == ENOENT; }));
-    EXPECT("a type that is not hash is ENOENT", ({ int s = bound("skcipher", "cbc(aes)"); s < 0 && errno == ENOENT; }));
+    EXPECT("a type that is not hash is ENOENT", ({ int s = bound("rng", "stdrng"); s < 0 && errno == ENOENT; }));
     EXPECT("sha256 of abc", strcmp(digest("sha256", NULL, 0, "abc", 3), SHA256_ABC) == 0);
     EXPECT("sha256 of nothing", strcmp(digest("sha256", NULL, 0, NULL, 0), SHA256_EMPTY) == 0);
     EXPECT("sha384 of abc", strcmp(digest("sha384", NULL, 0, "abc", 3), SHA384_ABC) == 0);
