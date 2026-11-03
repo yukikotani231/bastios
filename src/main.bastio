@@ -75,6 +75,7 @@ import "lxloop.bastio";
 import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
+import "lxmountapi.bastio";
 import "lxns.bastio";
 import "lxnsk.bastio";
 import "lxuser.bastio";
