@@ -41,6 +41,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bterm` keeps the last 2000 lines that scrolled off the top (it kept 200), so a long build log can be read back with the wheel or Shift-Page Up.
 - `bterm` finds text in the screen and the scrollback with Ctrl-Shift-F: what is typed shows in the title bar, the match is lit and scrolled to the middle, Enter goes to an older match, Tab to a newer one and Escape ends it.
 - `bwm` says "No room for another window (16)" in the task bar for a few seconds when a program asks for a window past the limit, where the request was dropped without a word.
+- `bwm` resizes the focused window by 16 pixels with Ctrl-Alt and an arrow key.
 - `bwm` moves the focused window 16 pixels with Alt-Shift and an arrow key.
 - `bwm` moves a window when it is dragged with Alt held, from anywhere in the window and not only its title bar. The program in the window does not get that click.
 - The `bfiles` viewer's header gives the file's size in lines and bytes when there is room for it.
