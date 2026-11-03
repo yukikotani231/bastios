@@ -32,9 +32,14 @@
 // and the output a copy made at read: nothing is encrypted or decrypted in
 // place in a program's memory or in a page of a file.
 //
+// sendfile and splice (from a pipe) into an accepted socket add the bytes to
+// the message like send: they are copied into the socket's buffer, never
+// referenced, so a file's pages are neither read after the call returns nor
+// ever written to, whatever the cipher does.
+//
 // ALG_N sockets at most, each with ALG_BUF bytes of message. Not done:
-// sendfile and splice into the socket, AES-192, other modes (ecb, xts) and
-// md5 and sha1, which the libraries here do not have. An hmac key may be ALG_KEYMAX
+// AES-192, other modes (ecb, xts) and md5 and sha1, which the libraries here
+// do not have. An hmac key may be ALG_KEYMAX
 // bytes.
 
 import "core/sha256.bastio";
@@ -429,6 +434,31 @@ fn alg_send(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64) -> u64
     bcopy(&mut k.algb, s * ALG_BUF + have + done, k.fs.xfer, 0, chunk);
     done = done + chunk;
   }
+  alg_set(&mut k, s, ALG_MLEN, have + n);
+  return n;
+}
+
+/// n bytes of the transfer buffer join the message of the accepted socket fd:
+/// what sendfile and splice give it, after they have copied the file's or the
+/// pipe's bytes into the transfer buffer. The bytes are copied into the
+/// socket's own buffer, so the file's pages are never the cipher's input or
+/// output and are never written to. n bytes, or -errno.
+fn alg_put_xfer(k: &mut Kernel, pid: u64, fd: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= XFER
+  ensures kok(k) && (result <= n || result > XFER)
+{
+  let s = alg_of(k, pid, fd);
+  if s >= ALG_N {
+    return ENOTSOCK;
+  }
+  if alg_get(k, s, ALG_ST) != 3 {
+    return EOPNOTSUPP;
+  }
+  let have = alg_get(k, s, ALG_MLEN);
+  if have > ALG_BUF || n > ALG_BUF - have {
+    return EMSGSIZE;                        // more than the socket holds
+  }
+  bcopy(&mut k.algb, s * ALG_BUF + have, k.fs.xfer, 0, n);
   alg_set(&mut k, s, ALG_MLEN, have + n);
   return n;
 }
