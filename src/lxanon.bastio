@@ -22,7 +22,8 @@
 //
 // What stays eager: shared and read-only anonymous mappings (and
 // read-only executable ones),
-// MAP_POPULATE and MAP_LOCKED, and a mapping that finds every record in use.
+// MAP_POPULATE and MAP_LOCKED, and a mapping that finds every record in use
+// and no record to grow (anon_grow) or give up (anon_evict).
 // mprotect, mremap, mlock and the calls that need the pages there map the
 // rest of a recorded range first (anon_reach). A record split by an munmap
 // in its middle, with no free record for the right part, maps the right
