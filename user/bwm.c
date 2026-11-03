@@ -1467,6 +1467,20 @@ static void close_win(struct win *w)
     }
 }
 
+/* Alt-Shift with an arrow key: the window moves 16 pixels, kept where its title bar stays reachable (as a drag keeps it). */
+static void nudge_win(struct win *w, int dx, int dy)
+{
+    touch_win(w);
+    w->maxed = 0;
+    w->x += dx;
+    w->y += dy;
+    if (w->x > (int)W - 60) w->x = (int)W - 60;
+    if (w->x < 60 - w->w) w->x = 60 - w->w;
+    if (w->y > (int)H - BAR_H - TITLE_H) w->y = (int)H - BAR_H - TITLE_H;
+    if (w->y < 0) w->y = 0;
+    touch_win(w);
+}
+
 /* Fills the left (side -1) or right (side 1) half of the screen above the
  * task bar, or all of it (side 0); the maximize button, or toggle_max, puts the window back. */
 static void snap_win(struct win *w, int side)
@@ -2315,6 +2329,13 @@ int main(int argc, char **argv)
                             } else {
                                 raise_win(z[0]);
                             }
+                            touch_all();
+                        }
+                    } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_shift) {
+                        struct win *t = focus();                    /* Alt-Shift-arrows: nudge the focused window by 16 pixels */
+                        if (t) {
+                            raise_win(t);
+                            nudge_win(t, code == 105 ? -16 : code == 106 ? 16 : 0, code == 103 ? -16 : code == 108 ? 16 : 0);
                             touch_all();
                         }
                     } else if ((code == 105 || code == 106 || code == 103) && down && k_alt) {

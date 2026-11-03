@@ -604,6 +604,22 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print("pixels", [at(x, 200) for x in (100, 250, 350)])
             fails += not good
             time.sleep(3)                                    # Alt is up before the next key (it was held for 4 s)
+            # Alt-Shift with an arrow key moves the focused window 16 pixels.
+            def left_edge():
+                w, h, px = screendump()
+                for x in range(0, 700):
+                    if tuple(px[(200 * w + x) * 3:(200 * w + x) * 3 + 3]) == (255, 255, 0):
+                        return x
+                return -1
+            e0 = left_edge()
+            monitor("sendkey alt-shift-left", "sendkey alt-shift-left", "sendkey alt-shift-right")
+            time.sleep(1)
+            e1 = left_edge()
+            good = e0 > 0 and e1 == e0 - 16
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift with the arrow keys moves the window 16 pixels")
+            if not good:
+                print("edges", e0, e1)
+            fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
