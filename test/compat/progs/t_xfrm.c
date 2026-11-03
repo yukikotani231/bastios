@@ -24,6 +24,12 @@
 #define XFRM_MSG_DELSA 17
 #define XFRM_MSG_GETSA 18
 #define XFRM_MSG_FLUSHSA 28
+#define XFRM_MSG_NEWPOLICY 19
+#define XFRM_MSG_DELPOLICY 20
+#define XFRM_MSG_GETPOLICY 21
+#define XFRM_MSG_UPDPOLICY 25
+#define XFRM_MSG_FLUSHPOLICY 29
+#define XFRMA_TMPL 5
 #define XFRMA_ALG_CRYPT 2
 #define XFRMA_ALG_AEAD 18
 #define IPPROTO_ESP_ 50
@@ -44,6 +50,22 @@ struct usersa {
 };
 struct usersa_id { uint8_t daddr[16]; uint32_t spi; uint16_t family; uint8_t proto, pad; };
 struct aead { char name[64]; uint32_t key_len, icv_len; uint8_t key[36]; };
+
+struct userpolicy {
+    struct selector sel;
+    uint64_t lft[8], curlft[4];
+    uint32_t priority, index;
+    uint8_t dir, action, flags, share;
+};
+struct policy_id { struct selector sel; uint32_t index; uint8_t dir, pad[3]; };
+struct tmpl {
+    struct xid id;
+    uint16_t family, p;
+    uint8_t saddr[16];
+    uint32_t reqid;
+    uint8_t mode, share, optional, p2;
+    uint32_t aalgos, ealgos, calgos;
+};
 
 static char buf[1024];
 static int blen;
@@ -141,6 +163,53 @@ static int count(void) {
         struct nlh *h = (void *)p;
         if (h->len < 16) break;
         if (h->type == XFRM_MSG_NEWSA) n++;
+        p += (h->len + 3) & ~3u;
+    }
+    return n;
+}
+
+/* A policy for traffic from SRC/SP to DST/DP in direction DIR; REQID > 0 adds
+ * an ESP template (tunnel mode, to TDST) and ACT 1 makes it a block. */
+static int policy(int s, int type, int dir, uint32_t dst, int dp, uint32_t src, int sp, int proto, int prio,
+                  int reqid, uint32_t tdst, int act, int ntmpl, int tproto) {
+    struct userpolicy up;
+    struct tmpl t[2];
+    memset(&up, 0, sizeof up);
+    memset(t, 0, sizeof t);
+    ip4(up.sel.daddr, dst); ip4(up.sel.saddr, src);
+    up.sel.family = AF_INET; up.sel.pd = dp; up.sel.ps = sp; up.sel.proto = proto;
+    up.priority = prio; up.dir = dir; up.action = act;
+    for (int i = 0; i < 2; i++) {
+        ip4(t[i].id.daddr, tdst); t[i].id.proto = tproto; t[i].family = AF_INET;
+        ip4(t[i].saddr, 0x0a000001); t[i].reqid = reqid; t[i].mode = 1;
+        t[i].aalgos = t[i].ealgos = t[i].calgos = ~0u;
+    }
+    start(type, NLM_F_ACK);
+    body(&up, sizeof up);
+    if (ntmpl) attr(XFRMA_TMPL, t, ntmpl * sizeof t[0]);
+    return talk(s, 0);
+}
+
+static int selproto;
+
+static int pol_get_sel(int s, int type, int dir, uint32_t dst, int dp, uint32_t src, int sp, int flags) {
+    struct policy_id id;
+    memset(&id, 0, sizeof id);
+    ip4(id.sel.daddr, dst); ip4(id.sel.saddr, src);
+    id.sel.family = AF_INET; id.sel.pd = dp; id.sel.ps = sp; id.sel.proto = selproto; id.dir = dir;
+    start(type, flags | NLM_F_ACK);
+    body(&id, sizeof id);
+    return talk(s, 0);
+}
+
+static int pol_count(int s) {
+    start(XFRM_MSG_GETPOLICY, NLM_F_DUMP);
+    if (talk(s, 1) != 0) return -1;
+    int n = 0;
+    for (char *p = ans; p < ans + anslen;) {
+        struct nlh *h = (void *)p;
+        if (h->len < 16) break;
+        if (h->type == XFRM_MSG_NEWPOLICY) n++;
         p += (h->len + 3) & ~3u;
     }
     return n;
@@ -289,6 +358,121 @@ int main(void) {
         body(&fl, 1);
         talk(s, 0);
         full && add(s, FL, 0x0a000002, 0x1001, 1, 0, 16) == 0;
+    }));
+    /* ---- policies ---- */
+    EXPECT("an out policy with an ESP template is added", policy(s, XFRM_MSG_NEWPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0, 100, 7, 0x0a000002, 0, 1, 50) == 0);
+    EXPECT("the same one again is EEXIST", policy(s, XFRM_MSG_NEWPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0, 100, 7, 0x0a000002, 0, 1, 50) == -EEXIST);
+    EXPECT("the same selector in the other direction is another policy", policy(s, XFRM_MSG_NEWPOLICY, 0, 0x0a000100, 24, 0x0a000200, 24, 0, 100, 7, 0x0a000001, 0, 1, 50) == 0);
+    EXPECT("reading one by selector gives its template, priority and direction", ({
+        int e = pol_get_sel(s, XFRM_MSG_GETPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0);
+        struct userpolicy *up = (void *)(ans + 16);
+        struct tmpl *t = (void *)(ans + 16 + sizeof *up + 4);
+        e == 0 && anslen >= 16 + (int)sizeof *up + 4 + (int)sizeof *t && up->priority == 100 && up->dir == 1 && up->action == 0
+            && up->sel.pd == 24 && up->sel.ps == 24 && up->sel.daddr[2] == 2 && t->reqid == 7 && t->mode == 1
+            && t->id.proto == IPPROTO_ESP_ && t->id.daddr[3] == 2;
+    }));
+    EXPECT("host bits of a selector are cleared", ({
+        int e = policy(s, XFRM_MSG_NEWPOLICY, 1, 0x0a000377, 24, 0x0a000100, 24, 0, 5, 1, 0x0a000002, 0, 1, 50);
+        int g = pol_get_sel(s, XFRM_MSG_GETPOLICY, 1, 0x0a000300, 24, 0x0a000100, 24, 0);
+        struct userpolicy *up = (void *)(ans + 16);
+        e == 0 && g == 0 && up->sel.daddr[3] == 0 && up->sel.daddr[2] == 3;
+    }));
+    EXPECT("a dump lists them", pol_count(s) == 3);
+    EXPECT("reading one by its index gives the same policy", ({
+        pol_get_sel(s, XFRM_MSG_GETPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0);
+        uint32_t idx = ((struct userpolicy *)(ans + 16))->index;
+        struct policy_id id;
+        memset(&id, 0, sizeof id);
+        id.index = idx; id.dir = 1;
+        start(XFRM_MSG_GETPOLICY, NLM_F_ACK);
+        body(&id, sizeof id);
+        int e = talk(s, 0);
+        idx != 0 && e == 0 && ((struct userpolicy *)(ans + 16))->priority == 100;
+    }));
+    EXPECT("UPDPOLICY replaces one, and NEWPOLICY does not", ({
+        int e = policy(s, XFRM_MSG_UPDPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0, 50, 9, 0x0a000002, 0, 1, 50);
+        int g = pol_get_sel(s, XFRM_MSG_GETPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0);
+        struct userpolicy *up = (void *)(ans + 16);
+        struct tmpl *t = (void *)(ans + 16 + sizeof *up + 4);
+        e == 0 && g == 0 && up->priority == 50 && t->reqid == 9 && pol_count(s) == 3;
+    }));
+    EXPECT("a block policy is added and read back", ({
+        int e = policy(s, XFRM_MSG_NEWPOLICY, 0, 0x0a000500, 32, 0, 0, 17, 1, 0, 0, 1, 0, 0);
+        selproto = 17;
+        int g = pol_get_sel(s, XFRM_MSG_GETPOLICY, 0, 0x0a000500, 32, 0, 0, 0);
+        selproto = 0;
+        struct userpolicy *up = (void *)(ans + 16);
+        e == 0 && g == 0 && up->action == 1 && up->sel.proto == 17;
+    }));
+    EXPECT("a block policy with a template is EINVAL", policy(s, XFRM_MSG_NEWPOLICY, 0, 0x0a000600, 32, 0, 0, 0, 1, 1, 0x0a000002, 1, 1, 50) == -EINVAL);
+    EXPECT("a prefix longer than 32 is EINVAL", policy(s, XFRM_MSG_NEWPOLICY, 1, 0x0a000600, 33, 0, 0, 0, 1, 0, 0, 0, 0, 0) == -EINVAL);
+    EXPECT("a direction that is not in or out is EINVAL", policy(s, XFRM_MSG_NEWPOLICY, 3, 0x0a000600, 32, 0, 0, 0, 1, 0, 0, 0, 0, 0) == -EINVAL);
+    EXPECT("the forward direction is EOPNOTSUPP", policy(s, XFRM_MSG_NEWPOLICY, 2, 0x0a000600, 32, 0, 0, 0, 1, 0, 0, 0, 0, 0) == -EOPNOTSUPP);
+    EXPECT("two templates are EOPNOTSUPP", policy(s, XFRM_MSG_NEWPOLICY, 1, 0x0a000600, 32, 0, 0, 0, 1, 1, 0x0a000002, 0, 2, 50) == -EOPNOTSUPP);
+    EXPECT("a template for a protocol other than ESP is refused", policy(s, XFRM_MSG_NEWPOLICY, 1, 0x0a000600, 32, 0, 0, 0, 1, 1, 0x0a000002, 0, 1, 51) == -EPROTONOSUPPORT);
+    EXPECT("a selector with a port is EOPNOTSUPP", ({
+        struct userpolicy up;
+        memset(&up, 0, sizeof up);
+        ip4(up.sel.daddr, 0x0a000600); up.sel.family = AF_INET; up.sel.pd = 32; up.sel.dport = htons(80); up.sel.dport_mask = 0xffff;
+        start(XFRM_MSG_NEWPOLICY, NLM_F_ACK); body(&up, sizeof up);
+        talk(s, 0) == -EOPNOTSUPP;
+    }));
+    EXPECT("a truncated policy is EINVAL", ({
+        char half[40];
+        memset(half, 0, sizeof half);
+        start(XFRM_MSG_NEWPOLICY, NLM_F_ACK); body(half, sizeof half);
+        talk(s, 0) == -EINVAL;
+    }));
+    EXPECT("a policy is deleted, and then it is ESRCH", ({
+        int d = pol_get_sel(s, XFRM_MSG_DELPOLICY, 1, 0x0a000300, 24, 0x0a000100, 24, 0);
+        d == 0 && pol_get_sel(s, XFRM_MSG_DELPOLICY, 1, 0x0a000300, 24, 0x0a000100, 24, 0) == -ESRCH
+            && pol_get_sel(s, XFRM_MSG_GETPOLICY, 1, 0x0a000300, 24, 0x0a000100, 24, 0) == -ESRCH;
+    }));
+    EXPECT("a program that is not privileged cannot add, read or delete a policy", ({
+        int r = 0;
+        pid_t c = fork();
+        if (c == 0) {
+            if (setuid(1000) != 0) _exit(2);
+            int t = socket(AF_NETLINK, SOCK_RAW, NETLINK_XFRM);
+            int a = policy(t, XFRM_MSG_NEWPOLICY, 1, 0x0a000700, 24, 0, 0, 0, 1, 0, 0, 0, 0, 0);
+            int g = pol_get_sel(t, XFRM_MSG_GETPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0);
+            int d = pol_get_sel(t, XFRM_MSG_DELPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0);
+            _exit(a == -EPERM && g == -EPERM && d == -EPERM ? 0 : 1);
+        }
+        int st = 0;
+        waitpid(c, &st, 0);
+        r = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        r && pol_get_sel(s, XFRM_MSG_GETPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0) == 0;
+    }));
+    EXPECT("a network namespace has policies of its own", ({
+        int r = 0;
+        pid_t c = fork();
+        if (c == 0) {
+            if (unshare(CLONE_NEWNET) != 0) _exit(2);
+            int t = socket(AF_NETLINK, SOCK_RAW, NETLINK_XFRM);
+            int seen = pol_get_sel(t, XFRM_MSG_GETPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0);
+            int a = policy(t, XFRM_MSG_NEWPOLICY, 1, 0x0a000200, 24, 0x0a000100, 24, 0, 1, 0, 0, 0, 0, 0);
+            int n = pol_count(t);
+            _exit(seen == -ESRCH && a == 0 && n == 1 ? 0 : 1);
+        }
+        int st = 0;
+        waitpid(c, &st, 0);
+        r = WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        r && pol_count(s) == 3;
+    }));
+    EXPECT("flushing policies removes them all, and gives the room back", ({
+        char fl = 0;
+        start(XFRM_MSG_FLUSHPOLICY, NLM_F_ACK);
+        body(&fl, 1);
+        int e = talk(s, 0);
+        int z = pol_count(s) == 0;
+        int n = 0;
+        while (n < 200 && policy(s, XFRM_MSG_NEWPOLICY, 1, 0x0b000000 + n * 256, 24, 0, 0, 0, 1, 0, 0, 0, 0, 0) == 0) n++;
+        int full = n < 200 && n >= 16;
+        start(XFRM_MSG_FLUSHPOLICY, NLM_F_ACK);
+        body(&fl, 1);
+        talk(s, 0);
+        e == 0 && z && full && pol_count(s) == 0;
     }));
     return done();
 }

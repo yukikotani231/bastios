@@ -38,6 +38,7 @@ const DNS_SERVER: u64 = 0x0A000203;   // 10.0.2.3, QEMU's resolver, with the sta
 const IP_ICMP: u64 = 1;
 const IP_ICMP6: u64 = 58;               // ICMPv6, as the protocol of the IPv4 frame that stands for it
 const IP_UDP: u64 = 17;
+const IPPROTO_ESP: u64 = 50;            // IPsec ESP (src/xfrm.bastio)
 const IP_TCP: u64 = 6;
 const ICMP_ECHO_REPLY: u64 = 0;
 const ICMP_ECHO: u64 = 8;
@@ -110,6 +111,7 @@ const S_CORK: u64 = 6;                // bytes held back by MSG_MORE, in cork
 const S_NS: u64 = 7;                  // its network namespace (src/netns.bastio)
 const RAW_ICMP: u64 = 65537;           // S_PORT of a raw ICMP socket (no port number is)
 const RAW_ICMP6: u64 = 65538;          // S_PORT of a raw ICMPv6 socket (src/net6.bastio)
+const RAW_ESP: u64 = 65539;            // S_PORT of a raw ESP socket: it only sends (src/xfrm.bastio)
 const S_FAM: u64 = 8;                 // FAM_*: which peers it takes datagrams from
 const SOCK_FIELDS: u64 = 9;           // S_FAM + 1
 // Which address family a socket (UDP here, TCP listeners in tcp.bastio)
@@ -189,7 +191,10 @@ const WGPN: u64 = 64;                  //   peers, all devices together
 const XSA_N: u64 = 64;                  // IPsec security associations (src/xfrm.bastio), all namespaces together
 const XSA_W: u64 = 24;
 const XSA_BASE: u64 = 4736;              // WGPN * WGP_W: where the associations start in Net.wgp
-const WGPX_LEN: u64 = 6272;              // XSA_BASE + XSA_N * XSA_W: the length of Net.wgp
+const XP_N: u64 = 32;                   // IPsec policies, all namespaces together
+const XP_W: u64 = 16;
+const XP_BASE: u64 = 6272;              // XSA_BASE + XSA_N * XSA_W: where the policies start in Net.wgp
+const WGPX_LEN: u64 = 6784;              // XP_BASE + XP_N * XP_W: the length of Net.wgp
 const WG_ALLOWED: u64 = 8;             //   allowed IPs a peer can hold
 const NATN: u64 = 256;                 // masqueraded flows (src/netns.bastio)
 const NAT_W: u64 = 5;                  // words per flow:
@@ -289,7 +294,7 @@ struct Net {
   nl_full: bool,      // ... and whether something did not fit
   nat: Buf,           // masqueraded flows, NAT_W words each
   wgd: Buf,           // WireGuard devices: WG_W words for each interface slot (src/wgdev.bastio)
-  wgp: Buf,           // WireGuard peers, WGP_W words each, then the IPsec security associations, XSA_W words each (src/xfrm.bastio)
+  wgp: Buf,           // WireGuard peers, WGP_W words each, then the IPsec security associations, XSA_W words each, then the policies, XP_W words each (src/xfrm.bastio)
   nat_next: u64,      // the flow replaced when every one is in use
   nfw: Buf,           // the packet filter's tables, chains and rules (src/nft.bastio)
   nfb: Bytes,         // the text of its rules
@@ -751,6 +756,9 @@ fn send_via_raw(n: &mut Net, hop: u64, flen: u64) -> bool
   requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= NET_BUF
   ensures net_ok(n)
 {
+  if esp_out(&mut n, flen) != 0 {
+    return true;                      // wrapped in ESP and sent, or dropped by a policy
+  }
   if !is_local(n, hop) && flen <= FRAME_MAX {
     let o = route_if(n, hop);
     if o < IFN && iw(n, o, IF_KIND) == IFK_WG {
@@ -1117,6 +1125,16 @@ fn ip_in(n: &mut Net, frame_len: u64)
     return;
   }
   if !nf_hook(&mut n, NF_IN, 0, flen, n.in_if, NO_IF) {
+    return;
+  }
+  // IPsec (src/xfrm.bastio): what came in plain must not be what an in
+  // policy wants in ESP. (A packet round the loopback queue is this machine's
+  // own: the one inside an ESP packet comes back that way.)
+  if mine && !(n.lo_in && n.in_if == ns_lo(n)) && !esp_plain_ok(n, src, dst, proto) {
+    return;
+  }
+  if proto == IPPROTO_ESP && mine {
+    esp_in(&mut n, total);
     return;
   }
   if proto == IP_ICMP {
@@ -1775,12 +1793,15 @@ fn raw_sendto(n: &mut Net, s: u64, to: u64, buf: &Bytes, size: u64) -> u64
     return NO_SOCK;
   }
   let kind = sk_get(n, s, S_PORT);
-  if (kind != RAW_ICMP && kind != RAW_ICMP6) || ip > IP_MAX || ip == 0
+  if (kind != RAW_ICMP && kind != RAW_ICMP6 && kind != RAW_ESP) || ip > IP_MAX || ip == 0
     || size < 8 || size > UDP_MAX + 8 || size > blen(buf) {
     return NO_SOCK;
   }
   sk_enter(&mut n, s);
   let mut proto = IP_ICMP;
+  if kind == RAW_ESP {
+    proto = IPPROTO_ESP;
+  }
   if kind == RAW_ICMP6 {
     proto = IP_ICMP6;
     if !is_v6tok(ip) {
@@ -2742,6 +2763,23 @@ fn sock_set_fam(c: &mut Nic, s: u64, fam: u64)
   }
 }
 
+/// Makes socket s (just opened) a raw ESP socket: one that sends packets of
+/// protocol 50 (what arrives is the IPsec stack's, not a socket's).
+fn sock_make_raw_esp(c: &mut Nic, s: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) {
+        sk_set(&mut n, s, S_PORT, RAW_ESP);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
 /// Makes socket s (just opened) a raw ICMPv6 socket.
 fn sock_make_raw6(c: &mut Nic, s: u64)
   requires nic_ok(c)
@@ -2763,7 +2801,7 @@ fn sock_is_raw(c: &Nic, s: u64) -> bool
 {
   match c {
     Nic::None => { return false; },
-    Nic::Up(n) => { return udp_is_open(n, s) && (sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6); },
+    Nic::Up(n) => { return udp_is_open(n, s) && (sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 || sk_get(n, s, S_PORT) == RAW_ESP); },
   }
 }
 
@@ -3009,7 +3047,7 @@ fn sock_row(c: &Nic, s: u64, ns: u64, f: u64) -> u64
   match c {
     Nic::None => { return 0; },
     Nic::Up(n) => {
-      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 {
+      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 || sk_get(n, s, S_PORT) == RAW_ESP {
         return 0;
       }
       if f == 0 {
