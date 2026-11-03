@@ -40,17 +40,17 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
-    out, server, client, gtk, qt, qt2, java, wx, busybox, bx11, fakebwm, x11start = args
+    out, server, client, gtk, qt, qt2, java, wx, py, busybox, bx11, fakebwm, x11start = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "x11")
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
     os.makedirs(work, exist_ok=True)
-    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity")):
+    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru")):
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
         write_tar(files, os.path.join(work, tar))
-    env = dict(os.environ, MKDISK_FREE_MB="1800")
+    env = dict(os.environ, MKDISK_FREE_MB="2200")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
                                f"busybox={busybox}", f"bx11={bx11}", f"fakebwm={fakebwm}", f"x11start={x11start}",
                                f"server.tar={os.path.join(work, 'server.tar')}",
@@ -59,6 +59,7 @@ def main():
                                f"qt.tar={os.path.join(work, 'qt.tar')}",
                                f"qt2.tar={os.path.join(work, 'qt2.tar')}",
                                f"java.tar={os.path.join(work, 'java.tar')}",
-                               f"wx.tar={os.path.join(work, 'wx.tar')}"], env)
+                               f"wx.tar={os.path.join(work, 'wx.tar')}",
+                               f"py.tar={os.path.join(work, 'py.tar')}"], env)
 
 main()

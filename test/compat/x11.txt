@@ -82,3 +82,12 @@ fakebwm: window 800x600 X11 :6
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a Python program with PyQt 5, dupeGuru, draws its window on the X screen
+# timeout 400
+$ bb kill $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 2; bb mkdir -p /disk/p; bb tar -xf /disk/py.tar -C /disk/p; /disk/fakebwm 300 'x' >/disk/fb8.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/p -d 7 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/dupeguru >/disk/dg.out 2>&1 & until bb grep -q typed /disk/fb8.out; do bb sleep 1; done; bb cat /disk/fb8.out; bb ps | bb grep -q '/usr/bin/dupeguru' && echo alive || bb cat /disk/dg.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :7
+fakebwm: pixels drawn
+fakebwm: typed
+alive

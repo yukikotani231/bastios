@@ -488,21 +488,27 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
 {
   let kind = cast[u64](bget(n.pkt, 54));
   let hops = cast[u64](bget(n.pkt, 21));
+  let code = cast[u64](bget(n.pkt, 55));
   if kind == ICMP6_ECHO && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46)) {
     net_copy(&mut n, 54 + plen);
     bset(&mut n.out, 54, cast[u8](ICMP6_ECHO_REPLY));
     v6_header(&mut n, smac, NH_ICMP6, plen, be64(n.pkt, 38), n.iid, shi, slo, 64);
     net_send(&mut n, 54 + plen);
-  } else if kind == ICMP6_NS && plen >= 24 && hops == 255 {
+  } else if kind == ICMP6_NS && plen >= 24 && hops == 255 && code == 0 {
     let thi = be64(n.pkt, 62);
     let tlo = be64(n.pkt, 70);
     if v6_mine(n, thi, tlo) && shi != 0 {
       if v6_onlink(n, shi) {
         v6_token(&mut n, shi, slo, smac);   // it will want an answer back
       }
-      na_send(&mut n, smac, shi, slo, thi, tlo);
+      na_send(&mut n, smac, shi, slo, thi, tlo, true);
+    } else if v6_mine(n, thi, tlo) && be64(n.pkt, 38) == MC_HI && be64(n.pkt, 46) == SNM_LO + n.iid % TWO24 && plen == 24 {
+      // Duplicate address detection by another node (RFC 4861 7.2.4): the
+      // solicitation has no source address and no source link-layer option.
+      // Say so to every node, with the Solicited flag clear.
+      na_send(&mut n, 0x333300000001, MC_HI, 1, thi, tlo, false);
     }
-  } else if kind == ICMP6_NA && plen >= 24 && hops == 255 {
+  } else if kind == ICMP6_NA && plen >= 24 && hops == 255 && code == 0 {
     let thi = be64(n.pkt, 62);
     let tlo = be64(n.pkt, 70);
     let i = v6_find(n, thi, tlo);
@@ -511,7 +517,7 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
       let tok = V6_BASE + i;
       v6_release(&mut n, tok);
     }
-  } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI {
+  } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI && code == 0 {
     ra_in(&mut n, plen, smac, slo);
   } else if (kind == ICMP6_ECHO_REPLY || (1 <= kind && kind <= 4)) && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46))
     && shi / TWO48 != 0xFF02 {
@@ -558,14 +564,18 @@ fn v6_release(n: &mut Net, tok: u64)
   }
 }
 
-fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64)
+fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64, solicited: bool)
   requires net_ok(n) && mac < MAC_LIMIT
   ensures net_ok(n)
 {
   bset(&mut n.out, 54, cast[u8](ICMP6_NA));
   bset(&mut n.out, 55, 0);
   put32(&mut n.out, 56, 0);
-  put32(&mut n.out, 58, 0x60000000);  // solicited, override
+  if solicited {
+    put32(&mut n.out, 58, 0x60000000);  // solicited, override
+  } else {
+    put32(&mut n.out, 58, 0x20000000);  // override
+  }
   put64(&mut n.out, 62, thi);
   put64(&mut n.out, 70, tlo);
   bset(&mut n.out, 78, 2);            // option: our link-layer address
@@ -585,6 +595,9 @@ fn ra_in(n: &mut Net, plen: u64, smac: u64, slo: u64)
   if be16(n.pkt, 60) != 0 {
     n.rtr_mac = smac;                 // a router lifetime: a default router
     n.rtr_lo = slo;
+  } else if n.rtr_mac == smac && n.rtr_lo == slo {
+    n.rtr_mac = 0;                    // lifetime 0: it is no default router any more (RFC 4861 6.3.4)
+    n.rtr_lo = 0;
   }
   let end = 54 + plen;
   let mut o = 70;

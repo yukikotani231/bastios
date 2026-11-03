@@ -236,10 +236,17 @@ t_algskc: cbc(aes) with a 256-bit key encrypts F.2.5 and decrypts it
 t_algskc: ctr(aes) takes any length: 20 bytes give the first 20 of the 32
 t_algskc: ctr(aes) with a 128-bit key encrypts the SP 800-38A F.5.1 message and decrypts it
 t_algskc: ctr(aes) with a 256-bit key gives F.5.5
+t_algskc: encrypting from a file leaves the file as the plaintext
 t_algskc: no operation, or no IV, is EINVAL
 t_algskc: reading into the memory that was sent is fine and gives the same result
+t_algskc: sendfile into a hash socket gives the digest of the file
+t_algskc: sendfile of a file of ciphertext decrypts it, and the file stays the ciphertext
+t_algskc: sendfile to a socket that is bound but not accepted fails
+t_algskc: splice from a file through a pipe, as a program like OpenSSL does, gives the same
+t_algskc: splice from a pipe into the socket adds to the message like send
 t_algskc: the IV goes on: a second message with no new IV continues the CBC chain
 t_algskc: the counter carries through all 16 bytes: ff..ff then 00..00
+t_algskc: the file changed after the sendfile does not change the result
 t_algskc: the input is a copy: changing the memory after the send changes nothing
 t_algskc: the key is a copy: a socket accepted before a new key keeps the old one
 t_algskc: the result goes only to the buffer read into: the sent memory is not changed
@@ -1857,6 +1864,7 @@ x11: x11: a Qt 5 program, MediaInfo, draws its window on the X screen
 x11: x11: a larger Qt 5 program, KeePassXC, draws its window on the X screen
 x11: x11: a Java Swing program, the JDownloader installer, draws its window on the X screen
 x11: x11: a wxWidgets program, Audacity, draws its window on the X screen
+x11: x11: a Python program with PyQt 5, dupeGuru, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program

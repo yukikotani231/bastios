@@ -6,10 +6,15 @@
  * only to the buffer read into, a CBC message that is not whole blocks, a
  * buffer too small, a wrong IV length, a missing operation or IV and an
  * AES-192 key are errors that leave no output, and the IV goes on from one
- * message to the next as in Linux. */
+ * message to the next as in Linux. Last, sendfile and splice of a file's
+ * bytes into the socket: they are a copy, and the file is never written to
+ * (decrypting from a file must not turn the file into the plaintext), and
+ * changing the file after the call changes nothing. */
 #define _GNU_SOURCE
 #include "compat.h"
+#include <fcntl.h>
 #include <stdint.h>
+#include <sys/sendfile.h>
 #include <sys/socket.h>
 #include <sys/uio.h>
 
@@ -381,5 +386,130 @@ int main(void) {
         close(s);
         ok;
     }));
+
+    /* sendfile and splice into the socket */
+    {
+        const char *path = "algskc.dat";
+        unsigned char ct[32], pt[32], iv[16];
+        unhex("7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2", ct);
+        unhex(P12, pt);
+        unhex(IVCBC, iv);
+        EXPECT("sendfile of a file of ciphertext decrypts it, and the file stays the ciphertext", ({
+            int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+            long w = fd >= 0 ? write(fd, ct, 32) : -1;
+            int op = skc_op("cbc(aes)", k128, 16);
+            long s0 = op >= 0 ? skc_send(op, 0, iv, 16, "", 0) : -1;   /* decrypt: the op and the IV, no data */
+            off_t off = 0;
+            long sf = op >= 0 && fd >= 0 ? sendfile(op, fd, &off, 32) : -1;
+            long r = op >= 0 ? read(op, out, sizeof out) : -1;
+            unsigned char back[32];
+            long rd = fd >= 0 ? pread(fd, back, 32, 0) : -1;
+            int ok = w == 32 && s0 == 0 && sf == 32 && r == 32 && memcmp(out, pt, 32) == 0 && rd == 32 && memcmp(back, ct, 32) == 0;
+            if (op >= 0) close(op);
+            if (fd >= 0) close(fd);
+            ok;
+        }));
+        EXPECT("the file changed after the sendfile does not change the result", ({
+            int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+            long w = fd >= 0 ? write(fd, pt, 32) : -1;
+            int op = skc_op("cbc(aes)", k128, 16);
+            long s0 = op >= 0 ? skc_send(op, 1, iv, 16, "", 0) : -1;
+            off_t off = 0;
+            long sf = op >= 0 && fd >= 0 ? sendfile(op, fd, &off, 32) : -1;
+            unsigned char z[32] = {0};
+            long wz = fd >= 0 ? pwrite(fd, z, 32, 0) : -1;
+            long r = op >= 0 ? read(op, out, sizeof out) : -1;
+            unsigned char want[32];
+            unhex("7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2", want);
+            int ok = w == 32 && s0 == 0 && sf == 32 && wz == 32 && r == 32 && memcmp(out, want, 32) == 0;
+            if (op >= 0) close(op);
+            if (fd >= 0) close(fd);
+            ok;
+        }));
+        EXPECT("encrypting from a file leaves the file as the plaintext", ({
+            int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+            long w = fd >= 0 ? write(fd, pt, 32) : -1;
+            int op = skc_op("ctr(aes)", k128, 16);
+            unsigned char civ[16];
+            unhex(IVCTR, civ);
+            long s0 = op >= 0 ? skc_send(op, 1, civ, 16, "", 0) : -1;
+            off_t off = 0;
+            long sf = op >= 0 && fd >= 0 ? sendfile(op, fd, &off, 32) : -1;
+            long r = op >= 0 ? read(op, out, sizeof out) : -1;
+            unsigned char back[32];
+            long rd = fd >= 0 ? pread(fd, back, 32, 0) : -1;
+            int ok = w == 32 && s0 == 0 && sf == 32 && r == 32 && memcmp(out, pt, 32) != 0 && rd == 32 && memcmp(back, pt, 32) == 0;
+            if (op >= 0) close(op);
+            if (fd >= 0) close(fd);
+            ok;
+        }));
+        EXPECT("splice from a pipe into the socket adds to the message like send", ({
+            int p[2];
+            long pr = pipe(p);
+            int op = skc_op("cbc(aes)", k128, 16);
+            long s0 = op >= 0 ? skc_send(op, 1, iv, 16, "", 0) : -1;
+            long w = pr == 0 ? write(p[1], pt, 32) : -1;
+            long sp = op >= 0 && pr == 0 ? splice(p[0], NULL, op, NULL, 32, 0) : -1;
+            long r = op >= 0 ? read(op, out, sizeof out) : -1;
+            unsigned char want[32];
+            unhex("7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2", want);
+            int ok = pr == 0 && s0 == 0 && w == 32 && sp == 32 && r == 32 && memcmp(out, want, 32) == 0;
+            if (pr == 0) { close(p[0]); close(p[1]); }
+            if (op >= 0) close(op);
+            ok;
+        }));
+        EXPECT("splice from a file through a pipe, as a program like OpenSSL does, gives the same", ({
+            int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+            long w = fd >= 0 ? write(fd, pt, 32) : -1;
+            int p[2];
+            long pr = pipe(p);
+            int op = skc_op("cbc(aes)", k128, 16);
+            long s0 = op >= 0 ? skc_send(op, 1, iv, 16, "", 0) : -1;
+            loff_t off = 0;
+            long a = pr == 0 && fd >= 0 ? splice(fd, &off, p[1], NULL, 32, 0) : -1;
+            long b = op >= 0 && pr == 0 ? splice(p[0], NULL, op, NULL, 32, 0) : -1;
+            long r = op >= 0 ? read(op, out, sizeof out) : -1;
+            unsigned char want[32], back[32];
+            unhex("7649abac8119b246cee98e9b12e9197d5086cb9b507219ee95db113a917678b2", want);
+            long rd = fd >= 0 ? pread(fd, back, 32, 0) : -1;
+            int ok = w == 32 && pr == 0 && s0 == 0 && a == 32 && b == 32 && r == 32 && memcmp(out, want, 32) == 0
+                     && rd == 32 && memcmp(back, pt, 32) == 0;
+            if (pr == 0) { close(p[0]); close(p[1]); }
+            if (op >= 0) close(op);
+            if (fd >= 0) close(fd);
+            ok;
+        }));
+        EXPECT("sendfile into a hash socket gives the digest of the file", ({
+            int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+            long w = fd >= 0 ? write(fd, "abc", 3) : -1;
+            int s = bound("hash", "sha256");
+            int op = s >= 0 ? accept(s, NULL, NULL) : -1;
+            off_t off = 0;
+            long sf = op >= 0 && fd >= 0 ? sendfile(op, fd, &off, 3) : -1;
+            unsigned char d[32];
+            long r = op >= 0 ? read(op, d, sizeof d) : -1;
+            unsigned char want[32];
+            unhex("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", want);
+            int ok = w == 3 && sf == 3 && r == 32 && memcmp(d, want, 32) == 0;
+            if (op >= 0) close(op);
+            if (s >= 0) close(s);
+            if (fd >= 0) close(fd);
+            ok;
+        }));
+        EXPECT("sendfile to a socket that is bound but not accepted fails", ({
+            int fd = open(path, O_CREAT | O_TRUNC | O_RDWR, 0600);
+            long w = fd >= 0 ? write(fd, "abc", 3) : -1;
+            int s = skc_op("cbc(aes)", k128, 16);   /* accepted: use a bound-only one below */
+            if (s >= 0) close(s);
+            int b = bound("skcipher", "cbc(aes)");
+            off_t off = 0;
+            long sf = b >= 0 && fd >= 0 ? sendfile(b, fd, &off, 3) : 0;
+            int ok = w == 3 && sf < 0;
+            if (b >= 0) close(b);
+            if (fd >= 0) close(fd);
+            ok;
+        }));
+        unlink(path);
+    }
     return done();
 }
