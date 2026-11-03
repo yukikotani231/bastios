@@ -16,7 +16,7 @@
 // the same rules as mount(2) (src/lxmount.bastio): a tmpfs, a bstdisk3
 // image or an ext image, the directory in memory and empty. A mount object
 // can be attached once, and fsopen of another file system type (proc,
-// sysfs, overlay, ...) is ENODEV; open_tree, fspick, mount_setattr and
+// sysfs, overlay, ...) is ENOSYS, so that a program falls back on mount(2); open_tree, fspick, mount_setattr and
 // moving a mount that exists are not supported. The parameters a tmpfs
 // takes (size, mode, uid, gid, nr_inodes) are accepted and, as for
 // mount(2)'s data, not used.
@@ -148,6 +148,9 @@ fn lx_fsopen(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
     return EINVAL;
   }
   let t = fs_type(&mut k, pid, name);
+  if t > FST_NS {
+    return ENOSYS;                          // proc, overlay, ...: runtimes fall back on mount(2) for these
+  }
   if t != FST_TMPFS && t != FST_BSTDISK && t != FST_EXT4 {
     return ENODEV;
   }

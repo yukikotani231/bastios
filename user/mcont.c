@@ -1,6 +1,6 @@
 /* What container runtimes ask of the kernel beyond namespaces: close_range,
  * the child-subreaper and keep-capabilities flags, the ambient capability
- * set, and quiet refusals of the keyring and the new mount API. Prints
+ * set, and quiet refusals of the keyring and of the file systems the new mount API does not take. Prints
  * "mcont: ok", or what failed. */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -97,9 +97,11 @@ int main(void) {
 	/* the session keyring exists (keyctl GET_KEYRING_ID, KEY_SPEC_SESSION_KEYRING) */
 	if (syscall(250, 0, -3, 0, 0, 0) <= 0) return fail("keyctl");
 
-	/* quiet ENOSYS */
-	if (syscall(430, "ext4", 0) != -1 || errno != ENOSYS) return fail("fsopen");
-	if (syscall(432, -1, 0, 0) != -1 || errno != ENOSYS) return fail("fsmount");
+	/* quiet ENOSYS for a file system type the new mount API does not take, so a
+	 * runtime falls back on mount(2); and the usual errors for the rest */
+	if (syscall(430, "overlay", 0) != -1 || errno != ENOSYS) return fail("fsopen");
+	if (syscall(430, "nosuchfs", 0) != -1 || errno != ENODEV) return fail("fsopen of an unknown type");
+	if (syscall(432, -1, 0, 0) != -1 || errno != EBADF) return fail("fsmount");
 
 	/* A named pipe opened O_PATH holds its name, not an end: reopening it through
 	 * /proc/self/fd/N for writing waits for a reader like any open (runc's exec.fifo). */
