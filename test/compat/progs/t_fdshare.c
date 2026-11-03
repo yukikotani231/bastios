@@ -9,6 +9,7 @@
 #include <sys/stat.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <pthread.h>
 
 #define STACK 65536
 #define KCMP_FILES 2
@@ -27,6 +28,50 @@ struct arg {
     int flags;       /* clone flags, besides SIGCHLD */
     pid_t parent;
 };
+
+/* Firefox's sandbox: a process shares its working directory with a helper
+ * (clone with CLONE_FS) that later chroots for it, and then starts threads.
+ * Returns 0 if the threads are made and see the helper's chdir, and the
+ * helper sees a thread's. */
+static int fsh_up[2], fsh_go[2];
+static int fsh_seen;              /* the thread found itself in /etc */
+static int fsh_helper(void *p)
+{
+    char c;
+    (void)p;
+    if (read(fsh_go[0], &c, 1) != 1 || chdir("/etc")) return 1;
+    write(fsh_up[1], &c, 1);
+    if (read(fsh_go[0], &c, 1) != 1) return 2;
+    char cwd[64];
+    return getcwd(cwd, sizeof cwd) && !strcmp(cwd, "/") ? 0 : 3;
+}
+static void *fsh_thread(void *p)
+{
+    char c = 'g';
+    write(fsh_go[1], &c, 1);                      /* the helper moves to /etc */
+    read(fsh_up[0], &c, 1);
+    struct stat a, b;
+    fsh_seen = stat(".", &a) == 0 && stat("/etc", &b) == 0 && a.st_dev == b.st_dev && a.st_ino == b.st_ino;
+    chdir("/");
+    write(fsh_go[1], &c, 1);                      /* the helper checks it is in / */
+    return p;
+}
+static int fsh_run(void)
+{
+    static char stack[STACK];
+    if (pipe(fsh_up) || pipe(fsh_go)) return 10;
+    pid_t h = clone(fsh_helper, stack + sizeof stack, CLONE_FS | SIGCHLD, 0);
+    if (h < 0) return 11;
+    pthread_t t;
+    int r = pthread_create(&t, 0, fsh_thread, 0);
+    if (r) { kill(h, SIGKILL); return 12; }
+    pthread_join(t, 0);
+    int st;
+    if (waitpid(h, &st, 0) != h || !WIFEXITED(st) || WEXITSTATUS(st)) return 13;
+    if (!fsh_seen) return 14;
+    char cwd[64];
+    return getcwd(cwd, sizeof cwd) && !strcmp(cwd, "/") ? 0 : 15;
+}
 
 static int child(void *p)
 {
@@ -179,6 +224,13 @@ int main(int argc, char **argv)
         a.mode = 10;
         EXPECT("kcmp(KCMP_FS) says processes that share a working directory do", run(&a) == 0 && syscall(SYS_kcmp, getpid(), 1, KCMP_FS, 0, 0) != 0);
         chdir(here);
+    }
+    if (begin("a process that shares its working directory with a helper (CLONE_FS) starts threads, which share it too")) {
+        pid_t x = fork();
+        if (x == 0) _exit(fsh_run());
+        int st = 0;
+        if (x > 0 && waitpid(x, &st, 0) == x && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();
+        else fail("the process ended with status %#x", st);
     }
     return done();
 }
