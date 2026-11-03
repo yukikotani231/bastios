@@ -2216,6 +2216,33 @@ t_wgcfg: the listen port is taken by the device
 t_wgcfg: the new one is taken
 t_wgcfg: the old port is free
 t_wgcfg: the port is changed
+t_wgcookie: a child in a new network namespace
+t_wgcookie: a client socket
+t_wgcookie: a device with an address
+t_wgcookie: a veth pair, one end in the child's namespace
+t_wgcookie: an initiation with a bad mac1 gets no reply
+t_wgcookie: and none of them twice
+t_wgcookie: each reply is 64 bytes, type 3 and has the index of an initiation
+t_wgcookie: fewer replies than initiations: the first ones were taken before it was busy
+t_wgcookie: five more are echoed while it goes on
+t_wgcookie: go
+t_wgcookie: its last handshake time is set
+t_wgcookie: keys are traded
+t_wgcookie: sockets
+t_wgcookie: the BLAKE2s used here gives the known digest of abc
+t_wgcookie: the busy device answered with cookie replies
+t_wgcookie: the child is ready
+t_wgcookie: the child is set up
+t_wgcookie: the child reports
+t_wgcookie: the child stops
+t_wgcookie: the child took at least six packets and no more than were sent
+t_wgcookie: the flood was sent
+t_wgcookie: the flooder reports
+t_wgcookie: the flooder stops
+t_wgcookie: the handshake gets through the flood, by cookie
+t_wgcookie: the parent's end has an address
+t_wgcookie: the peer is set up, the child's endpoint direct
+t_wgcookie: the peer shows traffic both ways and a handshake
 t_wghs: a capture socket
 t_wghs: a message of an unknown type gets none
 t_wghs: a peer without a keep-alive starts nothing
