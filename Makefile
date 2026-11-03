@@ -1023,7 +1023,7 @@ build/compat/jdk.img: test/compat/jdkdisk.py test/compat/alpinedisk.py test/comp
 build/compat/ruby.img: test/compat/rubydisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/rubydisk.py $@ $(RUBY_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
-# Xvfb, xterm, PuTTY, MediaInfo and KeePassXC (images, each root as a tar file the cases unpack),
+# Xvfb, xterm, PuTTY, MediaInfo, KeePassXC and JDownloader (images, each root as a tar file the cases unpack),
 # with bx11 and fakebwm, for x11.txt. Pinned by digest, their layers kept in
 # ALPINE_CACHE like the others'. x86-64 only.
 build/compat/bx11: user/bx11.c user/bwmlib.h user/bwmproto.h | build/compat
@@ -1033,7 +1033,7 @@ build/compat/fakebwm: test/compat/x11/fakebwm.c user/bwmlib.h user/bwmproto.h | 
 	$(MUSLCC) -static-pie -O2 -Wno-unused-function -o $@ $<
 
 build/compat/x11.img: test/compat/x11/x11start.sh test/compat/x11disk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/bx11 build/compat/fakebwm
-	test/compat/x11disk.py $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GTK_IMAGE) $(X11_QT_IMAGE) $(X11_QT2_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
+	test/compat/x11disk.py $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GTK_IMAGE) $(X11_QT_IMAGE) $(X11_QT2_IMAGE) $(X11_JAVA_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
 
 # Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
 # Java disk as /opt/jdtls.
