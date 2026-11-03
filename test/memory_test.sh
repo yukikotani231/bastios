@@ -17,7 +17,7 @@ MEM=${MEM:-64M}
 SMP=${SMP:-1}
 
 python3 - "$KERNEL" "$TIMEOUT" "$MEM" "$SMP" <<'PY'
-import os, re, select, subprocess, sys, tempfile, time
+import os, re, select, socket, subprocess, sys, tempfile, time
 
 kernel, timeout, mem, smp = sys.argv[1], float(sys.argv[2]), sys.argv[3], sys.argv[4]
 tmp = tempfile.TemporaryDirectory()
@@ -25,11 +25,12 @@ img = os.path.join(tmp.name, "disk.img")
 subprocess.run([sys.executable, "test/compat/mkdisk.py", img, "mhog=build/user/mhog.elf"], check=True,
                env=dict(os.environ, MKDISK_FREE_MB="64"))
 
+mon_path = os.path.join(tmp.name, "mon.sock")
 qemu = subprocess.Popen(
     ["qemu-system-x86_64", "-kernel", kernel, "-m", mem, "-smp", smp,
      "-display", "none", "-no-reboot", "-nic", "none",
      "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
-     "-serial", "stdio", "-monitor", "none",
+     "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait",
      "-drive", f"file={img},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd"],
     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 deadline = time.time() + timeout
@@ -104,6 +105,35 @@ OVER, HOLD, SECOND, HUGE = F * 7 // 5, F * 3 // 5, F * 19 // 20, F * 4
 # machine (the swap table takes 16 bytes of it for each slot).
 SWAP_MB = max(F * 2 // 3, 8)
 SWAP_KB = SWAP_MB * 1024 - 4
+
+# The kernel's heap is a fixed arena (8 MiB) plus an extension carved out of
+# memory at boot, and the boot tables take most of it. What is left is what a
+# swap table, a cgroup or a big /proc file can still get: when it falls below
+# HEAP_MIN_WORDS the next kernel table that grows takes the kernel down with
+# "bastio: out of memory" (this test did just that on the 64 MiB machine). The
+# symbols come from the kernel's own ELF; a kernel without them is skipped.
+HEAP_MIN_WORDS = 100000
+def heap_words_left():
+    syms = {}
+    nm = subprocess.run(["nm", kernel.replace("bastios.elf", "bastios64.elf")], capture_output=True, text=True)
+    for l in nm.stdout.splitlines():
+        f = l.split()
+        if len(f) == 3 and f[2] in ("bst_arena_top", "bst_arena2_top", "bst_arena2_words"):
+            syms[f[2]] = int(f[0], 16)
+    if len(syms) != 3:
+        return None
+    def peek(addr):
+        m = socket.socket(socket.AF_UNIX)
+        m.connect(mon_path); time.sleep(0.2); m.recv(65536)
+        m.sendall(f"xp /1gx 0x{addr:x}\n".encode()); time.sleep(0.3)
+        r = m.recv(65536).decode(errors="replace"); m.close()
+        return int(re.findall(r": 0x([0-9a-f]+)", r)[-1], 16)
+    return (1 << 20) - peek(syms["bst_arena_top"]) + peek(syms["bst_arena2_words"]) - peek(syms["bst_arena2_top"])
+left = heap_words_left()
+if left is None:
+    print("SKIP kernel heap headroom (no arena symbols in the kernel image)")
+else:
+    check("the kernel heap has room left after boot", left >= HEAP_MIN_WORDS, f"{left} words left, want at least {HEAP_MIN_WORDS}")
 
 # A hog that fits is left alone.
 t = run("/disk/mhog touch 16; echo rc=$?")
