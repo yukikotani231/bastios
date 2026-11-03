@@ -40,22 +40,23 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
-    out, server, client, gtk, qt, busybox, bx11, fakebwm, x11start = args
+    out, server, client, gtk, qt, qt2, busybox, bx11, fakebwm, x11start = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "x11")
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
     os.makedirs(work, exist_ok=True)
-    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui")):
+    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc")):
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
         write_tar(files, os.path.join(work, tar))
-    env = dict(os.environ, MKDISK_FREE_MB="450")
+    env = dict(os.environ, MKDISK_FREE_MB="800")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
                                f"busybox={busybox}", f"bx11={bx11}", f"fakebwm={fakebwm}", f"x11start={x11start}",
                                f"server.tar={os.path.join(work, 'server.tar')}",
                                f"client.tar={os.path.join(work, 'client.tar')}",
                                f"gtk.tar={os.path.join(work, 'gtk.tar')}",
-                               f"qt.tar={os.path.join(work, 'qt.tar')}"], env)
+                               f"qt.tar={os.path.join(work, 'qt.tar')}",
+                               f"qt2.tar={os.path.join(work, 'qt2.tar')}"], env)
 
 main()
