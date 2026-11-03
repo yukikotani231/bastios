@@ -19,6 +19,7 @@
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <elf.h>
+#include <string.h>
 #include <time.h>
 
 #ifndef PTRACE_O_EXITKILL
@@ -41,6 +42,37 @@
 #ifndef PTRACE_O_TRACESYSGOOD
 #define PTRACE_O_TRACESYSGOOD 1
 #endif
+
+#ifndef PTRACE_GET_SYSCALL_INFO
+#define PTRACE_GET_SYSCALL_INFO 0x420e
+#endif
+/* struct ptrace_syscall_info, as linux/ptrace.h has it (musl does not). */
+struct psi {
+    unsigned char op, pad[3];
+    unsigned int arch;
+    unsigned long long ip, sp;
+    union {
+        struct { unsigned long long nr, args[6]; } entry;
+        struct { long long rval; unsigned char is_error; } exit;
+    };
+};
+
+/* Resumes c with PTRACE_SYSCALL and waits for its next stop; returns its
+ * PTRACE_GET_SYSCALL_INFO op (-1: no stop), with the number at an entry or
+ * the result at an exit in *v. */
+static int next_sc(pid_t c, long long *v)
+{
+    int st = 0;
+    if (ptrace(PTRACE_SYSCALL, c, 0, 0) != 0 || waitpid(c, &st, __WALL) != c || !WIFSTOPPED(st)) return -1;
+    struct psi si;
+    memset(&si, 0, sizeof si);
+    if (ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si) <= 0) return -1;
+    *v = si.op == 1 ? (long long)si.entry.nr : si.op == 2 ? si.exit.rval : 0;
+    return si.op;
+}
+
+/* A child that waits in read on pipe fd r, then exits with what it read. */
+static void body_read(int r) { char b = 0; long n = read(r, &b, 1); _exit(n == 1 ? b : 99); }
 
 static volatile int handled;
 static void on_usr1(int s) { (void)s; handled = SIGUSR1; }
@@ -350,6 +382,31 @@ int main(void)
            close(q[1]); char b; read(p[0], &b, 1); waitpid(tr, 0, 0);
            struct pollfd pf = {q[0], POLLIN, 0}; int ok = poll(&pf, 1, 3000) == 1 && read(q[0], &b, 1) == 1 && b == 'x';
            close(p[0]); close(p[1]); close(q[0]); ok; }));
+
+    /* A tracer that comes in while the tracee waits in a call (strace -p
+     * of a sleeping process) sees the call start again, then end: its
+     * entry and exit stops pair up from the first one. */
+    EXPECT("PTRACE_SYSCALL after seizing a tracee that waits in read: the first stop is the read's entry, then its exit", ({
+           int p[2]; pipe(p); c = fork(); if (c == 0) { close(p[1]); body_read(p[0]); }
+           usleep(50000); int ok = ptrace(PTRACE_SEIZE, c, 0, 0) == 0 && ptrace(PTRACE_INTERRUPT, c, 0, 0) == 0;
+           ok = ok && event_of(c) == PTRACE_EVENT_STOP; long long v1 = -1, v2 = -1;
+           int op1 = next_sc(c, &v1); write(p[1], "A", 1); int op2 = next_sc(c, &v2);
+           ok = ok && op1 == 1 && v1 == SYS_read && op2 == 2 && v2 == 1;
+           ptrace(PTRACE_CONT, c, 0, 0); int s9 = wst(c); close(p[0]); close(p[1]);
+           ok && WIFEXITED(s9) && WEXITSTATUS(s9) == 'A'; }));
+    EXPECT("PTRACE_INTERRUPT of a tracee waiting in a traced read: the read ends, the event stop, then the read starts again", ({
+           int p[2]; pipe(p); c = fork(); if (c == 0) { close(p[1]); body_read(p[0]); }
+           usleep(50000); int ok = ptrace(PTRACE_SEIZE, c, 0, 0) == 0 && ptrace(PTRACE_INTERRUPT, c, 0, 0) == 0;
+           ok = ok && event_of(c) == PTRACE_EVENT_STOP; long long v1 = -1, v2 = -1, v3 = -1, v4 = -1;
+           int op1 = next_sc(c, &v1); usleep(50000); ptrace(PTRACE_INTERRUPT, c, 0, 0);
+           int st2 = 0; ok = ok && waitpid(c, &st2, __WALL) == c && WIFSTOPPED(st2);
+           struct psi si; memset(&si, 0, sizeof si); ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+           int op2 = si.op; v2 = si.exit.rval;
+           int op3 = next_sc(c, &v3);              /* the event stop: no system call stop */
+           int op4 = next_sc(c, &v4); write(p[1], "B", 1); long long v5 = -1; int op5 = next_sc(c, &v5);
+           ok = ok && op1 == 1 && v1 == SYS_read && op2 == 2 && op3 == 0 && op4 == 1 && v4 == SYS_read && op5 == 2 && v5 == 1;
+           ptrace(PTRACE_CONT, c, 0, 0); int s9 = wst(c); close(p[0]); close(p[1]);
+           ok && WIFEXITED(s9) && WEXITSTATUS(s9) == 'B'; }));
 
     /* Errors. */
     EXPECT("PTRACE_PEEKDATA of an unmapped address is EIO", ({

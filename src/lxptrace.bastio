@@ -193,6 +193,9 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
   if t / TS_CUT % 2 == 1 && t / TS_EXIT % 2 == 1 && sys && !detach {
     next = next + TS_CUT;                   // the signal that cut the call short is next
   }
+  if t / TS_ENTRY % 2 == 0 && sys && !detach && pget(k.procs, c, F_RESTART) != 0 {
+    next = sat_add(next, TS_RENTRY);              // it waits in a call whose start the tracer has not seen (since)
+  }
   tr2_put(&mut k, c, sat_add(next, t / TS_XEV % 2 * TS_XEV));
   if t / TS_VFDONE % 2 == 1 && t / TS_EV % 16 == 2 && !detach {
     // The vfork event is over: the vfork-done one comes next, with the
@@ -242,18 +245,27 @@ fn pt_brk(k: &mut Kernel, p: u64)
 /// Process p is about to make a system call (it has been charged for none
 /// yet). If its tracer asked to see calls it stops before the call, which
 /// starts again when the tracer resumes it: true. The call's number is kept
-/// for the stop after it. A call that waits and starts again is not seen again.
+/// for the stop after it. A call that waits and starts again is not seen
+/// again, unless the tracer did not see it begin (it attached while the call
+/// waited) or saw it end (a signal cut it short and no handler ran): then,
+/// as on Linux, where it starts again by restart_syscall, it stops before it
+/// once more (TS_RENTRY), so the tracer's entries and exits keep pairing up.
 fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
-  let t = tr2_get(k, p);
-  if tr_tracer(k, p) == 0 || t % 2 == 0 || restarted {
+  let t0 = tr2_get(k, p);
+  if tr_tracer(k, p) == 0 || t0 % 2 == 0 {
     return false;
   }
   let nr = smaller(pget(k.procs, p, F_REGS + R_LXNR), 1023);
+  let again = t0 / TS_RENTRY % 2 == 1;
+  let t = t0 - t0 / TS_RENTRY % 2 * TS_RENTRY;
   if t / TS_NOENT % 2 == 1 {
     tr2_put(&mut k, p, TS_SYS + nr * TS_NR + t / TS_EV * TS_EV);
+    return false;
+  }
+  if restarted && !again {
     return false;
   }
   tr2_put(&mut k, p, TS_SYS + TS_ENTRY + nr * TS_NR + t / TS_EV * TS_EV);

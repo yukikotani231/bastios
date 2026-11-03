@@ -1308,7 +1308,7 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
       if w % 65536 != 0 && s != SIGKILL {
         if tr_skip(w) == 0 && (s == 5 || tr2_get(k, p) / TS_XEV % 2 == 0) {
           let t = tr2_get(k, p);
-          if pget(k.procs, p, F_RESTART) != 0 && t % 2 == 1 && t / TS_NOENT % 2 == 0 && t / TS_ENTRY % 2 == 0 && t / TS_EXIT % 2 == 0 && t / TS_CUT % 2 == 0 {
+          if pget(k.procs, p, F_RESTART) != 0 && t % 2 == 1 && t / TS_NOENT % 2 == 0 && t / TS_ENTRY % 2 == 0 && t / TS_EXIT % 2 == 0 && t / TS_CUT % 2 == 0 && t / TS_RENTRY % 2 == 0 {
             // A call that waits is cut short by this signal: as on Linux, the
             // tracer sees the call end (-ERESTARTSYS) before it sees the
             // signal, and the call starts again, with a stop of its own, once
