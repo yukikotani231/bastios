@@ -213,8 +213,11 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
   pset(&mut k.procs, p, F_ARGS, pget(k.procs, h, F_ARGS));
   // The working directory and root are shared (CLONE_FS) unless the threads
   // are in different mount namespaces, which only setns and unshare make
-  // them: then each keeps its own. Namespaces belong to the thread.
-  if get(k.mns, h) == get(k.mns, p) {
+  // them: then each keeps its own. Namespaces belong to the thread. Threads
+  // of a process that shares them with another process (clone with
+  // CLONE_FS, as Firefox's sandbox does for its chroot helper) are members
+  // of that ring instead (lx_thread_clone): fs_take moved them already.
+  if get(k.mns, h) == get(k.mns, p) && fs_next(k.procs, h) == 0 && fs_next(k.procs, p) == 0 {
     if (h + 1) * CWD_STRIDE <= len(k.cwd) && (p + 1) * CWD_STRIDE <= len(k.cwd) {      // live processes have rows
       swap_words(&mut k.cwd, h * CWD_STRIDE, p * CWD_STRIDE, CWD_STRIDE);
       swap_spill(&mut k.cwdx, h, p);
@@ -380,9 +383,6 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   if flags & CLONE_VM == 0 || flags & CLONE_SIGHAND == 0 || flags & CLONE_VFORK != 0 {
     return EINVAL;
   }
-  if fs_next(k.procs, pid) != 0 {
-    return EAGAIN;                          // its working directory is shared with another process: threads would move it with their group
-  }
   if !cow_break_all(&mut k, pid) {
     return ENOMEM;                          // its copy-on-write pages need copies first (src/lxcow.bastio)
   }
@@ -433,6 +433,14 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   pset(&mut k.procs, c, F_FDNEXT, 0);      // the copy of the row says who shares with the creator
   pset(&mut k.procs, c, F_FDHOLD, 0);
   fd_join(&mut k, pid, c);                  // the group's descriptors
+  pset(&mut k.procs, c, F_FSNEXT, 0);
+  pset(&mut k.procs, c, F_FSHOLD, 0);
+  if fs_next(k.procs, pid) != 0 {
+    // The creator shares its working directory, root and umask with
+    // another process (clone with CLONE_FS): the thread joins that ring,
+    // and group_move leaves them to it.
+    fs_join(&mut k, pid, c);
+  }
   pset(&mut k.procs, c, F_WAIT, 0);
   pset(&mut k.procs, c, F_CODE, 0);
   pset(&mut k.procs, c, F_TICKS, 0);
