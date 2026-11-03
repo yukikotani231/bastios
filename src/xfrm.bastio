@@ -49,7 +49,6 @@ const XFRMA_ALG_CRYPT: u64 = 2;
 const XFRMA_ALG_COMP: u64 = 3;
 const XFRMA_ALG_AUTH_TRUNC: u64 = 20;
 const XFRMA_ALG_AEAD: u64 = 18;
-const IPPROTO_ESP: u64 = 50;
 const XFRM_USERSA: u64 = 224;             // struct xfrm_usersa_info
 const XFRM_USERSA_ID: u64 = 24;           // struct xfrm_usersa_id
 const XFRM_USERPOLICY: u64 = 168;         // struct xfrm_userpolicy_info
@@ -888,4 +887,426 @@ fn xfrm_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
   nlw_close(&mut n, q);
   n.ns = was;
   return len;
+}
+
+// ---------------------------------------------------------------- the packet path
+//
+// Out: a packet the stack sends (send_via_raw) that an out policy covers
+// with an ESP template is wrapped in ESP and sent to the association's far
+// end; a block policy drops it. In: an ESP packet for us is looked up by
+// (destination, SPI, namespace), checked against the replay window, opened
+// into a buffer of its own (the packet that arrived is never written to),
+// and the packet inside goes round the loopback queue as if it had come in
+// from the wire again; a packet that comes in plain is dropped when an in
+// policy asks for ESP.
+
+const ESP_OVER: u64 = 52;                 // outer IPv4 header, ESP header, IV and ICV: 20 + 8 + 8 + 16
+const ESP_WIN: u64 = 256;                 // the replay bitmap's bits
+
+/// The AES key of association sa as bytes (16 or 32).
+fn esp_key(n: &Net, sa: u64) -> Bytes
+  requires net_ok(n) && sa < XSA_N
+  ensures blen(result) == 16 || blen(result) == 32
+{
+  let mut len = 16;
+  if xs_get(n, sa, XS_KLEN) == 32 {
+    len = 32;
+  }
+  let mut b = balloc(len);
+  let mut j = 0;
+  while j < len
+    invariant j <= len && (len == 16 || len == 32) && blen(b) == len && net_ok(n) && sa < XSA_N
+  {
+    bset(&mut b, j, cast[u8](xs_get(n, sa, XS_KEY + j / 8) / (1 << (8 * (j % 8))) % 256));
+    j = j + 1;
+  }
+  return b;
+}
+
+/// The 12-byte GCM nonce of association sa: its salt, then an 8-byte IV left zero.
+fn esp_nonce(n: &Net, sa: u64) -> Bytes
+  requires net_ok(n) && sa < XSA_N
+  ensures blen(result) == 12
+{
+  let mut b = balloc(12);
+  store_le32(&mut b, 0, cast[u32](xs_get(n, sa, XS_SALT) % 4294967296));
+  return b;
+}
+
+/// The additional data of a packet: its SPI and sequence number.
+fn esp_aad(spi: u64, seq: u64) -> Bytes
+  requires spi <= 4294967295 && seq <= 4294967295
+  ensures blen(result) == 8
+{
+  let mut b = balloc(8);
+  store_be32(&mut b, 0, cast[u32](spi));
+  store_be32(&mut b, 4, cast[u32](seq));
+  return b;
+}
+
+/// The association an out policy p's template uses for a packet to dst, or XSA_N.
+fn esp_sa_out(n: &Net, p: u64, dst: u64) -> u64
+  requires net_ok(n) && p < XP_N
+  ensures result <= XSA_N
+{
+  let ns = n.ns;
+  let mode = xp_get(n, p, XP_TMODE);
+  let treq = xp_get(n, p, XP_TREQID);
+  let mut want = dst;
+  if mode == 1 {
+    want = xp_get(n, p, XP_TDST);
+  }
+  let mut i = 0;
+  while i < XSA_N
+    invariant i <= XSA_N
+  {
+    if xs_get(n, i, XS_USED) == 1 && xs_get(n, i, XS_NS) == ns && xs_get(n, i, XS_MODE) == mode
+        && (treq == 0 || xs_get(n, i, XS_REQID) == treq) && (want == 0 || xs_get(n, i, XS_DST) == want) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return XSA_N;
+}
+
+fn esp_bit_clear(n: &mut Net, sa: u64, b: u64)
+  requires net_ok(n) && sa < XSA_N && b < ESP_WIN
+  ensures net_ok(n)
+{
+  let w = xs_get(n, sa, XS_RMAP + b / 64);
+  let bit = 1 << (b % 64);
+  if w / bit % 2 == 1 {
+    xs_set(&mut n, sa, XS_RMAP + b / 64, w - bit);
+  }
+}
+
+/// Whether sequence number seq is new to association sa: above everything
+/// received, or inside the window and not yet taken. A window of 0 is
+/// treated as 1 (each packet newer than the last): the replay check is
+/// never off.
+fn esp_seq_ok(n: &Net, sa: u64, seq: u64) -> bool
+  requires net_ok(n) && sa < XSA_N
+{
+  if seq == 0 || seq > 4294967295 {
+    return false;
+  }
+  let top = xs_get(n, sa, XS_RTOP) % 4294967296;
+  if seq > top {
+    return true;
+  }
+  let d = top - seq;
+  let mut win = smaller(xs_get(n, sa, XS_RWIN), 255);
+  if win == 0 {
+    win = 1;
+  }
+  if d >= win {
+    return false;
+  }
+  let b = seq % ESP_WIN;
+  return xs_get(n, sa, XS_RMAP + b / 64) / (1 << (b % 64)) % 2 == 0;
+}
+
+/// Records seq (which esp_seq_ok took and a packet then authenticated) as
+/// received; the window moves up if seq is above it.
+fn esp_seq_set(n: &mut Net, sa: u64, seq: u64)
+  requires net_ok(n) && sa < XSA_N && seq <= 4294967295
+  ensures net_ok(n)
+{
+  let top = xs_get(n, sa, XS_RTOP) % 4294967296;
+  if seq > top {
+    let d = seq - top;
+    if d >= ESP_WIN {
+      let mut k = 0;
+      while k < 4
+        invariant k <= 4 && net_ok(n) && sa < XSA_N
+      {
+        xs_set(&mut n, sa, XS_RMAP + k, 0);
+        k = k + 1;
+      }
+    } else {
+      let mut j = 0;
+      while j < d
+        invariant j <= d && d < ESP_WIN && top + d <= 4294967295 && net_ok(n) && sa < XSA_N
+      {
+        esp_bit_clear(&mut n, sa, (top + j + 1) % ESP_WIN);
+        j = j + 1;
+      }
+    }
+    xs_set(&mut n, sa, XS_RTOP, seq);
+  }
+  let b = seq % ESP_WIN;
+  let w = xs_get(n, sa, XS_RMAP + b / 64);
+  let bit = 1 << (b % 64);
+  if w / bit % 2 == 0 {
+    xs_set(&mut n, sa, XS_RMAP + b / 64, w + bit);
+  }
+}
+
+fn esp_count(n: &mut Net, sa: u64, bytes: u64)
+  requires net_ok(n) && sa < XSA_N && bytes <= 65535
+  ensures net_ok(n)
+{
+  let pk = xs_get(n, sa, XS_PKTS);
+  if pk < 4294967295 {
+    xs_set(&mut n, sa, XS_PKTS, pk + 1);
+  }
+  let by = xs_get(n, sa, XS_BYTES);
+  if by < 4294967295 * 65536 {
+    xs_set(&mut n, sa, XS_BYTES, by + bytes);
+  }
+}
+
+/// The outgoing frame (flen bytes, Ethernet header included): 0 if no
+/// policy takes it, else 1 once it has been wrapped and sent, or dropped
+/// (a block policy, no association, no room: as if lost on the way).
+fn esp_out(n: &mut Net, flen: u64) -> u64
+  requires net_ok(n) && 14 <= flen && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  if flen < 34 || flen > FRAME_MAX || be16(n.out, 12) != ETH_IP {
+    return 0;
+  }
+  let proto = cast[u64](bget(n.out, 23));
+  if proto == IPPROTO_ESP {
+    return 0;
+  }
+  let src = be32(n.out, 26);
+  let dst = be32(n.out, 30);
+  let ns = n.ns;
+  let p = xp_lookup(n, ns, 1, src, dst, proto);
+  if p >= XP_N {
+    return 0;
+  }
+  if xp_get(n, p, XP_ACT) == 1 {
+    return 1;
+  }
+  if xp_get(n, p, XP_NT) != 1 {
+    return 0;
+  }
+  let sa = esp_sa_out(n, p, dst);
+  if sa >= XSA_N {
+    return 1;
+  }
+  let tot = be16(n.out, 16);
+  if cast[u64](bget(n.out, 14)) != 0x45 || tot < 20 || 14 + tot > flen {
+    return 1;
+  }
+  let tunnel = xs_get(n, sa, XS_MODE) == 1;
+  let mut start = 34;
+  let mut body = tot - 20;
+  let mut nh = proto;
+  if tunnel {
+    start = 14;
+    body = tot;
+    nh = 4;
+  }
+  let pad = (4 - (body + 2) % 4) % 4;
+  let plen = body + pad + 2;
+  if 14 + ESP_OVER + plen > FRAME_MAX {
+    return 1;                         // would not fit a frame: no fragmenting
+  }
+  let cur = xs_get(n, sa, XS_SEQ);
+  if cur >= 4294967295 {
+    return 1;                         // the sequence numbers are used up
+  }
+  let seq = cur + 1;
+  xs_set(&mut n, sa, XS_SEQ, seq);
+  let spi = xs_get(n, sa, XS_SPI) % 4294967296;
+  let mut plain = balloc(plen);
+  bcopy(&mut plain, 0, n.out, start, body);
+  let mut i = 0;
+  while i < pad
+    invariant i <= pad && pad <= 3 && plen == body + pad + 2 && blen(plain) == plen
+  {
+    bset(&mut plain, body + i, cast[u8](i + 1));
+    i = i + 1;
+  }
+  bset(&mut plain, body + pad, cast[u8](pad));
+  bset(&mut plain, body + pad + 1, cast[u8](nh));
+  let key = esp_key(n, sa);
+  let mut nonce = esp_nonce(n, sa);
+  store_be32(&mut nonce, 8, cast[u32](seq));
+  let aad = esp_aad(spi, seq);
+  let sealed = gcm_seal(key, nonce, aad, plain);
+  let total = ESP_OVER + plen;
+  let mut src2 = src;
+  let mut dst2 = dst;
+  if tunnel {
+    dst2 = xs_get(n, sa, XS_DST) % 4294967296;
+    src2 = xs_get(n, sa, XS_SRC) % 4294967296;
+    if src2 == 0 {
+      src2 = src_ip(n, dst2);
+    }
+  }
+  bset(&mut n.out, 14, 0x45);
+  bset(&mut n.out, 15, 0);
+  put16(&mut n.out, 16, total);
+  put16(&mut n.out, 18, n.tx % 65536);
+  put16(&mut n.out, 20, 0);
+  bset(&mut n.out, 22, 64);
+  bset(&mut n.out, 23, cast[u8](IPPROTO_ESP));
+  put16(&mut n.out, 24, 0);
+  put32(&mut n.out, 26, src2);
+  put32(&mut n.out, 30, dst2);
+  put16(&mut n.out, 24, csum(n.out, 14, 20));
+  put32(&mut n.out, 34, spi);
+  put32(&mut n.out, 38, seq);
+  bcopy(&mut n.out, 42, nonce, 4, 8);
+  bcopy(&mut n.out, 50, sealed, 0, plen + 16);
+  bfree(sealed);
+  bfree(aad);
+  bfree(nonce);
+  bfree(key);
+  bfree(plain);
+  esp_count(&mut n, sa, plen);
+  let hop = next_hop(n, dst2);
+  if hop == 0 || hop > IP_MAX {
+    return 1;
+  }
+  send_nowg(&mut n, hop, 14 + total);
+  return 1;
+}
+
+/// Whether a packet that came out of association sa (from src to dst,
+/// protocol proto) is allowed by the in policy that covers it: one that
+/// allows it and, if it has a template, one that names sa's reqid and mode.
+/// With none, a transport-mode packet is let in (as Linux does), a
+/// tunnel-mode one is not: the addresses inside a tunnel are not authenticated
+/// by anything but a policy.
+fn esp_in_ok(n: &Net, sa: u64, src: u64, dst: u64, proto: u64) -> bool
+  requires net_ok(n) && sa < XSA_N && src <= IP_MAX && dst <= IP_MAX
+{
+  let p = xp_lookup(n, n.ns, 0, src, dst, proto);
+  if p >= XP_N {
+    return xs_get(n, sa, XS_MODE) != 1;   // a tunnel's inner packet needs a policy that names its addresses
+  }
+  if xp_get(n, p, XP_ACT) == 1 {
+    return false;
+  }
+  if xp_get(n, p, XP_NT) != 1 {
+    return true;
+  }
+  let treq = xp_get(n, p, XP_TREQID);
+  return xs_get(n, sa, XS_MODE) == xp_get(n, p, XP_TMODE) && (treq == 0 || xs_get(n, sa, XS_REQID) == treq);
+}
+
+/// Whether a packet that came in plain (src to dst, protocol proto) is
+/// allowed: no in policy covers it, or one allows it without asking for ESP.
+fn esp_plain_ok(n: &Net, src: u64, dst: u64, proto: u64) -> bool
+  requires net_ok(n) && src <= IP_MAX && dst <= IP_MAX
+{
+  if proto == IPPROTO_ESP {
+    return true;
+  }
+  let p = xp_lookup(n, n.ns, 0, src, dst, proto);
+  if p >= XP_N {
+    return true;
+  }
+  return xp_get(n, p, XP_ACT) == 0 && xp_get(n, p, XP_NT) == 0;
+}
+
+/// The packet inside an authenticated ESP packet (plain: its payload,
+/// padding, pad length and next header) of association sa goes round the
+/// loopback queue, if it is whole and a policy lets it in.
+fn esp_accept(n: &mut Net, sa: u64, seq: u64, plain: &Bytes)
+  requires net_ok(n) && sa < XSA_N && seq <= 4294967295 && blen(plain) <= FRAME_MAX - 34
+  ensures net_ok(n)
+{
+  esp_seq_set(&mut n, sa, seq);
+  let pl = blen(plain);
+  if pl < 4 {
+    return;
+  }
+  let padlen = cast[u64](bget(plain, pl - 2));
+  let nh = cast[u64](bget(plain, pl - 1));
+  if padlen + 2 > pl {
+    return;
+  }
+  let inner = pl - 2 - padlen;
+  let mut k = 0;
+  while k < padlen
+    invariant k <= padlen && padlen + 2 <= pl && pl == blen(plain) && inner == pl - 2 - padlen
+  {
+    if cast[u64](bget(plain, inner + k)) != k + 1 {
+      return;                         // the padding is 1, 2, 3 ...
+    }
+    k = k + 1;
+  }
+  esp_count(&mut n, sa, pl);
+  put48(&mut n.out, 0, 0);
+  put48(&mut n.out, 6, 0);
+  put16(&mut n.out, 12, ETH_IP);
+  if xs_get(n, sa, XS_MODE) == 1 {
+    // tunnel: the packet inside is a whole IPv4 packet with a plain header
+    if nh != 4 || inner < 20 || cast[u64](bget(plain, 0)) != 0x45 || csum(plain, 0, 20) != 0 {
+      return;
+    }
+    let itot = be16(plain, 2);
+    if itot < 20 || itot > inner {
+      return;
+    }
+    let src = be32(plain, 12);
+    let dst = be32(plain, 16);
+    if src == 0 || src / 16777216 == LO_NET || src >= 3758096384 || !esp_in_ok(n, sa, src, dst, cast[u64](bget(plain, 9))) {
+      return;                         // a source no peer may have, or a policy says no
+    }
+    bcopy(&mut n.out, 14, plain, 0, itot);
+    lo_send(&mut n, 14 + itot);
+  } else {
+    // transport: the outer header stays, with the protocol the trailer names
+    if nh == IPPROTO_ESP {
+      return;                         // no ESP inside ESP
+    }
+    let src = be32(n.pkt, 26);
+    let dst = be32(n.pkt, 30);
+    if src == 0 || src / 16777216 == LO_NET || src >= 3758096384 || !esp_in_ok(n, sa, src, dst, nh) {
+      return;
+    }
+    bset(&mut n.out, 14, 0x45);
+    bset(&mut n.out, 15, 0);
+    put16(&mut n.out, 16, 20 + inner);
+    put16(&mut n.out, 18, be16(n.pkt, 18));
+    put16(&mut n.out, 20, 0);
+    bset(&mut n.out, 22, bget(n.pkt, 22));
+    bset(&mut n.out, 23, cast[u8](nh));
+    put16(&mut n.out, 24, 0);
+    put32(&mut n.out, 26, src);
+    put32(&mut n.out, 30, dst);
+    put16(&mut n.out, 24, csum(n.out, 14, 20));
+    bcopy(&mut n.out, 34, plain, 0, inner);
+    lo_send(&mut n, 34 + inner);
+  }
+}
+
+/// An ESP packet (total bytes of IPv4 packet at 14 in n.pkt) for this machine.
+fn esp_in(n: &mut Net, total: u64)
+  requires net_ok(n) && 20 <= total && 14 + total <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if total < 56 || (total - 52) % 4 != 0 || n.lo_split {
+    return;                           // not a whole ESP packet (ICV 16, IV 8, at least 4 of payload)
+  }
+  let dst = be32(n.pkt, 30);
+  let spi = be32(n.pkt, 34);
+  let seq = be32(n.pkt, 38);
+  let sa = xs_find(n, n.ns, dst, spi);
+  if sa >= XSA_N || !esp_seq_ok(n, sa, seq) {
+    return;
+  }
+  let key = esp_key(n, sa);
+  let mut nonce = esp_nonce(n, sa);
+  bcopy(&mut nonce, 4, n.pkt, 42, 8);
+  let aad = bytes_slice(n.pkt, 34, 42);
+  let sealed = bytes_slice(n.pkt, 50, 14 + total);
+  match gcm_open(key, nonce, aad, sealed) {
+    Option::None => {},
+    Option::Some(plain) => {
+      esp_accept(&mut n, sa, seq, plain);
+      bfree(plain);
+    },
+  }
+  bfree(sealed);
+  bfree(aad);
+  bfree(nonce);
+  bfree(key);
 }

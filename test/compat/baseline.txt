@@ -348,6 +348,58 @@ t_dockerd: a peer's shutdown(SHUT_WR) is POLLRDHUP, not POLLHUP, and this end ca
 t_dockerd: inotify_add_watch on /proc/self/status succeeds
 t_dockerd: oom_score_adj takes a number with a trailing NUL
 t_dockerd: readlinkat of an empty path on an O_PATH|O_NOFOLLOW handle of a /proc/self/fd link is its target
+t_esp: a child in a new network namespace
+t_esp: a client socket
+t_esp: a datagram that goes out plain is dropped by the child, whose in policy asks for ESP
+t_esp: a datagram under an out block policy goes nowhere
+t_esp: a forged packet with a huge number is not echoed
+t_esp: a number outside the window is not
+t_esp: a packet cut in the tag is not echoed
+t_esp: a packet cut to its header is not echoed
+t_esp: a packet for an SPI the child has no association for is not echoed
+t_esp: a packet one byte short is not echoed
+t_esp: a packet sealed by hand is made
+t_esp: a packet sealed with another key is not echoed
+t_esp: a packet with a bit of the IV changed is not echoed
+t_esp: a packet with a bit of the SPI changed is not echoed
+t_esp: a packet with a bit of the ciphertext changed is not echoed
+t_esp: a packet with a bit of the ciphertext's middle changed is not echoed
+t_esp: a packet with a bit of the sequence number changed is not echoed
+t_esp: a packet with a bit of the tag changed is not echoed
+t_esp: a packet with wrong padding is not echoed
+t_esp: a raw ESP socket opens
+t_esp: a real packet far ahead moves the window
+t_esp: a tunnel-mode packet sealed by hand is echoed
+t_esp: a tunnel-mode packet with a bit changed is not
+t_esp: a veth pair, one end in the child's namespace
+t_esp: an inner packet from 127.0.0.1 is not
+t_esp: an inner packet from a source no policy names is not
+t_esp: an older number inside the window and not yet taken is echoed
+t_esp: and played again it is not
+t_esp: and the echo with it
+t_esp: and the window has not moved to it: the next real packet is echoed
+t_esp: and then 1002 is behind it
+t_esp: datagrams of five sizes are echoed through ESP (transport mode)
+t_esp: datagrams of four sizes are echoed through ESP (tunnel mode)
+t_esp: go
+t_esp: netlink sockets
+t_esp: played again it is not
+t_esp: sent to the child, it is echoed
+t_esp: sequence number 0 is not
+t_esp: the ESP policy is back
+t_esp: the child is configured for transport mode
+t_esp: the child is configured for tunnel mode
+t_esp: the child is ready
+t_esp: the child reports
+t_esp: the child stops
+t_esp: the child took in exactly the datagrams that were whole, fresh and ours
+t_esp: the out policy is back
+t_esp: the out policy is removed
+t_esp: the parent is configured for transport mode
+t_esp: the parent is configured for tunnel mode
+t_esp: the parent's end has an address
+t_esp: the same packet again is not
+t_esp: without IPsec the datagram is echoed
 t_fanotify: a child's event comes to its directory
 t_fanotify: the content classes are accepted, both at once are refused, and a permission mask is refused
 t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
