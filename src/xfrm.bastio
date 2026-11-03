@@ -75,6 +75,19 @@ const XS_RMAP: u64 = 17;                  // the replay bitmap, four words
 const XS_PKTS: u64 = 21;
 const XS_BYTES: u64 = 22;
 
+// A lifetime row (XL_W words at XL_BASE in Net.wgp, one per association row).
+// The limits are what xfrm_lifetime_cfg held; 0 and ~0 both mean no limit.
+const XL_BSOFT: u64 = 0;                  // soft and hard byte limits
+const XL_BHARD: u64 = 1;
+const XL_PSOFT: u64 = 2;                  // soft and hard packet limits
+const XL_PHARD: u64 = 3;
+const XL_ASOFT: u64 = 4;                  // seconds after the association was added
+const XL_AHARD: u64 = 5;
+const XL_USOFT: u64 = 6;                  // seconds after it was first used
+const XL_UHARD: u64 = 7;
+const XL_ADD: u64 = 8;                    // when it was added, in seconds on the stack's clock
+const XL_USE: u64 = 9;                    // when it was first used, plus one (0: not yet)
+
 // A policy row (XP_W words at XP_BASE in Net.wgp, after the associations).
 const XP_USED: u64 = 0;
 const XP_NS: u64 = 1;
@@ -106,17 +119,91 @@ fn xs_set(n: &mut Net, i: u64, f: u64, v: u64)
   n.wgp = set(n.wgp, XSA_BASE + i * XSA_W + f, v);
 }
 
-/// Empties row i, its key too.
+fn xl_get(n: &Net, i: u64, f: u64) -> u64
+  requires net_ok(n) && i < XSA_N && f < XL_W
+{
+  return get(n.wgp, XL_BASE + i * XL_W + f);
+}
+
+fn xl_set(n: &mut Net, i: u64, f: u64, v: u64)
+  requires net_ok(n) && i < XSA_N && f < XL_W
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, XL_BASE + i * XL_W + f, v);
+}
+
+/// Empties row i, its key and lifetime too.
 fn xs_clear(n: &mut Net, i: u64)
   requires net_ok(n) && i < XSA_N
   ensures net_ok(n)
 {
+  let mut g = 0;
+  while g < XL_W
+    invariant g <= XL_W && net_ok(n)
+  {
+    xl_set(&mut n, i, g, 0);
+    g = g + 1;
+  }
   let mut f = 0;
   while f < XSA_W
     invariant f <= XSA_W && net_ok(n)
   {
     xs_set(&mut n, i, f, 0);
     f = f + 1;
+  }
+}
+
+/// A 64-bit little-endian word at the end of the message.
+fn xs_64(n: &mut Net, v: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_32(&mut n, v % 4294967296);
+  nl_32(&mut n, v / 4294967296);
+}
+
+/// Whether association i has passed a hard limit: packets or bytes
+/// carried, seconds since it was added, or since it was first used.
+fn xs_expired(n: &Net, i: u64) -> bool
+  requires net_ok(n) && i < XSA_N
+{
+  let ph = xl_get(n, i, XL_PHARD);
+  if ph != 0 && xs_get(n, i, XS_PKTS) >= ph {
+    return true;
+  }
+  let bh = xl_get(n, i, XL_BHARD);
+  if bh != 0 && xs_get(n, i, XS_BYTES) >= bh {
+    return true;
+  }
+  let now = n.now / 100;
+  let ah = xl_get(n, i, XL_AHARD);
+  let add = xl_get(n, i, XL_ADD);
+  if ah != 0 && now >= add && now - add >= ah {
+    return true;
+  }
+  let uh = xl_get(n, i, XL_UHARD);
+  let used = xl_get(n, i, XL_USE);
+  if uh != 0 && used > 0 && now + 1 >= used && now + 1 - used >= uh {
+    return true;
+  }
+  return false;
+}
+
+/// Deletes every association that has passed a hard limit (its key erased
+/// with it). Run before an association is looked up for a packet or a
+/// request, so one past its limit is never used and never shown.
+fn xs_reap(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut i = 0;
+  while i < XSA_N
+    invariant i <= XSA_N && net_ok(n)
+  {
+    if xs_get(n, i, XS_USED) == 1 && xs_expired(n, i) {
+      xs_clear(&mut n, i);
+    }
+    i = i + 1;
   }
 }
 
@@ -160,7 +247,7 @@ fn xs_ns_end(n: &mut Net, s: u64)
   ensures net_ok(n)
 {
   assert XSA_BASE == WGPN * WGP_W && XP_BASE == XSA_BASE + XSA_N * XSA_W && WGC_PBASE == XP_BASE + XP_N * XP_W
-    && WGC_DBASE == WGC_PBASE + WGPN * WGC_PW && WGPX_LEN == WGC_DBASE + IFN * WGC_DW;   // the tables sit one after the other
+    && WGC_DBASE == WGC_PBASE + WGPN * WGC_PW && XL_BASE == WGC_DBASE + IFN * WGC_DW && WGPX_LEN == XL_BASE + XSA_N * XL_W;   // the tables sit one after the other
   let mut i = 0;
   while i < XSA_N
     invariant i <= XSA_N && net_ok(n)
@@ -333,6 +420,14 @@ fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u6
     w = w + 1;
   }
   xs_set(&mut n, row, XS_FLAGS, rd8(b, sa + 216));
+  let mut l = 0;
+  while l < 8
+    invariant l <= 8 && net_ok(n)
+  {
+    xl_set(&mut n, row, l, rd64(b, sa + 96 + l * 8));
+    l = l + 1;
+  }
+  xl_set(&mut n, row, XL_ADD, n.now / 100);
   return 0;
 }
 
@@ -361,16 +456,23 @@ fn xs_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
   nl_b(&mut n, IPPROTO_ESP);
   xs_zeros(&mut n, 3);
   xs_put_addr(&mut n, xs_get(n, i, XS_SRC));
-  // xfrm_lifetime_cfg: no limits (~0 bytes and packets)
+  // xfrm_lifetime_cfg, then xfrm_lifetime_cur: bytes, packets, add_time, use_time
   let mut k = 0;
   while k < 8
     invariant k <= 8 && net_ok(n)
   {
-    nl_32(&mut n, 4294967295);
-    nl_32(&mut n, 4294967295);
+    xs_64(&mut n, xl_get(n, i, k));
     k = k + 1;
   }
-  xs_zeros(&mut n, 32);                   // xfrm_lifetime_cur
+  xs_64(&mut n, xs_get(n, i, XS_BYTES));
+  xs_64(&mut n, xs_get(n, i, XS_PKTS));
+  xs_64(&mut n, xl_get(n, i, XL_ADD));
+  let used = xl_get(n, i, XL_USE);
+  if used > 0 {
+    xs_64(&mut n, used - 1);
+  } else {
+    xs_64(&mut n, 0);
+  }
   xs_zeros(&mut n, 12);                   // xfrm_stats
   nl_32(&mut n, 0);                       // seq
   nl_32(&mut n, xs_get(n, i, XS_REQID));
@@ -847,6 +949,7 @@ fn xfrm_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
   if ns >= NNET || !ns_live(n, ns) {
     return len;
   }
+  xs_reap(&mut n);
   n.ns = ns;
   nlw_open(&mut n, q);
   let mut at = 0;
@@ -1047,6 +1150,9 @@ fn esp_count(n: &mut Net, sa: u64, bytes: u64)
   requires net_ok(n) && sa < XSA_N && bytes <= 65535
   ensures net_ok(n)
 {
+  if xl_get(n, sa, XL_USE) == 0 {
+    xl_set(&mut n, sa, XL_USE, n.now / 100 + 1);
+  }
   let pk = xs_get(n, sa, XS_PKTS);
   if pk < 4294967295 {
     xs_set(&mut n, sa, XS_PKTS, pk + 1);
@@ -1084,6 +1190,7 @@ fn esp_out(n: &mut Net, flen: u64) -> u64
   if xp_get(n, p, XP_NT) != 1 {
     return 0;
   }
+  xs_reap(&mut n);
   let sa = esp_sa_out(n, p, dst);
   if sa >= XSA_N {
     return 1;
@@ -1290,6 +1397,7 @@ fn esp_in(n: &mut Net, total: u64)
   let dst = be32(n.pkt, 30);
   let spi = be32(n.pkt, 34);
   let seq = be32(n.pkt, 38);
+  xs_reap(&mut n);
   let sa = xs_find(n, n.ns, dst, spi);
   if sa >= XSA_N || !esp_seq_ok(n, sa, seq) {
     return;
