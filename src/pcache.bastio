@@ -44,7 +44,9 @@
 // lookup) and takes one only when every slot holds one: a program text
 // page can be read again, but a shared page may be mapped and in use (a
 // semaphore), and a later mmap of that part of the file must get the same
-// page.
+// page. A page a read or a write cached (pc_fill) is program text to the
+// clock, so a MAP_SHARED mapping does not take it as it is: it gets a
+// MAP_SHARED page with the same bytes in that slot (lx_map_file_shared).
 //
 // Not done: the cache does not replace the file's own bytes, so a mapped
 // page is still written back at msync, munmap and exit (src/lxmem.bastio);
@@ -818,6 +820,34 @@ fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
   return n;
 }
 
+/// Drops the page in slot i, whatever its mark, so the next pc_add for
+/// that part of the file makes a new one. A process that maps the old page
+/// keeps it until it lets go.
+fn pc_drop_slot(c: &mut PCache, m: &mut Mem, i: u64)
+  requires pc_ok(c) && mem_ok(m) && i < PC_N
+  ensures pc_ok(c) && mem_ok(m)
+{
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_lease_count(&mut t) == 0 && pt_has(t, i / 512) {
+        pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512);
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  pc_unkey(&mut c.keys, &mut c.link, i);
+}
+
+/// Is slot i a MAP_SHARED mapping's page (mark 2)? Only those stay the one
+/// page of that part of the file while the cache is full: the clock takes a
+/// page of program text, or one a read cached, when it passes it unused.
+fn pc_slot_shared(c: &PCache, i: u64) -> bool
+  requires pc_ok(c) && i < PC_N
+{
+  return get(c.keys, 3 * i + 2) == 2;
+}
+
 /// File h went away (its handle will name another file): drops its pages.
 fn pc_forget(c: &mut PCache, m: &mut Mem, h: u64)
   requires pc_ok(c) && mem_ok(m)
@@ -963,6 +993,8 @@ fn pc_map_run(l1: &mut PageTable, c: &mut PCache, h: u64, pg: u64, i: u64, n: u6
           go = false;
         } else if text && get(c.keys, 3 * s + 2) == 2 {
           go = false;                         // a MAP_SHARED mapping's page: the caller copies it
+        } else if !text && get(c.keys, 3 * s + 2) != 2 {
+          go = false;                         // program text or read bytes: the caller makes it a MAP_SHARED page first (pc_drop_slot)
         } else if pt_borrow(&mut t, s / 512, dup_l1, s % 512, &mut l1, i + done, w) {
           if get(c.keys, 3 * s + 2) == 0 {
             c.keys = set(c.keys, 3 * s + 2, 1);
