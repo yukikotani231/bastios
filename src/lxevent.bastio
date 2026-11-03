@@ -18,8 +18,12 @@
 // looked at, as Linux drops it when the description closes. Readiness is
 // what poll finds, so edge-triggered entries (EPOLLET) are reported like
 // level-triggered ones: a program that reads until EAGAIN, as EPOLLET
-// requires, sees no difference. An epoll instance inside another never
-// reports ready.
+// requires, sees no difference. The mount tables are the exception: they
+// are always readable, and reading never drains them, so an edge-triggered
+// entry on one is reported once after it is added and then once after each
+// change of the mount table (EP_ETDONE), as on Linux; libmount's monitor
+// watches mountinfo that way and loops until epoll_wait finds nothing.
+// An epoll instance inside another never reports ready.
 //
 // A signalfd is an open file description of kind OF_SIGFD whose word 2 is
 // the set of signals it takes. A read takes the lowest pending ones in the
@@ -71,6 +75,8 @@ const EPOLL_CTL_DEL: u64 = 2;
 const EPOLL_CTL_MOD: u64 = 3;
 const EPOLLONESHOT: u64 = 0x40000000;
 const EP_OFF: u64 = 0x4000000000000000;      // a one-shot entry that has fired
+const EPOLLET: u64 = 0x80000000;
+const EP_ETDONE: u64 = 0x2000000000000000;   // an edge-triggered entry on a mount table that has been reported (ep_entry_bits)
 const INT_NEG: u64 = 0x80000000;             // an int argument this large is negative
 const VA_LAST: u64 = 0xFFFFFFFFFFFF0000;     // an address past this cannot hold two timespecs
 
@@ -588,6 +594,28 @@ fn mnt_catch_up(k: &mut Kernel, h: u64)
   }
 }
 
+/// Whether descriptor fd of process pid is a mount table (is_mounts_dev).
+fn mounts_fd(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let f = fd_look(k, pid, fd);
+  return f.kind == K_DEV && is_mounts_dev(f.x);
+}
+
+/// A poll, select or epoll_wait of process pid found `bits` on descriptor
+/// fd. If fd is a mount table and they report a change (POLLPRI and
+/// POLLERR), the change is used up: as on Linux, the next poll of the same
+/// description finds none until the table changes again. Reading the file
+/// does not use it up.
+fn mnt_polled(k: &mut Kernel, pid: u64, fd: u64, bits: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if bits & (POLLPRI | POLLERR) != 0 && mounts_fd(k, pid, fd) {
+    mnt_catch_up(&mut k, fd_ofd(k, pid, fd));
+  }
+}
+
 /// epoll_ctl(epfd, op, fd, event).
 fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -605,7 +633,8 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   if target.kind == K_BAD || fd >= LXNFD {
     return EBADF;
   }
-  if target.kind == K_FILE || target.kind == K_DIR || target.kind == K_DEV && no_poll_dev(target.x) {
+  if (target.kind == K_FILE && ur_find(k, row_file(k.fs, target.x)) >= URING_N) || target.kind == K_DIR
+     || target.kind == K_DEV && no_poll_dev(target.x) {
     return EPERM;                           // a file is always ready: Linux will not watch one
   }
   if op == EPOLL_CTL_ADD && target.kind == K_EPOLL && target.x < EP_N && e < EP_N {
@@ -661,8 +690,12 @@ fn ep_entry_bits(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
     return 0;
   }
   let events = evg(k, ep_at(e, j, 2));
-  if events & EP_OFF != 0 || fd_ofd(k, pid, w - 1) != evg(k, ep_at(e, j, 1)) {
+  let h = evg(k, ep_at(e, j, 1));
+  if events & EP_OFF != 0 || fd_ofd(k, pid, w - 1) != h {
     return 0;
+  }
+  if events & EP_ETDONE != 0 && mnt_seen(k, h) == mnt_events(k) && mounts_fd(k, pid, w - 1) {
+    return 0;                               // reported, and the mount table has not changed since
   }
   return leaf_bits(k, pid, w - 1) & (events | POLLERR | POLLHUP) & 0xFFFF;
 }
@@ -952,6 +985,12 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
       let events = evg(k, ep_at(e, j, 2));
       if events & EPOLLONESHOT != 0 {
         evs(&mut k, ep_at(e, j, 2), events | EP_OFF);   // until EPOLL_CTL_MOD
+      }
+      if w != 0 && mounts_fd(k, pid, w - 1) {
+        mnt_polled(&mut k, pid, w - 1, bits);
+        if events & EPOLLET != 0 {
+          evs(&mut k, ep_at(e, j, 2), evg(k, ep_at(e, j, 2)) | EP_ETDONE);   // until the next change, or EPOLL_CTL_MOD
+        }
       }
       got = got + 1;
       last = j;

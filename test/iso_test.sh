@@ -590,6 +590,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and at(100, 200) == (255, 255, 0) and at(350, 200) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) a shared window is resized with new shared memory")
             fails += not good
+            # With Alt held, a drag from inside the window (the pointer is at its grip, 220 right and
+            # 105 down of where this puts it, inside the contents) moves it, and the client sees no click.
+            mark_ad = len(out)
+            monitor("mouse_move -220 -105", "sendkey alt 4000")
+            time.sleep(0.5)
+            monitor("mouse_button 1", "mouse_move 50 0", "mouse_move 50 0", "mouse_button 0")
+            time.sleep(1)
+            w, h, px = screendump()
+            good = at(100, 200) != (255, 255, 0) and at(250, 200) == (255, 255, 0) and b"bhello: mouse" not in bytes(out[mark_ad:])
+            print(("ok  " if good else "FAIL"), f"({name}) an Alt-drag from inside a window moves it without a click for the client")
+            if not good:
+                print("pixels", [at(x, 200) for x in (100, 250, 350)])
+            fails += not good
+            time.sleep(3)                                    # Alt is up before the next key (it was held for 4 s)
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
@@ -660,10 +674,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             mark2 = len(out)
             monitor("sendkey ctrl-t")
             good = until(b"bterm: window", mark2)
+            # The ninth and tenth: bwm used to serve eight clients and
+            # closed the connection of any further one.
+            for _ in range(8):
+                time.sleep(1)
+                monitor("sendkey ctrl-t")
+            good = good and until(b"bterm: window 10", mark2)
             time.sleep(1)
             monitor("sendkey ctrl-q")
             good = good and until(b"bwm: bye", mark2)
-            print(("ok  " if good else "FAIL"), f"({name}) bwm still gets keys with two terminal windows open")
+            print(("ok  " if good else "FAIL"), f"({name}) bwm still gets keys with ten terminal windows open")
             fails += not good
         else:
             monitor("sendkey ctrl-q")
@@ -870,6 +890,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     *[f"sendkey {c}" for c in ("slash", "b", "i", "n", "slash", "m", "h", "e", "l")], "sendkey tab")
             time.sleep(0.5)
             monitor("sendkey spc", "sendkey shift-dot", *[f"sendkey {c}" for c in ("slash", "t", "m", "p", "slash", "t", "a", "b", "2")], "sendkey ret")
+            time.sleep(2)
+            if run_prompt():
+                monitor("sendkey esc")
+                time.sleep(0.5)
+            monitor("sendkey alt-f4")
+            time.sleep(0.5)
+            # Left, Delete, Home and End edit the Run line in the middle: xecxho becomes echo; Ctrl-Left goes back a word, so y lands before zz.
+            monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "xecxho"], *["sendkey left"] * 3, "sendkey delete",
+                    "sendkey home", "sendkey delete", "sendkey end", "sendkey spc", "sendkey z", "sendkey z",
+                    "sendkey ctrl-left", "sendkey y", "sendkey end",
+                    "sendkey spc", "sendkey shift-dot", *[f"sendkey {c}" for c in ("slash", "t", "m", "p", "slash", "c", "u", "r")], "sendkey ret")
             time.sleep(2)
             if run_prompt():
                 monitor("sendkey esc")
@@ -1113,6 +1144,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"cat /tmp/tab2\r"); q.stdin.flush()
         good = until(b"/bin/mhello\r\n", mark)
         print(("ok  " if good else "FAIL"), f"({name}) Tab in the Run prompt completes a file name")
+        fails += not good
+        mark = len(out)
+        q.stdin.write(b"cat /tmp/cur\r"); q.stdin.flush()
+        good = until(b"yzz\r\n", mark)
+        print(("ok  " if good else "FAIL"), f"({name}) the Run prompt line can be edited with Left, Delete, Home, End and Ctrl-Left")
         fails += not good
         # m in the System window picks the screen mode bwm asks for the next time it starts (/etc/bwm.mode).
         mark = len(out)
@@ -2576,6 +2612,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The viewer's header says how long the file is.
+        mark = len(out)
+        q.stdin.write(b"printf 'one\\ntwo\\nthree\\n' > /tmp/ct/f.txt; bwm -n -c bfiles /tmp/ct/f.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ct/f.txt", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = "(3 lines, 14 bytes)" in lines[0]
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) the bfiles viewer's header gives the lines and bytes")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
         time.sleep(1)
         mark = len(out)
         q.stdin.write(b"\r"); q.stdin.flush()
@@ -2931,6 +2986,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # A word from the later part of the dictionary: "gakusei" is 学生.
+            monitor("sendkey ctrl-u", "sendkey alt-spc", *[f"sendkey {c}" for c in "echo"], "sendkey spc", "sendkey alt-shift-spc")
+            monitor(*[f"sendkey {c}" for c in "gakusei"])
+            monitor("sendkey spc")
+            time.sleep(1)
+            monitor("sendkey ret")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 80, 24)
+            good = any("echo \u5b66\u751f" in l for l in lines)
+            print(("ok  " if good else "FAIL"), f"({name}) kanji conversion knows everyday words (gakusei is 学生)")
+            if not good:
+                print("\n".join(l for l in lines if l))
+            fails += not good
             monitor("sendkey ctrl-u", "sendkey alt-spc")
             # 256 colours (38;5;N and 48;5;N) and 24-bit colours (48;2;R;G;B, drawn as the nearest of them).
             keys[";"] = "semicolon"
@@ -3104,6 +3173,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
             fails += not good
+            # Ctrl-Shift-F finds text in the history: l05 was printed above and is lit on a row; text that is not there finds none; Esc ends it.
+            mark = len(out)
+            monitor("sendkey ctrl-shift-f", "sendkey l", "sendkey 0", "sendkey 5")
+            good = until(b"bterm: find l05 ", mark)
+            m = re.search(rb"bterm: find l05 (-?\d+)", bytes(out[mark:]))
+            good = good and m is not None and int(m.group(1)) >= 0
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-F finds a line of the history")
+            fails += not good
+            mark = len(out)
+            monitor("sendkey q", "sendkey q")
+            good = until(b"bterm: find l05qq -1", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Shift-F reports text that is not there")
+            fails += not good
+            monitor("sendkey esc")
+            time.sleep(1)
             monitor("sendkey ctrl-q")
             until(b"bwm: bye", mark)
             time.sleep(0.5)

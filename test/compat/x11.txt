@@ -1,0 +1,84 @@
+# X11 on BastiOS, for the compatibility suite (test/compat): Xvfb, the X
+# server, and xterm, an X client, both from Alpine images, each entered with
+# chroot. bx11 (user/bx11.c) shows the X screen in a bwm window and turns the
+# window's keys and pointer events into X input; fakebwm stands in for bwm.
+# The X11 disk (x11disk.py) holds the two roots as tar files and a BusyBox at
+# /disk/busybox. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+
+== x11: unpack the server and the client roots
+$ bb mkdir -p /disk/x /disk/t /tmp && bb tar -xf /disk/server.tar -C /disk/x && bb tar -xf /disk/client.tar -C /disk/t && for r in x t; do bb mkdir -p /disk/$r/dev /disk/$r/proc /disk/$r/tmp/.X11-unix && bb mount --bind /dev /disk/$r/dev && bb mount -t proc proc /disk/$r/proc; done; bb mkdir -p /disk/x/tmp/fb; echo ok
+ok
+
+== x11: Xvfb listens on a UNIX socket and keeps its screen in a file
+# timeout 120
+$ bb chroot /disk/x /usr/bin/Xvfb :0 -screen 0 640x480x24 -ac -fbdir /tmp/fb >/disk/xlog 2>&1 & bb sleep 8; test -S /disk/x/tmp/.X11-unix/X0 && echo socket; test -f /disk/x/tmp/fb/Xvfb_screen0 && echo screen
+socket
+screen
+
+== x11: xterm draws on the X screen and takes the keys bwm sends through bx11
+# timeout 300
+$ bb mount --bind /disk/x/tmp/.X11-unix /disk/t/tmp/.X11-unix; bb mkdir -p /tmp/.X11-unix; bb mount --bind /disk/x/tmp/.X11-unix /tmp/.X11-unix; DISPLAY=:0 bb chroot /disk/t /usr/bin/xterm -e /bin/sh -c 'read v; echo got $v > /tmp/got; sleep 1' >/disk/tlog 2>&1 & /disk/fakebwm 120 'abc\r' >/disk/fb.out 2>&1 & bb sleep 2; /disk/bx11 -f /disk/x/tmp/fb/Xvfb_screen0 >/disk/bx.out 2>&1 & until bb grep -q typed /disk/fb.out; do bb sleep 1; done; bb sleep 4; bb cat /disk/fb.out /disk/bx.out; bb cat /disk/t/tmp/got || { bb cat /disk/tlog /disk/xlog; bb ps; }
+fakebwm: listening
+fakebwm: window 640x480 X11
+fakebwm: pixels drawn
+fakebwm: typed
+bx11: window 1, screen 640x480
+got abc
+
+== x11: x11start runs a program on a second display and a smaller screen
+# timeout 300
+$ /disk/fakebwm 120 'xyz\r' >/disk/fb2.out 2>&1 & bb sleep 2; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/t -d 1 -g 320x240 -b /disk/bx11 xterm -e /bin/sh -c 'read v; echo got2 $v > /tmp/got2; sleep 1' >/disk/xs.out 2>&1; bb cat /disk/fb2.out; bb cat /disk/t/tmp/got2 || bb cat /disk/xs.out
+fakebwm: listening
+fakebwm: window 320x240 X11 :1
+fakebwm: pixels drawn
+fakebwm: typed
+got2 xyz
+
+== x11: a GTK 3 program, PuTTY, draws its window on the X screen
+# timeout 300
+$ bb mkdir -p /disk/g; bb tar -xf /disk/gtk.tar -C /disk/g; /disk/fakebwm 200 'x' >/disk/fb3.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/g -d 2 -g 800x600 -b /disk/bx11 /usr/bin/putty >/disk/pt.out 2>&1 & until bb grep -q typed /disk/fb3.out; do bb sleep 1; done; bb cat /disk/fb3.out; bb ps | bb grep -q '{gmain}' && echo alive || bb cat /disk/pt.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :2
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11: a Qt 5 program, MediaInfo, draws its window on the X screen
+# timeout 300
+$ bb mkdir -p /disk/q; bb tar -xf /disk/qt.tar -C /disk/q; /disk/fakebwm 200 'x' >/disk/fb4.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/q -d 3 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/mediainfo-gui >/disk/mi.out 2>&1 & until bb grep -q typed /disk/fb4.out; do bb sleep 1; done; bb cat /disk/fb4.out; bb ps | bb grep -q '{QXcbEventQueue}' && echo alive || bb cat /disk/mi.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :3
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11: a larger Qt 5 program, KeePassXC, draws its window on the X screen
+# timeout 400
+$ bb mkdir -p /disk/k; bb tar -xf /disk/qt2.tar -C /disk/k; /disk/fakebwm 300 'x' >/disk/fb5.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/k -d 4 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/keepassxc >/disk/kp.out 2>&1 & until bb grep -q typed /disk/fb5.out; do bb sleep 1; done; bb cat /disk/fb5.out; bb ps | bb grep -q '/usr/bin/keepassxc' && echo alive || bb cat /disk/kp.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :4
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11: a Java Swing program, the JDownloader installer, draws its window on the X screen
+# timeout 500
+$ bb mkdir -p /disk/j; bb tar -xf /disk/java.tar -C /disk/j; /disk/fakebwm 400 'x' >/disk/fb6.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/j -d 5 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/java -jar /defaults/JDownloader.jar >/disk/jd.out 2>&1 & until bb grep -q typed /disk/fb6.out; do bb sleep 1; done; bb cat /disk/fb6.out; bb ps | bb grep -q 'AWT-EventQueue' && echo alive || bb cat /disk/jd.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :5
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11: a wxWidgets program, Audacity, draws its window on the X screen
+# timeout 400
+$ bb kill $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 2; bb mkdir -p /disk/a; bb tar -xf /disk/wx.tar -C /disk/a; /disk/fakebwm 300 'x' >/disk/fb7.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/a -d 6 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/audacity >/disk/au.out 2>&1 & until bb grep -q typed /disk/fb7.out; do bb sleep 1; done; bb cat /disk/fb7.out; bb ps | bb grep -q '/usr/bin/audacity' && echo alive || bb cat /disk/au.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :6
+fakebwm: pixels drawn
+fakebwm: typed
+alive

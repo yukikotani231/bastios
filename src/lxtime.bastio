@@ -385,9 +385,12 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_EVENT || f.kind == K_TIMER || f.kind == K_EPOLL {
     return ev_bits(k, f.kind, f.x);
   }
+  if f.kind == K_FILE && ur_find(k, row_file(k.fs, f.x)) < URING_N {
+    return 0;                               // a ring can be watched, but is not reported ready (src/lxuring.bastio)
+  }
   if f.kind == K_DEV && is_mounts_dev(f.x) {
     if mnt_seen(k, fd_ofd(k, pid, fd)) != mnt_events(k) {
-      return POLLIN | POLLOUT | POLLPRI | POLLERR;   // the mount table changed since it was read
+      return POLLIN | POLLOUT | POLLPRI | POLLERR;   // the mount table changed since a poll of this description saw it (mnt_polled)
     }
     return POLLIN | POLLOUT;
   }
@@ -453,6 +456,9 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if is_unix(k, pid, fd) {
       return ux_poll_bits(k, pid, fd);
     }
+    if is_alg(k, pid, fd) {
+      return POLLIN | POLLOUT;                // a hash socket never waits
+    }
     let q = nl_of(k, pid, fd);
     if q < NLS && nic_nl_queued(k.nic, q) > 0 {
       return POLLIN | POLLOUT;
@@ -495,7 +501,9 @@ fn lx_poll(k: &mut Kernel, pid: u64, n: u64, was: u64, fds: u64, nfds: u64, wait
     let ev = cast[u64](bget(k.fs.xfer, at + 4)) | cast[u64](bget(k.fs.xfer, at + 5)) << 8;
     let mut rv = 0;
     if fd < 0x80000000 {
-      rv = poll_bits(k, pid, fd) & (ev | POLLERR | POLLHUP | POLLNVAL);
+      let pb = poll_bits(k, pid, fd);
+      rv = pb & (ev | POLLERR | POLLHUP | POLLNVAL);
+      mnt_polled(&mut k, pid, fd, pb);      // a mount table's change is seen once (src/lxevent.bastio)
     }
     bset(&mut k.fs.xfer, at + 6, cast[u8](rv % 256));
     bset(&mut k.fs.xfer, at + 7, cast[u8](rv / 256 % 256));   // POLLRDHUP is 0x2000
@@ -607,7 +615,7 @@ fn lx_select(k: &mut Kernel, pid: u64, n: u64, was: u64, nfds: u64, rd: u64, wr:
   let mut ready = 0;
   let mut i = 0;
   while i < nfds
-    invariant i <= nfds && nfds <= FD_SETSIZE && ready <= 2 * i && kok(k)
+    invariant i <= nfds && nfds <= FD_SETSIZE && ready <= 3 * i && kok(k)
   {
     let want_r = set_has(k, SEL_IN, i);
     let want_w = set_has(k, SEL_IN + SET_BYTES, i);
@@ -618,12 +626,17 @@ fn lx_select(k: &mut Kernel, pid: u64, n: u64, was: u64, nfds: u64, rd: u64, wr:
         ret(&mut k.procs, pid, EBADF);
         return KEEP;
       }
+      mnt_polled(&mut k, pid, i, bits);
       if want_r && bits & (POLLIN | POLLHUP | POLLERR) != 0 {
         set_put(&mut k, SEL_OUT, i);
         ready = ready + 1;
       }
       if want_w && bits & (POLLOUT | POLLERR) != 0 {
         set_put(&mut k, SEL_OUT + SET_BYTES, i);
+        ready = ready + 1;
+      }
+      if want_e && bits & POLLPRI != 0 {
+        set_put(&mut k, SEL_OUT + 2 * SET_BYTES, i);   // exceptional: urgent data, a change of a mount table
         ready = ready + 1;
       }
     }

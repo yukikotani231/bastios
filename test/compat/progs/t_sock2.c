@@ -20,6 +20,34 @@
 static volatile int got, val;
 static void h(int s, siginfo_t *i, void *c) { (void)c; got = s; val = i->si_value.sival_int; }
 
+/* A close with received bytes nobody read sends a reset, not a FIN: the peer
+ * reads what arrived and then gets ECONNRESET, as on Linux (RFC 2525 2.17). */
+static int close_unread_resets(void) {
+    int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(0x7f000001)};
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (ls < 0 || bind(ls, (void *)&a, sizeof a) != 0 || listen(ls, 2) != 0) return 0;
+    socklen_t l = sizeof a;
+    getsockname(ls, (void *)&a, &l);
+    pid_t k = fork();
+    if (k == 0) {
+        int c = accept(ls, 0, 0);
+        usleep(200000);                         /* the client's bytes are here, unread */
+        if (write(c, "ALERT", 5) != 5) _exit(1);
+        close(c);
+        _exit(0);
+    }
+    int s = socket(AF_INET, SOCK_STREAM, 0), st;
+    char b[16];
+    int ok = connect(s, (void *)&a, sizeof a) == 0 && write(s, "hello", 5) == 5;
+    ok = ok && read(s, b, sizeof b) == 5 && memcmp(b, "ALERT", 5) == 0;
+    ok = ok && read(s, b, sizeof b) == -1 && errno == ECONNRESET;
+    waitpid(k, &st, 0);
+    close(s);
+    close(ls);
+    return ok;
+}
+
 /* Stream socketpairs until one fails (64 fit), each carrying its own byte. */
 static int many_pairs(void) {
     int sv[65][2], n = 0, ok = 1;
@@ -153,6 +181,7 @@ int main(void) {
            recvmsg(s, &m, 0) == 4 && memcmp(x, "ab", 2) == 0 && memcmp(y, "cd", 2) == 0; }));
     EXPECT("SO_RCVBUF and SO_SNDBUF", ({ int v = 0; socklen_t vl = sizeof v; getsockopt(s, SOL_SOCKET, SO_RCVBUF, &v, &vl) == 0 && v > 0 &&
            (vl = sizeof v, getsockopt(s, SOL_SOCKET, SO_SNDBUF, &v, &vl)) == 0 && v > 0; }));
+    EXPECT("getsockopt gives the length of the value, 4, for an int option", ({ int v = 0; socklen_t vl = 99; getsockopt(s, SOL_SOCKET, SO_SNDBUF, &v, &vl) == 0 && vl == sizeof v; }));
     EXPECT("SO_KEEPALIVE", setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one) == 0);
     EXPECT("SO_ERROR is 0", ({ int v = -1; socklen_t vl = sizeof v; getsockopt(c, SOL_SOCKET, SO_ERROR, &v, &vl) == 0 && v == 0; }));
     EXPECT("getpeername", ({ struct sockaddr_in p; socklen_t pl = sizeof p; getpeername(c, (void *)&p, &pl) == 0 && p.sin_port == a.sin_port; }));
@@ -283,6 +312,7 @@ int main(void) {
                read(f, &i, sizeof i) == sizeof i && i.ssi_signo == SIGUSR1 && i.ssi_code == SI_QUEUE && i.ssi_int == 7);
         close(f);
     }
+    EXPECT("closing a TCP socket with unread bytes resets the peer, after it read what had arrived", close_unread_resets());
     EXPECT("a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once", refused_connect());
     EXPECT("TCP listeners that set SO_REUSEPORT share a port; one that did not is refused", reuse_port_listeners());
     EXPECT("56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails", many_pairs());

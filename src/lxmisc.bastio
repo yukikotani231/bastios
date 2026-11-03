@@ -214,7 +214,7 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
   if !children {
     // ru_maxrss in kilobytes: every page the process has counts as resident
     // (the peak is not kept; this is the current size).
-    xfer_u64(&mut k.fs.xfer, 32, smaller(anon_count(&mut k, pid, 0, WPAGES), WPAGES) * 4);
+    xfer_u64(&mut k.fs.xfer, 32, anon_resident(&mut k, pid) * 4);
     xfer_u64(&mut k.fs.xfer, 128, csw_get(k, pid, false));   // ru_nvcsw, ru_nivcsw: the calling thread's
     xfer_u64(&mut k.fs.xfer, 136, csw_get(k, pid, true));
   }
@@ -1060,6 +1060,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_mprotect(&mut k, pid, a, b, c);
   } else if n == LX_MADVISE {
     r = lx_madvise(&mut k, pid, a, b, c);
+    assert kok(k);
   } else if n == LX_MSYNC {
     r = lx_msync(&mut k, pid, a, b, c);
     sync_files(&mut k);

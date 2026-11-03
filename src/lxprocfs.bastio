@@ -1269,6 +1269,22 @@ fn maps_ent(o: &mut Bytes, at: u64, from: u64, to: u64, bits: u64, cls: u64, ful
   return put_s(&mut o, a, " kB\nSwap:                  0 kB\n");
 }
 
+/// The row that holds process p's memory: p, or for a thread of a group
+/// whose address space another member holds now, that member (holder).
+fn mm_of(k: &mut Kernel, p: u64) -> u64
+  requires kok(k)
+  ensures kok(k) && (p < NPROC ==> result < NPROC)
+{
+  if p == 0 || p >= NPROC || pget(k.procs, p, F_TGID) == 0 || has_space(&mut k.spaces, p) {
+    return p;
+  }
+  let h = holder(&mut k, tgid(k.procs, p));
+  if h == 0 {
+    return p;                               // lent to a vfork child: nothing to show
+  }
+  return h;
+}
+
 /// /proc/PID/maps of process p, from its page tables and its records of
 /// anonymous memory not touched yet (those read as private read-write): runs
 /// of pages with the same permissions, the heap apart, then the vDSO and the
@@ -2356,20 +2372,20 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         return tm_text(k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);   // src/lxnsk.bastio
       }
       if w == 12 {
-        return environ_text(&mut k, smaller((what - SY_PX) / PXF_N, NPROC - 1), &mut o);
+        return environ_text(&mut k, mm_of(&mut k, smaller((what - SY_PX) / PXF_N, NPROC - 1)), &mut o);
       }
       if w == 13 {
         let sp = smaller((what - SY_PX) / PXF_N, NPROC - 1);
         if sp == 0 || state(k.procs, sp) == ZOMBIE {
           return 0;
         }
-        return maps_text(&mut k, sp, &mut o, true);
+        return maps_text(&mut k, mm_of(&mut k, sp), &mut o, true);
       }
       if w == 11 {
         // The sums /proc/PID/smaps_rollup gives, with the pages statm counts
         // as resident: all of them private and dirty, none shared.
         let sp = smaller((what - SY_PX) / PXF_N, NPROC - 1);
-        let kb = 4 * smaller(anon_count(&mut k, sp, 0, WPAGES), WPAGES);
+        let kb = 4 * anon_resident(&mut k, sp);
         let mut a = put_s(&mut o, 0, "00400000-7ffffffff000 ---p 00000000 00:00 0                          [rollup]\n");
         a = put_s(&mut o, a, "Rss:               ");
         a = put_n(&mut o, a, kb);
@@ -2467,6 +2483,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   if p != 0 && p < NPROC && state(k.procs, p) == ZOMBIE && (what == PF_CMDLINE || what == PF_AUXV || what == PF_MAPS || what == PF_EXE) {
     return 0;
   }
+  // The memory of a thread group is in the row of the member that holds
+  // its address space (src/lxthread.bastio): any thread's files describe it.
+  let mp = mm_of(&mut k, p);
   if what == PF_MOUNTS {
     return mounts_text(&mut k, p, &mut o);
   }
@@ -2841,7 +2860,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       i = i + 1;
     }
     // Every page the process has counts as resident (as in statm).
-    let kb = smaller(anon_count(&mut k, p, 0, WPAGES), WPAGES) * 4;
+    let kb = anon_resident(&mut k, mp) * 4;
     a = put_s(&mut o, a, "\nVmPeak:\t");
     a = put_n(&mut o, a, kb);
     a = put_s(&mut o, a, " kB\nVmSize:\t");
@@ -2885,7 +2904,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   if what == PF_STATM {
     // size resident shared text lib data dt, in pages: every page the process
     // has is counted as resident and as data; nothing is shared or text.
-    let c = smaller(anon_count(&mut k, p, 0, WPAGES), WPAGES);
+    let c = anon_resident(&mut k, mp);
     let mut a = put_n(&mut o, 0, c);
     a = put_c(&mut o, a, 32);
     a = put_n(&mut o, a, c);
@@ -2912,13 +2931,13 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if what == PF_MAPS {
-    return maps_text(&mut k, p, &mut o, false);
+    return maps_text(&mut k, mp, &mut o, false);
   }
   if what == PF_CMDLINE {
-    let w = pget(k.procs, p, F_ARGS);
+    let w = pget(k.procs, mp, F_ARGS);
     let n = w / 17592186044416;
     if n != 0 && n < PROC_OUT {
-      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + w % 17592186044416, &mut k.fs.xfer, n);
+      let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, mp, USER_BASE + w % 17592186044416, &mut k.fs.xfer, n);
       if got == n {
         let mut i = 0;
         while i < n
@@ -2938,10 +2957,10 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     // built it (init_stack, src/elf.bastio): found by its first entries, which
     // are always AT_PHDR, AT_PHENT = the program header size, AT_PHNUM. A
     // debugger asks for AT_ENTRY to find where a PIE program was loaded.
-    let w = pget(k.procs, p, F_ARGS);
+    let w = pget(k.procs, mp, F_ARGS);
     let top = w % 17592186044416;
     if w / 17592186044416 != 0 && top >= 320 {
-      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, USER_BASE + top - 320, &mut k.fs.xfer, 320) == 320 {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, mp, USER_BASE + top - 320, &mut k.fs.xfer, 320) == 320 {
         let mut j = 0;
         let mut found = false;
         while j < 8 && !found

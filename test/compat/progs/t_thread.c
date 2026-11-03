@@ -400,6 +400,47 @@ static int process_cpu(void) {
     return 1;
 }
 
+/* A thread reads its process's memory files through the leader's id: the
+ * leader's row does not hold the group's address space while this thread
+ * runs, and the files must describe the group's memory all the same. */
+static int count_lines(const char *path) {
+    char b[4096];
+    int fd = open(path, O_RDONLY), n = 0;
+    ssize_t r;
+    if (fd < 0) return -1;
+    while ((r = read(fd, b, sizeof b)) > 0)
+        for (ssize_t i = 0; i < r; i++) n += b[i] == '\n';
+    close(fd);
+    return n;
+}
+static long file_size(const char *path) {
+    char b[4096];
+    int fd = open(path, O_RDONLY);
+    long n = 0;
+    ssize_t r;
+    if (fd < 0) return -1;
+    while ((r = read(fd, b, sizeof b)) > 0) n += r;
+    close(fd);
+    return n;
+}
+static void *memfiles(void *arg) {
+    (void)arg;
+    char p[64];
+    int ok = 1;
+    snprintf(p, sizeof p, "/proc/%d/maps", getpid());
+    ok = ok && count_lines(p) >= 4;               // the program, libc or the stack, the vDSO and more
+    snprintf(p, sizeof p, "/proc/%d/cmdline", getpid());
+    ok = ok && file_size(p) > 0;
+    snprintf(p, sizeof p, "/proc/%d/auxv", getpid());
+    ok = ok && file_size(p) > 0;
+    snprintf(p, sizeof p, "/proc/%d/statm", getpid());
+    FILE *f = fopen(p, "r");
+    long size = 0;
+    ok = ok && f && fscanf(f, "%ld", &size) == 1 && size > 0;
+    if (f) fclose(f);
+    return (void *)(long)ok;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -418,6 +459,8 @@ int main(void) {
            pthread_join(t[0], 0) == 0);
     EXPECT("timed condition wait, signalled early (realtime)", timed_wake(CLOCK_REALTIME));
     EXPECT("timed condition wait, signalled early (monotonic)", timed_wake(CLOCK_MONOTONIC));
+    EXPECT("a thread reads the leader's maps, cmdline, auxv and statm and finds the group's memory",
+           pthread_create(&t[0], 0, memfiles, 0) == 0 && pthread_join(t[0], &r) == 0 && r == (void *)1);
     EXPECT("thread-local storage", pthread_create(&t[0], 0, tlsf, 0) == 0 && pthread_join(t[0], &r) == 0 && r == (void *)2 && tls == 1);
     EXPECT("pthread_detach", pthread_create(&t[0], 0, tlsf, 0) == 0 && pthread_detach(t[0]) == 0);
     EXPECT("gettid differs in a thread", ({ pthread_t x; long other = 0;

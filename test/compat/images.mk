@@ -18,6 +18,18 @@ ALPINE_X86_PKGS ?= dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d5
 ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
 DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
 JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c1602330a80b5f2d2fcfa0aa97c4e
+# Xvfb (slieb/xvfb-run, Alpine 3.5), xterm (jbonds/xterm, Alpine 3.6) and PuTTY, a GTK 3
+# program (jlesage/putty, Alpine 3.20) MediaInfo, a Qt 5 program (jlesage/mediainfo), and KeePassXC, a larger
+# Qt 5 one (jlesage/keepassxc) and the installer of JDownloader, a Java 8 Swing
+# program (jlesage/jdownloader-2, Alpine's OpenJDK) and Audacity, a wxWidgets (GTK 3)
+# program (jlesage/audacity), for x11.txt.
+X11_SERVER_IMAGE := slieb/xvfb-run@sha256:295c246aa1da131a977d23eb20d6bfe58fed6728edc3a8c0cee13c6570547982
+X11_CLIENT_IMAGE := jbonds/xterm@sha256:bac17f91159dffccecd9d3c73bea2c16c6b2de0f98cb81803e157dabb401c2ec
+X11_GTK_IMAGE := jlesage/putty@sha256:ecd5868c45a512fef25a6219f6559a3966136ca3f1652998e30584a91f901034
+X11_QT_IMAGE := jlesage/mediainfo@sha256:b9d0388107f44cbe9c3d36f1d43371cb7bfb261ff8b3ffa2ba3d1f3b6f3ae9bf
+X11_QT2_IMAGE := jlesage/keepassxc@sha256:f48315f5c8452a6cdc4838262111a9639d8d9b09480a33263e00dfd2e71f9241
+X11_JAVA_IMAGE := jlesage/jdownloader-2@sha256:b5e40d7e313f43db2a02124949703c45c4e28d45db601236010f3db71ac2d39f
+X11_WX_IMAGE := jlesage/audacity@sha256:5ff22fadf705ddc828ae480671f61056288394ad7629eead4a628e16a29196a9
 RUBY_IMAGE ?= library/ruby@sha256:730b265fc537e93f4ad335031ba95f8a9df88dc75bd9462968b92f368a115f6d
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191

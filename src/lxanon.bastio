@@ -175,6 +175,21 @@ fn anon_reach(k: &mut Kernel, pid: u64, from: u64, to: u64)
   anon_forget(&mut k, pid, from, to);
 }
 
+/// The pages process pid has, for /proc and getrusage. The count cannot be
+/// taken while another processor runs the process's space; then the last
+/// count that could be taken stands, never a made-up size.
+fn anon_resident(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= WPAGES
+{
+  let c = anon_count(&mut k, pid, 0, WPAGES);
+  if c <= WPAGES {
+    pset(&mut k.procs, pid, F_RSSC, c);
+    return c;
+  }
+  return smaller(pget(k.procs, pid, F_RSSC), WPAGES);
+}
+
 /// How many of window pages from .. to of process pid are memory the
 /// process has: mapped, or covered by a record.
 fn anon_count(k: &mut Kernel, pid: u64, from: u64, to: u64) -> u64

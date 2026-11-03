@@ -84,7 +84,7 @@ struct fix_info {
 #define GRIP 14                          /* the resize grip at the corner of a frame */
 #define MIN_CW 64
 #define MIN_CH 32
-#define MAXCLI 8
+#define MAXCLI MAXWIN                    /* one connection per window: both limits must agree */
 #define RXCAP (BWM_MAX_PAYLOAD + 64)
 
 static int fb = -1;
@@ -119,12 +119,17 @@ static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
 static int nz;
 static int next_id = 1;
 static void touch_bar(void);
+static long long now_ms(void);
+static char notice[40];                  /* a short message in the task bar (no room for a window, say) */
+static long long notice_due;             /* when it goes; 0 when none shows */
+#define NOTICE_MS 3000
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
 static int run_on;                       /* the Alt-F2 prompt is showing in the task bar */
 static char run_buf[160];                /* what has been typed in it */
 static int run_n;
+static int run_cur;                      /* where the cursor is in it (0 to run_n) */
 #define RUN_HIST 8
 static char run_hist[RUN_HIST][160];     /* commands run from it, newest last (Up and Down walk them) */
 static char tab_pfx[160];                /* the first word as typed when Tab was first pressed */
@@ -516,14 +521,25 @@ static void draw_bar(void)
         snprintf(im, sizeof im, "%s %.3s", ime_on == 2 ? "Kata" : "Kana", ime_buf);
         text(scene, ix + 4, y0 + 4, im, rgb(255, 255, 255));
     }
+    if (notice_due && now_ms() >= notice_due)
+        notice_due = 0;
+    if (notice_due && !run_on) {                          /* the notice covers the window buttons too */
+        int x0 = BTN_X0, x1 = (int)W - MENU_W - 12 - CLOCK_W - (ime_on == 3 ? IME_W_KANJI : ime_on ? IME_W : 0) - 4;
+        fill(scene, x0, y0 + 3, x1, H - 3, rgb(150, 60, 40));
+        char nb[40];
+        snprintf(nb, sizeof nb, "%.*s", (x1 - x0 - 8) / CELL_W > 0 ? (x1 - x0 - 8) / CELL_W : 0, notice);
+        text(scene, x0 + 4, y0 + 4, nb, rgb(255, 255, 255));
+    }
     if (run_on) {                                         /* the prompt covers the window buttons */
         int x0 = BTN_X0, x1 = (int)W - MENU_W - 12 - CLOCK_W - (ime_on == 3 ? IME_W_KANJI : ime_on ? IME_W : 0) - 4;
         fill(scene, x0, y0 + 3, x1, H - 3, rgb(30, 110, 70));
         text(scene, x0 + 4, y0 + 4, "Run:", rgb(255, 255, 255));
         int room = (x1 - x0 - 8) / CELL_W - 6;
-        const char *shown = run_n > room ? run_buf + (run_n - room) : run_buf;
+        int from = run_cur > room ? run_cur - room : 0;       /* the cursor stays in view; the tail may not be */
+        char shown[160];
+        snprintf(shown, sizeof shown, "%.*s", room > 0 ? room : 0, run_buf + from);
         text(scene, x0 + 4 + 5 * CELL_W, y0 + 4, shown, rgb(255, 255, 255));
-        int cx = x0 + 4 + (5 + (int)strlen(shown)) * CELL_W;
+        int cx = x0 + 4 + (5 + run_cur - from) * CELL_W;
         fill(scene, cx, y0 + 5, cx + 2, y0 + 19, rgb(255, 255, 255));
     }
     int hh, mm;
@@ -1099,6 +1115,11 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         if (py > (int)H - BAR_H - (c.h + TITLE_H + BORDER)) py = (int)H - BAR_H - (c.h + TITLE_H + BORDER);
         struct win *w = win_new(px < 0 ? 0 : px, py < 0 ? 0 : py, c.w, c.h, c.title, i);
         if (!w) {
+            snprintf(notice, sizeof notice, "No room for another window (%d)", MAXWIN);
+            notice_due = now_ms() + NOTICE_MS;
+            touch_bar();
+            printf("bwm: no room for a window\n");
+            fflush(stdout);
             if (mf >= 0)
                 close(mf);
             drop_client(i);
@@ -2099,6 +2120,15 @@ int main(int argc, char **argv)
             if (wait < 0 || d < wait)
                 wait = d < 0 ? 0 : (int)d;
         }
+        if (notice_due) {                                     /* draw the task bar again when the notice goes */
+            long long d = notice_due - now_ms();
+            if (wait < 0 || d < wait)
+                wait = d < 0 ? 0 : (int)d;
+            if (d <= 0) {
+                notice_due = 0;
+                touch_bar();
+            }
+        }
         if (grab_outside(buttons, my)) {
             long long d = scroll_due - now_ms();
             if (wait < 0 || d < wait)
@@ -2178,12 +2208,37 @@ int main(int argc, char **argv)
                                 run_n = 0;
                                 run_buf[0] = 0;
                             }
+                            run_cur = run_n;
+                            m = 0;
+                        } else if (code == 105 || code == 106 || code == 102 || code == 107 || code == 111) {
+                            if (code == 105 && k_ctrl) {                                  /* Ctrl-Left, Ctrl-Right: by words */
+                                while (run_cur > 0 && run_buf[run_cur - 1] == ' ')
+                                    run_cur--;
+                                while (run_cur > 0 && run_buf[run_cur - 1] != ' ')
+                                    run_cur--;
+                            } else if (code == 106 && k_ctrl) {
+                                while (run_cur < run_n && run_buf[run_cur] == ' ')
+                                    run_cur++;
+                                while (run_cur < run_n && run_buf[run_cur] != ' ')
+                                    run_cur++;
+                            } else if (code == 105 && run_cur > 0) {
+                                run_cur--;                                                    /* Left, Right, Home, End */
+                            } else if (code == 106 && run_cur < run_n) {
+                                run_cur++;
+                            }
+                            if (code == 102) run_cur = 0;
+                            if (code == 107) run_cur = run_n;
+                            if (code == 111 && run_cur < run_n) {                       /* Delete */
+                                memmove(run_buf + run_cur, run_buf + run_cur + 1, (size_t)(run_n - run_cur));
+                                run_n--;
+                            }
                             m = 0;
                         }
                         for (int j = 0; j < m; j++) {
                             unsigned char c = (unsigned char)out[j];
                             if (c == 9) {
                                 run_complete();
+                                run_cur = run_n;
                                 continue;
                             }
                             tab_k = 0;
@@ -2199,20 +2254,31 @@ int main(int argc, char **argv)
                                 }
                             } else if (c == 27) {
                                 run_on = 0;
-                            } else if (c == 21) {                  /* Ctrl-U: the whole line */
-                                run_n = 0;
-                                run_buf[0] = 0;
-                            } else if (c == 23) {                  /* Ctrl-W: the last word */
-                                while (run_n > 0 && run_buf[run_n - 1] == ' ')
-                                    run_n--;
-                                while (run_n > 0 && run_buf[run_n - 1] != ' ')
-                                    run_n--;
-                                run_buf[run_n] = 0;
-                            } else if ((c == 127 || c == 8) && run_n > 0) {
-                                run_buf[--run_n] = 0;
+                            } else if (c == 21) {                  /* Ctrl-U: what is left of the cursor */
+                                memmove(run_buf, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_n -= run_cur;
+                                run_cur = 0;
+                            } else if (c == 23) {                  /* Ctrl-W: the word left of the cursor */
+                                int e = run_cur;
+                                while (e > 0 && run_buf[e - 1] == ' ')
+                                    e--;
+                                while (e > 0 && run_buf[e - 1] != ' ')
+                                    e--;
+                                memmove(run_buf + e, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_n -= run_cur - e;
+                                run_cur = e;
+                            } else if (c == 1) {                   /* Ctrl-A, Ctrl-E: start and end */
+                                run_cur = 0;
+                            } else if (c == 5) {
+                                run_cur = run_n;
+                            } else if ((c == 127 || c == 8) && run_cur > 0) {
+                                memmove(run_buf + run_cur - 1, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_n--;
+                                run_cur--;
                             } else if (c >= 32 && c < 127 && run_n < (int)sizeof run_buf - 1) {
-                                run_buf[run_n++] = (char)c;
-                                run_buf[run_n] = 0;
+                                memmove(run_buf + run_cur + 1, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                run_buf[run_cur++] = (char)c;
+                                run_n++;
                             }
                         }
                         touch_bar();
@@ -2220,6 +2286,7 @@ int main(int argc, char **argv)
                         run_on = 1;
                         run_hi = run_nh;
                         run_n = 0;
+                        run_cur = 0;
                         run_buf[0] = 0;
                         menu_open = 0;
                         touch_all();
@@ -2273,6 +2340,11 @@ int main(int argc, char **argv)
                         if (top && top->cli >= 0) {                /* Shift-Insert, Ctrl-Shift-V: paste (key 0x100, for bterm) */
                             struct bwm_key pk = { (uint32_t)top->id, BWM_KEY_PASTE };
                             to_client(top->cli, BWM_KEY, &pk, sizeof pk);
+                        }
+                    } else if (down && k_shift && k_ctrl && !k_alt && code == 33) {
+                        if (top && top->cli >= 0) {                /* Ctrl-Shift-F: find text in the history of a bterm (key 0x108) */
+                            struct bwm_key fk = { (uint32_t)top->id, BWM_KEY_FIND };
+                            to_client(top->cli, BWM_KEY, &fk, sizeof fk);
                         }
                     } else if (down && k_shift && (code == 104 || code == 109)) {
                         if (top && top->cli >= 0) {                /* Shift-Page Up and Down: scroll back (keys 0x101 and 0x102, for bterm); with Ctrl, to the oldest line or the live screen (0x103 and 0x104) */
@@ -2455,7 +2527,7 @@ int main(int argc, char **argv)
                             last_click_ms = now;
                             last_click_maxed = under->maxed;
                         }
-                        drag = !dbl && my < under->y + TITLE_H ? under : NULL;
+                        drag = !dbl && (my < under->y + TITLE_H || k_alt) ? under : NULL;   /* Alt-drag moves a window by any part of it */
                         if (drag)
                             under->maxed = 0;                    /* moved by hand: no longer "maximized" */
                         if (edges) {

@@ -64,6 +64,8 @@ const ARPHRD_LOOPBACK: u64 = 772;
 const IFF_LOWER_UP: u64 = 0x10000;
 const KIND_VETH: u64 = 0x68746576;        // "veth", low byte first
 const KIND_BRIDGE: u64 = 0x656764697262;  // "bridge"
+const KIND_WG: u64 = 8241997880008796535; // "wireguar", then "d" (nla_word keeps 8 bytes)
+const ARPHRD_NONE: u64 = 65534;
 const QDISC_NOOP: u64 = 0x706F6F6E;       // "noop": what a link that is down has
 const QDISC_NOQUEUE: u64 = 0x65756575716F6E;   // "noqueue": a virtual link's
 const QDISC_FIFO0: u64 = 0x61665F6F66696670;   // "pfifo_fast": the card's
@@ -497,6 +499,8 @@ fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
   nl_b(&mut n, 0);
   if lo {
     nl_16(&mut n, ARPHRD_LOOPBACK);
+  } else if k == IFK_WG {
+    nl_16(&mut n, ARPHRD_NONE);
   } else {
     nl_16(&mut n, ARPHRD_ETHER);
   }
@@ -519,10 +523,18 @@ fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
     nla_put32(&mut n, IFLA_TXQLEN, 1000);
     nla_put32(&mut n, IFLA_MTU, 65536);
   } else {
-    nla_put32(&mut n, IFLA_TXQLEN, 1000);
-    nla_put32(&mut n, IFLA_MTU, 1500);
-    if if_lxflags(n, i) / IFF_LOWER_UP % 2 == 1 {
-      oper = 6;                       // IF_OPER_UP
+    if k == IFK_WG {
+      nla_put32(&mut n, IFLA_TXQLEN, 1000);
+      nla_put32(&mut n, IFLA_MTU, 1420);
+      if if_up(n, i) {
+        oper = 0;                     // unknown, as Linux says of a tunnel
+      }
+    } else {
+      nla_put32(&mut n, IFLA_TXQLEN, 1000);
+      nla_put32(&mut n, IFLA_MTU, 1500);
+      if if_lxflags(n, i) / IFF_LOWER_UP % 2 == 1 {
+        oper = 6;                     // IF_OPER_UP
+      }
     }
   }
   nla_put8(&mut n, IFLA_OPERSTATE, oper);
@@ -534,14 +546,19 @@ fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
   if k == IFK_VETH && p < IFN {
     nla_put32(&mut n, IFLA_LINK, if_index(n, p));
   }
-  if lo {
+  if k == IFK_WG {
+    // A layer-3 device: no link-layer address.
+  } else if lo {
     nla_mac(&mut n, IFLA_ADDRESS, 0);
     nla_mac(&mut n, IFLA_BROADCAST, 0);
   } else {
     nla_mac(&mut n, IFLA_ADDRESS, iw(n, i, IF_MAC) % MAC_LIMIT);
     nla_mac(&mut n, IFLA_BROADCAST, MAC_BCAST);
   }
-  if k == IFK_VETH || k == IFK_BRIDGE {
+  if k == IFK_WG {
+    nla_head(&mut n, IFLA_LINKINFO, 16);
+    nla_str(&mut n, IFLA_INFO_KIND, KIND_WG, 100);
+  } else if k == IFK_VETH || k == IFK_BRIDGE {
     nla_head(&mut n, IFLA_LINKINFO, 12);
     if k == IFK_VETH {
       nla_str(&mut n, IFLA_INFO_KIND, KIND_VETH, 0);
@@ -882,7 +899,15 @@ fn rt_newlink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, tgt: u64, ptgt
   let mut kind = 0;
   let mut data = 0;
   if ll > 0 {
-    kind = nla_word(b, nla_find(b, li, li + ll, IFLA_INFO_KIND));
+    let ka = nla_find(b, li, li + ll, IFLA_INFO_KIND);
+    kind = nla_word(b, ka);
+    if kind == KIND_WG {
+      // nla_word keeps 8 bytes: the ninth must be the "d" that ends it.
+      let kl = nla_len(b, ka);
+      if kl < 9 || bget(b, ka + 8) != 100 || (kl > 9 && bget(b, ka + 9) != 0) {
+        kind = 0;
+      }
+    }
     data = nla_find(b, li, li + ll, IFLA_INFO_DATA);
   }
   if flags / NLM_F_CREATE % 2 == 1 && idx == 0 && (na == 0 || if_by_name(n, ns, name0, name1) == NO_IF) {
@@ -943,8 +968,24 @@ fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, na
   requires net_ok(n) && ns < NNET
   ensures net_ok(n)
 {
-  if kind != KIND_VETH && kind != KIND_BRIDGE {
+  if kind != KIND_VETH && kind != KIND_BRIDGE && kind != KIND_WG {
     return NE_OPNOTSUPP;
+  }
+  if kind == KIND_WG {
+    // A WireGuard device is named by the caller (ip link add wg0 type wireguard).
+    if name0 == 0 {
+      return NE_INVAL;
+    }
+    if if_by_name(n, ns, name0, name1) != NO_IF {
+      return NE_EXIST;
+    }
+    let a = if_free_slot(n);
+    if a >= IFN {
+      return NE_NOSPC;
+    }
+    wg_clear(&mut n, a);
+    if_make(&mut n, a, IFK_WG, ns, name0, name1);
+    return 0;
   }
   let mut w0 = name0;
   let mut w1 = name1;
@@ -1023,6 +1064,9 @@ fn rt_move(n: &mut Net, i: u64, tgt: u64) -> u64
     return NE_EXIST;
   }
   iset(&mut n, i, IF_NS, tgt);
+  if k == IFK_WG {
+    wg_rebind(&mut n, i);
+  }
   iset(&mut n, i, IF_FLAGS, 0);
   iset(&mut n, i, IF_IP, 0);
   iset(&mut n, i, IF_SPAN, 0);
@@ -1056,7 +1100,7 @@ fn rt_dellink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
     return NE_NODEV;
   }
   let k = iw(n, i, IF_KIND);
-  if k != IFK_VETH && k != IFK_BRIDGE {
+  if k != IFK_VETH && k != IFK_BRIDGE && k != IFK_WG {
     return NE_OPNOTSUPP;
   }
   if_drop(&mut n, i);
@@ -1287,6 +1331,7 @@ fn nl_open(n: &mut Net, ns: u64, port: u64) -> u64
       n.nls = set(n.nls, q * NL_W + NL_USED, 1);
       n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
       n.nls = set(n.nls, q * NL_W + NL_RAW, 0);
+      n.nls = set(n.nls, q * NL_W + NL_PROTO, 0);
       n.nls = set(n.nls, q * NL_W + NL_PORT, port);
       n.nls = set(n.nls, q * NL_W + NL_NS, ns);
       return q;
@@ -1412,6 +1457,92 @@ fn nic_nl_open(c: &mut Nic, ns: u64, port: u64) -> u64
       let q = nl_open(&mut n, ns, port);
       c = Nic::Up(n);
       return q;
+    },
+  }
+}
+
+/// Socket q speaks protocol `proto` (NETLINK_NETFILTER; it starts as NETLINK_ROUTE).
+fn nic_nl_set_proto(c: &mut Nic, q: u64, proto: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if q < NLS {
+        n.nls = set(n.nls, q * NL_W + NL_PROTO, proto);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// Socket q's protocol.
+fn nic_nl_proto(c: &Nic, q: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if q < NLS {
+        return get(n.nls, q * NL_W + NL_PROTO);
+      }
+      return 0;
+    },
+  }
+}
+
+/// The nf_tables messages in b[0..len) sent on socket q: how many bytes were
+/// taken (whole messages).
+fn nic_nf_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return len; },
+    Nic::Up(mut n) => {
+      let mut r = len;
+      if q < NLS && len <= blen(b) {
+        r = nf_request(&mut n, q, b, len, admin);
+      }
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// The generic netlink messages in b[0..len) sent on socket q: how many
+/// bytes were taken (whole messages).
+fn nic_genl_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return len; },
+    Nic::Up(mut n) => {
+      let mut r = len;
+      if q < NLS && len <= blen(b) {
+        r = genl_request(&mut n, q, b, len, admin);
+      }
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+fn nic_xfrm_request(c: &mut Nic, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; return len; },
+    Nic::Up(mut n) => {
+      let mut r = len;
+      if q < NLS && len <= blen(b) {
+        r = xfrm_request(&mut n, q, b, len, admin);
+      }
+      c = Nic::Up(n);
+      return r;
     },
   }
 }
