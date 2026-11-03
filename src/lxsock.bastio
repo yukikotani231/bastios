@@ -622,6 +622,17 @@ fn icmp_errno(code: u64) -> u64 {
   return EHOSTUNREACH;
 }
 
+/// The same errno as icmp_errno, as the positive number SO_ERROR reports.
+fn icmp_soerror(code: u64) -> u64 {
+  if code == 2 || code == 3 {
+    return 111;                             // ECONNREFUSED
+  }
+  if code == 0 || code == 6 || code == 8 {
+    return 101;                             // ENETUNREACH
+  }
+  return 113;                               // EHOSTUNREACH
+}
+
 /// sendto(fd, buf, n, flags, addr, alen); with addr 0, to the connected
 /// peer (send and write). One datagram of at most UDP_MAX bytes.
 fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, alen: u64, flags: u64) -> u64
@@ -1103,6 +1114,19 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   }
   if level == SOL_SOCKET && name == SO_ERROR && is_tcp(k, pid, fd) {
     v = lx_tcp_soerror(&mut k, pid, fd);
+  }
+  if level == SOL_SOCKET && name == SO_ERROR && !tcp && !is_unix(k, pid, fd) && !is_alg(k, pid, fd) && nl_of(k, pid, fd) >= NLS {
+    // A connected UDP socket: the ICMP error its peer's host sent back, once.
+    let sk = sk_look(k, pid, fd);
+    if sk.err == 0 {
+      let peer = of_get(k.ofd, sk.h, 3) / 2;
+      if peer != 0 {
+        let e = sock_err_take(&mut k.nic, sk.s, peer / 65536, peer % 65536);
+        if e != 0 {
+          v = icmp_soerror(e - 1);
+        }
+      }
+    }
   }
   if level == 41 && name % 0x100000000 == IPV6_V6ONLY {
     let h = fd_ofd(k, pid, fd);
