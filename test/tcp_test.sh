@@ -1006,6 +1006,32 @@ link.in_rule = lambda f: 0
 net.peer = None
 until(lambda: b"bastios> " in out[mark:], 20)
 
+# 6i. Path MTU (RFC 1191, RFC 5927 4.2): our segments carry DF, so an ICMP
+#     "fragmentation needed" for one of them with a next hop MTU of 600 makes
+#     the guest send the rest in segments of at most 560 bytes of data.
+pm = {"cut": None, "sizes": []}
+def mtu_rule(f):
+    x = tcp_of(f)
+    if x and x["data"]:
+        if pm["cut"] is None and len(x["data"]) > 560:
+            pm["cut"] = x["seq"]
+            inner = f[14:14 + 28]
+            body = struct.pack("!BBHHH", 3, 4, 0, 0, 600) + inner
+            body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+            net.send_ip(1, body)
+            return None                 # the router drops it
+        if pm["cut"] is not None and x["seq"] == pm["cut"]:
+            pm["again"] = True          # the resend, after the guest heard of the MTU
+        if pm.get("again"):
+            pm["sizes"].append(len(x["data"]))
+    return 0
+def mtu_setup(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    link.in_rule = mtu_rule
+p = echo_run("path MTU", pattern(30000, 11), mtu_setup)
+check(pm["cut"] is not None and pm["sizes"] and max(pm["sizes"]) <= 560,
+      f"path MTU: from the resend on the guest's segments are at most {max(pm['sizes']) if pm['sizes'] else -1} bytes (560 allowed)")
+
 qemu.kill(); qemu.wait()
 print("---- transcript ----")
 print(out.decode(errors="replace").replace("\r", ""))

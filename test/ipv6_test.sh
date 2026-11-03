@@ -248,6 +248,26 @@ for name, src, dst in (("global", ON_LINK, GUEST_GL), ("link-local", ROUTER_LL, 
     check(until(lambda: any(g[0] == "echo-reply" and g[1] == dst and g[2] == src and g[3] == b"\x62\x62\x00\x01bastios ipv6 ping"
                             for g in wire.got), 5), f"answers a ping to its {name} address")
 
+# Extension headers (RFC 8200 4): a ping that carries a hop-by-hop options
+# header is answered, and so is one behind a routing header with no segments
+# left; a routing header with segments left is not.
+def with_ext(frame, ext, nh):
+    """frame (from ip6) with the extension headers ext in front of its payload."""
+    hdr = bytearray(frame[14:54])
+    hdr[4:6] = struct.pack("!H", struct.unpack("!H", hdr[4:6])[0] + len(ext))
+    hdr[6] = nh
+    return frame[:14] + bytes(hdr) + ext + frame[54:]
+hbh = bytes([58, 0, 1, 4, 0, 0, 0, 0])
+rt0 = bytes([58, 0, 0, 0, 0, 0, 0, 0])
+rt1 = bytes([58, 0, 0, 1, 0, 0, 0, 0])
+for name, ext, nh, want in (("hop-by-hop options", hbh, 0, True), ("a routing header with no segments left", rt0, 43, True),
+                            ("a routing header with segments left", rt1, 43, False)):
+    echo = struct.pack("!BBHHH", 128, 0, 0, 0x7272 + nh, 1) + b"ext hdr ping"
+    before = len(wire.got)
+    wire.send(with_ext(ip6(58, ON_LINK, GUEST_GL, echo, at=2), ext, nh))
+    got = until(lambda: any(g[0] == "echo-reply" and g[3][:2] == struct.pack("!H", 0x7272 + nh) for g in wire.got[before:]), 3)
+    check(got == want, f"a ping behind {name} is {'answered' if want else 'ignored'}")
+
 mark = len(out)
 type_line("ash")
 until(lambda: b"# " in out[mark:], 20)

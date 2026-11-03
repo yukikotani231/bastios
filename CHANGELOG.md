@@ -40,6 +40,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `bterm` keeps the last 2000 lines that scrolled off the top (it kept 200), so a long build log can be read back with the wheel or Shift-Page Up.
 - `bterm` finds text in the screen and the scrollback with Ctrl-Shift-F: what is typed shows in the title bar, the match is lit and scrolled to the middle, Enter goes to an older match, Tab to a newer one and Escape ends it.
 - `bwm` says "No room for another window (16)" in the task bar for a few seconds when a program asks for a window past the limit, where the request was dropped without a word.
+- `bwm` moves the focused window 16 pixels with Alt-Shift and an arrow key.
 - `bwm` moves a window when it is dragged with Alt held, from anywhere in the window and not only its title bar. The program in the window does not get that click.
 - The `bfiles` viewer's header gives the file's size in lines and bytes when there is room for it.
 - The kanji dictionary of `bwm` (`user/bwmdict.h`) has about 150 more everyday words (verbs, adjectives, days of the week, directions, common computer terms), a few hundred in all.
@@ -243,6 +244,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - An ICMP destination unreachable (protocol, port, source route or administrative prohibition) that quotes the SYN of a connection that is still opening makes the connect fail as refused, instead of waiting out the timeouts (RFC 1122 4.2.3.9). The quoted sequence number must be the SYN's (RFC 5927 4.1); other ICMP errors change nothing yet.
 - A SYN that crosses ours while a connect is opening (simultaneous open, RFC 9293 3.5) is answered with a SYN+ACK and the connection comes up, instead of being ignored until the connect times out.
 - IPv6 neighbor discovery follows RFC 4861 more closely: a duplicate address detection probe for one of our addresses is answered to all nodes with the Solicited flag clear, neighbor solicitations, advertisements and router advertisements with an ICMP code other than 0 are ignored, and a router advertisement with lifetime 0 from the default router removes it.
+- IPv6 packets with hop-by-hop options, destination options or a routing header with no segments left are accepted (RFC 8200 4); the options are not acted on. Before, any extension header made the packet be dropped.
+- TCP follows the path MTU (RFC 1191): an ICMP "fragmentation needed" that quotes an unacknowledged segment of ours (segments carry DF) lowers the connection's segment size to the next hop's MTU and sends what is unacknowledged again. Before, a path narrower than 1500 bytes stalled the connection.
 - A UDP datagram for a port nobody listens on is answered with ICMP port unreachable (at most 50 a second), and an IPv4 packet with options is taken in with the options ignored (RFC 1122 4.1.3.4 and 3.2.1.8).
 - The IPv4 stack follows more of RFC 1122 and RFC 9293: a packet whose source is a broadcast, multicast or class E address, or a loopback address that arrived over the wire, is dropped (it used to be answered); a TCP segment without ACK is dropped once the connection is synchronized; ARP cache entries expire 60 s after the neighbour was last heard from; TCP segments carry DF with identification 0 and other packets a new identification each (RFC 6864).
 - A driver for the AWS Elastic Network Adapter (`src/ena.bastio`, PCI
