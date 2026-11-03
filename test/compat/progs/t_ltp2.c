@@ -1125,7 +1125,7 @@ int main(void) {
            umount("/tmp/mnsf");
            rmdir("/tmp/mnsf");
            ok; }));
-    EXPECT("poll and epoll report POLLPRI|POLLERR on /proc/self/mounts and mountinfo after a mount or umount, until the file is read", ({
+    EXPECT("poll, select and epoll report POLLPRI|POLLERR once on /proc/self/mounts and mountinfo after a mount or umount, and reading does not take it back", ({
            int ok = mkdir("/tmp/mpoll", 0755) == 0 || errno == EEXIST;
            int fd = open("/proc/self/mounts", O_RDONLY);
            int fi = open("/proc/self/mountinfo", O_RDONLY);
@@ -1136,26 +1136,55 @@ int main(void) {
            ev.data.fd = fi;
            ok = ok && epoll_ctl(ep, EPOLL_CTL_ADD, fi, &ev) == 0;
            struct pollfd pf = { .fd = fd, .events = POLLPRI };
-           ok = ok && poll(&pf, 1, 0) == 0 && epoll_wait(ep, &ev, 1, 0) == 0;
+           ok = ok && poll(&pf, 1, 0) == 0;
+           struct epoll_event out[2];
+           ok = ok && epoll_wait(ep, out, 2, 0) == 0;
            ok = ok && mount("none", "/tmp/mpoll", "tmpfs", 0, 0) == 0;
            pf.revents = 0;
            ok = ok && poll(&pf, 1, 0) == 1 && (pf.revents & (POLLPRI | POLLERR)) == (POLLPRI | POLLERR);
-           struct epoll_event out[2];
-           ok = ok && epoll_wait(ep, out, 2, 0) == 2 && (out[0].events & EPOLLPRI) && (out[1].events & EPOLLPRI);
-           char b[4096];
-           ok = ok && lseek(fd, 0, SEEK_SET) == 0;
-           while (read(fd, b, sizeof b) > 0) {}
            pf.revents = 0;
-           ok = ok && poll(&pf, 1, 0) == 0;            // mountinfo has not been read yet
-           ok = ok && epoll_wait(ep, out, 2, 0) == 1 && out[0].data.fd == fi;
-           while (read(fi, b, sizeof b) > 0) {}
+           ok = ok && poll(&pf, 1, 0) == 0;            // the poll above took the change
+           ok = ok && epoll_wait(ep, out, 2, 0) == 1 && out[0].data.fd == fi && (out[0].events & EPOLLPRI);
            ok = ok && epoll_wait(ep, out, 2, 0) == 0;
            ok = ok && umount("/tmp/mpoll") == 0;
-           ok = ok && epoll_wait(ep, out, 2, 0) == 2;
+           char b[4096];
+           while (read(fd, b, sizeof b) > 0) {}        // reading does not use the change up
+           while (read(fi, b, sizeof b) > 0) {}
+           fd_set ex;
+           FD_ZERO(&ex);
+           FD_SET(fd, &ex);
+           struct timeval tv = { 0, 0 };
+           ok = ok && select(fd + 1, 0, 0, &ex, &tv) == 1 && FD_ISSET(fd, &ex);
+           ok = ok && epoll_wait(ep, out, 2, 0) == 1 && out[0].data.fd == fi;
+           ok = ok && epoll_wait(ep, out, 2, 0) == 0;
            close(ep);
            close(fi);
            close(fd);
            rmdir("/tmp/mpoll");
+           ok; }));
+    EXPECT("an edge-triggered epoll entry on mountinfo is reported once when added and once after each change of the mount table", ({
+           int ok = mkdir("/tmp/mpet", 0755) == 0 || errno == EEXIST;
+           int fi = open("/proc/self/mountinfo", O_RDONLY);
+           int ep = epoll_create1(0);
+           ok = ok && fi >= 0 && ep >= 0;
+           struct epoll_event ev = { .events = EPOLLIN | EPOLLET, .data.fd = fi };
+           ok = ok && epoll_ctl(ep, EPOLL_CTL_ADD, fi, &ev) == 0;
+           struct epoll_event out[1];
+           ok = ok && epoll_wait(ep, out, 1, 0) == 1 && out[0].events == EPOLLIN;
+           ok = ok && epoll_wait(ep, out, 1, 0) == 0;  // libmount drains the first event this way
+           ok = ok && mount("none", "/tmp/mpet", "tmpfs", 0, 0) == 0;
+           ok = ok && epoll_wait(ep, out, 1, 0) == 1 && out[0].events == (EPOLLIN | EPOLLERR);
+           ok = ok && epoll_wait(ep, out, 1, 0) == 0;
+           ok = ok && umount("/tmp/mpet") == 0;
+           ok = ok && epoll_wait(ep, out, 1, 0) == 1;
+           ok = ok && epoll_wait(ep, out, 1, 0) == 0;
+           ev.events = EPOLLIN | EPOLLET;
+           ok = ok && epoll_ctl(ep, EPOLL_CTL_MOD, fi, &ev) == 0;
+           ok = ok && epoll_wait(ep, out, 1, 0) == 1;  // a new edge, as Linux polls the entry again
+           ok = ok && epoll_wait(ep, out, 1, 0) == 0;
+           close(ep);
+           close(fi);
+           rmdir("/tmp/mpet");
            ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;
