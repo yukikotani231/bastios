@@ -189,7 +189,10 @@ const WGPN: u64 = 64;                  //   peers, all devices together
 const XSA_N: u64 = 64;                  // IPsec security associations (src/xfrm.bastio), all namespaces together
 const XSA_W: u64 = 24;
 const XSA_BASE: u64 = 4736;              // WGPN * WGP_W: where the associations start in Net.wgp
-const WGPX_LEN: u64 = 6272;              // XSA_BASE + XSA_N * XSA_W: the length of Net.wgp
+const XP_N: u64 = 32;                   // IPsec policies, all namespaces together
+const XP_W: u64 = 16;
+const XP_BASE: u64 = 6272;              // XSA_BASE + XSA_N * XSA_W: where the policies start in Net.wgp
+const WGPX_LEN: u64 = 6784;              // XP_BASE + XP_N * XP_W: the length of Net.wgp
 const WG_ALLOWED: u64 = 8;             //   allowed IPs a peer can hold
 const NATN: u64 = 256;                 // masqueraded flows (src/netns.bastio)
 const NAT_W: u64 = 5;                  // words per flow:
@@ -289,7 +292,7 @@ struct Net {
   nl_full: bool,      // ... and whether something did not fit
   nat: Buf,           // masqueraded flows, NAT_W words each
   wgd: Buf,           // WireGuard devices: WG_W words for each interface slot (src/wgdev.bastio)
-  wgp: Buf,           // WireGuard peers, WGP_W words each, then the IPsec security associations, XSA_W words each (src/xfrm.bastio)
+  wgp: Buf,           // WireGuard peers, WGP_W words each, then the IPsec security associations, XSA_W words each, then the policies, XP_W words each (src/xfrm.bastio)
   nat_next: u64,      // the flow replaced when every one is in use
   nfw: Buf,           // the packet filter's tables, chains and rules (src/nft.bastio)
   nfb: Bytes,         // the text of its rules
