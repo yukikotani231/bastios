@@ -87,6 +87,7 @@ confstr01
 connect01
 connect02
 connect03
+cve-2022-0185
 fanotify01
 fanotify02
 fanotify04
@@ -102,7 +103,14 @@ flistxattr03
 fork13
 fremovexattr01
 fremovexattr02
+fsconfig01
+fsconfig02
+fsconfig03
 fsetxattr01
+fsmount01
+fsmount02
+fsopen01
+fsopen02
 getxattr01
 getxattr02
 inotify02
@@ -148,6 +156,8 @@ llistxattr01
 llistxattr02
 llistxattr03
 lremovexattr01
+move_mount01
+move_mount02
 msgget03
 removexattr01
 removexattr02

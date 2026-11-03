@@ -979,6 +979,36 @@ t_more: utimensat and llistxattr act on a dangling link itself
 t_more: vfork + _exit
 t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_more: what a mapping wrote past the end of a file reads as zeros
+t_mountapi: a context is created
+t_mountapi: a context is created once
+t_mountapi: a file can be made in it
+t_mountapi: a flag parameter
+t_mountapi: a flag with a value is EINVAL
+t_mountapi: a mount object is not a context
+t_mountapi: a read-only mount object
+t_mountapi: a second context
+t_mountapi: a string parameter
+t_mountapi: an unknown command is EOPNOTSUPP
+t_mountapi: an unknown flag parameter is EINVAL
+t_mountapi: and the attributes from fsmount
+t_mountapi: fsmount
+t_mountapi: fsmount before the context is created is EINVAL
+t_mountapi: fsmount of a closed descriptor is EBADF
+t_mountapi: fsmount with a bad attribute is EINVAL
+t_mountapi: fsopen of an unknown type is ENODEV
+t_mountapi: fsopen of tmpfs
+t_mountapi: fsopen with a bad flag is EINVAL
+t_mountapi: it can be attached once
+t_mountapi: it is read-only
+t_mountapi: it unmounts
+t_mountapi: it unmounts again
+t_mountapi: move_mount attaches it
+t_mountapi: move_mount to a name that is not there is ENOENT
+t_mountapi: move_mount with a bad flag is EINVAL
+t_mountapi: move_mount with a name that is not there is ENOENT
+t_mountapi: nothing can be made in it
+t_mountapi: the directory is a mount point
+t_mountapi: with the flag from fsconfig
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
