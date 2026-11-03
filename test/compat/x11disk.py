@@ -50,7 +50,7 @@ def main():
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
         write_tar(files, os.path.join(work, tar))
-    env = dict(os.environ, MKDISK_FREE_MB="2200")
+    env = dict(os.environ, MKDISK_FREE_MB="900")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
                                f"busybox={busybox}", f"bx11={bx11}", f"fakebwm={fakebwm}", f"x11start={x11start}",
                                f"server.tar={os.path.join(work, 'server.tar')}",
