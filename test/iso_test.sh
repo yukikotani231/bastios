@@ -525,6 +525,19 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) its task bar button shows the window again")
             fails += not good
+            # A second click on the button of the focused window hides it; a third shows it.
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = at(80, 100) != (0, 255, 0) and at(260, 100) != (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) the task bar button of the focused window hides it")
+            fails += not good
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) and the button shows it again")
+            fails += not good
             monitor("mouse_move 25 -308", "mouse_move 25 -308")                          # back to where the next step starts
             # The grip at the corner of the frame: dragging it 100 right and 60
             # down asks the client for a 300 x 160 window, which it paints again.
@@ -717,7 +730,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
         # The task bar: its Term button starts a terminal window, and a click
-        # on the button of that window (the top one already) changes nothing.
+        # on the button of that window (the top one) hides it, and another shows it.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
         good = until(b"bwm: ready", mark)
@@ -731,10 +744,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             time.sleep(1.5)
             w, h, before = screendump()
             monitor("mouse_move 60 0", "mouse_button 1", "mouse_button 0")
-            time.sleep(0.5)
+            time.sleep(0.7)
+            w, h, hid = screendump()
+            good = before[:w * 3 * 740] != hid[:w * 3 * 740]
+            print(("ok  " if good else "FAIL"), f"({name}) a click on the button of the top window hides it")
+            fails += not good
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
             w, h, after = screendump()
             good = before[:w * 3 * 740] == after[:w * 3 * 740]       # above the bar, where the pointer is
-            print(("ok  " if good else "FAIL"), f"({name}) a click on the button of the top window changes nothing")
+            print(("ok  " if good else "FAIL"), f"({name}) and another click shows it as it was")
             fails += not good
             # Alt-Left and Alt-Right put the window on half of the screen, Alt-Up
             # on all of it (a title bar along the top shows where it reaches).
