@@ -463,10 +463,18 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
     if q < NLS && nic_nl_queued(k.nic, q) > 0 {
       return POLLIN | POLLOUT;
     }
+    let mut b = POLLOUT;
     if sock_ready(k.nic, f.x) {
-      return POLLIN | POLLOUT;
+      b = POLLIN | POLLOUT;
     }
-    return POLLOUT;
+    let sk = sk_look(k, pid, fd);
+    if sk.err == 0 {
+      let peer = of_get(k.ofd, sk.h, 3) / 2;
+      if peer != 0 && sock_err_pending(k.nic, sk.s, peer / 65536, peer % 65536) {
+        b = b | POLLERR;                    // an ICMP error about a datagram it sent (SO_ERROR takes it)
+      }
+    }
+    return b;
   }
   return POLLIN | POLLOUT;                  // files and directories never wait
 }

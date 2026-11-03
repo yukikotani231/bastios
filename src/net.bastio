@@ -3060,6 +3060,23 @@ fn sock_err_take(c: &mut Nic, s: u64, ip: u64, port: u64) -> u64
   }
 }
 
+/// Does socket s hold an ICMP error about a datagram sent to ip:port (so a
+/// poll of it reports POLLERR)? It does not take the error.
+fn sock_err_pending(c: &Nic, s: u64, ip: u64, port: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => {
+      if !udp_is_open(n, s) || ip > IP_MAX {
+        return false;
+      }
+      let e = sk_get(n, s, S_ERR);
+      return e != 0 && (e - 1) / 16 == ip * 65536 + port % 65536;
+    },
+  }
+}
+
 /// The address and port the last datagram taken from s came from (0
 /// before any).
 fn sock_peer_ip(c: &Nic, s: u64) -> u64

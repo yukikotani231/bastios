@@ -2256,13 +2256,22 @@ fn lx_map_file_shared(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, 
       j = j + run;
     } else {
       let mut slot = pc_get(&mut k.fs.pc, f, fpg);
-      if slot >= PC_N {
+      // A page a read or exec cached is program text (TXT_PAGE), and the
+      // clock may take its slot while this mapping still holds it: the next
+      // process to map that part of the file would get a page of its own,
+      // and the two would not see each other's writes. So this mapping
+      // gets a MAP_SHARED page in its place, with the same bytes.
+      let shared = slot < PC_N && pc_slot_shared(k.fs.pc, slot);
+      if !shared {
         let mut got = 0;
         if fpg <= 0xFFFFFFFFFFFFF {
           got = vfs_read_at(&mut k.fs, f, fpg * 4096, XFER);
           if got == NO_FD {
             got = 0;
           }
+        }
+        if slot < PC_N {
+          pc_drop_slot(&mut k.fs.pc, &mut k.mem, slot);
         }
         slot = pc_add(&mut k.fs.pc, &mut k.mem, f, fpg, k.fs.xfer, got, false);
       }
