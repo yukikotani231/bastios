@@ -1826,6 +1826,7 @@ x11: x11: x11start runs a program on a second display and a smaller screen
 x11: x11: a GTK 3 program, PuTTY, draws its window on the X screen
 x11: x11: a Qt 5 program, MediaInfo, draws its window on the X screen
 x11: x11: a larger Qt 5 program, KeePassXC, draws its window on the X screen
+x11: x11: a Java Swing program, the JDownloader installer, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
