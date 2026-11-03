@@ -299,10 +299,10 @@ fn wg_who(ip: u64, port: u64) -> Bytes
   return b;
 }
 
-/// Does the initiation msg carry the mac2 of the cookie its sender (at
-/// src_ip:src_port) would be given?
+/// Does the initiation or response msg carry the mac2 of the cookie its
+/// sender (at src_ip:src_port) would be given?
 fn wg_mac2_valid(n: &Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, ticks: u64) -> bool
-  requires net_ok(n) && i < IFN && blen(msg) == MSG_INIT
+  requires net_ok(n) && i < IFN && (blen(msg) == MSG_INIT || blen(msg) == MSG_RESP)
 {
   if !wg_secret_fresh(n, i, ticks) {
     return false;
@@ -317,11 +317,11 @@ fn wg_mac2_valid(n: &Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, ticks
   return ok;
 }
 
-/// Answers the initiation msg from src_ip:src_port with a cookie reply
-/// instead of the handshake. The secret, if there is none that is fresh, and
+/// Answers the initiation or response msg from src_ip:src_port with a cookie
+/// reply instead of the handshake. The secret, if there is none that is fresh, and
 /// the 24-byte nonce are both made from ent, under different labels.
 fn wg_cookie_send(n: &mut Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, ticks: u64, ent: &Bytes)
-  requires net_ok(n) && i < IFN && blen(msg) == MSG_INIT && blen(ent) == WG_ENT
+  requires net_ok(n) && i < IFN && (blen(msg) == MSG_INIT || blen(msg) == MSG_RESP) && blen(ent) == WG_ENT
   ensures net_ok(n)
 {
   if !wg_secret_fresh(n, i, ticks) && ticks <= 4611686018427387904 {
@@ -344,7 +344,7 @@ fn wg_cookie_send(n: &mut Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, 
   let who = wg_who(src_ip, src_port);
   let cookie = wgn_cookie(secret, who);
   let spub = wg_dbytes(n, i, WGD_PUB);
-  let mac1 = bytes_slice(msg, 116, 132);
+  let mac1 = bytes_slice(msg, blen(msg) - 32, blen(msg) - 16);
   let reply = wgn_cookie_reply(spub, cast[u64](load_le32(msg, 4)), nonce, cookie, mac1);
   let sock = wdw(n, i, WGD_SOCK);
   if sock != 0 && sock <= SOCKS {
@@ -373,13 +373,36 @@ fn wg_cookie_or_none(n: &Net, p: u64, ticks: u64) -> Bytes
   return balloc(0);
 }
 
+/// The peer of device i that answered with our index idx and has not yet
+/// confirmed that session: the response it got a cookie reply for.
+fn wg_peer_unconfirmed(n: &Net, i: u64, idx: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= WGPN
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 && wpw(n, p, WGP_SVALID) == 1 && wpw(n, p, WGP_ISINIT) == 0 && wpw(n, p, WGP_CONF) == 0 && wpw(n, p, WGP_HS) != 1 && wpw(n, p, WGP_LIDX) == idx {
+      return p;
+    }
+    p = p + 1;
+  }
+  return WGPN;
+}
+
 /// A cookie reply (type 3) on device i: if it answers the initiation peer p
 /// has out, its cookie is kept and the initiation goes out again at once.
 fn wg_on_cookie(n: &mut Net, i: u64, msg: &Bytes, ticks: u64)
   requires net_ok(n) && i < IFN && blen(msg) == MSG_COOKIE
   ensures net_ok(n)
 {
-  let p = wg_peer_waiting(n, i, cast[u64](load_le32(msg, 4)));
+  let mut p = wg_peer_waiting(n, i, cast[u64](load_le32(msg, 4)));
+  let mut asked = true;
+  if p >= WGPN {
+    p = wg_peer_unconfirmed(n, i, cast[u64](load_le32(msg, 4)));
+    asked = false;
+  }
   if p >= WGPN || ticks > 4611686018427387904 {
     return;
   }
@@ -391,7 +414,9 @@ fn wg_on_cookie(n: &mut Net, i: u64, msg: &Bytes, ticks: u64)
       wcps(&mut n, p, WGC_COOKIE, load_le64(c, 0));
       wcps(&mut n, p, WGC_COOKIE + 1, load_le64(c, 8));
       wcps(&mut n, p, WGC_COOKT, ticks + 1);
-      wps(&mut n, p, WGP_WANT, 1);
+      if asked {
+        wps(&mut n, p, WGP_WANT, 1);
+      }
       bfree(c);
     },
   }
@@ -478,13 +503,17 @@ fn wg_respond(n: &mut Net, i: u64, p: u64, who: &Bytes, st: &mut Bytes, msg: &By
   match wgn_response(&mut st, epriv, ei_pub, si_pub, psk, idx, ridx, &mut keys) {
     Option::None => {},
     Option::Some(resp) => {
-      let none = balloc(0);
+      let none = wg_cookie_or_none(n, p, ticks);
       let full = wgn_macs(resp, si_pub, none);
       wps(&mut n, p, WGP_TAI_HI, load_be64(who, 32));
       wps(&mut n, p, WGP_TAI_LO, cast[u64](load_be32(who, 40)));
       wg_set_endpoint(&mut n, p, src_ip, src_port);
       wg_session(&mut n, p, keys, idx, ridx, ticks, 0);
       if blen(full) == MSG_RESP {
+        if wpw(n, p, WGP_HS) != 1 {
+          wcps(&mut n, p, WGC_MAC1, load_le64(full, 60));
+          wcps(&mut n, p, WGC_MAC1 + 1, load_le64(full, 68));
+        }
         wg_send_peer(&mut n, i, p, full, MSG_RESP);
       }
       bfree(full);
@@ -553,12 +582,19 @@ fn wg_peer_waiting(n: &Net, i: u64, idx: u64) -> u64
 }
 
 /// A datagram of type 2 on device i.
-fn wg_on_resp(n: &mut Net, i: u64, msg: &Bytes, wall: u64, ticks: u64)
-  requires net_ok(n) && i < IFN && blen(msg) == MSG_RESP
+fn wg_on_resp(n: &mut Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, wall: u64, ticks: u64, ent: &Bytes) -> bool
+  requires net_ok(n) && i < IFN && blen(msg) == MSG_RESP && blen(ent) == WG_ENT
   ensures net_ok(n)
 {
   let spub = wg_dbytes(n, i, WGD_PUB);
-  if wgn_mac1_ok(msg, spub) {
+  let mut used = false;
+  let mut go = wgn_mac1_ok(msg, spub);
+  if go && wg_load(&mut n, i, ticks) && !wg_mac2_valid(n, i, msg, src_ip, src_port, ticks) {
+    wg_cookie_send(&mut n, i, msg, src_ip, src_port, ticks, ent);
+    used = true;
+    go = false;
+  }
+  if go {
     let p = wg_peer_waiting(n, i, cast[u64](load_le32(msg, 8)));
     if p < WGPN {
       let spriv = wg_dbytes(n, i, WGD_PRIV);
@@ -585,6 +621,7 @@ fn wg_on_resp(n: &mut Net, i: u64, msg: &Bytes, wall: u64, ticks: u64)
     }
   }
   bfree(spub);
+  return used;
 }
 
 // ---------------------------------------------------------------- transport
@@ -1009,8 +1046,9 @@ fn wg_on_datagram(n: &mut Net, i: u64, buf: &Bytes, len: u64, src_ip: u64, src_p
   }
   if len == MSG_RESP && load_le32(buf, 0) == 2 {
     let m2 = bytes_slice(buf, 0, MSG_RESP);
-    wg_on_resp(&mut n, i, m2, wall, ticks);
+    let used = wg_on_resp(&mut n, i, m2, src_ip, src_port, wall, ticks, ent);
     bfree(m2);
+    return used;
   }
   return false;
 }

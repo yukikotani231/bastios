@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- WireGuard cookie replies to responses: a busy initiator answers a handshake response that has no valid mac2 with a cookie reply instead of doing the Diffie-Hellman work; the responder keeps the cookie for its unconfirmed session and puts the mac2 on the responses it sends next. `t_wgcookieresp` checks that a handshake started by a busy device completes this way.
 - WireGuard previous session: the session a rekey replaces stays as a receive-only session for up to 180 s, so packets in flight under the old keys are still taken (once each; later ones are refused). `t_wgprev` checks it.
 - `bwm`: a middle click on a window's task bar button closes the window, as Alt-F4 does for the focused one.
 - `bwm`: a click on the task bar button of the focused window minimizes it (a click on any other button still raises it).
