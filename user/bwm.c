@@ -2331,6 +2331,16 @@ int main(int argc, char **argv)
                             }
                             touch_all();
                         }
+                    } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_ctrl && !k_shift) {
+                        struct win *t = focus();                    /* Ctrl-Alt-arrows: grow or shrink a resizable window by 16 pixels */
+                        if (t && t->resizable) {
+                            raise_win(t);
+                            t->maxed = 0;
+                            t->want_cw = cw_of(t) + (code == 106 ? 16 : code == 105 ? -16 : 0);
+                            t->want_ch = ch_of(t) + (code == 108 ? 16 : code == 103 ? -16 : 0);
+                            request_size(t);
+                            touch_all();
+                        }
                     } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_shift) {
                         struct win *t = focus();                    /* Alt-Shift-arrows: nudge the focused window by 16 pixels */
                         if (t) {
