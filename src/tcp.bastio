@@ -1589,7 +1589,8 @@ fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
 }
 
 /// The caller lets go of t: a listener stops, a connection sends its FIN
-/// after the data still buffered (the slot is freed once the close
+/// after the data still buffered (a reset instead, if received bytes were
+/// never read) (the slot is freed once the close
 /// completes), and one that never connected is dropped.
 fn tcp_release(n: &mut Net, t: u64) -> bool
   requires net_ok(n)
@@ -1602,6 +1603,13 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
   tset(&mut n, t, W_HELD, 0);
   tset(&mut n, t, W_PARENT, TCBS);          // accepted once: never handed out again
   let st = tw(n, t, W_STATE);
+  if (st == T_ESTABLISHED || st == T_CLOSE_WAIT) && tw(n, t, W_RXLEN) > 0 {
+    // Bytes that arrived and were never read: as on Linux (RFC 2525 2.17),
+    // the peer gets a reset, not a FIN, so it knows they were lost.
+    tcp_emit(&mut n, t, TF_RST + TF_ACK, twb(n, t, W_NXT, SEQ_MOD), 0, 0);
+    tcb_close(&mut n, t, false);
+    return true;
+  }
   if st == T_LISTEN {
     tcp_orphans(&mut n, t);
   }
