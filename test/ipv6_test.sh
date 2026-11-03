@@ -118,7 +118,7 @@ class Wire:
                 na = struct.pack("!BBHI", 136, 0, 0, 0x60000000) + target + bytes([2, 1]) + HOST_MAC
                 self.send(ip6(58, target, src, na, hops=255, at=2))
         elif kind == 136:
-            self.got.append(("na", p[8:24], p[26:32] if len(p) >= 32 else b"", hops))
+            self.got.append(("na", p[8:24], p[26:32] if len(p) >= 32 else b"", hops, p[4], dst))
         elif kind == 1:
             self.got.append(("unreach", src, dst, p[1], p[8:]))
         elif kind == 129:
@@ -228,6 +228,20 @@ snm = ipaddress.IPv6Address("ff02::1:ff12:3456").packed
 wire.send(ip6(58, ROUTER_LL, snm, ns, hops=255, at=2))
 check(until(lambda: any(g[0] == "na" and g[1] == GUEST_GL and g[2] == GUEST_MAC and g[3] == 255 for g in wire.got), 5),
       "answers a neighbor solicitation for its global address with its MAC")
+# Duplicate address detection by another node (RFC 4861 7.2.4): a solicitation
+# from :: for its address is answered to all nodes, Solicited flag clear. One
+# with a code other than 0 is ignored (RFC 4861 7.1.1).
+before = len(wire.got)
+dad = struct.pack("!BBHI", 135, 0, 0, 0) + GUEST_LL
+wire.send(ip6(58, bytes(16), snm, dad, hops=255, at=2))
+check(until(lambda: any(g[0] == "na" and g[1] == GUEST_LL and g[5] == ALL_NODES and g[4] & 0x40 == 0 and g[4] & 0x20
+                        for g in wire.got[before:]), 5),
+      "answers a duplicate address detection probe to all nodes, Solicited flag clear")
+before = len(wire.got)
+bad = struct.pack("!BBHI", 135, 1, 0, 0) + GUEST_GL + bytes([1, 1]) + HOST_MAC
+wire.send(ip6(58, ROUTER_LL, snm, bad, hops=255, at=2))
+until(lambda: False, 1)
+check(not any(g[0] == "na" for g in wire.got[before:]), "ignores a neighbor solicitation with a code other than 0")
 for name, src, dst in (("global", ON_LINK, GUEST_GL), ("link-local", ROUTER_LL, GUEST_LL)):
     echo = struct.pack("!BBHHH", 128, 0, 0, 0x6262, 1) + b"bastios ipv6 ping"
     wire.send(ip6(58, src, dst, echo, at=2))
