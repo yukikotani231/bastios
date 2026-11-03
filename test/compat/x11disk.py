@@ -26,10 +26,12 @@ def keep(name):
     # were hard-linked to it are written out as files (see write_tar)
     return name != "cache" and not name.startswith(("opt/", "cache/")) and "/share/doc/" not in name and "/share/man/" not in name and not name.startswith("usr/share/man/")
 
-def write_tar(files, path):
+def write_tar(files, path, only=None):
+    """Writes the files that keep() allows to the tar file path; only, if given,
+    says which of them (by name) go into this file."""
     with tarfile.open(path, "w") as t:
         for name, (ti, body) in sorted(files.items()):
-            if not keep(name):
+            if not keep(name) or (only is not None and not only(name)):
                 continue
             if ti.islnk() and ti.linkname.lstrip("./") in files:
                 # a hard link to a file that is left off: write a copy
@@ -56,6 +58,13 @@ def main():
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
+        if tar == "tag.tar":
+            # puddletag's root is 640 MB; as one file it ended in "tar: short read"
+            # in CI, so its biggest libraries are a file of their own (tag2.tar)
+            big = lambda n: n.startswith(("usr/lib/libLLVM", "usr/lib/libgallium"))
+            write_tar(files, os.path.join(work, tar), lambda n: not big(n))
+            write_tar(files, os.path.join(work, "tag2.tar"), big)
+            continue
         write_tar(files, os.path.join(work, tar))
     env = dict(os.environ, MKDISK_FREE_MB="900")
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
@@ -68,6 +77,7 @@ def main():
                                f"java.tar={os.path.join(work, 'java.tar')}",
                                f"wx.tar={os.path.join(work, 'wx.tar')}",
                                f"py.tar={os.path.join(work, 'py.tar')}",
-                               f"tag.tar={os.path.join(work, 'tag.tar')}"], env)
+                               f"tag.tar={os.path.join(work, 'tag.tar')}",
+                               f"tag2.tar={os.path.join(work, 'tag2.tar')}"], env)
 
 main()
