@@ -42,6 +42,25 @@ int main(void) {
     report(send(c, "ping", 4, 0) < 0 && errno == ECONNREFUSED, "udp: the next send reports ECONNREFUSED");
     report(send(c, "ping", 4, 0) == 4, "udp: and the one after goes out");
 
+    /* poll reports POLLERR, and SO_ERROR takes the error. First drop the
+     * error the send above drew. */
+    usleep(1500000);
+    recv(c, buf, sizeof buf, MSG_DONTWAIT);
+    report(send(c, "ping", 4, 0) == 4, "udp: a send goes out");
+    p.events = 0;
+    int pr = poll(&p, 1, 3000);
+    report(pr == 1 && (p.revents & POLLERR), "udp: poll reports POLLERR");
+    int soe = -1; socklen_t sl = sizeof soe;
+    getsockopt(c, SOL_SOCKET, SO_ERROR, &soe, &sl);
+    errno = soe;
+    report(soe == ECONNREFUSED, "udp: SO_ERROR reports ECONNREFUSED");
+    soe = -1; sl = sizeof soe;
+    getsockopt(c, SOL_SOCKET, SO_ERROR, &soe, &sl);
+    report(soe == 0, "udp: SO_ERROR reports it once");
+    pr = poll(&p, 1, 0);
+    report(pr == 0, "udp: and POLLERR is gone");
+    report(send(c, "ping", 4, 0) == 4, "udp: a send after SO_ERROR goes out");
+
     int u = socket(AF_INET, SOCK_DGRAM, 0);
     report(sendto(u, "ping", 4, 0, (struct sockaddr *)&a, sizeof a) == 4, "udp: unconnected send");
     usleep(1500000);
