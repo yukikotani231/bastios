@@ -70,6 +70,8 @@ const EPROTONOSUPPORT: u64 = 18446744073709551523; // 2^64 - 93
 const EAFNOSUPPORT: u64 = 18446744073709551519;    // 2^64 - 97
 const EADDRINUSE: u64 = 18446744073709551518;      // 2^64 - 98
 const ENETUNREACH: u64 = 18446744073709551515;     // 2^64 - 101
+const EHOSTUNREACH: u64 = 18446744073709551503;    // 2^64 - 113
+const ECONNREFUSED_UDP: u64 = 18446744073709551505;   // 2^64 - 111, as lxtcp.bastio's ECONNREFUSED
 const ENOBUFS: u64 = 18446744073709551511;         // 2^64 - 105
 const ENOTCONN: u64 = 18446744073709551509;        // 2^64 - 107
 
@@ -606,6 +608,20 @@ fn to_local(ip: u64) -> u64
   return ip;
 }
 
+/// The error for an ICMP destination unreachable of code `code` (RFC 1122
+/// 4.1.3.3; the errno values Linux gives): protocol and port unreachable are
+/// a refusal, network unreachable and its relatives ENETUNREACH, the rest
+/// EHOSTUNREACH.
+fn icmp_errno(code: u64) -> u64 {
+  if code == 2 || code == 3 {
+    return ECONNREFUSED_UDP;
+  }
+  if code == 0 || code == 6 || code == 8 {
+    return ENETUNREACH;
+  }
+  return EHOSTUNREACH;
+}
+
 /// sendto(fd, buf, n, flags, addr, alen); with addr 0, to the connected
 /// peer (send and write). One datagram of at most UDP_MAX bytes.
 fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, alen: u64, flags: u64) -> u64
@@ -633,6 +649,13 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   let d = udp_dest(&mut k, pid, fd, addr, alen);
   if d.err != 0 {
     return d.err;
+  }
+  if addr == 0 && !sock_is_raw(k.nic, d.s) {
+    // A connected socket reports an ICMP error about its peer once (RFC 1122 4.1.3.3).
+    let e = sock_err_take(&mut k.nic, d.s, d.ip, d.port);
+    if e != 0 {
+      return icmp_errno(e - 1);
+    }
   }
   if sock_is_raw(k.nic, d.s) {
     if n > UDP_MAX + 8 {
@@ -726,6 +749,13 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
     return sk.err;
+  }
+  let peer = of_get(k.ofd, sk.h, 3) / 2;
+  if peer != 0 {
+    let e = sock_err_take(&mut k.nic, sk.s, peer / 65536, peer % 65536);
+    if e != 0 {
+      return icmp_errno(e - 1);
+    }
   }
   let full = sock_head_len(&mut k.nic, sk.s);
   let got = sock_recvfrom(&mut k.nic, sk.s, &mut k.fs.xfer, smaller(n, XFER), flags / MSG_PEEK % 2 == 1);
