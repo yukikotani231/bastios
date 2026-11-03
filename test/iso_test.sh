@@ -603,6 +603,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("pixels", [at(x, 200) for x in (100, 250, 350)])
             fails += not good
+            time.sleep(3)                                    # Alt is up before the next key (it was held for 4 s)
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
