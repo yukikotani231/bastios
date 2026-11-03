@@ -15,12 +15,17 @@
 #include <stdint.h>
 #include <sys/ptrace.h>
 #include <sys/syscall.h>
+#include <sys/mman.h>
 #include <sys/uio.h>
 #include <sys/user.h>
 #include <sys/wait.h>
 #include <elf.h>
 #include <string.h>
 #include <time.h>
+#ifndef FUTEX_WAIT
+#define FUTEX_WAIT 0
+#define FUTEX_WAKE 1
+#endif
 
 #ifndef PTRACE_O_EXITKILL
 #define PTRACE_O_EXITKILL (1 << 20)
@@ -409,6 +414,30 @@ int main(void)
            if (!ok) kill(c, SIGKILL);
            ptrace(PTRACE_CONT, c, 0, 0); int s9 = wst(c); close(p[0]); close(p[1]);
            ok && WIFEXITED(s9) && WEXITSTATUS(s9) == 'B'; }));
+
+    EXPECT("a traced futex wait that another process wakes stops at its exit with 0, before the next call", ({
+           int *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0); *w = 0;
+           c = fork(); if (c == 0) { ptrace(PTRACE_TRACEME, 0, 0, 0); raise(SIGSTOP); long r = syscall(SYS_futex, w, FUTEX_WAIT, 0, 0, 0, 0); _exit(r == 0 ? 7 : 8); }
+           int ok = stopped_with(c, SIGSTOP); long long v = -1; int op = 0;
+           for (int i = 0; i < 50 && ok; i++) { op = next_sc(c, &v); if (op < 0) ok = 0; if (op == 1 && v == SYS_futex) break; }
+           ok = ok && op == 1 && v == SYS_futex && ptrace(PTRACE_SYSCALL, c, 0, 0) == 0;
+           long n = 0; for (int i = 0; i < 100 && n == 0; i++) { usleep(10000); n = syscall(SYS_futex, w, FUTEX_WAKE, 1, 0, 0, 0); }
+           int st2 = wst(c); struct psi si; memset(&si, 0, sizeof si); ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+           ok = ok && n == 1 && WIFSTOPPED(st2) && si.op == 2 && si.exit.rval == 0;
+           if (!ok) kill(c, SIGKILL);
+           ptrace(PTRACE_CONT, c, 0, 0); int s9 = wst(c); munmap(w, 4096);
+           ok && WIFEXITED(s9) && WEXITSTATUS(s9) == 7; }));
+    EXPECT("PTRACE_DETACH right after PTRACE_INTERRUPT cut a traced read short: the process reads on and is not killed by SIGTRAP", ({
+           int p[2]; pipe(p); c = fork(); if (c == 0) { close(p[1]); body_read(p[0]); }
+           usleep(50000); int ok = ptrace(PTRACE_SEIZE, c, 0, 0) == 0 && ptrace(PTRACE_INTERRUPT, c, 0, 0) == 0;
+           ok = ok && event_of(c) == PTRACE_EVENT_STOP;
+           long long v = -1; int op1 = next_sc(c, &v);      /* the read's entry */
+           ok = ok && op1 == 1 && ptrace(PTRACE_SYSCALL, c, 0, 0) == 0; usleep(50000);
+           ok = ok && ptrace(PTRACE_INTERRUPT, c, 0, 0) == 0; int st2 = wst(c);
+           ok = ok && WIFSTOPPED(st2) && ptrace(PTRACE_DETACH, c, 0, 0) == 0;
+           if (!ok) kill(c, SIGKILL);
+           usleep(50000); write(p[1], "C", 1); int s9 = wst(c); close(p[0]); close(p[1]);
+           ok && WIFEXITED(s9) && WEXITSTATUS(s9) == 'C'; }));
 
     /* Errors. */
     EXPECT("PTRACE_PEEKDATA of an unmapped address is EIO", ({
