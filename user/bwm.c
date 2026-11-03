@@ -2506,6 +2506,10 @@ int main(int argc, char **argv)
                     menu_show(mx, my);                   /* a right click on the desktop opens the menu there */
                     menu_mx = mx; menu_my = my;
                     touch_all();
+                } else if ((m[0] & 4) && !(buttons & 4) && in_bar && mx < (int)W - MENU_W - 4 && !(mx >= TERM_X && mx < TERM_X + TERM_W)) {
+                    struct win *bw = bar_window(mx);     /* a middle click on a window's task bar button closes the window */
+                    if (bw)
+                        close_win(bw);
                 } else if (down && !(buttons & 1) && in_bar && mx >= (int)W - MENU_W - 4) {
                     menu_show((int)W - 4 - MENU_ITEM_W, (int)H - BAR_H - menu_n * MENU_ITEM_H);
                     menu_mx = mx; menu_my = my;

@@ -815,6 +815,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = not any(blue(x) for x in range(0, 1000, 8))
             print(("ok  " if good else "FAIL"), f"({name}) Alt-F9 minimizes the focused window")
             fails += not good
+            # A middle click on the window's task bar button (the pointer is on it) closes the window.
+            w, h, before = screendump()
+            monitor("mouse_button 4", "mouse_button 0")
+            time.sleep(1.5)
+            w, h, after = screendump()
+            good = before[w * 3 * 745:] != after[w * 3 * 745:]       # the button is gone from the bar
+            print(("ok  " if good else "FAIL"), f"({name}) a middle click on a task bar button closes the window")
+            fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)

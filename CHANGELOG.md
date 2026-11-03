@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm`: a middle click on a window's task bar button closes the window, as Alt-F4 does for the focused one.
 - `bwm`: a click on the task bar button of the focused window minimizes it (a click on any other button still raises it).
 - IPsec SA lifetimes: `xfrm_lifetime_cfg` is stored and reported by `GETSA` with the `xfrm_lifetime_cur` counters; a hard packet, byte, add-time or first-use limit deletes the association before it is used again, for sealing and for opening, and forged packets do not count. Soft limits are reported only. `t_xfrmlife` checks it.
 - IPsec security associations over `NETLINK_XFRM`: `XFRM_MSG_NEWSA`, `DELSA`, `GETSA` (one or a dump) and `FLUSHSA` for ESP over IPv4 in transport or tunnel mode, with `rfc4106(gcm(aes))` as the only algorithm, per network namespace and for `CAP_NET_ADMIN` only. Policies (`NEWPOLICY`, `UPDPOLICY`, `DELPOLICY`, `GETPOLICY`, `FLUSHPOLICY`: IPv4 selector, in or out, allow or block, one ESP template) are kept the same way. ESP packet path for IPv4 in transport and tunnel mode: out policies wrap what the stack sends, in policies are enforced, and ESP packets are opened into a buffer of their own with a replay window that only authenticated packets move. A raw ESP socket can send. `t_xfrm` and `t_esp` check it.
