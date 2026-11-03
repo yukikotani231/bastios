@@ -15,6 +15,7 @@
 #include <sched.h>
 #include <time.h>
 #include <sys/wait.h>
+#include <ftw.h>
 
 static long memfree_kb(void) {
     FILE *f = fopen("/proc/meminfo", "r");
@@ -24,6 +25,19 @@ static long memfree_kb(void) {
         if (!strncmp(l, "MemFree:", 8)) { v = atol(l + 8); break; }
     if (f) fclose(f);
     return v;
+}
+/* Reads every file under /disk, up to `left` bytes, so the page cache
+ * fills with pages read once and its clock passes over every slot. */
+static long fill_left;
+static int fill_one(const char *path, const struct stat *st, int type, struct FTW *w) {
+    (void)w;
+    if (type != FTW_F || !S_ISREG(st->st_mode)) return 0;
+    int fd = open(path, O_RDONLY);
+    static char buf[65536];
+    long n;
+    while (fd >= 0 && fill_left > 0 && (n = read(fd, buf, sizeof buf)) > 0) fill_left -= n;
+    if (fd >= 0) close(fd);
+    return fill_left <= 0;
 }
 static char *cow_buf;
 static volatile int fast_phase;
@@ -537,5 +551,29 @@ int main(void) {
                ok = ok && munmap(p, sz) == 0;
            }
            ok; }));
+    /* Xvfb -fbdir writes its screen file with write(2) and then maps it
+     * MAP_SHARED; a compositor maps the file later to show the screen. The
+     * written pages were cached as pages a read had brought in, which the
+     * cache's clock takes back: the later mapping got a page of its own
+     * and showed a blank screen. */
+    EXPECT("a file written with write(2) and mapped MAP_SHARED is the same memory to a mapping made after the page cache has filled up", ({
+           int sf = open("/disk/mem_coh", O_RDWR | O_CREAT | O_TRUNC, 0600);
+           static char z[65536];
+           int ok = sf >= 0 && write(sf, z, sizeof z) == sizeof z;
+           char *a = ok ? mmap(NULL, sizeof z, PROT_READ | PROT_WRITE, MAP_SHARED, sf, 0) : MAP_FAILED;
+           ok = a != MAP_FAILED;
+           for (int r = 0; ok && r < 2; r++) {
+               fill_left = 96l << 20;
+               nftw("/disk", fill_one, 16, FTW_PHYS);
+           }
+           if (ok) memset(a, 'Q', sizeof z);
+           char *b = ok ? mmap(NULL, sizeof z, PROT_READ, MAP_SHARED, sf, 0) : MAP_FAILED;
+           int seen = 0;
+           for (size_t i = 0; b != MAP_FAILED && i < sizeof z; i += 4096) seen += b[i] == 'Q';
+           if (b != MAP_FAILED) munmap(b, sizeof z);
+           if (a != MAP_FAILED) munmap(a, sizeof z);
+           if (sf >= 0) close(sf);
+           unlink("/disk/mem_coh");
+           ok && seen == 16; }));
     return done();
 }
