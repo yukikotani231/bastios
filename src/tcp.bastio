@@ -995,15 +995,38 @@ fn tcp_icmp_error(n: &mut Net, total: u64)
     return;
   }
   let code = cast[u64](bget(n.pkt, 35));
-  if !(code == 2 || code == 3 || code == 9 || code == 10 || code == 13) {
+  if !(code == 2 || code == 3 || code == 4 || code == 9 || code == 10 || code == 13) {
     return;
   }
   if cast[u64](bget(n.pkt, 42)) != 69 || cast[u64](bget(n.pkt, 51)) != IP_TCP {
     return;
   }
   let t = tcb_find(n, be16(n.pkt, 62), be32(n.pkt, 58), be16(n.pkt, 64));
-  if t < TCBS && tw(n, t, W_STATE) == T_SYN_SENT && be32(n.pkt, 66) == twb(n, t, W_ISS, SEQ_MOD) {
-    tcb_close(&mut n, t, true);
+  if t >= TCBS {
+    return;
+  }
+  let seq = be32(n.pkt, 66);
+  if code != 4 {
+    if tw(n, t, W_STATE) == T_SYN_SENT && seq == twb(n, t, W_ISS, SEQ_MOD) {
+      tcb_close(&mut n, t, true);
+    }
+    return;
+  }
+  // Fragmentation needed with DF set (RFC 1191, RFC 5927 4.2): the segment
+  // quoted must be one we have sent and not had acknowledged. Segments
+  // shrink to fit the next hop's MTU (never under 68 bytes, so a segment
+  // of 28 bytes of data) and what is unacknowledged goes out again.
+  let mtu = be16(n.pkt, 40);
+  let st = tw(n, t, W_STATE);
+  if (st == T_ESTABLISHED || st == T_CLOSE_WAIT) && mtu >= 68 && mtu - 40 < tw(n, t, W_MSS)
+    && seq_diff(seq, tw(n, t, W_UNA)) < TCP_RING && seq_diff(seq, tw(n, t, W_NXT)) >= TCP_RING {
+    tset(&mut n, t, W_MSS, mtu - 40);
+    tset(&mut n, t, W_NXT, tw(n, t, W_UNA));
+    tset(&mut n, t, W_CWND, 0);
+    tset(&mut n, t, W_RTTT, 0);
+    tset(&mut n, t, W_DUPS, 0);
+    tset(&mut n, t, W_TIMER, 0);
+    tcp_output(&mut n, t, true);
   }
 }
 
