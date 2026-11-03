@@ -27,6 +27,7 @@ const LX_LISTEN: u64 = 50;
 const LX_ACCEPT4: u64 = 288;
 
 const AF_INET: u64 = 2;
+const AF_ALG: u64 = 38;                 // src/lxalg.bastio
 const SOCK_STREAM: u64 = 1;
 const SOCK_DGRAM: u64 = 2;
 const SOCK_SEQPACKET: u64 = 5;
@@ -305,6 +306,9 @@ fn lx_socket(k: &mut Kernel, pid: u64, domain: u64, kind: u64, proto: u64) -> u6
   if domain == 1 {
     return ux_socket(&mut k, pid, kind, proto);   // AF_UNIX: src/lxunix.bastio
   }
+  if domain == AF_ALG {
+    return alg_socket(&mut k, pid, kind, proto);   // src/lxalg.bastio
+  }
   if domain == AF_NETLINK {
     return nl_socket(&mut k, pid, kind, proto);   // src/lxnetlink.bastio
   }
@@ -343,8 +347,8 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
     return lx_tcp_socket(&mut k, pid, kind, proto);   // src/lxtcp.bastio
   }
   let raw = kind % 16 == SOCK_RAW;
-  if raw && proto != IPPROTO_ICMP {
-    return EPROTONOSUPPORT;                 // raw sockets: ICMP only (ping)
+  if raw && proto != IPPROTO_ICMP && proto != IPPROTO_ESP {
+    return EPROTONOSUPPORT;                 // raw sockets: ICMP (ping), and ESP to send
   }
   if raw && !cap_has(k, pid, CAP_NET_RAW) {
     return EPERM;
@@ -356,7 +360,9 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   if s >= SOCKS {
     return ENOBUFS;                         // every socket taken, or no network card
   }
-  if raw {
+  if raw && proto == IPPROTO_ESP {
+    sock_make_raw_esp(&mut k.nic, s);
+  } else if raw {
     sock_make_raw(&mut k.nic, s);
   }
   let h = ofd_new(&mut k, OF_SOCK, s);
@@ -396,6 +402,9 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   }
   if is_nl(k, pid, fd) {
     return nl_bind(&mut k, pid, fd, addr, alen);
+  }
+  if is_alg(k, pid, fd) {
+    return alg_bind(&mut k, pid, fd, addr, alen);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
@@ -604,6 +613,9 @@ fn lx_sendto(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, addr: u64, ale
   ensures kok(k)
 {
   let more = flags / MSG_MORE % 2 == 1;
+  if is_alg(k, pid, fd) {
+    return alg_send(&mut k, pid, fd, buf, n);   // src/lxalg.bastio
+  }
   if is_tcp(k, pid, fd) {
     let r = lx_tcp_send(&mut k, pid, fd, buf, n, more);
     if r == SK_WAIT && flags / MSG_DONTWAIT % 2 == 1 {
@@ -682,6 +694,9 @@ fn lx_recvfrom(k: &mut Kernel, pid: u64, fd: u64, buf: u64, n: u64, flags: u64, 
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_alg(k, pid, fd) {
+    return alg_recv(&mut k, pid, fd, buf, n);   // src/lxalg.bastio
+  }
   if is_tcp(k, pid, fd) {
     if flags % 2 == MSG_OOB {
       return EINVAL;                        // no urgent data is ever kept
@@ -907,6 +922,9 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if is_alg(k, pid, fd) {
+    return alg_setsockopt(&mut k, pid, fd, level, name, va, len);   // src/lxalg.bastio
+  }
   let tcp = is_tcp(k, pid, fd);
   let unix = is_unix(k, pid, fd) || is_nl(k, pid, fd);
   if !tcp && !unix {
@@ -1086,6 +1104,7 @@ fn lx_getsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, n) != n {
     return EFAULT;
   }
+  lx_fill(&mut k, 0, 4);                    // the value's other bytes are not part of the length
   bset(&mut k.fs.xfer, 0, cast[u8](n));
   if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, lenp, k.fs.xfer, 4) != 4 {
     return EFAULT;
@@ -1108,7 +1127,9 @@ fn sock_call_rest(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, d: u
       fl = d;
     }
     let sk = sk_look(k, pid, a);
-    if is_unix(k, pid, a) {
+    if is_alg(k, pid, a) {
+      r = alg_accept(&mut k, pid, a, fl);     // src/lxalg.bastio
+    } else if is_unix(k, pid, a) {
       r = ux_accept(&mut k, pid, a, b, c, fl);
     } else if sk.err == 0 || is_nl(k, pid, a) {
       r = EOPNOTSUPP;                       // a UDP socket takes no connections

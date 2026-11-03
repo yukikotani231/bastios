@@ -8,6 +8,7 @@ BastiOS is a kernel written in [Bastio](https://github.com/yukikotani231/bastiol
 | --- | --- |
 | Build it, boot it in QEMU, write a Bastio program, run a Linux program | [Getting started](getting-started.md) |
 | Use it as a system: users, network, SSH, Alpine and `apk` | [Using BastiOS](using.md) |
+| Run X11 programs (Xvfb, xterm) in a window | [X11 programs](x11.md) |
 | Develop software on it: editor, compiler, debugger, containers | [Development on BastiOS](development.md) |
 | Boot it on a real PC and report what happened | [Real hardware](real-hardware.md) |
 | Run it as a cloud guest (virtio, ENA, microvm, PVH) | [Cloud guest](cloud.md) |

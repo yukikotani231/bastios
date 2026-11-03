@@ -560,6 +560,15 @@ def run_program(env, prog, timeout):
     """Runs /disk/PROG, rerunning past hangs. Returns its checks, in order:
     dicts with name, result (pass / fail / hang / crash), detail, syscalls."""
     checks, skip, rounds = [], 0, 0
+    # A program that has to wait for real time to pass says so in its first
+    # lines: "compat-timeout: SECONDS".
+    try:
+        for line in open(os.path.join(HERE, "progs", prog + ".c")).readlines()[:3]:
+            m = re.search(r"compat-timeout:\s*(\d+)", line)
+            if m:
+                timeout = max(timeout, int(m.group(1)))
+    except OSError:
+        pass
     while rounds < 20:
         rounds += 1
         pre = f"COMPAT_SKIP={skip} " if skip else ""
@@ -829,6 +838,7 @@ def main():
     ap.add_argument("--oss-dir", help="the git repositories of real projects (ossrepos.sh), served at HOSTURL/oss")
     ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
+    ap.add_argument("--x11-disk", help="the X11 disk (Xvfb and xterm roots, bx11) for x11.txt")
     ap.add_argument("--ruby-disk", help="the Ruby disk (the root of the ruby:alpine image) for ruby.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
     ap.add_argument("--podman-disk", help="the Podman disk (the root of the podman image) for podman.txt")
@@ -846,7 +856,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "ruby", "rust", "python", "python2", "podman", "docker", "gitsuite"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "ruby", "x11", "rust", "python", "python2", "python3", "podman", "docker", "gitsuite"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -877,13 +887,22 @@ def main():
     py_at = {c[0]: i for i, c in enumerate(python)}
     py_setup = python[:py_at["pip: build a C extension from source (setuptools, gcc) and import it"] + 1]
     py_wheels_at = py_at["pip: binary wheels for musl (numpy, cryptography, lxml, Pillow, PyYAML, greenlet, psutil, orjson, cffi)"]
-    python_parts = {"python": python[:py_wheels_at], "python#2": py_setup + python[py_wheels_at:]}
+    # python3 takes the two longest test suites (pytest's own and
+    # more-itertools'), which only need the set-up's venv and pytest, so that
+    # python2 and python3 each end in about half the time python2 alone took.
+    py_slow = {c[0] for c in python if c[0].startswith("pytest: pytest's own test suite")
+               or c[0].startswith("pytest: more-itertools' own tests")}
+    assert len(py_slow) == 2 and all(py_at[n] > py_wheels_at for n in py_slow)
+    python_parts = {"python": python[:py_wheels_at],
+                    "python#2": py_setup + [c for c in python[py_wheels_at:] if c[0] not in py_slow],
+                    "python#3": py_setup + [c for c in python[py_wheels_at:] if c[0] in py_slow]}
     python_owner = {}
     for k in python_parts:
         for c in python_parts[k]:
             python_owner.setdefault(c[0], k)
     java = load_applets(os.path.join(HERE, "java.txt"))
     ruby = load_applets(os.path.join(HERE, "ruby.txt"))
+    x11 = load_applets(os.path.join(HERE, "x11.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     podman = load_applets(os.path.join(HERE, "podman.txt"))
     docker = load_applets(os.path.join(HERE, "docker.txt"))
@@ -1101,7 +1120,7 @@ def main():
         disk = os.path.join(args.out, "go-run.img")
         shutil.copyfile(args.go_disk, disk)
         lanes.append(("go", disk, [("go", "Go toolchain", applets_lane(go, 600))], "1G"))
-    if args.python_disk and (lane_chosen("python") or lane_chosen("python2")):
+    if args.python_disk and (lane_chosen("python") or lane_chosen("python2") or lane_chosen("python3")):
         # Compilers and test suites on the emulated processor take a while;
         # the cases write the disk. The packages pip installs come from the
         # host's web server.
@@ -1111,7 +1130,7 @@ def main():
         if args.alpine_repo and not os.path.exists(os.path.join(web.dir, "alpine")):
             os.makedirs(os.path.join(web.dir, "alpine"), exist_ok=True)
             os.symlink(os.path.abspath(args.alpine_repo), os.path.join(web.dir, "alpine", args.arch))
-        for lane_name, key, what in (("python", "python", "Python development"), ("python2", "python#2", "Python development, the packages with extension modules")):
+        for lane_name, key, what in (("python", "python", "Python development"), ("python2", "python#2", "Python development, the packages with extension modules"), ("python3", "python#3", "Python development, the longest test suites")):
             if lane_chosen(lane_name):
                 disk = os.path.join(args.out, f"{lane_name}-run.img")
                 shutil.copyfile(args.python_disk, disk)
@@ -1127,6 +1146,11 @@ def main():
         shutil.copyfile(args.ruby_disk, disk)
         os.symlink(os.path.join(HERE, "rbprogs"), os.path.join(web.dir, "rbprogs"))
         lanes.append(("ruby", disk, [("ruby", "Ruby", applets_lane(ruby, 900))], "1G"))
+    if args.x11_disk and lane_chosen("x11"):
+        # The cases unpack two roots of about 60 MB onto the disk: a copy.
+        disk = os.path.join(args.out, "x11-run.img")
+        shutil.copyfile(args.x11_disk, disk)
+        lanes.append(("x11", disk, [("x11", "X11", applets_lane(x11, 900))], "1G"))
     if args.rust_disk and lane_chosen("rust"):
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.
@@ -1199,7 +1223,7 @@ def main():
                 if c["name"] not in merged or python_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["python"] = sorted(merged.values(), key=lambda c: py_at.get(c["name"], len(py_at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "ruby", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "ruby", "x11", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

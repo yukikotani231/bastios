@@ -153,6 +153,7 @@ int main(void) {
            recvmsg(s, &m, 0) == 4 && memcmp(x, "ab", 2) == 0 && memcmp(y, "cd", 2) == 0; }));
     EXPECT("SO_RCVBUF and SO_SNDBUF", ({ int v = 0; socklen_t vl = sizeof v; getsockopt(s, SOL_SOCKET, SO_RCVBUF, &v, &vl) == 0 && v > 0 &&
            (vl = sizeof v, getsockopt(s, SOL_SOCKET, SO_SNDBUF, &v, &vl)) == 0 && v > 0; }));
+    EXPECT("getsockopt gives the length of the value, 4, for an int option", ({ int v = 0; socklen_t vl = 99; getsockopt(s, SOL_SOCKET, SO_SNDBUF, &v, &vl) == 0 && vl == sizeof v; }));
     EXPECT("SO_KEEPALIVE", setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one) == 0);
     EXPECT("SO_ERROR is 0", ({ int v = -1; socklen_t vl = sizeof v; getsockopt(c, SOL_SOCKET, SO_ERROR, &v, &vl) == 0 && v == 0; }));
     EXPECT("getpeername", ({ struct sockaddr_in p; socklen_t pl = sizeof p; getpeername(c, (void *)&p, &pl) == 0 && p.sin_port == a.sin_port; }));

@@ -84,7 +84,7 @@ struct fix_info {
 #define GRIP 14                          /* the resize grip at the corner of a frame */
 #define MIN_CW 64
 #define MIN_CH 32
-#define MAXCLI 8
+#define MAXCLI MAXWIN                    /* one connection per window: both limits must agree */
 #define RXCAP (BWM_MAX_PAYLOAD + 64)
 
 static int fb = -1;

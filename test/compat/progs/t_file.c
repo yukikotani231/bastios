@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 /* Files: open, read, write, seek, positional and vectored I/O, sizes,
  * renaming, links, metadata. Works in /tmp if it exists, else in /. */
 #include "compat.h"
@@ -236,6 +237,30 @@ int main(void) {
         if (s != MAP_FAILED) munmap(s, 20000);
         close(g);
         unlink("cf_rd");
+    }
+    {
+        int g = open("cf_direct", O_CREAT | O_RDWR | O_DIRECT, 0600);
+        EXPECT("open with O_DIRECT is accepted and F_GETFL reports it", g >= 0 && (fcntl(g, F_GETFL) & O_DIRECT) != 0);
+        EXPECT("O_DIRECT can be cleared and set again with F_SETFL", ({
+            int fl = fcntl(g, F_GETFL);
+            int off = fcntl(g, F_SETFL, fl & ~O_DIRECT) == 0 && (fcntl(g, F_GETFL) & O_DIRECT) == 0;
+            int on = fcntl(g, F_SETFL, fl | O_DIRECT) == 0 && (fcntl(g, F_GETFL) & O_DIRECT) != 0;
+            off && on;
+        }));
+        EXPECT("O_DIRECT does not disturb O_ASYNC or O_NONBLOCK", ({
+            int fl = fcntl(g, F_GETFL);
+            fcntl(g, F_SETFL, fl | O_NONBLOCK | O_ASYNC);
+            int now = fcntl(g, F_GETFL);
+            (now & O_DIRECT) && (now & O_NONBLOCK) && (now & O_ASYNC);
+        }));
+        EXPECT("an aligned O_DIRECT write and read come back", ({
+            static char buf[4096] __attribute__((aligned(512)));
+            static char back[4096] __attribute__((aligned(512)));
+            memset(buf, 'd', sizeof buf);
+            pwrite(g, buf, 4096, 0) == 4096 && pread(g, back, 4096, 0) == 4096 && memcmp(buf, back, 4096) == 0;
+        }));
+        close(g);
+        unlink("cf_direct");
     }
     return done();
 }

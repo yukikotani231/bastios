@@ -332,7 +332,7 @@ fn chacha_const(i: u64) -> u64 {
 
 /// One ChaCha20 block (RFC 8439 2.3) into `out` (16 words of 32 bits),
 /// with the 8 key words at k[key..], block counter ctr and a zero nonce.
-fn chacha_block(key: &Buf, at: u64, ctr: u64, out: &mut Buf)
+fn rng_chacha_block(key: &Buf, at: u64, ctr: u64, out: &mut Buf)
   requires at + 8 <= len(key) && len(out) == 16
   ensures len(out) == 16
 {
@@ -403,7 +403,7 @@ fn rng_refill(r: &mut Buf)
   let ctr = get(r, RNG_CTR);
   r = set(r, RNG_CTR, wrap_add(ctr, 1));
   let mut b = alloc(16);
-  chacha_block(r, RNG_KEY, ctr, &mut b);
+  rng_chacha_block(r, RNG_KEY, ctr, &mut b);
   i = 0;
   while i < 8
     invariant i <= 8 && len(r) == RNG_LEN && len(b) == 16

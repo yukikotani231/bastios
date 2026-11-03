@@ -502,7 +502,7 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DIR {
     return Fd { kind: K_DIR, x: x };
   }
-  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK {
+  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK || kind == OF_ALG {
     return Fd { kind: K_SOCK, x: x };
   }
   if kind == OF_DEV || kind == OF_PTY {
@@ -703,6 +703,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     pipe_release(&mut k, x);
   } else if kind == OF_SOCK {
     sock_close(&mut k.nic, x);
+  } else if kind == OF_ALG {
+    alg_close(&mut k, x);                   // src/lxalg.bastio: the key is erased
   } else if kind == OF_NETLINK {
     nic_nl_close(&mut k.nic, x);           // src/rtnl.bastio
   } else if kind == OF_TCP && x < TCBS {
@@ -1321,6 +1323,7 @@ fn lx_open_orphan(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     return ENFILE;
   }
   of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  of_set(&mut k.ofd, h, OF_ASYNC, flags / LO_DIRECT % 2 * 2);   // O_DIRECT is kept for F_GETFL, not enforced
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -1643,7 +1646,8 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
     vfs_close(&mut k.fs, &mut k.mem, row);
     return ENFILE;
   }
-  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // kept for F_GETFL only
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  of_set(&mut k.ofd, h, OF_ASYNC, flags / LO_DIRECT % 2 * 2);   // O_DIRECT is kept for F_GETFL, not enforced   // kept for F_GETFL only
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -1720,7 +1724,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   let pipe = h < OFD_N && can_block(kind);
   // Sockets keep O_NONBLOCK in the low bit of word 3 too (src/lxsock.bastio,
   // src/lxtcp.bastio, src/lxunix.bastio), above their other state.
-  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK);
+  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK || kind == OF_ALG);
   let mut row = FD_ROWS;
   if h < OFD_N && kind == OF_FILE {
     row = of_get(k.ofd, h, 2);
@@ -1737,7 +1741,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if m / O_APPEND % 2 == 1 {
       fl = fl + LO_APPEND;
     }
-    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC;
+    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC + of_get(k.ofd, h, OF_ASYNC) / 2 % 2 * LO_DIRECT;
   }
   if cmd == F_SETFL && row < FD_ROWS {
     // O_APPEND takes effect; O_NONBLOCK is only reported back (a file never blocks).
@@ -1748,7 +1752,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     fset(&mut k.fs.ftab, row, FD_MODE, nm);
     of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
-    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2);
+    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2 + arg / LO_DIRECT % 2 * 2);
     return 0;
   }
   if cmd == F_GETFL {

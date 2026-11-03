@@ -28,6 +28,7 @@ const FUTEX_WAIT: u64 = 0;
 const FUTEX_WAKE: u64 = 1;
 const FUTEX_REQUEUE: u64 = 3;
 const FUTEX_CMP_REQUEUE: u64 = 4;
+const FUTEX_WAKE_OP: u64 = 5;
 const FUTEX_WAIT_BITSET: u64 = 9;
 const FUTEX_WAKE_BITSET: u64 = 10;
 const FUTEX_WOKEN: u64 = 1;         // F_FUTEX of a timed waiter woken on a processor (futex_wake)
@@ -871,6 +872,64 @@ fn user_mapped(k: &mut Kernel, pid: u64, addr: u64) -> bool
   return w.ok;
 }
 
+/// A 12-bit field of a FUTEX_WAKE_OP word, sign-extended to 32 bits.
+fn futex_sext12(x: u64) -> u64
+  requires x < 4096
+  ensures result < 0x100000000
+{
+  if x >= 2048 {
+    return x + 0xFFFFF000;
+  }
+  return x;
+}
+
+/// The new value of the word of a FUTEX_WAKE_OP: old op arg for the
+/// operations SET, ADD, OR, ANDN, XOR (0..4); 32-bit; None (EINVAL) for
+/// the others.
+fn futex_op_new(prev: u64, opn: u64, arg: u64) -> u64
+  requires prev < 0x100000000 && arg < 0x100000000
+  ensures result < 0x100000000
+{
+  if opn == 0 {
+    return arg;
+  }
+  if opn == 1 {
+    return (prev + arg) % 0x100000000;
+  }
+  if opn == 2 {
+    return (prev | arg) % 0x100000000;
+  }
+  if opn == 3 {
+    return (prev & (0xFFFFFFFF - arg)) % 0x100000000;
+  }
+  return (prev ^ arg) % 0x100000000;
+}
+
+/// Whether `prev cmp arg` holds, as signed 32-bit values, for the
+/// comparisons EQ, NE, LT, LE, GT, GE (0..5).
+fn futex_op_cmp(prev: u64, cmp: u64, arg: u64) -> bool
+  requires prev < 0x100000000 && arg < 0x100000000
+{
+  let a = (prev + 0x80000000) % 0x100000000;     // a bias keeps the signed order
+  let b = (arg + 0x80000000) % 0x100000000;
+  if cmp == 0 {
+    return a == b;
+  }
+  if cmp == 1 {
+    return a != b;
+  }
+  if cmp == 2 {
+    return a < b;
+  }
+  if cmp == 3 {
+    return a <= b;
+  }
+  if cmp == 4 {
+    return a > b;
+  }
+  return a >= b;
+}
+
 /// futex(addr, op, val, timeout or val2, addr2, val3).
 fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
@@ -929,6 +988,57 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
     } else {
       ret(&mut k.procs, pid, woken);
     }
+    return KEEP;
+  }
+  if cmd == FUTEX_WAKE_OP {
+    // val3: op (bits 28..31, bit 3 meaning "1 << oparg"), cmp (24..27),
+    // oparg (12..23), cmparg (0..11). It changes the word at addr2 and
+    // wakes `val` waiters on addr and, if the old word compares, arg4
+    // waiters on addr2. The counts are ints.
+    if val % 0x100000000 >= 0x80000000 || arg4 % 0x100000000 >= 0x80000000 {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    if addr2 % 4 != 0 {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    if op & FUTEX_PRIVATE == 0 && !user_mapped(&mut k, pid, addr) {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    let w3 = val3 % 0x100000000;
+    let fop = w3 / 0x10000000;
+    let fcmp = (w3 / 0x1000000) % 16;
+    let mut oparg = futex_sext12((w3 / 0x1000) % 4096);
+    let cmparg = futex_sext12(w3 % 4096);
+    let opn = fop % 8;
+    if fop >= 8 {
+      if oparg >= 32 {
+        ret(&mut k.procs, pid, EINVAL);
+        return KEEP;
+      }
+      oparg = 1 << oparg;
+    }
+    if opn > 4 || fcmp > 5 {
+      ret(&mut k.procs, pid, ENOSYS);
+      return KEEP;
+    }
+    let prev = user_u32(&mut k, pid, addr2);
+    if !prev.ok {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    if !put_user_u32(&mut k, pid, addr2, futex_op_new(prev.v, opn, oparg)) {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    let key2 = futex_key(&mut k, pid, addr2, op);
+    let mut woken = futex_wake(&mut k, pid, key, val);
+    if futex_op_cmp(prev.v, fcmp, cmparg) {
+      woken = woken + futex_wake(&mut k, pid, key2, arg4 % 0x100000000);
+    }
+    ret(&mut k.procs, pid, woken);
     return KEEP;
   }
   if cmd != FUTEX_WAIT && cmd != FUTEX_WAIT_BITSET {

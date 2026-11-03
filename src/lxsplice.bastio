@@ -262,6 +262,10 @@ fn lx_splice(con: &mut Con, k: &mut Kernel, pid: u64, fin: u64, inp: u64, out: u
   if !from_pipe && !to_pipe {
     return EINVAL;                          // one side must be a pipe
   }
+  if (di.kind == K_FILE && ur_find(k, row_file(k.fs, di.x)) < URING_N)
+     || (dout.kind == K_FILE && ur_find(k, row_file(k.fs, dout.x)) < URING_N) {
+    return EINVAL;                          // a ring has no splice_read or splice_write
+  }
   if (from_pipe && inp != 0) || (to_pipe && outp != 0) {
     return ESPIPE;                          // a pipe has no offset
   }

@@ -1,0 +1,922 @@
+import "core/x25519.bastio";
+
+// WireGuard devices: the generic netlink family "wireguard", through which
+// `wg set` and `wg show` configure and read a device made with
+// `ip link add wg0 type wireguard` (src/rtnl.bastio).
+//
+// The state of a device lives in Net.wgd, WG_W words for each interface slot,
+// and its peers in Net.wgp, WGP_W words each (with the owner's slot + 1; 0:
+// free). A 32-byte key is four words, little-endian.
+//
+// What is kept: the private key (clamped; the public key is derived from it
+// with X25519), the listen port, the firewall mark, and for each peer its
+// public and pre-shared keys, IPv4 endpoint, keep-alive interval and up to
+// WG_ALLOWED IPv4 allowed IPs (kept in network order as a number, so the
+// prefix is the high bits). An allowed IP belongs to one peer of a
+// device: giving it to another peer takes it from the first.
+//
+// What is not done: IPv6 allowed IPs and endpoints (EAFNOSUPPORT), and
+// handshakes and traffic: a configured device does not carry packets yet.
+
+const WG_CMD_SET_DEVICE: u64 = 1;
+const WGDEVICE_A_IFINDEX: u64 = 1;
+const WGDEVICE_A_IFNAME: u64 = 2;
+const WGDEVICE_A_PRIVATE_KEY: u64 = 3;
+const WGDEVICE_A_PUBLIC_KEY: u64 = 4;
+const WGDEVICE_A_FLAGS: u64 = 5;
+const WGDEVICE_A_LISTEN_PORT: u64 = 6;
+const WGDEVICE_A_FWMARK: u64 = 7;
+const WGDEVICE_A_PEERS: u64 = 8;
+const WGDEVICE_F_REPLACE_PEERS: u64 = 1;
+const WGPEER_A_PUBLIC_KEY: u64 = 1;
+const WGPEER_A_PRESHARED_KEY: u64 = 2;
+const WGPEER_A_FLAGS: u64 = 3;
+const WGPEER_A_ENDPOINT: u64 = 4;
+const WGPEER_A_KEEPALIVE: u64 = 5;
+const WGPEER_A_LAST_HANDSHAKE: u64 = 6;
+const WGPEER_A_RX_BYTES: u64 = 7;
+const WGPEER_A_TX_BYTES: u64 = 8;
+const WGPEER_A_ALLOWEDIPS: u64 = 9;
+const WGPEER_A_PROTOCOL_VERSION: u64 = 10;
+const WGPEER_F_REMOVE_ME: u64 = 1;
+const WGPEER_F_REPLACE_ALLOWEDIPS: u64 = 2;
+const WGALLOWEDIP_A_FAMILY: u64 = 1;
+const WGALLOWEDIP_A_IPADDR: u64 = 2;
+const WGALLOWEDIP_A_CIDR_MASK: u64 = 3;
+const NE_NODEV_: u64 = 19;
+const NE_BADR: u64 = 53;
+const NE_AFNOSUPPORT: u64 = 97;
+const AF_INET_: u64 = 2;
+
+// Device words.
+const WGD_PORT: u64 = 0;
+const WGD_MARK: u64 = 1;
+const WGD_PRIV: u64 = 2;                  // four words
+const WGD_PUB: u64 = 6;                   // four words
+const WGD_HAS_KEY: u64 = 10;
+const WGD_SOCK: u64 = 11;                 // the UDP socket's slot + 1 (0: none)
+const WGD_BUSY: u64 = 12;                 // 1 while a packet is being sent through the device (no recursion)
+const NE_ADDRINUSE: u64 = 98;
+// Peer words.
+const WGP_OWNER: u64 = 0;
+const WGP_PUB: u64 = 1;                   // four words
+const WGP_PSK: u64 = 5;                   // four words
+const WGP_END: u64 = 9;                   // ip | port << 32 | 1 << 48; 0: none
+const WGP_KEEP: u64 = 10;
+const WGP_ALLOWED: u64 = 11;              // WG_ALLOWED words: ip | length << 32 | 1 << 40
+const WGP_RX: u64 = 19;
+const WGP_TX: u64 = 20;
+// Handshake and session words (src/wgproto.bastio).
+const WGP_HS: u64 = 21;                   // 1: an initiation is out, waiting for the response
+const WGP_HIDX: u64 = 22;                 // our index in that initiation
+const WGP_HE: u64 = 23;                   // its ephemeral private key (four words), then
+const WGP_HC: u64 = 27;                   //   the chaining key (four) and
+const WGP_HH: u64 = 31;                   //   the hash (four)
+const WGP_HT: u64 = 35;                   // tick it was sent at
+const WGP_WANT: u64 = 36;                 // 1: start a handshake as soon as possible
+const WGP_TRIES: u64 = 37;                // initiations sent since the last answer
+const WGP_TAI_HI: u64 = 38;               // the newest initiation timestamp accepted: seconds
+const WGP_TAI_LO: u64 = 39;               //   and nanoseconds
+const WGP_LHS: u64 = 40;                  // wall clock (ns) of the last completed handshake
+const WGP_SVALID: u64 = 41;               // 1: a session is set
+const WGP_LIDX: u64 = 42;                 // our index in it
+const WGP_RIDX: u64 = 43;                 // the peer's
+const WGP_SK: u64 = 44;                   // the sending key (four words)
+const WGP_RK: u64 = 48;                   // the receiving key (four words)
+const WGP_SCTR: u64 = 52;                 // the next sending counter
+const WGP_SBORN: u64 = 53;                // tick it was made at
+const WGP_RMAX: u64 = 54;                 // the replay window: the highest counter taken + 1 (0: none),
+const WGP_RWIN: u64 = 55;                 //   and 16 words of bits for the 1024 counters up to it, by counter mod 1024
+const WGP_ISINIT: u64 = 72;               // 1: we started the handshake of the session (we rekey it)
+const WGP_LTX: u64 = 73;                  // tick of the last packet sent to the peer
+const WGP_CONF: u64 = 71;                 // 1: the session has carried a packet from the peer
+const WIN_BITS: u64 = 1024;
+// Cookie state words (Net.wgp after the policies): per device
+const WGC_CSEC: u64 = 0;                  // the cookie secret (four words), made from fresh random bytes
+const WGC_CSECT: u64 = 4;                 // tick it was made at, plus 1 (0: none yet)
+const WGC_LOADW: u64 = 5;                 // start tick of the second initiations are counted in
+const WGC_LOADN: u64 = 6;                 //   and how many came in it
+const WGC_BUSYU: u64 = 7;                 // the device is busy (asks for cookies) until this tick
+// and per peer
+const WGC_COOKIE: u64 = 0;                // the cookie the peer last sent us (two words),
+const WGC_COOKT: u64 = 2;                 //   the tick it came at, plus 1 (0: none),
+const WGC_MAC1: u64 = 3;                  //   and the mac1 (two words) of the last initiation we sent: what a cookie reply is read against
+const ALLOWED_SET: u64 = 1099511627776;   // 1 << 40
+const END_SET: u64 = 281474976710656;     // 1 << 48
+
+fn wdw(n: &Net, i: u64, f: u64) -> u64
+  requires net_ok(n) && i < IFN && f < WG_W
+{
+  return get(n.wgd, i * WG_W + f);
+}
+
+fn wds(n: &mut Net, i: u64, f: u64, v: u64)
+  requires net_ok(n) && i < IFN && f < WG_W
+  ensures net_ok(n)
+{
+  n.wgd = set(n.wgd, i * WG_W + f, v);
+}
+
+fn wpw(n: &Net, p: u64, f: u64) -> u64
+  requires net_ok(n) && p < WGPN && f < WGP_W
+{
+  return get(n.wgp, p * WGP_W + f);
+}
+
+fn wps(n: &mut Net, p: u64, f: u64, v: u64)
+  requires net_ok(n) && p < WGPN && f < WGP_W
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, p * WGP_W + f, v);
+}
+
+fn wcd(n: &Net, i: u64, f: u64) -> u64
+  requires net_ok(n) && i < IFN && f < WGC_DW
+{
+  return get(n.wgp, WGC_DBASE + i * WGC_DW + f);
+}
+
+fn wcds(n: &mut Net, i: u64, f: u64, v: u64)
+  requires net_ok(n) && i < IFN && f < WGC_DW
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, WGC_DBASE + i * WGC_DW + f, v);
+}
+
+fn wcpw(n: &Net, p: u64, f: u64) -> u64
+  requires net_ok(n) && p < WGPN && f < WGC_PW
+{
+  return get(n.wgp, WGC_PBASE + p * WGC_PW + f);
+}
+
+fn wcps(n: &mut Net, p: u64, f: u64, v: u64)
+  requires net_ok(n) && p < WGPN && f < WGC_PW
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, WGC_PBASE + p * WGC_PW + f, v);
+}
+
+/// Frees peer p and erases everything it held, session keys included.
+fn wg_peer_wipe(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let mut c = 0;
+  while c < WGC_PW
+    invariant c <= WGC_PW && net_ok(n)
+  {
+    wcps(&mut n, p, c, 0);
+    c = c + 1;
+  }
+  let mut f = 0;
+  while f < WGP_W
+    invariant f <= WGP_W && net_ok(n)
+  {
+    wps(&mut n, p, f, 0);
+    f = f + 1;
+  }
+}
+
+/// Closes device i's UDP socket, if it has one.
+fn wg_unbind(n: &mut Net, i: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let w = wdw(n, i, WGD_SOCK);
+  if w != 0 {
+    let s = w - 1;
+    if s < SOCKS && udp_is_open(n, s) {
+      sk_set(&mut n, s, S_OPEN, 0);
+      sk_set(&mut n, s, S_PORT, 0);
+      sk_set(&mut n, s, S_COUNT, 0);
+      sk_set(&mut n, s, S_CORK, 0);
+    }
+    wds(&mut n, i, WGD_SOCK, 0);
+  }
+}
+
+/// Opens a UDP socket in device i's namespace bound to `port` (not 0):
+/// its slot, or SOCKS if the port is taken or no socket is free.
+fn wg_open_socket(n: &mut Net, i: u64, port: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n) && result <= SOCKS
+{
+  let was = n.ns;
+  let ns = iw(n, i, IF_NS);
+  if ns >= NNET || port == 0 || port > 65535 {
+    return SOCKS;
+  }
+  n.ns = ns;
+  let s = udp_open(&mut n);
+  if s >= SOCKS {
+    n.ns = was;
+    return SOCKS;
+  }
+  if !udp_bind(&mut n, s, port) {
+    sk_set(&mut n, s, S_OPEN, 0);
+    sk_set(&mut n, s, S_PORT, 0);
+    n.ns = was;
+    return SOCKS;
+  }
+  n.ns = was;
+  return s;
+}
+
+/// Makes `port` device i's listen port: a new socket is bound first, so a
+/// port that is taken leaves the old one in place. 0 or an errno.
+fn wg_set_port(n: &mut Net, i: u64, port: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  if port == 0 {
+    wg_unbind(&mut n, i);
+    wds(&mut n, i, WGD_PORT, 0);
+    return 0;
+  }
+  if wdw(n, i, WGD_PORT) == port && wdw(n, i, WGD_SOCK) != 0 {
+    return 0;
+  }
+  let s = wg_open_socket(&mut n, i, port);
+  if s >= SOCKS {
+    return NE_ADDRINUSE;
+  }
+  wg_unbind(&mut n, i);
+  wds(&mut n, i, WGD_SOCK, s + 1);
+  wds(&mut n, i, WGD_PORT, port);
+  return 0;
+}
+
+/// Device i has moved to another namespace: its socket is made again there
+/// (the port is kept even if the new namespace has it taken, with no socket).
+fn wg_rebind(n: &mut Net, i: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  wg_unbind(&mut n, i);
+  let port = wdw(n, i, WGD_PORT);
+  if port != 0 {
+    let s = wg_open_socket(&mut n, i, port);
+    if s < SOCKS {
+      wds(&mut n, i, WGD_SOCK, s + 1);
+    }
+  }
+}
+
+/// Forgets everything about device i and frees its peers.
+fn wg_clear(n: &mut Net, i: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  wg_unbind(&mut n, i);
+  let mut f = 0;
+  while f < WG_W
+    invariant f <= WG_W && net_ok(n)
+  {
+    wds(&mut n, i, f, 0);
+    f = f + 1;
+  }
+  let mut c = 0;
+  while c < WGC_DW
+    invariant c <= WGC_DW && net_ok(n)
+  {
+    wcds(&mut n, i, c, 0);       // the cookie secret goes too
+    c = c + 1;
+  }
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 {
+      wg_peer_wipe(&mut n, p);
+    }
+    p = p + 1;
+  }
+}
+
+// ---------------------------------------------------------------- answers
+
+/// Opens a nested attribute of type t; nest_close fixes its length.
+fn nest_open(n: &mut Net, t: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let at = n.nl_at;
+  nla_head(&mut n, t, 0);
+  return at;
+}
+
+fn nest_close(n: &mut Net, at: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  if n.nl_full || at > blen(n.nlq) || blen(n.nlq) - at < 2 || at > n.nl_at {
+    return;
+  }
+  let l = n.nl_at - at;
+  bset(&mut n.nlq, at, cast[u8](l % 256));
+  bset(&mut n.nlq, at + 1, cast[u8](l / 256 % 256));
+}
+
+/// The eight bytes of w, low byte first.
+fn nl_w64(n: &mut Net, w: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut x = w;
+  let mut j = 0;
+  while j < 8
+    invariant j <= 8 && net_ok(n)
+  {
+    nl_b(&mut n, x % 256);
+    x = x / 256;
+    j = j + 1;
+  }
+}
+
+/// A 32-byte key attribute whose four words are wgd or wgp words.
+fn nla_key(n: &mut Net, t: u64, w0: u64, w1: u64, w2: u64, w3: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, t, 32);
+  nl_w64(&mut n, w0);
+  nl_w64(&mut n, w1);
+  nl_w64(&mut n, w2);
+  nl_w64(&mut n, w3);
+}
+
+/// One allowed IP as WGALLOWEDIP_A_* attributes.
+fn wg_put_allowed(n: &mut Net, w: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nla_head(&mut n, WGALLOWEDIP_A_FAMILY, 2);
+  nl_16(&mut n, AF_INET_);
+  nl_pad(&mut n);
+  nla_head(&mut n, WGALLOWEDIP_A_IPADDR, 4);
+  nl_b(&mut n, w / 16777216 % 256);       // network order: the first octet is the high part
+  nl_b(&mut n, w / 65536 % 256);
+  nl_b(&mut n, w / 256 % 256);
+  nl_b(&mut n, w % 256);
+  nla_put8(&mut n, WGALLOWEDIP_A_CIDR_MASK, w / 4294967296 % 256);
+}
+
+/// Peer p as one element of the peers list.
+fn wg_put_peer(n: &mut Net, p: u64, idx: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let el = nest_open(&mut n, idx % 32768 + NLA_NESTED);
+  nla_key(&mut n, WGPEER_A_PUBLIC_KEY, wpw(n, p, WGP_PUB), wpw(n, p, WGP_PUB + 1), wpw(n, p, WGP_PUB + 2), wpw(n, p, WGP_PUB + 3));
+  nla_key(&mut n, WGPEER_A_PRESHARED_KEY, wpw(n, p, WGP_PSK), wpw(n, p, WGP_PSK + 1), wpw(n, p, WGP_PSK + 2), wpw(n, p, WGP_PSK + 3));
+  let e = wpw(n, p, WGP_END);
+  if e / END_SET % 2 == 1 {
+    // A sockaddr_in: family, port and address (both in network order).
+    nla_head(&mut n, WGPEER_A_ENDPOINT, 16);
+    nl_16(&mut n, AF_INET_);
+    nl_b(&mut n, e / 4294967296 / 256 % 256);
+    nl_b(&mut n, e / 4294967296 % 256);
+    nl_b(&mut n, e % 256);
+    nl_b(&mut n, e / 256 % 256);
+    nl_b(&mut n, e / 65536 % 256);
+    nl_b(&mut n, e / 16777216 % 256);
+    nl_w64(&mut n, 0);
+  }
+  nla_head(&mut n, WGPEER_A_KEEPALIVE, 2);
+  nl_16(&mut n, wpw(n, p, WGP_KEEP) % 65536);
+  nl_pad(&mut n);
+  nla_head(&mut n, WGPEER_A_LAST_HANDSHAKE, 16);
+  nl_w64(&mut n, wpw(n, p, WGP_LHS) / 1000000000);
+  nl_w64(&mut n, wpw(n, p, WGP_LHS) % 1000000000);
+  nla_head(&mut n, WGPEER_A_RX_BYTES, 8);
+  nl_w64(&mut n, wpw(n, p, WGP_RX));
+  nla_head(&mut n, WGPEER_A_TX_BYTES, 8);
+  nl_w64(&mut n, wpw(n, p, WGP_TX));
+  nla_put32(&mut n, WGPEER_A_PROTOCOL_VERSION, 1);
+  let al = nest_open(&mut n, WGPEER_A_ALLOWEDIPS + NLA_NESTED);
+  let mut k = 0;
+  let mut count = 0;
+  while k < WG_ALLOWED
+    invariant k <= WG_ALLOWED && count <= k && net_ok(n)
+  {
+    let w = wpw(n, p, WGP_ALLOWED + k);
+    if w / ALLOWED_SET % 2 == 1 {
+      let a = nest_open(&mut n, count + NLA_NESTED);
+      wg_put_allowed(&mut n, w);
+      nest_close(&mut n, a);
+      count = count + 1;
+    }
+    k = k + 1;
+  }
+  nest_close(&mut n, al);
+  nest_close(&mut n, el);
+}
+
+/// One RTM-less message describing device i and its peers.
+fn wg_put_device(n: &mut Net, i: u64, seq: u64, port: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, GENL_ID_WG, NLM_F_MULTI, seq, port);
+  nl_b(&mut n, WG_CMD_GET_DEVICE);
+  nl_b(&mut n, 1);
+  nl_16(&mut n, 0);
+  nla_put32(&mut n, WGDEVICE_A_IFINDEX, if_index(n, i));
+  nla_str(&mut n, WGDEVICE_A_IFNAME, iw(n, i, IF_NAME), iw(n, i, IF_NAME + 1));
+  if wdw(n, i, WGD_HAS_KEY) == 1 {
+    nla_key(&mut n, WGDEVICE_A_PRIVATE_KEY, wdw(n, i, WGD_PRIV), wdw(n, i, WGD_PRIV + 1), wdw(n, i, WGD_PRIV + 2), wdw(n, i, WGD_PRIV + 3));
+    nla_key(&mut n, WGDEVICE_A_PUBLIC_KEY, wdw(n, i, WGD_PUB), wdw(n, i, WGD_PUB + 1), wdw(n, i, WGD_PUB + 2), wdw(n, i, WGD_PUB + 3));
+  }
+  nla_head(&mut n, WGDEVICE_A_LISTEN_PORT, 2);
+  nl_16(&mut n, wdw(n, i, WGD_PORT) % 65536);
+  nl_pad(&mut n);
+  nla_put32(&mut n, WGDEVICE_A_FWMARK, wdw(n, i, WGD_MARK) % 4294967296);
+  let pl = nest_open(&mut n, WGDEVICE_A_PEERS + NLA_NESTED);
+  let mut p = 0;
+  let mut count = 0;
+  while p < WGPN
+    invariant p <= WGPN && count <= p && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 {
+      wg_put_peer(&mut n, p, count);
+      count = count + 1;
+    }
+    p = p + 1;
+  }
+  nest_close(&mut n, pl);
+  nl_end(&mut n);
+}
+
+// ---------------------------------------------------------------- setting
+
+/// Stores the 32 bytes at b[a..) as four words from word `base` of device i.
+fn wg_dev_key(n: &mut Net, i: u64, base: u64, b: &Bytes, a: u64)
+  requires net_ok(n) && i < IFN && base + 4 <= WG_W && a + 32 <= blen(b)
+  ensures net_ok(n)
+{
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && a + 32 <= blen(b) && net_ok(n)
+  {
+    wds(&mut n, i, base + k, load_le64(b, a + k * 8));
+    k = k + 1;
+  }
+}
+
+fn wg_peer_key(n: &mut Net, p: u64, base: u64, b: &Bytes, a: u64)
+  requires net_ok(n) && p < WGPN && base + 4 <= WGP_W && a + 32 <= blen(b)
+  ensures net_ok(n)
+{
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && a + 32 <= blen(b) && net_ok(n)
+  {
+    wps(&mut n, p, base + k, load_le64(b, a + k * 8));
+    k = k + 1;
+  }
+}
+
+/// Derives device i's public key from its private key.
+fn wg_derive(n: &mut Net, i: u64)
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let mut k = balloc(32);
+  let mut k2 = 0;
+  while k2 < 4
+    invariant k2 <= 4 && blen(k) == 32
+  {
+    store_le64(&mut k, k2 * 8, wdw(n, i, WGD_PRIV + k2));
+    k2 = k2 + 1;
+  }
+  let mut u = balloc(32);
+  bset(&mut u, 0, cast[u8](9));
+  let r = x25519(k, u);
+  wg_dev_key(&mut n, i, WGD_PUB, r, 0);
+  bfree(k);
+  bfree(u);
+  bfree(r);
+}
+
+/// Does peer p of device i have the public key at b[a..a + 32)?
+fn wg_peer_is(n: &Net, p: u64, b: &Bytes, a: u64) -> bool
+  requires net_ok(n) && p < WGPN && a + 32 <= blen(b)
+{
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && a + 32 <= blen(b) && net_ok(n)
+  {
+    if wpw(n, p, WGP_PUB + k) != load_le64(b, a + k * 8) {
+      return false;
+    }
+    k = k + 1;
+  }
+  return true;
+}
+
+/// The peer of device i with that public key, or WGPN.
+fn wg_peer_find(n: &Net, i: u64, b: &Bytes, a: u64) -> u64
+  requires net_ok(n) && i < IFN && a + 32 <= blen(b)
+  ensures result <= WGPN
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && i < IFN && a + 32 <= blen(b) && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 && wg_peer_is(n, p, b, a) {
+      return p;
+    }
+    p = p + 1;
+  }
+  return WGPN;
+}
+
+fn wg_peer_free(n: &Net) -> u64
+  requires net_ok(n)
+  ensures result <= WGPN
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == 0 {
+      return p;
+    }
+    p = p + 1;
+  }
+  return WGPN;
+}
+
+/// ip with the host bits of a /plen network cleared.
+fn wg_mask(ip: u64, plen: u64) -> u64
+  requires ip < 4294967296 && plen <= 32
+  ensures result <= ip
+{
+  let sh = 32 - plen;
+  return (ip >> sh) << sh;
+}
+
+/// The peer of device i that owns the longest allowed-IP prefix (of at
+/// least minp bits) holding ip, or WGPN.
+fn wg_peer_for(n: &Net, i: u64, ip: u64, minp: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= WGPN
+{
+  if ip > 4294967295 {
+    return WGPN;
+  }
+  let mut best = WGPN;
+  let mut bl = 0;
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && best <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 {
+      let mut k = 0;
+      while k < WG_ALLOWED
+        invariant k <= WG_ALLOWED && best <= WGPN && net_ok(n)
+      {
+        let w = wpw(n, p, WGP_ALLOWED + k);
+        let plen = w / 4294967296 % 256;
+        if w / ALLOWED_SET % 2 == 1 && plen <= 32 && plen >= minp && plen + 1 > bl && wg_mask(ip, plen) == w % 4294967296 {
+          best = p;
+          bl = plen + 1;
+        }
+        k = k + 1;
+      }
+    }
+    p = p + 1;
+  }
+  return best;
+}
+
+/// Gives allowed IP ip/plen to peer p of device i, taking it from any other
+/// peer of the device. 0 or an errno.
+fn wg_allow(n: &mut Net, i: u64, p: u64, ip0: u64, plen: u64) -> u64
+  requires net_ok(n) && i < IFN && p < WGPN
+  ensures net_ok(n)
+{
+  if plen > 32 || ip0 >= 4294967296 {
+    return NE_INVAL;
+  }
+  let w = wg_mask(ip0, plen) + plen * 4294967296 + ALLOWED_SET;
+  let mut q = 0;
+  while q < WGPN
+    invariant q <= WGPN && net_ok(n)
+  {
+    if wpw(n, q, WGP_OWNER) == i + 1 {
+      let mut k = 0;
+      while k < WG_ALLOWED
+        invariant k <= WG_ALLOWED && net_ok(n)
+      {
+        if wpw(n, q, WGP_ALLOWED + k) == w && q != p {
+          wps(&mut n, q, WGP_ALLOWED + k, 0);
+        }
+        k = k + 1;
+      }
+    }
+    q = q + 1;
+  }
+  let mut free = WG_ALLOWED;
+  let mut k = 0;
+  while k < WG_ALLOWED
+    invariant k <= WG_ALLOWED && free <= WG_ALLOWED && net_ok(n)
+  {
+    let cur = wpw(n, p, WGP_ALLOWED + k);
+    if cur == w {
+      return 0;
+    }
+    if cur / ALLOWED_SET % 2 == 0 && free == WG_ALLOWED {
+      free = k;
+    }
+    k = k + 1;
+  }
+  if free >= WG_ALLOWED {
+    return NE_NOSPC;
+  }
+  wps(&mut n, p, WGP_ALLOWED + free, w);
+  return 0;
+}
+
+/// The allowed IPs in the nested list at b[from..to) for peer p.
+fn wg_allowed_list(n: &mut Net, i: u64, p: u64, b: &Bytes, from: u64, to: u64) -> u64
+  requires net_ok(n) && i < IFN && p < WGPN && from <= to && to <= blen(b)
+  ensures net_ok(n)
+{
+  let mut at = from;
+  while at + 4 <= to
+    invariant at <= to && to <= blen(b) && net_ok(n)
+  {
+    let l = rd16(b, at);
+    if l < 4 || l > to - at {
+      return NE_INVAL;
+    }
+    let fa = nla_find(b, at + 4, at + l, WGALLOWEDIP_A_FAMILY);
+    let ia = nla_find(b, at + 4, at + l, WGALLOWEDIP_A_IPADDR);
+    let ca = nla_find(b, at + 4, at + l, WGALLOWEDIP_A_CIDR_MASK);
+    if nla_len(b, fa) < 2 || nla_len(b, ca) < 1 || nla_len(b, ia) < 4 {
+      return NE_INVAL;
+    }
+    if rd16(b, fa) != AF_INET_ {
+      return NE_AFNOSUPPORT;
+    }
+    let ip = rd8(b, ia) * 16777216 + rd8(b, ia + 1) * 65536 + rd8(b, ia + 2) * 256 + rd8(b, ia + 3);
+    let e = wg_allow(&mut n, i, p, ip, rd8(b, ca));
+    if e != 0 {
+      return e;
+    }
+    let step = (l + 3) / 4 * 4;
+    if step > to - at {
+      at = to;
+    } else {
+      at = at + step;
+    }
+  }
+  return 0;
+}
+
+/// One peer's attributes at b[from..to) for device i.
+fn wg_peer_set(n: &mut Net, i: u64, b: &Bytes, from: u64, to: u64) -> u64
+  requires net_ok(n) && i < IFN && to <= blen(b)
+  ensures net_ok(n)
+{
+  let ka = nla_find(b, from, to, WGPEER_A_PUBLIC_KEY);
+  if nla_len(b, ka) != 32 {
+    return NE_INVAL;
+  }
+  let flags = nla_u32(b, from, to, WGPEER_A_FLAGS, 0);
+  let mut p = wg_peer_find(n, i, b, ka);
+  if flags / WGPEER_F_REMOVE_ME % 2 == 1 {
+    if p < WGPN {
+      wg_peer_wipe(&mut n, p);
+    }
+    return 0;
+  }
+  let pv = nla_u32(b, from, to, WGPEER_A_PROTOCOL_VERSION, 1);
+  if pv > 1 {
+    return NE_INVAL;
+  }
+  if p >= WGPN {
+    p = wg_peer_free(n);
+    if p >= WGPN {
+      return NE_NOSPC;
+    }
+    let mut f = 0;
+    while f < WGP_W
+      invariant f <= WGP_W && net_ok(n)
+    {
+      wps(&mut n, p, f, 0);
+      f = f + 1;
+    }
+    let mut c = 0;
+    while c < WGC_PW
+      invariant c <= WGC_PW && net_ok(n)
+    {
+      wcps(&mut n, p, c, 0);
+      c = c + 1;
+    }
+    wps(&mut n, p, WGP_OWNER, i + 1);
+    wg_peer_key(&mut n, p, WGP_PUB, b, ka);
+  }
+  if flags / WGPEER_F_REPLACE_ALLOWEDIPS % 2 == 1 {
+    let mut k = 0;
+    while k < WG_ALLOWED
+      invariant k <= WG_ALLOWED && net_ok(n)
+    {
+      wps(&mut n, p, WGP_ALLOWED + k, 0);
+      k = k + 1;
+    }
+  }
+  let pa = nla_find(b, from, to, WGPEER_A_PRESHARED_KEY);
+  if pa != 0 {
+    if nla_len(b, pa) != 32 {
+      return NE_INVAL;
+    }
+    wg_peer_key(&mut n, p, WGP_PSK, b, pa);
+  }
+  let ea = nla_find(b, from, to, WGPEER_A_ENDPOINT);
+  if ea != 0 {
+    let el = nla_len(b, ea);
+    if el < 16 {
+      return NE_INVAL;
+    }
+    if rd16(b, ea) != AF_INET_ {
+      return NE_AFNOSUPPORT;
+    }
+    let port = rd8(b, ea + 2) * 256 + rd8(b, ea + 3);
+    let ip = rd8(b, ea + 4) + rd8(b, ea + 5) * 256 + rd8(b, ea + 6) * 65536 + rd8(b, ea + 7) * 16777216;
+    wps(&mut n, p, WGP_END, ip + port * 4294967296 + END_SET);
+  }
+  let ka2 = nla_find(b, from, to, WGPEER_A_KEEPALIVE);
+  if ka2 != 0 {
+    if nla_len(b, ka2) < 2 {
+      return NE_INVAL;
+    }
+    wps(&mut n, p, WGP_KEEP, rd16(b, ka2));
+    if rd16(b, ka2) != 0 {
+      wps(&mut n, p, WGP_WANT, 1);       // a persistent keep-alive brings the tunnel up at once
+    }
+  }
+  let aa = nla_find(b, from, to, WGPEER_A_ALLOWEDIPS);
+  if aa != 0 {
+    let al = nla_len(b, aa);
+    return wg_allowed_list(&mut n, i, p, b, aa, aa + al);
+  }
+  return 0;
+}
+
+/// The device a request names (IFINDEX or IFNAME) in namespace ns, or NO_IF.
+fn wg_lookup(n: &Net, b: &Bytes, from: u64, to: u64, ns: u64) -> u64
+  requires net_ok(n) && to <= blen(b)
+  ensures result == NO_IF || result < IFN
+{
+  let xa = nla_find(b, from, to, WGDEVICE_A_IFINDEX);
+  let na = nla_find(b, from, to, WGDEVICE_A_IFNAME);
+  let mut i = NO_IF;
+  if xa != 0 && nla_len(b, xa) >= 4 {
+    i = if_of_index(n, ns, rd32(b, xa));
+  } else if na != 0 {
+    i = if_by_name(n, ns, nla_name(b, na, 0), nla_name(b, na, 1));
+  }
+  if i < IFN && iw(n, i, IF_KIND) != IFK_WG {
+    return NO_IF;
+  }
+  return i;
+}
+
+/// WG_CMD_SET_DEVICE for the message at b[at..end).
+fn wg_set(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
+  requires net_ok(n) && at + 20 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  let from = at + 20;
+  let i = wg_lookup(n, b, from, end, ns);
+  if i >= IFN {
+    return NE_NODEV_;
+  }
+  let flags = nla_u32(b, from, end, WGDEVICE_A_FLAGS, 0);
+  if flags / WGDEVICE_F_REPLACE_PEERS % 2 == 1 {
+    let mut p = 0;
+    while p < WGPN
+      invariant p <= WGPN && net_ok(n)
+    {
+      if wpw(n, p, WGP_OWNER) == i + 1 {
+        wg_peer_wipe(&mut n, p);
+      }
+      p = p + 1;
+    }
+  }
+  let ka = nla_find(b, from, end, WGDEVICE_A_PRIVATE_KEY);
+  if ka != 0 {
+    if nla_len(b, ka) != 32 {
+      return NE_INVAL;
+    }
+    wg_dev_key(&mut n, i, WGD_PRIV, b, ka);
+    let mut any = 0;
+    let mut k = 0;
+    while k < 4
+      invariant k <= 4 && net_ok(n)
+    {
+      if wdw(n, i, WGD_PRIV + k) != 0 {
+        any = 1;
+      }
+      k = k + 1;
+    }
+    if any == 0 {
+      // An all-zero key removes the key.
+      wds(&mut n, i, WGD_HAS_KEY, 0);
+      let mut z = 0;
+      while z < 4
+        invariant z <= 4 && net_ok(n)
+      {
+        wds(&mut n, i, WGD_PUB + z, 0);
+        z = z + 1;
+      }
+    } else {
+      // Clamp as Curve25519 does, then derive the public key.
+      let w0 = wdw(n, i, WGD_PRIV);
+      let w3 = wdw(n, i, WGD_PRIV + 3);
+      wds(&mut n, i, WGD_PRIV, w0 - w0 % 8);
+      wds(&mut n, i, WGD_PRIV + 3, w3 % 72057594037927936 + ((w3 / 72057594037927936 % 128) % 64 + 64) * 72057594037927936);
+      wds(&mut n, i, WGD_HAS_KEY, 1);
+      wg_derive(&mut n, i);
+    }
+  }
+  let la = nla_find(b, from, end, WGDEVICE_A_LISTEN_PORT);
+  if la != 0 {
+    if nla_len(b, la) < 2 {
+      return NE_INVAL;
+    }
+    let e = wg_set_port(&mut n, i, rd16(b, la));
+    if e != 0 {
+      return e;
+    }
+  }
+  let ma = nla_find(b, from, end, WGDEVICE_A_FWMARK);
+  if ma != 0 {
+    if nla_len(b, ma) < 4 {
+      return NE_INVAL;
+    }
+    wds(&mut n, i, WGD_MARK, rd32(b, ma));
+  }
+  let pa = nla_find(b, from, end, WGDEVICE_A_PEERS);
+  if pa != 0 {
+    let pl = nla_len(b, pa);
+    let pend = pa + pl;
+    let mut at2 = pa;
+    while at2 + 4 <= pend
+      invariant at2 <= pend && pend <= blen(b) && net_ok(n)
+    {
+      let l = rd16(b, at2);
+      if l < 4 || l > pend - at2 {
+        return NE_INVAL;
+      }
+      let e = wg_peer_set(&mut n, i, b, at2 + 4, at2 + l);
+      if e != 0 {
+        return e;
+      }
+      let step = (l + 3) / 4 * 4;
+      if step > pend - at2 {
+        at2 = pend;
+      } else {
+        at2 = at2 + step;
+      }
+    }
+  }
+  return 0;
+}
+
+/// A message of family wireguard at b[at..end): runs it, writing any answer.
+/// Returns 0 or an errno.
+fn wg_request(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, seq: u64, port: u64, admin: bool) -> u64
+  requires net_ok(n) && at + 20 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  if !admin {
+    return NE_PERM;
+  }
+  let cmd = rd8(b, at + 16);
+  if cmd == WG_CMD_SET_DEVICE {
+    let ns = n.ns;
+    return wg_set(&mut n, b, at, end, ns);
+  }
+  if cmd != WG_CMD_GET_DEVICE {
+    return NE_OPNOTSUPP;
+  }
+  if fl / 256 % 4 != 3 {
+    return NE_OPNOTSUPP;                  // wg show always dumps
+  }
+  let ns = n.ns;
+  let i = wg_lookup(n, b, at + 20, end, ns);
+  if i >= IFN {
+    let xa = nla_find(b, at + 20, end, WGDEVICE_A_IFINDEX);
+    let na = nla_find(b, at + 20, end, WGDEVICE_A_IFNAME);
+    if xa == 0 && na == 0 {
+      return NE_BADR;
+    }
+    return NE_NODEV_;
+  }
+  wg_put_device(&mut n, i, seq, port);
+  nl_done(&mut n, seq, port);
+  return 0;
+}
