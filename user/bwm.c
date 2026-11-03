@@ -2518,6 +2518,9 @@ int main(int argc, char **argv)
                         if (bw && (bw != focus() || bw->hidden)) {
                             raise_win(bw);
                             touch_all();
+                        } else if (bw) {
+                            minimize(bw);                /* the button of the focused window hides it */
+                            touch_all();
                         }
                     }
                 } else if (down && !(buttons & 1) && under) {
