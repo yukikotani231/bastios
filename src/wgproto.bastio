@@ -1,0 +1,1062 @@
+import "core/wgnoise.bastio";
+
+// WireGuard's handshake (src/wgdev.bastio keeps the configuration): the
+// initiation and response of the Noise IKpsk2 exchange (core/wgnoise.bastio)
+// over each device's UDP socket, and the session keys that come out of it.
+//
+// The kernel drives it from the scheduler pass (net_wake in
+// src/syscall.bastio): nic_wg_due says whether anything is waiting, and
+// nic_wg is then given the wall clock, the tick count and 40 fresh random
+// bytes. One handshake message is made per call, with those bytes as its
+// ephemeral private key (32) and its index (4), so no random byte is used
+// twice.
+//
+// An initiation goes out when a peer asks for one (WGP_WANT: a persistent
+// keep-alive was set, or a packet had nowhere to go) and again every
+// REKEY_TICKS until the response comes, at most HS_TRIES times. A response is taken only for the index of an
+// initiation that is out, and an initiation only if its mac1 was made for
+// our public key and its timestamp is later than the last one accepted from
+// that peer, so a recorded initiation cannot be played again.
+//
+// A device that takes more than WG_LOAD_MAX initiations (with a good mac1) in
+// a second is busy for the next second: it does no Diffie-Hellman work for
+// an initiation whose mac2 is not the cookie it would give its sender, and
+// sends that sender a cookie reply instead (wg_cookie_send; the cookie is a
+// MAC of the sender's address and port under a secret made from fresh
+// random bytes and changed every two minutes). A peer that gets a cookie
+// reply for its initiation keeps the cookie and sends the initiation again
+// at once with the cookie as the key of mac2. Not done: cookie replies to
+// responses (a response is read whatever its mac2 holds).
+//
+// What is not done yet: transport data, key rotation and the timers after the first
+// session. A responder's session is current at once rather than "next"
+// until the first packet confirms it. A responder's last-handshake time
+// stays 0 for the same reason (as in Linux, where the first packet received
+// on the new session sets it).
+
+const REKEY_TICKS: u64 = 1000;            // 10 s (Linux: 5 s)
+const HS_TRIES: u64 = 9;
+const REKEY_AFTER: u64 = 12000;          // 120 s: the initiator starts a new handshake when it sends
+const REJECT_AFTER: u64 = 18000;         // 180 s: a session older than this carries nothing
+const WG_ENT: u64 = 40;
+const MSG_INIT: u64 = 148;
+const MSG_RESP: u64 = 92;
+const MSG_COOKIE: u64 = 64;
+const WG_LOAD_MAX: u64 = 8;               // initiations a second before a device is busy
+const COOKIE_TICKS: u64 = 12000;          // 120 s: how long a secret lasts
+const COOKIE_USE: u64 = 11000;            // 110 s: how long a peer uses a cookie it was given
+
+/// Bytes of cnt words (at most 8) of peer p from word base.
+fn wg_pbytes(n: &Net, p: u64, base: u64, cnt: u64) -> Bytes
+  requires net_ok(n) && p < WGPN && cnt <= 8 && base + cnt <= WGP_W
+  ensures blen(result) == cnt * 8
+{
+  let mut b = balloc(cnt * 8);
+  let mut k = 0;
+  while k < cnt
+    invariant k <= cnt && cnt <= 8 && base + cnt <= WGP_W && blen(b) == cnt * 8 && net_ok(n)
+  {
+    store_le64(&mut b, k * 8, wpw(n, p, base + k));
+    k = k + 1;
+  }
+  return b;
+}
+
+/// The four words of device i from word base as 32 bytes.
+fn wg_dbytes(n: &Net, i: u64, base: u64) -> Bytes
+  requires net_ok(n) && i < IFN && base + 4 <= WG_W
+  ensures blen(result) == 32
+{
+  let mut b = balloc(32);
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && base + 4 <= WG_W && blen(b) == 32 && net_ok(n)
+  {
+    store_le64(&mut b, k * 8, wdw(n, i, base + k));
+    k = k + 1;
+  }
+  return b;
+}
+
+/// A kernel address with its octets in the other order (the endpoint words
+/// keep the first octet lowest).
+fn wg_ip_swap(x: u64) -> u64
+  requires x <= 4294967295
+  ensures result <= 4294967295
+{
+  return x % 256 * 16777216 + x / 256 % 256 * 65536 + x / 65536 % 256 * 256 + x / 16777216 % 256;
+}
+
+/// The 12-byte TAI64N of the wall clock (ns since 1970).
+fn wg_tai(wall: u64) -> Bytes
+  ensures blen(result) == 12
+{
+  let mut t = balloc(12);
+  store_be64(&mut t, 0, 4611686018427387914 + wall / 1000000000 % 4294967296);
+  store_be32(&mut t, 8, cast[u32](wall % 1000000000));
+  return t;
+}
+
+/// Makes peer p's endpoint src_ip:src_port (kernel address form).
+fn wg_set_endpoint(n: &mut Net, p: u64, src_ip: u64, src_port: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  if src_ip <= IP_MAX && src_port <= 65535 && src_port != 0 {
+    wps(&mut n, p, WGP_END, wg_ip_swap(src_ip) + src_port * 4294967296 + END_SET);
+  }
+}
+
+/// Sends the first len bytes of msg on device i's socket to peer p's
+/// endpoint.
+fn wg_send_peer(n: &mut Net, i: u64, p: u64, msg: &Bytes, len: u64) -> bool
+  requires net_ok(n) && i < IFN && p < WGPN && len <= blen(msg)
+  ensures net_ok(n)
+{
+  let e = wpw(n, p, WGP_END);
+  let sock = wdw(n, i, WGD_SOCK);
+  if e / END_SET % 2 != 1 || sock == 0 || sock > SOCKS {
+    return false;
+  }
+  return udp_sendto(&mut n, sock - 1, wg_ip_swap(e % 4294967296), e / 4294967296 % 65536, msg, len) != NO_SOCK;
+}
+
+/// wg_send_peer for a packet sent while the stack is handling a frame
+/// (src/net.bastio udp_out): it does not poll.
+fn wg_send_out(n: &mut Net, i: u64, p: u64, msg: &Bytes, len: u64) -> bool
+  requires net_ok(n) && i < IFN && p < WGPN && len <= blen(msg)
+  ensures net_ok(n)
+{
+  let e = wpw(n, p, WGP_END);
+  let sock = wdw(n, i, WGD_SOCK);
+  if e / END_SET % 2 != 1 || sock == 0 || sock > SOCKS {
+    return false;
+  }
+  return udp_out(&mut n, sock - 1, wg_ip_swap(e % 4294967296), e / 4294967296 % 65536, msg, len) != NO_SOCK;
+}
+
+/// Zeroes the handshake state of peer p (the ephemeral key, C and H).
+fn wg_hs_wipe(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let mut k = 0;
+  while k < 12
+    invariant k <= 12 && net_ok(n)
+  {
+    wps(&mut n, p, WGP_HE + k, 0);
+    k = k + 1;
+  }
+  wps(&mut n, p, WGP_HS, 0);
+}
+
+/// Sets peer p's session from keys (send || receive), our index lidx and
+/// the peer's ridx.
+fn wg_session(n: &mut Net, p: u64, keys: &Bytes, lidx: u64, ridx: u64, ticks: u64, init: u64)
+  requires net_ok(n) && p < WGPN && blen(keys) == 64
+  ensures net_ok(n)
+{
+  wg_peer_key(&mut n, p, WGP_SK, keys, 0);
+  wg_peer_key(&mut n, p, WGP_RK, keys, 32);
+  wps(&mut n, p, WGP_LIDX, lidx);
+  wps(&mut n, p, WGP_RIDX, ridx);
+  wps(&mut n, p, WGP_SCTR, 0);
+  wps(&mut n, p, WGP_SBORN, n.now);          // the stack's clock, which the timers read
+  wps(&mut n, p, WGP_ISINIT, init);
+  wps(&mut n, p, WGP_LTX, n.now);
+  wps(&mut n, p, WGP_SVALID, 1);
+  wps(&mut n, p, WGP_CONF, 0);
+  wps(&mut n, p, WGP_RMAX, 0);
+  let mut k = 0;
+  while k < 16
+    invariant k <= 16 && net_ok(n)
+  {
+    wps(&mut n, p, WGP_RWIN + k, 0);
+    k = k + 1;
+  }
+  wps(&mut n, p, WGP_TRIES, 0);
+  wps(&mut n, p, WGP_WANT, 0);
+}
+
+/// Device i's cookie secret as bytes.
+fn wg_cbytes(n: &Net, i: u64) -> Bytes
+  requires net_ok(n) && i < IFN
+  ensures blen(result) == 32
+{
+  let mut b = balloc(32);
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && blen(b) == 32 && net_ok(n) && i < IFN
+  {
+    store_le64(&mut b, k * 8, wcd(n, i, WGC_CSEC + k));
+    k = k + 1;
+  }
+  return b;
+}
+
+/// Stores the 32 bytes of b as device i's cookie secret.
+fn wg_csec_set(n: &mut Net, i: u64, b: &Bytes)
+  requires net_ok(n) && i < IFN && blen(b) == 32
+  ensures net_ok(n)
+{
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && blen(b) == 32 && net_ok(n) && i < IFN
+  {
+    wcds(&mut n, i, WGC_CSEC + k, load_le64(b, k * 8));
+    k = k + 1;
+  }
+}
+
+/// Bytes of cnt words (at most 2) of peer p's cookie state from word base.
+fn wg_cpbytes(n: &Net, p: u64, base: u64, cnt: u64) -> Bytes
+  requires net_ok(n) && p < WGPN && cnt <= 2 && base + cnt <= WGC_PW
+  ensures blen(result) == cnt * 8
+{
+  let mut b = balloc(cnt * 8);
+  let mut k = 0;
+  while k < cnt
+    invariant k <= cnt && cnt <= 2 && base + cnt <= WGC_PW && blen(b) == cnt * 8 && net_ok(n) && p < WGPN
+  {
+    store_le64(&mut b, k * 8, wcpw(n, p, base + k));
+    k = k + 1;
+  }
+  return b;
+}
+
+// ---------------------------------------------------------------- cookies
+
+/// Counts an initiation with a good mac1 on device i at tick `ticks`. True if
+/// the device is busy: more than WG_LOAD_MAX came in this second, and the
+/// device stays busy for the second after the last one that was over.
+fn wg_load(n: &mut Net, i: u64, ticks: u64) -> bool
+  requires net_ok(n) && i < IFN
+  ensures net_ok(n)
+{
+  let w = wcd(n, i, WGC_LOADW);
+  if ticks < w || ticks - w >= 100 {
+    wcds(&mut n, i, WGC_LOADW, ticks);
+    wcds(&mut n, i, WGC_LOADN, 0);
+  }
+  let c = smaller(wcd(n, i, WGC_LOADN), 1000000) + 1;
+  wcds(&mut n, i, WGC_LOADN, c);
+  if c > WG_LOAD_MAX && ticks <= 4611686018427387904 {
+    wcds(&mut n, i, WGC_BUSYU, ticks + 100);
+  }
+  return ticks < wcd(n, i, WGC_BUSYU);
+}
+
+/// Is device i's cookie secret made and not older than COOKIE_TICKS?
+fn wg_secret_fresh(n: &Net, i: u64, ticks: u64) -> bool
+  requires net_ok(n) && i < IFN
+{
+  let t = wcd(n, i, WGC_CSECT);
+  return t != 0 && ticks >= t - 1 && ticks - (t - 1) < COOKIE_TICKS;
+}
+
+/// The 6 bytes (address, port) a cookie is made for.
+fn wg_who(ip: u64, port: u64) -> Bytes
+  ensures blen(result) == 6
+{
+  let mut b = balloc(6);
+  bset(&mut b, 0, cast[u8](ip / 16777216 % 256));
+  bset(&mut b, 1, cast[u8](ip / 65536 % 256));
+  bset(&mut b, 2, cast[u8](ip / 256 % 256));
+  bset(&mut b, 3, cast[u8](ip % 256));
+  bset(&mut b, 4, cast[u8](port / 256 % 256));
+  bset(&mut b, 5, cast[u8](port % 256));
+  return b;
+}
+
+/// Does the initiation msg carry the mac2 of the cookie its sender (at
+/// src_ip:src_port) would be given?
+fn wg_mac2_valid(n: &Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, ticks: u64) -> bool
+  requires net_ok(n) && i < IFN && blen(msg) == MSG_INIT
+{
+  if !wg_secret_fresh(n, i, ticks) {
+    return false;
+  }
+  let secret = wg_cbytes(n, i);
+  let who = wg_who(src_ip, src_port);
+  let cookie = wgn_cookie(secret, who);
+  let ok = wgn_mac2_ok(msg, cookie);
+  bfree(cookie);
+  bfree(who);
+  bfree(secret);
+  return ok;
+}
+
+/// Answers the initiation msg from src_ip:src_port with a cookie reply
+/// instead of the handshake. The secret, if there is none that is fresh, and
+/// the 24-byte nonce are both made from ent, under different labels.
+fn wg_cookie_send(n: &mut Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, ticks: u64, ent: &Bytes)
+  requires net_ok(n) && i < IFN && blen(msg) == MSG_INIT && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  if !wg_secret_fresh(n, i, ticks) && ticks <= 4611686018427387904 {
+    let label = bfrom("wgsecret");
+    let seed = bytes_slice(ent, 0, 32);
+    let fresh = wgn_hash(label, seed);
+    wg_csec_set(&mut n, i, fresh);
+    wcds(&mut n, i, WGC_CSECT, ticks + 1);
+    bfree(fresh);
+    bfree(seed);
+    bfree(label);
+  }
+  if !wg_secret_fresh(n, i, ticks) {
+    return;
+  }
+  let label2 = bfrom("wgnonce-");
+  let hn = wgn_hash(label2, ent);
+  let nonce = bytes_slice(hn, 0, 24);
+  let secret = wg_cbytes(n, i);
+  let who = wg_who(src_ip, src_port);
+  let cookie = wgn_cookie(secret, who);
+  let spub = wg_dbytes(n, i, WGD_PUB);
+  let mac1 = bytes_slice(msg, 116, 132);
+  let reply = wgn_cookie_reply(spub, cast[u64](load_le32(msg, 4)), nonce, cookie, mac1);
+  let sock = wdw(n, i, WGD_SOCK);
+  if sock != 0 && sock <= SOCKS {
+    udp_sendto(&mut n, sock - 1, src_ip, src_port, reply, MSG_COOKIE);
+  }
+  bfree(reply);
+  bfree(mac1);
+  bfree(spub);
+  bfree(cookie);
+  bfree(who);
+  bfree(secret);
+  bfree(nonce);
+  bfree(hn);
+  bfree(label2);
+}
+
+/// The cookie peer p gave us, if it is still good, else nothing: 16 bytes or 0.
+fn wg_cookie_or_none(n: &Net, p: u64, ticks: u64) -> Bytes
+  requires net_ok(n) && p < WGPN
+  ensures blen(result) == 0 || blen(result) == 16
+{
+  let t = wcpw(n, p, WGC_COOKT);
+  if t != 0 && ticks >= t - 1 && ticks - (t - 1) < COOKIE_USE {
+    return wg_cpbytes(n, p, WGC_COOKIE, 2);
+  }
+  return balloc(0);
+}
+
+/// A cookie reply (type 3) on device i: if it answers the initiation peer p
+/// has out, its cookie is kept and the initiation goes out again at once.
+fn wg_on_cookie(n: &mut Net, i: u64, msg: &Bytes, ticks: u64)
+  requires net_ok(n) && i < IFN && blen(msg) == MSG_COOKIE
+  ensures net_ok(n)
+{
+  let p = wg_peer_waiting(n, i, cast[u64](load_le32(msg, 4)));
+  if p >= WGPN || ticks > 4611686018427387904 {
+    return;
+  }
+  let rpub = wg_pbytes(n, p, WGP_PUB, 4);
+  let mac1 = wg_cpbytes(n, p, WGC_MAC1, 2);
+  match wgn_consume_cookie_reply(msg, rpub, mac1) {
+    Option::None => {},
+    Option::Some(c) => {
+      wcps(&mut n, p, WGC_COOKIE, load_le64(c, 0));
+      wcps(&mut n, p, WGC_COOKIE + 1, load_le64(c, 8));
+      wcps(&mut n, p, WGC_COOKT, ticks + 1);
+      wps(&mut n, p, WGP_WANT, 1);
+      bfree(c);
+    },
+  }
+  bfree(mac1);
+  bfree(rpub);
+}
+
+/// Sends an initiation from device i to peer p. ent: 32 bytes of ephemeral
+/// private key, then the 4-byte index. False if nothing could be sent.
+fn wg_initiate(n: &mut Net, i: u64, p: u64, wall: u64, ticks: u64, ent: &Bytes) -> bool
+  requires net_ok(n) && i < IFN && p < WGPN && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  let spriv = wg_dbytes(n, i, WGD_PRIV);
+  let spub = wg_dbytes(n, i, WGD_PUB);
+  let rpub = wg_pbytes(n, p, WGP_PUB, 4);
+  let epriv = bytes_slice(ent, 0, 32);
+  let idx = cast[u64](load_le32(ent, 32));
+  let tai = wg_tai(wall);
+  let mut st = balloc(64);
+  let mut sent = false;
+  match wgn_initiation(spriv, spub, rpub, epriv, idx, tai, &mut st) {
+    Option::None => {},
+    Option::Some(init) => {
+      let none = wg_cookie_or_none(n, p, ticks);
+      let full = wgn_macs(init, rpub, none);
+      wg_peer_key(&mut n, p, WGP_HE, epriv, 0);
+      wg_peer_key(&mut n, p, WGP_HC, st, 0);
+      wg_peer_key(&mut n, p, WGP_HH, st, 32);
+      wps(&mut n, p, WGP_HIDX, idx);
+      wps(&mut n, p, WGP_HS, 1);
+      wps(&mut n, p, WGP_HT, ticks);
+      wps(&mut n, p, WGP_WANT, 0);
+      let tries = wpw(n, p, WGP_TRIES);
+      if tries < HS_TRIES {
+        wps(&mut n, p, WGP_TRIES, tries + 1);
+      }
+      if blen(full) == MSG_INIT {
+        wcps(&mut n, p, WGC_MAC1, load_le64(full, 116));
+        wcps(&mut n, p, WGC_MAC1 + 1, load_le64(full, 124));
+        sent = wg_send_peer(&mut n, i, p, full, MSG_INIT);
+      }
+      bfree(full);
+      bfree(none);
+      bfree(init);
+    },
+  }
+  bfree(st);
+  bfree(tai);
+  bfree(epriv);
+  bfree(rpub);
+  bfree(spub);
+  bfree(spriv);
+  return sent;
+}
+
+/// Is the timestamp in who[32..44) newer than the last one peer p sent?
+fn wg_tai_newer(n: &Net, p: u64, who: &Bytes) -> bool
+  requires net_ok(n) && p < WGPN && blen(who) == 76
+{
+  let hi = load_be64(who, 32);
+  let lo = cast[u64](load_be32(who, 40));
+  let ohi = wpw(n, p, WGP_TAI_HI);
+  if hi != ohi {
+    return hi > ohi;
+  }
+  return lo > wpw(n, p, WGP_TAI_LO);
+}
+
+/// Answers a verified initiation of peer p: who is the consumed initiation
+/// (static key, timestamp, ephemeral key), st its state, msg the datagram.
+/// ent as for wg_initiate.
+fn wg_respond(n: &mut Net, i: u64, p: u64, who: &Bytes, st: &mut Bytes, msg: &Bytes, src_ip: u64, src_port: u64, wall: u64, ticks: u64, ent: &Bytes)
+  requires net_ok(n) && i < IFN && p < WGPN && blen(who) == 76 && blen(st) == 64 && blen(msg) == MSG_INIT && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  let epriv = bytes_slice(ent, 0, 32);
+  let idx = cast[u64](load_le32(ent, 32));
+  let ridx = cast[u64](load_le32(msg, 4));
+  let ei_pub = bytes_slice(who, 44, 76);
+  let si_pub = bytes_slice(who, 0, 32);
+  let psk = wg_pbytes(n, p, WGP_PSK, 4);
+  let mut keys = balloc(64);
+  match wgn_response(&mut st, epriv, ei_pub, si_pub, psk, idx, ridx, &mut keys) {
+    Option::None => {},
+    Option::Some(resp) => {
+      let none = balloc(0);
+      let full = wgn_macs(resp, si_pub, none);
+      wps(&mut n, p, WGP_TAI_HI, load_be64(who, 32));
+      wps(&mut n, p, WGP_TAI_LO, cast[u64](load_be32(who, 40)));
+      wg_set_endpoint(&mut n, p, src_ip, src_port);
+      wg_session(&mut n, p, keys, idx, ridx, ticks, 0);
+      if blen(full) == MSG_RESP {
+        wg_send_peer(&mut n, i, p, full, MSG_RESP);
+      }
+      bfree(full);
+      bfree(none);
+      bfree(resp);
+    },
+  }
+  bfree(keys);
+  bfree(psk);
+  bfree(si_pub);
+  bfree(ei_pub);
+  bfree(epriv);
+}
+
+/// A datagram of type 1 on device i. True if it used ent.
+fn wg_on_init(n: &mut Net, i: u64, msg: &Bytes, src_ip: u64, src_port: u64, wall: u64, ticks: u64, ent: &Bytes) -> bool
+  requires net_ok(n) && i < IFN && blen(msg) == MSG_INIT && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  let spriv = wg_dbytes(n, i, WGD_PRIV);
+  let spub = wg_dbytes(n, i, WGD_PUB);
+  let mut used = false;
+  let mut go = wgn_mac1_ok(msg, spub);
+  if go && wg_load(&mut n, i, ticks) && !wg_mac2_valid(n, i, msg, src_ip, src_port, ticks) {
+    wg_cookie_send(&mut n, i, msg, src_ip, src_port, ticks, ent);
+    used = true;
+    go = false;
+  }
+  if go {
+    let body = bytes_slice(msg, 0, 116);
+    let mut st = balloc(64);
+    match wgn_consume_initiation(spriv, spub, body, &mut st) {
+      Option::None => {},
+      Option::Some(who) => {
+        let p = wg_peer_find(n, i, who, 0);
+        if p < WGPN && wg_tai_newer(n, p, who) {
+          wg_respond(&mut n, i, p, who, &mut st, msg, src_ip, src_port, wall, ticks, ent);
+          used = true;
+        }
+        bfree(who);
+      },
+    }
+    bfree(st);
+    bfree(body);
+  }
+  bfree(spub);
+  bfree(spriv);
+  return used;
+}
+
+/// The peer of device i whose initiation with our index idx is out.
+fn wg_peer_waiting(n: &Net, i: u64, idx: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= WGPN
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 && wpw(n, p, WGP_HS) == 1 && wpw(n, p, WGP_HIDX) == idx {
+      return p;
+    }
+    p = p + 1;
+  }
+  return WGPN;
+}
+
+/// A datagram of type 2 on device i.
+fn wg_on_resp(n: &mut Net, i: u64, msg: &Bytes, wall: u64, ticks: u64)
+  requires net_ok(n) && i < IFN && blen(msg) == MSG_RESP
+  ensures net_ok(n)
+{
+  let spub = wg_dbytes(n, i, WGD_PUB);
+  if wgn_mac1_ok(msg, spub) {
+    let p = wg_peer_waiting(n, i, cast[u64](load_le32(msg, 8)));
+    if p < WGPN {
+      let spriv = wg_dbytes(n, i, WGD_PRIV);
+      let mut st = wg_pbytes(n, p, WGP_HC, 8);
+      let epriv = wg_pbytes(n, p, WGP_HE, 4);
+      let psk = wg_pbytes(n, p, WGP_PSK, 4);
+      let body = bytes_slice(msg, 0, 60);
+      let mut keys = balloc(64);
+      if wgn_consume_response(&mut st, epriv, spriv, psk, body, &mut keys) {
+        wg_session(&mut n, p, keys, wpw(n, p, WGP_HIDX), cast[u64](load_le32(msg, 4)), ticks, 1);
+        wps(&mut n, p, WGP_LHS, wall);
+        wps(&mut n, p, WGP_CONF, 1);
+        wg_hs_wipe(&mut n, p);
+        let empty = balloc(0);
+        wg_seal_send(&mut n, i, p, empty);      // a keep-alive: it confirms the session to the responder
+        bfree(empty);
+      }
+      bfree(keys);
+      bfree(body);
+      bfree(psk);
+      bfree(epriv);
+      bfree(st);
+      bfree(spriv);
+    }
+  }
+  bfree(spub);
+}
+
+// ---------------------------------------------------------------- transport
+
+const WG_MTU: u64 = 1420;
+const SESSION_MAX: u64 = 1152921504606846976;    // 2^60 packets: well short of the protocol's limit
+
+/// Is peer p's session set and younger than REJECT_AFTER?
+fn wg_fresh(n: &Net, p: u64) -> bool
+  requires net_ok(n) && p < WGPN
+{
+  let born = wpw(n, p, WGP_SBORN);
+  return wpw(n, p, WGP_SVALID) == 1 && n.now >= born && n.now - born < REJECT_AFTER;
+}
+
+/// Ends peer p's session: its keys and counters are zeroed. A peer with a
+/// persistent keep-alive then asks for a new handshake.
+fn wg_session_end(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let mut k = 0;
+  while k < 8
+    invariant k <= 8 && net_ok(n)
+  {
+    wps(&mut n, p, WGP_SK + k, 0);
+    k = k + 1;
+  }
+  wps(&mut n, p, WGP_SCTR, 0);
+  wps(&mut n, p, WGP_SVALID, 0);
+  if wpw(n, p, WGP_KEEP) != 0 {
+    wps(&mut n, p, WGP_WANT, 1);
+  }
+}
+
+/// Encrypts plain (a multiple of 16 bytes, at most WG_MTU rounded up) with
+/// peer p's sending key and the next counter, and sends it to the peer's
+/// endpoint as a transport message. The device is marked busy meanwhile, so
+/// that a route through the tunnel to its own peer cannot make it send
+/// into itself.
+fn wg_seal_send(n: &mut Net, i: u64, p: u64, plain: &Bytes) -> bool
+  requires net_ok(n) && i < IFN && p < WGPN && blen(plain) <= 1440
+  ensures net_ok(n)
+{
+  let ctr = wpw(n, p, WGP_SCTR);
+  if !wg_fresh(n, p) || ctr >= SESSION_MAX {
+    return false;
+  }
+  let key = wg_pbytes(n, p, WGP_SK, 4);
+  let mut nonce = balloc(12);
+  store_le64(&mut nonce, 4, ctr);
+  let aad = balloc(0);
+  let sealed = aead_seal(key, nonce, aad, plain);
+  let mut msg = balloc(16 + blen(sealed));
+  bset(&mut msg, 0, 4);
+  store_le32(&mut msg, 4, cast[u32](wpw(n, p, WGP_RIDX) % 4294967296));
+  store_le64(&mut msg, 8, ctr);
+  bytes_copy_into(&mut msg, 16, sealed);
+  wps(&mut n, p, WGP_SCTR, ctr + 1);
+  wds(&mut n, i, WGD_BUSY, 1);
+  let sent = wg_send_out(&mut n, i, p, msg, blen(msg));
+  wds(&mut n, i, WGD_BUSY, 0);
+  if sent {
+    wps(&mut n, p, WGP_LTX, n.now);
+    let born = wpw(n, p, WGP_SBORN);
+    if wpw(n, p, WGP_ISINIT) == 1 && wpw(n, p, WGP_HS) == 0 && n.now >= born && n.now - born >= REKEY_AFTER {
+      wps(&mut n, p, WGP_WANT, 1);       // a session this old is renewed by the side that started it
+    }
+    let tx = wpw(n, p, WGP_TX);
+    let len = blen(msg);
+    if tx <= 18446744073709551615 - len {
+      wps(&mut n, p, WGP_TX, tx + len);
+    }
+  }
+  bfree(msg);
+  bfree(sealed);
+  bfree(aad);
+  bfree(nonce);
+  bfree(key);
+  return sent;
+}
+
+/// The packet in the outgoing frame (n.out, flen bytes with the Ethernet
+/// header) for dst goes into the tunnel of device i: to the peer whose
+/// allowed IPs hold dst. With no session yet it is dropped and a handshake
+/// is asked for, as the first packets of a tunnel are in Linux when the
+/// queue is full; the sender sends again. False if the packet has nowhere to
+/// go: no peer owns its address.
+fn wg_tx(n: &mut Net, i: u64, dst: u64, flen: u64) -> bool
+  requires net_ok(n) && i < IFN && dst <= IP_MAX && 14 <= flen && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  if wdw(n, i, WGD_BUSY) != 0 || flen < 34 {
+    return false;
+  }
+  let tot = be16(n.out, 16);
+  if tot < 20 || 14 + tot > flen || tot > WG_MTU {
+    return false;
+  }
+  let p = wg_peer_for(n, i, dst, 0);
+  if p >= WGPN {
+    return false;
+  }
+  if !wg_fresh(n, p) {
+    if wpw(n, p, WGP_HS) == 0 {
+      wps(&mut n, p, WGP_WANT, 1);
+    } else if wpw(n, p, WGP_TRIES) >= HS_TRIES {
+      wps(&mut n, p, WGP_TRIES, 0);
+      wps(&mut n, p, WGP_WANT, 1);
+    }
+    return true;                      // lost on the way, as if queued and then dropped
+  }
+  let pad = (tot + 15) / 16 * 16;
+  let mut plain = balloc(pad);
+  bcopy(&mut plain, 0, n.out, 14, tot);
+  let sent = wg_seal_send(&mut n, i, p, plain);
+  bfree(plain);
+  return sent;
+}
+
+/// Has counter ctr not been taken and is it not behind the window?
+fn wg_win_ok(n: &Net, p: u64, ctr: u64) -> bool
+  requires net_ok(n) && p < WGPN
+{
+  if ctr >= SESSION_MAX {
+    return false;
+  }
+  let m = wpw(n, p, WGP_RMAX);
+  if ctr >= m {
+    return true;
+  }
+  if m - 1 - ctr >= WIN_BITS {
+    return false;
+  }
+  let b = ctr % WIN_BITS;
+  return wpw(n, p, WGP_RWIN + b / 64) / (1 << (b % 64)) % 2 == 0;
+}
+
+/// Clears the bit of counter c in peer p's window.
+fn wg_win_clear(n: &mut Net, p: u64, c: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let b = c % WIN_BITS;
+  let w = wpw(n, p, WGP_RWIN + b / 64);
+  let bit = 1 << (b % 64);
+  if w / bit % 2 == 1 {
+    wps(&mut n, p, WGP_RWIN + b / 64, w - bit);
+  }
+}
+
+/// Records counter ctr (which wg_win_ok took and a packet then
+/// authenticated) as taken; the window moves up if ctr is beyond it.
+fn wg_win_set(n: &mut Net, p: u64, ctr: u64)
+  requires net_ok(n) && p < WGPN && ctr < SESSION_MAX
+  ensures net_ok(n)
+{
+  let m = wpw(n, p, WGP_RMAX);
+  if ctr >= m {
+    let d = ctr - m + 1;
+    if d >= WIN_BITS {
+      let mut k = 0;
+      while k < 16
+        invariant k <= 16 && net_ok(n)
+      {
+        wps(&mut n, p, WGP_RWIN + k, 0);
+        k = k + 1;
+      }
+    } else {
+      let mut j = 0;
+      while j < d
+        invariant j <= d && d < WIN_BITS && m <= ctr && ctr < SESSION_MAX && net_ok(n)
+      {
+        wg_win_clear(&mut n, p, m + j);
+        j = j + 1;
+      }
+    }
+    wps(&mut n, p, WGP_RMAX, ctr + 1);
+  }
+  let b = ctr % WIN_BITS;
+  let w = wpw(n, p, WGP_RWIN + b / 64);
+  let bit = 1 << (b % 64);
+  if w / bit % 2 == 0 {
+    wps(&mut n, p, WGP_RWIN + b / 64, w + bit);
+  }
+}
+
+/// The peer of device i whose current session has our index idx.
+fn wg_peer_session(n: &Net, i: u64, idx: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= WGPN
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 && wpw(n, p, WGP_SVALID) == 1 && wpw(n, p, WGP_LIDX) == idx {
+      return p;
+    }
+    p = p + 1;
+  }
+  return WGPN;
+}
+
+/// An opened packet from peer p of device i: if it is IPv4 from an address
+/// the peer owns, it is taken in by the stack as if it had arrived on the
+/// device.
+fn wg_deliver(n: &mut Net, i: u64, p: u64, plain: &Bytes)
+  requires net_ok(n) && i < IFN && p < WGPN
+  ensures net_ok(n)
+{
+  let pl = blen(plain);
+  if pl < 20 || pl > WG_MTU + 16 || cast[u64](bget(plain, 0)) / 16 != 4 {
+    return;
+  }
+  let tot = be16(plain, 2);
+  if tot < 20 || tot > pl || tot > WG_MTU {
+    return;
+  }
+  if wg_peer_for(n, i, be32(plain, 12), 0) != p {
+    return;                           // a source address the peer does not own
+  }
+  put48(&mut n.out, 0, 0);
+  put48(&mut n.out, 6, 0);
+  put16(&mut n.out, 12, ETH_IP);
+  bcopy(&mut n.out, 14, plain, 0, tot);
+  q_send(&mut n, i, 14 + tot);
+}
+
+/// A transport message (type 4) of len bytes in buf on device i.
+fn wg_on_data(n: &mut Net, i: u64, buf: &Bytes, len: u64, src_ip: u64, src_port: u64, wall: u64)
+  requires net_ok(n) && i < IFN && len <= blen(buf)
+  ensures net_ok(n)
+{
+  if len < 32 || (len - 32) % 16 != 0 || len > WG_MTU + 48 {
+    return;
+  }
+  let p = wg_peer_session(n, i, cast[u64](load_le32(buf, 4)));
+  if p >= WGPN {
+    return;
+  }
+  let ctr = load_le64(buf, 8);
+  if !wg_fresh(n, p) || ctr >= SESSION_MAX || !wg_win_ok(n, p, ctr) {
+    return;
+  }
+  let key = wg_pbytes(n, p, WGP_RK, 4);
+  let mut nonce = balloc(12);
+  store_le64(&mut nonce, 4, ctr);
+  let aad = balloc(0);
+  let sealed = bytes_slice(buf, 16, len);
+  match aead_open(key, nonce, aad, sealed) {
+    Option::None => {},
+    Option::Some(plain) => {
+      wg_win_set(&mut n, p, ctr);
+      wg_set_endpoint(&mut n, p, src_ip, src_port);
+      let rx = wpw(n, p, WGP_RX);
+      if rx <= 18446744073709551615 - len {
+        wps(&mut n, p, WGP_RX, rx + len);
+      }
+      if wpw(n, p, WGP_CONF) == 0 {
+        wps(&mut n, p, WGP_CONF, 1);      // the first packet on a responder's session confirms it
+        wps(&mut n, p, WGP_LHS, wall);
+      }
+      wg_deliver(&mut n, i, p, plain);
+      bfree(plain);
+    },
+  }
+  bfree(sealed);
+  bfree(aad);
+  bfree(nonce);
+  bfree(key);
+}
+
+/// Handles the datagram of n bytes in buf received on device i. True if it
+/// used ent.
+fn wg_on_datagram(n: &mut Net, i: u64, buf: &Bytes, len: u64, src_ip: u64, src_port: u64, wall: u64, ticks: u64, ent: &Bytes) -> bool
+  requires net_ok(n) && i < IFN && len <= blen(buf) && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  if wdw(n, i, WGD_HAS_KEY) != 1 || len < 4 {
+    return false;
+  }
+  if len == MSG_INIT && load_le32(buf, 0) == 1 {
+    let m = bytes_slice(buf, 0, MSG_INIT);
+    let used = wg_on_init(&mut n, i, m, src_ip, src_port, wall, ticks, ent);
+    bfree(m);
+    return used;
+  }
+  if len >= 32 && load_le32(buf, 0) == 4 {
+    wg_on_data(&mut n, i, buf, len, src_ip, src_port, wall);
+    return false;
+  }
+  if len == MSG_COOKIE && load_le32(buf, 0) == 3 {
+    let m3 = bytes_slice(buf, 0, MSG_COOKIE);
+    wg_on_cookie(&mut n, i, m3, ticks);
+    bfree(m3);
+    return false;
+  }
+  if len == MSG_RESP && load_le32(buf, 0) == 2 {
+    let m2 = bytes_slice(buf, 0, MSG_RESP);
+    wg_on_resp(&mut n, i, m2, wall, ticks);
+    bfree(m2);
+  }
+  return false;
+}
+
+/// Does peer p need an initiation sent now? Only if its device can send
+/// it: a key, a socket and an endpoint.
+fn wg_wants(n: &Net, p: u64, ticks: u64) -> bool
+  requires net_ok(n) && p < WGPN
+{
+  let owner = wpw(n, p, WGP_OWNER);
+  if owner == 0 || owner > IFN {
+    return false;
+  }
+  let i = owner - 1;
+  if wdw(n, i, WGD_HAS_KEY) != 1 || wdw(n, i, WGD_SOCK) == 0 || wpw(n, p, WGP_END) / END_SET % 2 != 1 {
+    return false;
+  }
+  if wpw(n, p, WGP_WANT) == 1 {
+    return true;
+  }
+  let sent = wpw(n, p, WGP_HT);
+  return wpw(n, p, WGP_HS) == 1 && wpw(n, p, WGP_TRIES) < HS_TRIES
+    && sent <= 18446744073709551615 - REKEY_TICKS && ticks >= sent + REKEY_TICKS;
+}
+
+/// Does peer p need its timers run: a session to end, or a keep-alive to send?
+fn wg_timer_due(n: &Net, p: u64) -> bool
+  requires net_ok(n) && p < WGPN
+{
+  let owner = wpw(n, p, WGP_OWNER);
+  if owner == 0 || owner > IFN || wpw(n, p, WGP_SVALID) != 1 {
+    return false;
+  }
+  if !wg_fresh(n, p) {
+    return true;
+  }
+  let keep = wpw(n, p, WGP_KEEP);
+  let last = wpw(n, p, WGP_LTX);
+  return keep != 0 && keep <= 65535 && n.now >= last && n.now - last >= keep * 100;
+}
+
+/// Runs the timers of every peer: a session past REJECT_AFTER ends, and a
+/// persistent keep-alive that is due is sent.
+fn wg_timers(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wg_timer_due(n, p) {
+      if !wg_fresh(n, p) {
+        wg_session_end(&mut n, p);
+      } else {
+        let owner = wpw(n, p, WGP_OWNER);
+        if owner >= 1 && owner <= IFN {
+          let empty = balloc(0);
+          wg_seal_send(&mut n, owner - 1, p, empty);
+          bfree(empty);
+          wps(&mut n, p, WGP_LTX, n.now);    // also when it could not go: try again after a full interval
+        }
+      }
+    }
+    p = p + 1;
+  }
+}
+
+/// Whether device i has a socket that is open and bound.
+fn wg_live(n: &Net, i: u64) -> bool
+  requires net_ok(n) && i < IFN
+{
+  return iw(n, i, IF_KIND) == IFK_WG && wdw(n, i, WGD_SOCK) != 0 && wdw(n, i, WGD_SOCK) <= SOCKS;
+}
+
+/// Is there work for nic_wg: a datagram waiting on a device's socket, or a
+/// peer that wants an initiation?
+fn wg_due(n: &Net, ticks: u64) -> bool
+  requires net_ok(n)
+{
+  let mut i = 0;
+  while i < IFN
+    invariant i <= IFN && net_ok(n)
+  {
+    let sock = wdw(n, i, WGD_SOCK);
+    if sock != 0 && sock <= SOCKS && iw(n, i, IF_KIND) == IFK_WG && udp_queued(n, sock - 1) > 0 {
+      return true;
+    }
+    i = i + 1;
+  }
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wg_wants(n, p, ticks) || wg_timer_due(n, p) {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// Starts the initiation peer p wants, if its device can send it. True if
+/// it used ent.
+fn wg_start_wanted(n: &mut Net, p: u64, wall: u64, ticks: u64, ent: &Bytes) -> bool
+  requires net_ok(n) && p < WGPN && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  let owner = wpw(n, p, WGP_OWNER);
+  if owner == 0 || owner > IFN {
+    return false;
+  }
+  let i = owner - 1;
+  if !wg_live(n, i) || wdw(n, i, WGD_HAS_KEY) != 1 || wpw(n, p, WGP_END) / END_SET % 2 != 1 {
+    return false;
+  }
+  wg_initiate(&mut n, i, p, wall, ticks, ent);
+  return true;
+}
+
+/// Drains up to eight datagrams of device i; stops after one that used ent.
+fn wg_drain(n: &mut Net, i: u64, wall: u64, ticks: u64, ent: &Bytes) -> bool
+  requires net_ok(n) && i < IFN && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  let mut buf = balloc(1536);
+  let mut used = false;
+  let mut k = 0;
+  while k < 8 && !used && wg_live(n, i)
+    invariant k <= 8 && blen(buf) == 1536 && i < IFN && net_ok(n)
+  {
+    let sock = wdw(n, i, WGD_SOCK);
+    if sock == 0 || sock > SOCKS {
+      k = 8;
+    } else {
+      let s = sock - 1;
+      let got = udp_recvfrom(&mut n, s, &mut buf, 1536, false);
+      if got == NO_SOCK {
+        k = 8;
+      } else {
+        let sip = sk_get(n, s, S_PEER_IP);
+        let sport = sk_get(n, s, S_PEER_PORT);
+        used = wg_on_datagram(&mut n, i, buf, got, sip, sport, wall, ticks, ent);
+        k = k + 1;
+      }
+    }
+  }
+  bfree(buf);
+  return used;
+}
+
+/// One pass of the protocol: starts a wanted initiation, else reads the
+/// sockets. ent: 40 random bytes, used at most once.
+fn wg_run(n: &mut Net, wall: u64, ticks: u64, ent: &Bytes)
+  requires net_ok(n) && blen(ent) == WG_ENT
+  ensures net_ok(n)
+{
+  wg_timers(&mut n);
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n) && blen(ent) == WG_ENT
+  {
+    if wg_wants(n, p, ticks) {
+      if wg_start_wanted(&mut n, p, wall, ticks, ent) {
+        return;
+      }
+    }
+    p = p + 1;
+  }
+  let mut i = 0;
+  while i < IFN
+    invariant i <= IFN && net_ok(n) && blen(ent) == WG_ENT
+  {
+    if wg_live(n, i) {
+      if wg_drain(&mut n, i, wall, ticks, ent) {
+        return;
+      }
+    }
+    i = i + 1;
+  }
+}
+
+/// nic_wg_due / nic_wg: wg_due and wg_run on the stack, if there is one.
+fn nic_wg_due(c: &Nic, ticks: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => { return wg_due(n, ticks); },
+  }
+}
+
+fn nic_wg(c: &mut Nic, wall: u64, ticks: u64, ent: &Bytes)
+  requires nic_ok(c) && blen(ent) == WG_ENT
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      wg_run(&mut n, wall, ticks, ent);
+      c = Nic::Up(n);
+    },
+  }
+}

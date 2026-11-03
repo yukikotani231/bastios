@@ -13,6 +13,11 @@ import "net.bastio";
 import "tcp.bastio";
 import "netns.bastio";
 import "rtnl.bastio";
+import "nft.bastio";
+import "genl.bastio";
+import "wgdev.bastio";
+import "wgproto.bastio";
+import "xfrm.bastio";
 import "snd.bastio";
 
 // The most processes; the tables grow to it (new_pid). Raising it: the
@@ -20,7 +25,7 @@ import "snd.bastio";
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 1024;
-const STRIDE: u64 = 78 + REGS_EXT;
+const STRIDE: u64 = 80 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const FORK_SPAN: u64 = 64;           // how far above the lowest free id a fork may number on (new_fork_pid)
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
@@ -116,6 +121,8 @@ const F_FSNEXT: u64 = 74 + REGS_EXT;
 const F_FSHOLD: u64 = 75 + REGS_EXT;
 const F_TDUSER: u64 = 76 + REGS_EXT;  // a leader: the user ticks of its threads that ended (src/lxrlimit.bastio)
 const F_TDSYS: u64 = 77 + REGS_EXT;   // ... and their system ns
+const F_RSSC: u64 = 79 + REGS_EXT;    // the last resident page count that could be taken (see anon_resident)
+const F_GSBASE: u64 = 78 + REGS_EXT;  // the user's GS base (arch_prctl ARCH_SET_GS; x86-64), loaded when the process enters user mode
 const F_XSIG: u64 = 70;              // Linux: the signal its parent gets when it ends, plus 1 (clone's exit_signal); 0 is SIGCHLD
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
@@ -599,7 +606,16 @@ const SYS_CSW: u64 = SYS_AFF + NPROC;      // two words per thread: times it gav
 const SYS_CSWT: u64 = SYS_CSW + NPROC * 2;      // one word: all the switches counted, exited threads' too (/proc/stat ctxt)
 const SYS_IO: u64 = SYS_CSWT + 1;      // four words per thread: characters read, characters written, read calls, write calls (/proc/PID/io, src/lxprio.bastio)
 const SYS_MNTEV: u64 = SYS_IO + NPROC * 4;      // one word: mount table changes so far (the event /proc/mounts polls report, src/lxmount.bastio)
-const SYS_LEN: u64 = SYS_MNTEV + 1;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
+const SYS_URING: u64 = SYS_MNTEV + 1;      // io_uring rings (src/lxuring.bastio): URING_N rows of URING_W words
+const URING_N: u64 = 8;
+const URING_W: u64 = 10;
+const SYS_ALG: u64 = SYS_URING + URING_N * URING_W;   // AF_ALG sockets (src/lxalg.bastio): ALG_N rows of ALG_W words
+const ALG_N: u64 = 16;
+const ALG_W: u64 = 32;
+const ALG_BUF: u64 = 8192;             // bytes of message an AF_ALG socket holds
+const ALG_KEYMAX: u64 = 128;           // the longest hmac key
+const ALGB_LEN: u64 = 131072;          // ALG_N * ALG_BUF
+const SYS_LEN: u64 = SYS_ALG + ALG_N * ALG_W;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 const AT_N: u64 = 32;
 const LR_N: u64 = 4;
@@ -989,6 +1005,7 @@ const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; wor
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const OF_INOTIFY: u64 = 16;           // an inotify instance: x the instance; word 3: nonblocking (src/lxinotify.bastio)
 const OF_SECCOMP: u64 = 18;           // a seccomp notifier: x the filter; word 3: nonblocking (src/lxseccomp.bastio)
+const OF_ALG: u64 = 21;               // an AF_ALG hash socket: x its slot; word 3: nonblocking (src/lxalg.bastio)
 const OF_BPF: u64 = 20;               // a bpf program (x the slot) or a cgroup device link (word 3: its cgroup + 1) (src/lxbpf.bastio)
 const OF_CONSOLE: u64 = 19;             // the console, in flight over an AF_UNIX socket (src/lxmsg.bastio): the receiver gets the console again, and this description is freed
 const OF_NETLINK: u64 = 17;           // a netlink socket: x its slot; word 3: nonblocking (src/lxnetlink.bastio)
@@ -1122,6 +1139,7 @@ const F_UNLCK: u64 = 2;
 const LO_CLOEXEC: u64 = 0x80000;
 const LO_PATH: u64 = 0x200000;         // a handle for the name only: no permission needed
 const LO_NOFOLLOW: u64 = 0x20000;      // a symbolic link at the end is ELOOP
+const LO_DIRECT: u64 = 0x4000;        // O_DIRECT on x86-64: kept for F_GETFL, not enforced
 const LO_NOATIME: u64 = 0x40000;       // for the owner and root only
 
 const EMFILE: u64 = 18446744073709551592;   // 2^64 - 24
@@ -1179,6 +1197,7 @@ struct Kernel {
   evt: Buf,             // timerfds and epoll instances (src/lxevent.bastio)
   ux: Buf,              // AF_UNIX channels and names (src/lxunix.bastio)
   uxb: Bytes,           // their bytes
+  algb: Bytes,          // the messages of the AF_ALG sockets: ALG_BUF bytes a slot (src/lxalg.bastio)
   maps: Buf,            // Linux MAP_SHARED file mappings, MAP_N per process (src/lxmem.bastio)
   holes: Buf,           // address space munmap gave back, HOLE_N ranges per process (src/lxmem.bastio)
   lazy: Buf,            // code pages read from a file when first touched, LZ_W words per process (src/lazy.bastio)
@@ -1291,7 +1310,7 @@ fn traced_by(k: &Kernel, p: u64, t: u64) -> bool
 }
 
 spec fn kok(k: &Kernel) -> bool {
-  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.cwdx) <= CWDX_LEN && len(k.crootx) <= CWDX_LEN && len(k.dpathx) <= DPATHX_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && (blen(k.lexb) == PATH_OUT || blen(k.lexb) == 0) && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN && (blen(k.xab) == 0 || blen(k.xab) == XAB_LEN)
+  mem_ok(k.mem) && spaces_ok(k.spaces) && fpus_ok(k.fpus) && ptab_ok(k.procs) && qok(k.q) && lineok(k.line) && len(k.lxfd) <= LXFD_LEN && len(k.ofd) == OFD_LEN && len(k.pipes) == PIPES_LEN && vlen(k.pipebuf) <= NPIPES && vfs_ok(k.fs) && nic_ok(k.nic) && len(k.sigact) <= SIGACT_LEN && len(k.cwd) <= CWD_LEN && len(k.croot) <= CWD_LEN && len(k.dpath) <= DPATH_LEN && len(k.cwdx) <= CWDX_LEN && len(k.crootx) <= CWDX_LEN && len(k.dpathx) <= DPATHX_LEN && len(k.alarms) == ALARMS_LEN && len(k.sigsave) <= SIGSAVE_LEN && len(k.evt) <= EVT_LEN && len(k.ux) == UX_LEN && blen(k.uxb) == UXB_LEN && blen(k.algb) == ALGB_LEN && (blen(k.lexb) == PATH_OUT || blen(k.lexb) == 0) && maps_ok(k.maps) && len(k.lazy) == LAZY_LEN && len(k.anon) == ANON_LEN && len(k.holes) == HOLES_LEN && len(k.locks) == LK_LEN && len(k.loops) == LOOP_LEN && len(k.ptys) == PTY_LEN && blen(k.ptyb) == PTYB_LEN && len(k.ipc) == IPC_LEN && blen(k.ipcb) == IPCB_LEN && len(k.sys) == SYS_LEN && len(k.rng) == RNG_LEN && len(k.inet6) == OFD_N && snd_ok(k.snd) && blen(k.mice) == MICE_LEN && blen(k.gfx) == GFX_LEN && len(k.mns) == MNS_LEN && blen(k.mstr) == MSTR_LEN && (blen(k.xab) == 0 || blen(k.xab) == XAB_LEN)
     && (k.shm is Store::Table ==> (pt_level(k.shm.Table) == 2 && pt_leases(k.shm.Table) == 0))
     && (k.txt is Store::Table ==> (pt_level(k.txt.Table) == 2 && pt_leases(k.txt.Table) == 0))
 }
@@ -1920,6 +1939,8 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
     pset(&mut procs, pid, reg_word(r), 0);
     r = r + 1;
   }
+  pset(&mut procs, pid, F_GSBASE, 0);
+  pset(&mut procs, pid, F_RSSC, 0);
   pset(&mut procs, pid, F_PROG, NPROGS);       // a file: NPROGS + 1 + its handle, for /proc/PID/exe
   if src.file && src.f < HFILES {
     pset(&mut procs, pid, F_PROG, NPROGS + 1 + src.f);

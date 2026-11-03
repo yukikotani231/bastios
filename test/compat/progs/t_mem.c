@@ -8,11 +8,23 @@
 #define FUTEX_WAIT 0
 #define FUTEX_WAKE 1
 #define FUTEX_CMP_REQUEUE 4
+#define FUTEX_WAKE_OP 5
+#define FUTEX_OP(op, oparg, cmp, cmparg) \
+    ((unsigned)(((op) & 0xf) << 28 | ((cmp) & 0xf) << 24 | ((oparg) & 0xfff) << 12 | ((cmparg) & 0xfff)))
 #include <pthread.h>
 #include <sched.h>
 #include <time.h>
 #include <sys/wait.h>
 
+static long memfree_kb(void) {
+    FILE *f = fopen("/proc/meminfo", "r");
+    char l[128];
+    long v = -1;
+    while (f && fgets(l, sizeof l, f))
+        if (!strncmp(l, "MemFree:", 8)) { v = atol(l + 8); break; }
+    if (f) fclose(f);
+    return v;
+}
 static char *cow_buf;
 static volatile int fast_phase;
 static char *fast_page;
@@ -224,6 +236,74 @@ int main(void) {
         EXPECT("FUTEX_WAKE on an unmapped word is EFAULT", gone != MAP_FAILED && munmap(gone, 4096) == 0 &&
                syscall(SYS_futex, gone, FUTEX_WAKE, 1, 0, 0, 0) == -1 && errno == EFAULT);
     }
+    {
+        /* FUTEX_WAKE_OP, the call musl's condition variables and Qt use:
+           it changes the word at addr2, then wakes waiters of addr and, if
+           the old word compares, of addr2. */
+        volatile int *w = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        int ok = w != MAP_FAILED;
+        if (ok) {
+            w[0] = 0; w[1] = 5; w[2] = 0;
+            long r1 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(1, 3, 0, 5));  /* w1 += 3 */
+            ok = r1 == 0 && w[1] == 8;
+            long r2 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(2 | 8, 4, 1, 0));  /* w1 |= 1 << 4 */
+            ok = ok && r2 == 0 && w[1] == 24;
+            long r3 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(3, 8, 0, 0));  /* w1 &= ~8 */
+            ok = ok && r3 == 0 && w[1] == 16;
+            long r4 = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(4, -1, 5, -1));  /* w1 ^= -1 */
+            ok = ok && r4 == 0 && w[1] == ~16;
+        }
+        EXPECT("FUTEX_WAKE_OP changes the second word", ok);
+        EXPECT("FUTEX_WAKE_OP with an unknown operation is ENOSYS", ok &&
+               syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(7, 1, 0, 0)) == -1 && errno == ENOSYS);
+        pid_t c = -1;
+        long a = -1, b = -1;
+        if (ok) {
+            w[0] = 0; w[1] = 0; w[2] = 0;
+            c = fork();
+            if (c == 0) {
+                struct timespec ts = {5, 0};
+                __sync_fetch_and_add(&w[2], 1);
+                long r = syscall(SYS_futex, (int *)w + 1, FUTEX_WAIT, 0, &ts, 0, 0);
+                _exit(r == 0 ? 0 : 1);
+            }
+            for (int i = 0; i < 3000000 && w[2] < 1; i++) sched_yield();
+            struct timespec d = {0, 200000000};
+            nanosleep(&d, 0);
+            /* wake nobody on w[0]; set w[1] to 1 and, as the old value is
+               0 == 0, wake the child that waits on w[1] */
+            a = syscall(SYS_futex, (int *)w, FUTEX_WAKE_OP, 1, 1, (int *)w + 1, FUTEX_OP(0, 1, 0, 0));
+            b = c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+        }
+        EXPECT("FUTEX_WAKE_OP wakes a waiter of the second word when the old value compares", c > 0 && a == 1 && b == 1 && w[1] == 1);
+    }
+#ifdef __x86_64__
+    {
+        /* arch_prctl(ARCH_SET_GS), which wasm2c's "segue" (Firefox's sandboxed libraries) uses: the base
+           %gs addresses with is kept per process, across switches to a process with another one. */
+        static long mine[2] = {0x1234, 0}, other[2] = {0x5678, 0};
+        unsigned long got = 0;
+        long v = 0, w = 0;
+        long r = syscall(SYS_arch_prctl, 0x1001, mine);
+        __asm__ volatile ("movq %%gs:0, %0" : "=r"(v));
+        pid_t c = fork();
+        if (c == 0) {
+            syscall(SYS_arch_prctl, 0x1001, other);
+            long x = 0;
+            for (int i = 0; i < 50; i++) sched_yield();
+            __asm__ volatile ("movq %%gs:0, %0" : "=r"(x));
+            _exit(x == 0x5678 ? 0 : 1);
+        }
+        for (int i = 0; i < 50; i++) sched_yield();
+        __asm__ volatile ("movq %%gs:0, %0" : "=r"(w));
+        int cst = 1;
+        int ok = c > 0 && waitpid(c, &cst, 0) == c && WIFEXITED(cst) && WEXITSTATUS(cst) == 0;
+        EXPECT("ARCH_SET_GS sets the base %gs addresses with, and a process keeps its own", r == 0 && v == 0x1234 && w == 0x1234 && ok);
+        EXPECT("ARCH_GET_GS gives it back", syscall(SYS_arch_prctl, 0x1004, &got) == 0 && got == (unsigned long)mine);
+        EXPECT("ARCH_SET_GS with a base that is not canonical is EPERM",
+               syscall(SYS_arch_prctl, 0x1001, 0x8000000000000000UL) == -1 && errno == EPERM);
+    }
+#endif
     EXPECT("mlock", (q = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0)) != MAP_FAILED && mlock(q, 4096) == 0);
     {
         int ok = 1;
@@ -401,6 +481,60 @@ int main(void) {
 #endif
                ok = ok && mprotect(r + 4096, 8192, PROT_NONE) == 0 && mprotect(r + 4096, 8192, PROT_READ | PROT_WRITE) == 0 && r[4096] == 0;
                ok = ok && munmap(r, 512u << 20) == 0;
+           }
+           ok; }));
+    /* /proc/PID/status of a process another processor is running: the count
+     * of its pages cannot be taken then, and VmRSS must not turn into the
+     * size of the whole window (8 TiB), which top and ps would show. */
+    EXPECT("VmRSS of a process running on another processor is not the size of the address space", ({
+           volatile int *stop = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+           pid_t c = fork();
+           if (c == 0) {
+               while (!*stop) { }
+               _exit(0);
+           }
+           int ok = c > 0;
+           for (int i = 0; ok && i < 200; i++) {
+               char path[64], buf[2048];
+               snprintf(path, sizeof path, "/proc/%d/status", (int)c);
+               int fd = open(path, O_RDONLY);
+               ssize_t n = fd >= 0 ? read(fd, buf, sizeof buf - 1) : -1;
+               if (fd >= 0) close(fd);
+               if (n <= 0) { ok = 0; break; }
+               buf[n] = 0;
+               const char *r = strstr(buf, "VmRSS:"), *z = strstr(buf, "VmSize:");
+               ok = r && z && atol(r + 6) < (1l << 20) && atol(z + 7) < (1l << 30);   /* kB: under 1 GiB, and 1 TiB */
+               sched_yield();
+           }
+           *stop = 1;
+           if (c > 0) waitpid(c, 0, 0);
+           ok; }));
+    /* MADV_DONTNEED gives private pages back: jemalloc (Firefox) and glibc's
+     * malloc hand memory back this way, and a kernel that kept the pages made
+     * Firefox grow to gigabytes. */
+    EXPECT("MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again", ({
+           size_t sz = 64u << 20;
+           long free0 = memfree_kb();
+           char *p = mmap(0, sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = p != MAP_FAILED;
+           if (ok) {
+               for (size_t i = 0; i < sz; i += 4096) p[i] = 1;
+               long used = free0 - memfree_kb();
+               ok = used > 56 * 1024;                       /* the pages are in memory */
+               ok = ok && madvise(p, sz, MADV_DONTNEED) == 0;
+               long back = memfree_kb() - (free0 - used);
+               ok = ok && back > 56 * 1024;                 /* and nearly all come back */
+               ok = ok && p[0] == 0 && p[sz / 2] == 0 && p[sz - 4096] == 0;
+               for (size_t i = 0; i < sz; i += 4096) p[i] = 2;   /* they work again */
+               ok = ok && p[4096] == 2 && p[sz - 4096] == 2;
+               pid_t c = fork();                            /* a copy-on-write page too */
+               if (c == 0) {
+                   madvise(p, sz, MADV_DONTNEED);
+                   _exit(p[8192] == 0 && p[sz - 4096] == 0 ? 0 : 1);
+               }
+               int st = 0;
+               ok = ok && c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && p[8192] == 2;
+               ok = ok && munmap(p, sz) == 0;
            }
            ok; }));
     return done();

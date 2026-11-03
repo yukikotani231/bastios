@@ -14,7 +14,8 @@
 // io_setup that finds the table full.
 //
 // Not done: the vectored requests (PREADV, PWRITEV), requests on sockets and
-// devices, an eventfd to tell (IOCB_FLAG_RESFD), io_pgetevents and io_uring.
+// devices, an eventfd to tell (IOCB_FLAG_RESFD) and io_pgetevents. io_uring is in
+// src/lxuring.bastio.
 
 import "lxkeys.bastio";
 

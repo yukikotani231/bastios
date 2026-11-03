@@ -127,6 +127,16 @@ fn route_if(n: &Net, ip: u64) -> u64
         return i;
       }
     }
+    // A WireGuard device takes its own subnet and what its peers are allowed
+    // to own (a /0 is not a route here: it would swallow the way to the peers).
+    if k == IFK_WG && iw(n, i, IF_NS) == n.ns && if_up(n, i) {
+      if if_ip(n, i) != 0 && ip / if_span(n, i) == if_ip(n, i) / if_span(n, i) {
+        return i;
+      }
+      if wg_peer_for(n, i, ip, 1) < WGPN {
+        return i;
+      }
+    }
     i = i + 1;
   }
   return NO_IF;
@@ -296,6 +306,7 @@ fn if_drop(n: &mut Net, i: u64)
   }
   let k = iw(n, i, IF_KIND);
   let p = iw(n, i, IF_PEER);
+  wg_clear(&mut n, i);
   iset(&mut n, i, IF_KIND, IFK_FREE);
   iset(&mut n, i, IF_FLAGS, 0);
   if k == IFK_VETH && 2 <= p && p < IFN && iw(n, p, IF_KIND) == IFK_VETH {
@@ -379,6 +390,8 @@ fn ns_end(n: &mut Net, s: u64)
     }
     t = t + 1;
   }
+  nf_ns_end(&mut n, s);
+  xs_ns_end(&mut n, s);                    // src/xfrm.bastio
   nsset(&mut n, s, NS_USED, 0);
 }
 
@@ -633,8 +646,20 @@ fn nat_flow(n: &mut Net, proto: u64, ip: u64, port: u64, peer: u64, pport: u64) 
   return free;
 }
 
-/// Forwards the packet that came in (flen bytes), in namespace n.ns.
+/// Forwards the packet that came in (flen bytes), in namespace n.ns. The
+/// packet filter's forward and postrouting hooks run here, so the output hook
+/// does not run again for the packet (NX_SKIP).
 fn fwd(n: &mut Net, flen: u64)
+  requires net_ok(n) && flen <= RX_BUF
+  ensures net_ok(n)
+{
+  let skip = nf_x(n, NX_SKIP);
+  nf_xset(&mut n, NX_SKIP, 1);
+  fwd_in(&mut n, flen);
+  nf_xset(&mut n, NX_SKIP, skip);
+}
+
+fn fwd_in(n: &mut Net, flen: u64)
   requires net_ok(n) && flen <= RX_BUF
   ensures net_ok(n)
 {
@@ -649,9 +674,15 @@ fn fwd(n: &mut Net, flen: u64)
   let src = be32(n.pkt, 26);
   let dst = be32(n.pkt, 30);
   let ports = flow_ports(n.pkt, total, false);
+  let o = route_if(n, dst);
+  if !nf_hook(&mut n, NF_FWD, 0, 14 + total, n.in_if, o) {
+    return;
+  }
   net_copy(&mut n, 14 + total);
   bset(&mut n.out, 22, cast[u8](ttl - 1));
-  let o = route_if(n, dst);
+  if !nf_hook(&mut n, NF_POST, 1, 14 + total, n.in_if, o) {
+    return;
+  }
   if o < IFN {
     ip_resum(&mut n);
     virt_send(&mut n, o, dst, 14 + total);
@@ -734,6 +765,9 @@ fn nat_back(n: &mut Net, flen: u64) -> bool
   }
   ip_resum(&mut n);
   l4_resum(&mut n, proto, total);
-  virt_send(&mut n, o, inner, 14 + total);
+  nf_retrack(&mut n, 14 + total);
+  if nf_hook(&mut n, NF_FWD, 1, 14 + total, IF_ETH, o) && nf_hook(&mut n, NF_POST, 1, 14 + total, IF_ETH, o) {
+    virt_send(&mut n, o, inner, 14 + total);
+  }
   return true;
 }
