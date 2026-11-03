@@ -87,11 +87,142 @@ fn anon_add_x(k: &mut Kernel, pid: u64, from: u64, to: u64, x: bool) -> bool
     i = i + 1;
   }
   if free == AN_N {
-    return false;
+    if anon_grow(&mut k, pid, from, to, x) {
+      return true;
+    }
+    free = anon_evict(&mut k, pid, to - from);
+    if free >= AN_N {
+      return false;
+    }
   }
   k.anon = set(k.anon, an_at(pid, free, 0), from + 1);
   k.anon = set(k.anon, an_at(pid, free, 1), to - from + xw);
   return true;
+}
+
+/// Every record of process pid is in use: the record nearest below range
+/// from .. to (or else the nearest above it) grows to take the range in, if
+/// every page between them is mapped, none of them belongs to a MAP_SHARED
+/// file mapping, and there are at most AN_GAP of them. A record may cover
+/// mapped pages, which stay ordinary memory, so the pages between keep what
+/// they hold; and no page that must fault (a hole munmap left, PROT_NONE,
+/// code or a swapped page not there yet) comes under it. This is what keeps
+/// a program that hands many scattered runs of pages back with
+/// MADV_DONTNEED (jemalloc's purge in Firefox) from using up the records,
+/// after which every mmap would map all its pages at once.
+fn anon_grow(k: &mut Kernel, pid: u64, from: u64, to: u64, x: bool) -> bool
+  requires kok(k) && pid < NPROC && from < to && to <= WPAGES
+  ensures kok(k)
+{
+  let mut below = AN_N;
+  let mut below_end = 0;
+  let mut above = AN_N;
+  let mut above_first = WPAGES + 1;
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && below <= AN_N && above <= AN_N && below_end <= from && above_first >= to && kok(k) && pid < NPROC && from < to && to <= WPAGES
+  {
+    let first1 = get(k.anon, an_at(pid, i, 0));
+    let pages = get(k.anon, an_at(pid, i, 1)) % AN_X;
+    if first1 != 0 && first1 - 1 <= WPAGES && pages <= WPAGES - (first1 - 1) && anon_xbit(k, pid, i) == x {
+      let first = first1 - 1;
+      let end = first + pages;
+      if end <= from && (below == AN_N || end > below_end) {
+        below = i;
+        below_end = end;
+      } else if first >= to && first < above_first {
+        above = i;
+        above_first = first;
+      }
+    }
+    i = i + 1;
+  }
+  let mut xw = 0;
+  if x {
+    xw = AN_X;
+  }
+  if below < AN_N && anon_gap_ok(&mut k, pid, below_end, from) {
+    let first1 = get(k.anon, an_at(pid, below, 0));
+    if first1 != 0 && first1 - 1 <= below_end {
+      let first = first1 - 1;
+      k.anon = set(k.anon, an_at(pid, below, 1), to - first + xw);
+      return true;
+    }
+  }
+  if above < AN_N && above_first <= WPAGES && anon_gap_ok(&mut k, pid, to, above_first) {
+    let pages = get(k.anon, an_at(pid, above, 1)) % AN_X;
+    if pages <= WPAGES - above_first {
+      k.anon = set(k.anon, an_at(pid, above, 0), from + 1);
+      k.anon = set(k.anon, an_at(pid, above, 1), above_first + pages - from + xw);
+      return true;
+    }
+  }
+  return false;
+}
+
+/// Every record of process pid is in use and none can grow (anon_grow):
+/// the record that spans the fewest pages, if fewer than want and at most
+/// AN_EVICT, has its pages mapped now (anon_reach), and its slot is given
+/// back for a range of want pages. AN_N if there is none. A few small runs
+/// of pages handed back with MADV_DONTNEED cost their pages again; a large
+/// mmap after them stays lazy.
+fn anon_evict(k: &mut Kernel, pid: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut best = AN_N;
+  let mut best_pages = smaller(want, AN_EVICT + 1);
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && best <= AN_N && kok(k) && pid < NPROC
+  {
+    let first1 = get(k.anon, an_at(pid, i, 0));
+    let pages = get(k.anon, an_at(pid, i, 1)) % AN_X;
+    if first1 != 0 && pages < best_pages {
+      best = i;
+      best_pages = pages;
+    }
+    i = i + 1;
+  }
+  if best >= AN_N {
+    return AN_N;
+  }
+  let first1 = get(k.anon, an_at(pid, best, 0));
+  if first1 == 0 || first1 - 1 > WPAGES || best_pages > WPAGES - (first1 - 1) {
+    return AN_N;
+  }
+  anon_reach(&mut k, pid, first1 - 1, first1 - 1 + best_pages);
+  if get(k.anon, an_at(pid, best, 0)) != 0 {
+    return AN_N;
+  }
+  return best;
+}
+
+/// Whether a record may grow over window pages from .. to of process pid
+/// (anon_grow): at most AN_GAP pages, every one mapped, none in a MAP_SHARED
+/// file mapping.
+fn anon_gap_ok(k: &mut Kernel, pid: u64, from: u64, to: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if from > to || to > WPAGES || to - from > AN_GAP {
+    return false;
+  }
+  if from == to {
+    return true;
+  }
+  let mut i = 0;
+  while i < MAP_N
+    invariant i <= MAP_N && kok(k) && pid < NPROC
+  {
+    let first1 = wget(k.maps, mp_at(pid, i, 0));
+    let pages = wget(k.maps, mp_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 < to && (first1 - 1 >= from || pages > from - (first1 - 1)) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, from, to, 0) == to - from;
 }
 
 /// Window pages from .. to of process pid are going away or being replaced

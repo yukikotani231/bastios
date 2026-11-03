@@ -844,6 +844,8 @@ t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
 t_mem: a MAP_SHARED mapping sees write(2)
 t_mem: a big window: 1.2 GiB of PROT_NONE reservations as the Go runtime makes, then 4 GiB of mmap touched at both ends
+t_mem: pages come when first touched even after 100 separate untouched mappings (a browser's thread stacks and heap chunks): then 4 GiB of mmap touched at both ends
+t_mem: pages come when first touched even after 400 scattered pages were handed back with MADV_DONTNEED (jemalloc's purge): then 4 GiB of mmap touched at both ends, and the pages between keep what they hold
 t_mem: an 8 MiB stack: 6 MiB of locals in a function
 t_mem: file for mapping
 t_mem: fork: parent and child each see only their own writes (copy-on-write), read(2) into a shared page, a second thread, mprotect and MADV_DONTNEED

@@ -436,6 +436,54 @@ int main(void) {
            }
            for (int i = 0; i < 6; i++) if (res[i] != MAP_FAILED) munmap(res[i], sz[i]);
            ok; }));
+    EXPECT("pages come when first touched even after 100 separate untouched mappings (a browser's thread stacks and heap chunks): then 4 GiB of mmap touched at both ends", ({
+           enum { NMAP = 100 };
+           char *small[NMAP], *sep[NMAP]; int ok = 1;
+           for (int i = 0; i < NMAP; i++) {         /* a read-only page after each keeps any two of them from touching */
+               small[i] = mmap(0, 64 << 10, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               sep[i] = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               ok = ok && small[i] != MAP_FAILED && sep[i] != MAP_FAILED;
+           }
+           size_t n = (size_t)4 << 30;
+           char *r = ok ? mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+           ok = ok && r != MAP_FAILED;
+           if (r != MAP_FAILED) {
+               r[0] = 1; r[n - 1] = 2;
+               ok = ok && r[0] == 1 && r[n - 1] == 2 && r[n / 2] == 0;
+               munmap(r, n);
+           }
+           for (int i = 0; i < NMAP; i++) {
+               if (small[i] != MAP_FAILED) {
+                   ok = ok && small[i][0] == 0 && small[i][(64 << 10) - 1] == 0;
+                   small[i][4096] = 7;
+                   ok = ok && small[i][4096] == 7;
+                   munmap(small[i], 64 << 10);
+               }
+               if (sep[i] != MAP_FAILED) munmap(sep[i], 4096);
+           }
+           ok; }));
+    EXPECT("pages come when first touched even after 400 scattered pages were handed back with MADV_DONTNEED (jemalloc's purge): then 4 GiB of mmap touched at both ends, and the pages between keep what they hold", ({
+           size_t m = 16 << 20;
+           unsigned char *h = mmap(0, m, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = h != MAP_FAILED;
+           if (ok) {
+               for (size_t i = 0; i < m; i += 4096) h[i] = (unsigned char)(i / 4096 % 251 + 1);
+               for (size_t i = 0; ok && i < 400; i++) ok = madvise(h + i * 8 * 4096, 4096, MADV_DONTNEED) == 0;
+               size_t n = (size_t)4 << 30;
+               char *r = ok ? mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+               ok = ok && r != MAP_FAILED;
+               if (r != MAP_FAILED) {
+                   r[0] = 1; r[n - 1] = 2;
+                   ok = ok && r[0] == 1 && r[n - 1] == 2 && r[n / 2] == 0;
+                   munmap(r, n);
+               }
+               for (size_t i = 0; ok && i < m; i += 4096) {
+                   size_t pg = i / 4096;
+                   ok = h[i] == (pg % 8 == 0 && pg < 3200 ? 0 : (unsigned char)(pg % 251 + 1));
+               }
+               munmap(h, m);
+           }
+           ok; }));
     EXPECT("mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do", ({
            char *want = (char *)0x4000000000ul;      /* 256 GiB: the user address space is 512 GiB from 0 */
            char *a = mmap(want, 64 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
