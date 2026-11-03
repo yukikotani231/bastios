@@ -198,7 +198,9 @@ const WGC_PW: u64 = 5;                  // WireGuard cookie state (src/wgproto.b
 const WGC_PBASE: u64 = 6784;            //   from here (XP_BASE + XP_N * XP_W) in Net.wgp,
 const WGC_DW: u64 = 8;                  //   and per interface slot, from
 const WGC_DBASE: u64 = 7104;            //   WGC_PBASE + WGPN * WGC_PW
-const WGPX_LEN: u64 = 8128;              // WGC_DBASE + IFN * WGC_DW: the length of Net.wgp
+const XL_W: u64 = 12;                   // IPsec lifetime state (src/xfrm.bastio): words per association row, kept by row,
+const XL_BASE: u64 = 8128;              //   from here (WGC_DBASE + IFN * WGC_DW) in Net.wgp
+const WGPX_LEN: u64 = 8896;              // XL_BASE + XSA_N * XL_W: the length of Net.wgp
 const WG_ALLOWED: u64 = 8;             //   allowed IPs a peer can hold
 const NATN: u64 = 256;                 // masqueraded flows (src/netns.bastio)
 const NAT_W: u64 = 5;                  // words per flow:
@@ -298,7 +300,7 @@ struct Net {
   nl_full: bool,      // ... and whether something did not fit
   nat: Buf,           // masqueraded flows, NAT_W words each
   wgd: Buf,           // WireGuard devices: WG_W words for each interface slot (src/wgdev.bastio)
-  wgp: Buf,           // WireGuard peers, WGP_W words each, then the IPsec security associations, XSA_W words each, then the policies, XP_W words each (src/xfrm.bastio)
+  wgp: Buf,           // WireGuard peers, WGP_W words each, then the IPsec security associations, XSA_W words each, then the policies, XP_W words each, then the WireGuard cookie state and the IPsec lifetimes (src/xfrm.bastio)
   nat_next: u64,      // the flow replaced when every one is in use
   nfw: Buf,           // the packet filter's tables, chains and rules (src/nft.bastio)
   nfb: Bytes,         // the text of its rules
