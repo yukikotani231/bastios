@@ -91,3 +91,12 @@ fakebwm: window 800x600 X11 :7
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a Python tag editor with PyQt 5, puddletag, draws its window on the X screen
+# timeout 400
+$ bb kill $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 2; bb mkdir -p /disk/m; bb tar -xf /disk/tag.tar -C /disk/m && bb rm /disk/tag.tar; /disk/fakebwm 300 'x' >/disk/fb9.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/m -d 8 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp USER=root /usr/bin/puddletag >/disk/pdt.out 2>&1 & until bb grep -q typed /disk/fb9.out; do bb sleep 1; done; bb cat /disk/fb9.out; bb ps | bb grep -q '/usr/bin/puddletag' && echo alive || bb cat /disk/pdt.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :8
+fakebwm: pixels drawn
+fakebwm: typed
+alive
