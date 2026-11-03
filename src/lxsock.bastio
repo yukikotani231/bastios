@@ -347,8 +347,8 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
     return lx_tcp_socket(&mut k, pid, kind, proto);   // src/lxtcp.bastio
   }
   let raw = kind % 16 == SOCK_RAW;
-  if raw && proto != IPPROTO_ICMP {
-    return EPROTONOSUPPORT;                 // raw sockets: ICMP only (ping)
+  if raw && proto != IPPROTO_ICMP && proto != IPPROTO_ESP {
+    return EPROTONOSUPPORT;                 // raw sockets: ICMP (ping), and ESP to send
   }
   if raw && !cap_has(k, pid, CAP_NET_RAW) {
     return EPERM;
@@ -360,7 +360,9 @@ fn lx_inet_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   if s >= SOCKS {
     return ENOBUFS;                         // every socket taken, or no network card
   }
-  if raw {
+  if raw && proto == IPPROTO_ESP {
+    sock_make_raw_esp(&mut k.nic, s);
+  } else if raw {
     sock_make_raw(&mut k.nic, s);
   }
   let h = ofd_new(&mut k, OF_SOCK, s);

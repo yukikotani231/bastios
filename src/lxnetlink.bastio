@@ -136,7 +136,7 @@ fn nl_socket(k: &mut Kernel, pid: u64, kind: u64, proto: u64) -> u64
   if t != SOCK_RAW && t != SOCK_DGRAM {
     return 18446744073709551522;            // ESOCKTNOSUPPORT
   }
-  if proto != NETLINK_ROUTE && proto != NETLINK_NETFILTER && proto != NETLINK_GENERIC {
+  if proto != NETLINK_ROUTE && proto != NETLINK_NETFILTER && proto != NETLINK_GENERIC && proto != NETLINK_XFRM {
     return EPROTONOSUPPORT;
   }
   // The first socket of a process takes its pid as port id, as on Linux;
@@ -291,6 +291,16 @@ fn nl_send(k: &mut Kernel, pid: u64, q: u64, buf: u64, n: u64) -> u64
       return EFAULT;
     }
     nic_genl_request(&mut k.nic, q, k.fs.xfer, n, net_admin(k, pid));
+    return n;
+  }
+  if nic_nl_proto(k.nic, q) == NETLINK_XFRM {
+    if n > XFER {
+      return EMSGSIZE;
+    }
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf, &mut k.fs.xfer, n) != n {
+      return EFAULT;
+    }
+    nic_xfrm_request(&mut k.nic, q, k.fs.xfer, n, net_admin(k, pid));
     return n;
   }
   if n > XFER {
