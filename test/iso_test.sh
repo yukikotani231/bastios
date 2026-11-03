@@ -925,6 +925,20 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = b"bterm: window" not in out[mark:]
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-U clears the Run prompt line")
             fails += not good
+            # Ctrl-V pastes the clipboard (/tmp/bwm.clip) into the Run prompt: the clipboard is made by a command that writes it.
+            time.sleep(1)
+            monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "echo"], "sendkey spc", *[f"sendkey {c}" for c in "true"],
+                    "sendkey spc", "sendkey shift-dot", *[f"sendkey {c}" for c in ("slash", "t", "m", "p", "slash", "b", "w", "m", "dot", "c", "l", "i", "p")], "sendkey ret")
+            time.sleep(2.5)
+            monitor("sendkey alt-f4")
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey alt-f2", "sendkey ctrl-v", "sendkey ret")
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-V in the Run prompt pastes the clipboard")
+            fails += not good
+            time.sleep(1)
+            monitor("sendkey alt-f4")
             # Tab completes the first word from /bin: mhel is mhello, whose output goes to a file.
             time.sleep(1)
             monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "mhel"], "sendkey tab")
