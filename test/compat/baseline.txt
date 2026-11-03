@@ -219,6 +219,30 @@ t_alg: rfc7539 refuses a changed tag
 t_alg: rfc7539(chacha20,poly1305) opens what it sealed, with associated data
 t_alg: the tag size can be set to 16 and not to 8
 t_alg: the text is copied: changing the buffer after the send changes nothing
+t_algskc: a 12-byte IV is refused, as is a 24-byte key
+t_algskc: a CBC message that is not whole blocks is EINVAL and gives nothing
+t_algskc: a bad address for the result leaves the message to be read again
+t_algskc: a buffer too small for the result is EINVAL and nothing is written
+t_algskc: a skcipher socket binds to cbc(aes) and ctr(aes)
+t_algskc: a socket with no key cannot be accepted
+t_algskc: an aead operation is refused on a skcipher: no associated length
+t_algskc: an empty message reads as nothing
+t_algskc: an skcipher cannot be bound as a hash or an aead
+t_algskc: an unknown skcipher is ENOENT, and so is a hash name of that type
+t_algskc: and a counter continues after the blocks it used
+t_algskc: and decrypts it
+t_algskc: cbc(aes) with a 128-bit key encrypts the SP 800-38A F.2.1 message
+t_algskc: cbc(aes) with a 256-bit key encrypts F.2.5 and decrypts it
+t_algskc: ctr(aes) takes any length: 20 bytes give the first 20 of the 32
+t_algskc: ctr(aes) with a 128-bit key encrypts the SP 800-38A F.5.1 message and decrypts it
+t_algskc: ctr(aes) with a 256-bit key gives F.5.5
+t_algskc: no operation, or no IV, is EINVAL
+t_algskc: reading into the memory that was sent is fine and gives the same result
+t_algskc: the IV goes on: a second message with no new IV continues the CBC chain
+t_algskc: the counter carries through all 16 bytes: ff..ff then 00..00
+t_algskc: the input is a copy: changing the memory after the send changes nothing
+t_algskc: the key is a copy: a socket accepted before a new key keeps the old one
+t_algskc: the result goes only to the buffer read into: the sent memory is not changed
 t_cloned: /proc/self/exe opens and is not sealed
 t_cloned: /proc/sys/kernel/cap_last_cap is readable and numeric
 t_cloned: F_ADD_SEALS seals it
