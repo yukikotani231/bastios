@@ -620,6 +620,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("edges", e0, e1)
             fails += not good
+            # Ctrl-Alt with an arrow key resizes it by 16 pixels (the client says what size it took).
+            mark_rs = len(out)
+            monitor("sendkey ctrl-alt-right")
+            good = until(b"bhello: resized 316 160", mark_rs)
+            monitor("sendkey ctrl-alt-down", "sendkey ctrl-alt-left")
+            good = good and until(b"bhello: resized 316 176", mark_rs) and until(b"bhello: resized 300 176", mark_rs)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Alt with the arrow keys resizes the window by 16 pixels")
+            fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
