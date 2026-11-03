@@ -834,6 +834,7 @@ fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
       pset(&mut k.procs, q, F_RESTART, 0);
       pset(&mut k.procs, q, F_FUTEX, 0);
       pset(&mut k.procs, q, F_STATE, READY);
+      pt_woken(&mut k, q);                // its tracer sees the call end (src/lxptrace.bastio)
       woken = woken + 1;
     }
     q = q + 1;

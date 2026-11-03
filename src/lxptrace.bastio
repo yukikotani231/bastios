@@ -162,6 +162,12 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
   if sig != 0 && !detach {
     skip = 1;
   }
+  if detach && t / TS_EV % 16 == EV_STOP && has_sig(pget(k.procs, c, F_SIGPEND), 5) {
+    // The SIGTRAP of a PTRACE_INTERRUPT not yet taken is the tracer's, not
+    // the process's: it goes with the tracer (strace -p let go of a process
+    // that then died of it).
+    pset(&mut k.procs, c, F_SIGPEND, pget(k.procs, c, F_SIGPEND) & !sbit(5));
+  }
   if detach {
     tr_put(&mut k, c, 0);
   } else {
@@ -192,6 +198,9 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
   }
   if t / TS_CUT % 2 == 1 && t / TS_EXIT % 2 == 1 && sys && !detach {
     next = next + TS_CUT;                   // the signal that cut the call short is next
+  }
+  if t / TS_ENTRY % 2 == 0 && sys && !detach && pget(k.procs, c, F_RESTART) != 0 {
+    next = sat_add(next, TS_RENTRY);              // it waits in a call whose start the tracer has not seen (since)
   }
   tr2_put(&mut k, c, sat_add(next, t / TS_XEV % 2 * TS_XEV));
   if t / TS_VFDONE % 2 == 1 && t / TS_EV % 16 == 2 && !detach {
@@ -242,18 +251,27 @@ fn pt_brk(k: &mut Kernel, p: u64)
 /// Process p is about to make a system call (it has been charged for none
 /// yet). If its tracer asked to see calls it stops before the call, which
 /// starts again when the tracer resumes it: true. The call's number is kept
-/// for the stop after it. A call that waits and starts again is not seen again.
+/// for the stop after it. A call that waits and starts again is not seen
+/// again, unless the tracer did not see it begin (it attached while the call
+/// waited) or saw it end (a signal cut it short and no handler ran): then,
+/// as on Linux, where it starts again by restart_syscall, it stops before it
+/// once more (TS_RENTRY), so the tracer's entries and exits keep pairing up.
 fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
-  let t = tr2_get(k, p);
-  if tr_tracer(k, p) == 0 || t % 2 == 0 || restarted {
+  let t0 = tr2_get(k, p);
+  if tr_tracer(k, p) == 0 || t0 % 2 == 0 {
     return false;
   }
   let nr = smaller(pget(k.procs, p, F_REGS + R_LXNR), 1023);
+  let again = t0 / TS_RENTRY % 2 == 1;
+  let t = t0 - t0 / TS_RENTRY % 2 * TS_RENTRY;
   if t / TS_NOENT % 2 == 1 {
     tr2_put(&mut k, p, TS_SYS + nr * TS_NR + t / TS_EV * TS_EV);
+    return false;
+  }
+  if restarted && !again {
     return false;
   }
   tr2_put(&mut k, p, TS_SYS + TS_ENTRY + nr * TS_NR + t / TS_EV * TS_EV);
@@ -262,6 +280,28 @@ fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
   }
   tr_stop(&mut k, p, 5 + 128 * (tr_opt(tr_get(k, p)) % 2));   // SIGTRAP, with 0x80 for PTRACE_O_TRACESYSGOOD
   return true;
+}
+
+/// Process q waited in a system call its tracer saw begin, and another
+/// process ended the call for it (futex_wake gives it 0): as on Linux, it
+/// stops after the call before it goes on, or its tracer would take the
+/// next call's entry for this one's exit. A call the tracer has not seen
+/// begin (TS_RENTRY) ends unseen.
+fn pt_woken(k: &mut Kernel, q: u64)
+  requires kok(k) && 1 <= q && q < NPROC
+  ensures kok(k)
+{
+  let t0 = tr2_get(k, q);
+  if tr_tracer(k, q) == 0 || t0 % 2 == 0 || t0 / TS_ENTRY % 2 == 1 || t0 / TS_EXIT % 2 == 1 {
+    return;
+  }
+  let t = t0 - t0 / TS_RENTRY % 2 * TS_RENTRY;
+  if t0 / TS_RENTRY % 2 == 1 {
+    tr2_put(&mut k, q, t);                  // the next call is the tracer's next entry
+    return;
+  }
+  tr2_put(&mut k, q, TS_SYS + TS_EXIT + t / TS_STEP % 2 * TS_STEP + t / TS_NR % 1024 * TS_NR + t / TS_EV * TS_EV);
+  tr_stop(&mut k, q, 5 + 128 * (tr_opt(tr_get(k, q)) % 2));
 }
 
 /// Whether process p is traced by a tracer that asked to hear of
