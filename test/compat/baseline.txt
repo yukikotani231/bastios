@@ -2401,3 +2401,45 @@ t_xfrm: the same SPI to another destination is another association
 t_xfrm: the same one again is EEXIST
 t_xfrm: the same selector in the other direction is another policy
 t_xfrm: two templates are EOPNOTSUPP
+t_xfrmlife: GETSA answers
+t_xfrmlife: a child in a new network namespace
+t_xfrmlife: a client socket
+t_xfrmlife: a datagram is echoed
+t_xfrmlife: a datagram passes at once
+t_xfrmlife: a packet sealed by hand with the right key and a new number is not echoed
+t_xfrmlife: a raw ESP socket opens
+t_xfrmlife: a veth pair, one end in the child's namespace
+t_xfrmlife: an association that was not limited is still there
+t_xfrmlife: and so is every later datagram
+t_xfrmlife: and the first use is recorded
+t_xfrmlife: both sides are configured without limits
+t_xfrmlife: eight forged packets are sent and none is echoed
+t_xfrmlife: four datagrams pass, the soft limit among them
+t_xfrmlife: four datagrams pass: the byte count was under the limit before the fourth
+t_xfrmlife: four seconds after that, none passes
+t_xfrmlife: go
+t_xfrmlife: it was added before it was first used
+t_xfrmlife: its bytes were counted
+t_xfrmlife: netlink sockets
+t_xfrmlife: no limit reads back as ~0
+t_xfrmlife: none passes after four seconds
+t_xfrmlife: one packet was carried
+t_xfrmlife: the association is gone
+t_xfrmlife: the child has a hard limit of 3 packets on what it receives
+t_xfrmlife: the child is ready
+t_xfrmlife: the child reports
+t_xfrmlife: the child stops
+t_xfrmlife: the child took in exactly three
+t_xfrmlife: the fifth does not
+t_xfrmlife: the fourth does not
+t_xfrmlife: the limits are reported
+t_xfrmlife: the parent has a hard limit of 3 seconds from its adding
+t_xfrmlife: the parent has a hard limit of 3 seconds from its first use
+t_xfrmlife: the parent has a hard limit of three packets and a byte
+t_xfrmlife: the parent has a soft limit of 2 and a hard limit of 4 packets
+t_xfrmlife: the parent is configured
+t_xfrmlife: the parent's end has an address
+t_xfrmlife: they did not use up the limit: three real datagrams pass
+t_xfrmlife: two more datagrams: the counters add up
+t_xfrmlife: unused for four seconds, it still carries a datagram
+t_xfrmlife: without IPsec the datagram is echoed
