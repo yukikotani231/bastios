@@ -110,6 +110,9 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
     }
     return w;
   }
+  if d.kind == K_SOCK && is_alg(k, pid, out) {
+    return alg_put_xfer(&mut k, pid, out, n);   // src/lxalg.bastio
+  }
   if d.kind == K_SOCK && is_unix(k, pid, out) {
     let w = ux_send_xfer(&mut k, pid, out, n);
     if w == SK_WAIT {
