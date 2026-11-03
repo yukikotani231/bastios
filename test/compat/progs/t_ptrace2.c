@@ -392,19 +392,21 @@ int main(void)
            ok = ok && event_of(c) == PTRACE_EVENT_STOP; long long v1 = -1, v2 = -1;
            int op1 = next_sc(c, &v1); write(p[1], "A", 1); int op2 = next_sc(c, &v2);
            ok = ok && op1 == 1 && v1 == SYS_read && op2 == 2 && v2 == 1;
+           if (!ok) kill(c, SIGKILL);
            ptrace(PTRACE_CONT, c, 0, 0); int s9 = wst(c); close(p[0]); close(p[1]);
            ok && WIFEXITED(s9) && WEXITSTATUS(s9) == 'A'; }));
     EXPECT("PTRACE_INTERRUPT of a tracee waiting in a traced read: the read ends, the event stop, then the read starts again", ({
            int p[2]; pipe(p); c = fork(); if (c == 0) { close(p[1]); body_read(p[0]); }
            usleep(50000); int ok = ptrace(PTRACE_SEIZE, c, 0, 0) == 0 && ptrace(PTRACE_INTERRUPT, c, 0, 0) == 0;
            ok = ok && event_of(c) == PTRACE_EVENT_STOP; long long v1 = -1, v2 = -1, v3 = -1, v4 = -1;
-           int op1 = next_sc(c, &v1); usleep(50000); ptrace(PTRACE_INTERRUPT, c, 0, 0);
-           int st2 = 0; ok = ok && waitpid(c, &st2, __WALL) == c && WIFSTOPPED(st2);
+           int op1 = next_sc(c, &v1); ptrace(PTRACE_SYSCALL, c, 0, 0); usleep(50000); ptrace(PTRACE_INTERRUPT, c, 0, 0);
+           int st2 = wst(c); ok = ok && WIFSTOPPED(st2);
            struct psi si; memset(&si, 0, sizeof si); ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
            int op2 = si.op; v2 = si.exit.rval;
            int op3 = next_sc(c, &v3);              /* the event stop: no system call stop */
            int op4 = next_sc(c, &v4); write(p[1], "B", 1); long long v5 = -1; int op5 = next_sc(c, &v5);
            ok = ok && op1 == 1 && v1 == SYS_read && op2 == 2 && op3 == 0 && op4 == 1 && v4 == SYS_read && op5 == 2 && v5 == 1;
+           if (!ok) kill(c, SIGKILL);
            ptrace(PTRACE_CONT, c, 0, 0); int s9 = wst(c); close(p[0]); close(p[1]);
            ok && WIFEXITED(s9) && WEXITSTATUS(s9) == 'B'; }));
 
