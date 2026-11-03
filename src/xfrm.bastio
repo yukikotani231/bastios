@@ -1,0 +1,485 @@
+// IPsec: NETLINK_XFRM, the interface `ip xfrm` and the key daemons use, for
+// the security associations of ESP.
+//
+//   XFRM_MSG_NEWSA     add (NLM_F_CREATE | NLM_F_EXCL) or replace (NLM_F_REPLACE) one
+//   XFRM_MSG_DELSA     delete the one a struct xfrm_usersa_id names
+//   XFRM_MSG_GETSA     read one, or all of them as a dump
+//   XFRM_MSG_FLUSHSA   delete all (of a protocol)
+//
+// An association is ESP (protocol 50) over IPv4, in transport or tunnel mode,
+// keyed by its destination address, its SPI and the namespace it was made in.
+// The only algorithm is AEAD rfc4106(gcm(aes)), XFRMA_ALG_AEAD, with a
+// 128-bit tag and a 128- or 256-bit key followed by the 4-byte salt that
+// RFC 4106 puts in the key material. Linux's other algorithms (the separate
+// cipher and authenticator pairs) are refused with EOPNOTSUPP: the kernel has
+// the ciphers for AEADs only, and an unauthenticated mode is not offered.
+//
+// All of it needs CAP_NET_ADMIN in the namespace, reading too: a key is
+// secret.
+//
+// Not done yet: policies (XFRM_MSG_*POLICY), the packet path (what is sent
+// through an association and what comes in), lifetimes and the replay
+// state's notifications.
+
+const NETLINK_XFRM: u64 = 6;
+const XFRM_MSG_NEWSA: u64 = 16;
+const XFRM_MSG_DELSA: u64 = 17;
+const XFRM_MSG_GETSA: u64 = 18;
+const XFRM_MSG_FLUSHSA: u64 = 28;
+const XFRMA_ALG_AUTH: u64 = 1;
+const XFRMA_ALG_CRYPT: u64 = 2;
+const XFRMA_ALG_COMP: u64 = 3;
+const XFRMA_ALG_AUTH_TRUNC: u64 = 20;
+const XFRMA_ALG_AEAD: u64 = 18;
+const IPPROTO_ESP: u64 = 50;
+const XFRM_USERSA: u64 = 224;             // struct xfrm_usersa_info
+const XFRM_USERSA_ID: u64 = 24;           // struct xfrm_usersa_id
+const XFRM_ALGO_AEAD_HEAD: u64 = 72;      // alg_name[64], alg_key_len, alg_icv_len
+const NE_PROTONOSUPPORT: u64 = 93;
+
+const XS_USED: u64 = 0;
+const XS_NS: u64 = 1;
+const XS_DST: u64 = 2;                    // the destination address (host order)
+const XS_SPI: u64 = 3;
+const XS_SRC: u64 = 4;
+const XS_MODE: u64 = 5;                   // 0 transport, 1 tunnel
+const XS_REQID: u64 = 6;
+const XS_RWIN: u64 = 7;                   // replay_window, in packets (0: no replay check)
+const XS_SEQ: u64 = 8;                    // the last sequence number sent
+const XS_KLEN: u64 = 9;                   // bytes of AES key: 16 or 32
+const XS_SALT: u64 = 10;
+const XS_KEY: u64 = 11;                   // the key, four words (32 bytes)
+const XS_FLAGS: u64 = 15;
+const XS_RTOP: u64 = 16;                  // the highest sequence number received
+const XS_RMAP: u64 = 17;                  // the replay bitmap, four words
+const XS_PKTS: u64 = 21;
+const XS_BYTES: u64 = 22;
+
+fn xs_get(n: &Net, i: u64, f: u64) -> u64
+  requires net_ok(n) && i < XSA_N && f < XSA_W
+{
+  return get(n.wgp, XSA_BASE + i * XSA_W + f);
+}
+
+fn xs_set(n: &mut Net, i: u64, f: u64, v: u64)
+  requires net_ok(n) && i < XSA_N && f < XSA_W
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, XSA_BASE + i * XSA_W + f, v);
+}
+
+/// Empties row i, its key too.
+fn xs_clear(n: &mut Net, i: u64)
+  requires net_ok(n) && i < XSA_N
+  ensures net_ok(n)
+{
+  let mut f = 0;
+  while f < XSA_W
+    invariant f <= XSA_W && net_ok(n)
+  {
+    xs_set(&mut n, i, f, 0);
+    f = f + 1;
+  }
+}
+
+/// The association with destination dst and SPI spi in namespace ns, or XSA_N.
+fn xs_find(n: &Net, ns: u64, dst: u64, spi: u64) -> u64
+  requires net_ok(n)
+  ensures result <= XSA_N
+{
+  let mut i = 0;
+  while i < XSA_N
+    invariant i <= XSA_N
+  {
+    if xs_get(n, i, XS_USED) == 1 && xs_get(n, i, XS_NS) == ns && xs_get(n, i, XS_DST) == dst && xs_get(n, i, XS_SPI) == spi {
+      return i;
+    }
+    i = i + 1;
+  }
+  return XSA_N;
+}
+
+/// A free row, or XSA_N.
+fn xs_free_row(n: &Net) -> u64
+  requires net_ok(n)
+  ensures result <= XSA_N
+{
+  let mut i = 0;
+  while i < XSA_N
+    invariant i <= XSA_N
+  {
+    if xs_get(n, i, XS_USED) == 0 {
+      return i;
+    }
+    i = i + 1;
+  }
+  return XSA_N;
+}
+
+/// A namespace ended: its associations go, keys erased.
+fn xs_ns_end(n: &mut Net, s: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  assert XSA_BASE == WGPN * WGP_W && WGPX_LEN == XSA_BASE + XSA_N * XSA_W;   // the table sits right after the WireGuard peers
+  let mut i = 0;
+  while i < XSA_N
+    invariant i <= XSA_N && net_ok(n)
+  {
+    if xs_get(n, i, XS_USED) == 1 && xs_get(n, i, XS_NS) == s {
+      xs_clear(&mut n, i);
+    }
+    i = i + 1;
+  }
+}
+
+/// The IPv4 address in the 16-byte address field at b[a..a + 16] (the
+/// first four bytes, network order); 0 if the other twelve are not zero.
+fn xs_addr(b: &Bytes, a: u64) -> u64
+  requires a + 16 <= blen(b)
+{
+  return be32(b, a);
+}
+
+/// Writes a 16-byte address field for an IPv4 address.
+fn xs_put_addr(n: &mut Net, ip: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  nl_b(&mut n, ip / 16777216 % 256);
+  nl_b(&mut n, ip / 65536 % 256);
+  nl_b(&mut n, ip / 256 % 256);
+  nl_b(&mut n, ip % 256);
+  let mut i = 0;
+  while i < 12
+    invariant i <= 12 && net_ok(n)
+  {
+    nl_b(&mut n, 0);
+    i = i + 1;
+  }
+}
+
+fn xs_zeros(n: &mut Net, k: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut i = 0;
+  while i < k
+    invariant i <= k && net_ok(n)
+  {
+    nl_b(&mut n, 0);
+    i = i + 1;
+  }
+}
+
+/// Whether the bytes of name b[a..a + 64) are exactly "rfc4106(gcm(aes))".
+fn xs_is_gcm_name(b: &Bytes, a: u64) -> bool
+  requires a + 64 <= blen(b)
+{
+  let want = "rfc4106(gcm(aes))";
+  let l = slen(want);
+  let mut i = 0;
+  while i < 64
+    invariant i <= 64 && a + 64 <= blen(b)
+  {
+    let mut c = 0;
+    if i < l {
+      c = cast[u64](sget(want, i));
+    }
+    if cast[u64](bget(b, a + i)) != c {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// XFRM_MSG_NEWSA: the message at b[at..end) (header, xfrm_usersa_info,
+/// attributes). Returns an errno, 0 for success.
+fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u64
+  requires net_ok(n) && at + 16 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  if !admin {
+    return NE_PERM;
+  }
+  if end - at < 16 + XFRM_USERSA {
+    return NE_INVAL;
+  }
+  let sa = at + 16;
+  let attrs = sa + XFRM_USERSA;
+  let family = rd16(b, sa + 212);
+  let mode = rd8(b, sa + 214);
+  let window = rd8(b, sa + 215);
+  if family != 2 {
+    return NE_AFNOSUPPORT;                // IPv4 only
+  }
+  if rd8(b, sa + 56 + 20) != IPPROTO_ESP {
+    return NE_PROTONOSUPPORT;             // xfrm_id.proto: ESP only
+  }
+  if mode > 1 {
+    return NE_INVAL;
+  }
+  if nla_find(b, attrs, end, XFRMA_ALG_AUTH) != 0 || nla_find(b, attrs, end, XFRMA_ALG_CRYPT) != 0
+      || nla_find(b, attrs, end, XFRMA_ALG_AUTH_TRUNC) != 0 || nla_find(b, attrs, end, XFRMA_ALG_COMP) != 0 {
+    return NE_OPNOTSUPP;                  // only the AEAD
+  }
+  let ak = nla_find(b, attrs, end, XFRMA_ALG_AEAD);
+  if ak == 0 {
+    return NE_INVAL;
+  }
+  let al = nla_len(b, ak);
+  if al < XFRM_ALGO_AEAD_HEAD || !xs_is_gcm_name(b, ak) {
+    return NE_NOENT;                      // no such algorithm
+  }
+  let kbits = rd32(b, ak + 64);
+  let icv = rd32(b, ak + 68);
+  if icv != 128 {
+    return NE_INVAL;
+  }
+  if kbits != 160 && kbits != 288 {
+    return NE_INVAL;                      // an AES-128 or AES-256 key and the 4-byte salt
+  }
+  if al - XFRM_ALGO_AEAD_HEAD < kbits / 8 {
+    return NE_INVAL;
+  }
+  let dst = xs_addr(b, sa + 56);
+  let spi = be32(b, sa + 56 + 16);
+  let src = xs_addr(b, sa + 80);
+  let ns = n.ns;
+  let had = xs_find(n, ns, dst, spi);
+  let mut row = had;
+  if had < XSA_N {
+    if fl / NLM_F_REPLACE % 2 == 0 {
+      return NE_EXIST;                    // NLM_F_EXCL, or just not asked to replace
+    }
+  } else {
+    if fl / NLM_F_CREATE % 2 == 0 {
+      return NE_SRCH;
+    }
+    row = xs_free_row(n);
+    if row >= XSA_N {
+      return NE_NOSPC;
+    }
+  }
+  xs_clear(&mut n, row);
+  xs_set(&mut n, row, XS_USED, 1);
+  xs_set(&mut n, row, XS_NS, ns);
+  xs_set(&mut n, row, XS_DST, dst);
+  xs_set(&mut n, row, XS_SPI, spi);
+  xs_set(&mut n, row, XS_SRC, src);
+  xs_set(&mut n, row, XS_MODE, mode);
+  xs_set(&mut n, row, XS_REQID, rd32(b, sa + 208));
+  xs_set(&mut n, row, XS_RWIN, smaller(window, 255));
+  xs_set(&mut n, row, XS_SEQ, 0);
+  let klen = kbits / 8 - 4;
+  xs_set(&mut n, row, XS_KLEN, klen);
+  xs_set(&mut n, row, XS_SALT, rd32(b, ak + XFRM_ALGO_AEAD_HEAD + klen));
+  let mut w = 0;
+  while w < 4
+    invariant w <= 4 && net_ok(n)
+  {
+    if w * 8 + 8 <= klen {
+      xs_set(&mut n, row, XS_KEY + w, rd64(b, ak + XFRM_ALGO_AEAD_HEAD + w * 8));
+    }
+    w = w + 1;
+  }
+  xs_set(&mut n, row, XS_FLAGS, rd8(b, sa + 216));
+  return 0;
+}
+
+/// Writes association i as an XFRM_MSG_NEWSA message (for a read or a dump).
+fn xs_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
+  requires net_ok(n) && i < XSA_N
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, XFRM_MSG_NEWSA, flags, seq, port);
+  // xfrm_selector: any address
+  xs_put_addr(&mut n, 0);
+  xs_put_addr(&mut n, 0);
+  xs_zeros(&mut n, 8);                    // the ports and their masks
+  nl_16(&mut n, 2);                       // family
+  xs_zeros(&mut n, 2);                    // prefix lengths: any address
+  xs_zeros(&mut n, 1);                    // proto
+  xs_zeros(&mut n, 3);
+  xs_zeros(&mut n, 4);                    // ifindex
+  xs_zeros(&mut n, 4);                    // user
+  // xfrm_id
+  xs_put_addr(&mut n, xs_get(n, i, XS_DST));
+  nl_b(&mut n, xs_get(n, i, XS_SPI) / 16777216 % 256);
+  nl_b(&mut n, xs_get(n, i, XS_SPI) / 65536 % 256);
+  nl_b(&mut n, xs_get(n, i, XS_SPI) / 256 % 256);
+  nl_b(&mut n, xs_get(n, i, XS_SPI) % 256);
+  nl_b(&mut n, IPPROTO_ESP);
+  xs_zeros(&mut n, 3);
+  xs_put_addr(&mut n, xs_get(n, i, XS_SRC));
+  // xfrm_lifetime_cfg: no limits (~0 bytes and packets)
+  let mut k = 0;
+  while k < 8
+    invariant k <= 8 && net_ok(n)
+  {
+    nl_32(&mut n, 4294967295);
+    nl_32(&mut n, 4294967295);
+    k = k + 1;
+  }
+  xs_zeros(&mut n, 32);                   // xfrm_lifetime_cur
+  xs_zeros(&mut n, 12);                   // xfrm_stats
+  nl_32(&mut n, 0);                       // seq
+  nl_32(&mut n, xs_get(n, i, XS_REQID));
+  nl_16(&mut n, 2);                       // family
+  nl_b(&mut n, xs_get(n, i, XS_MODE) % 256);
+  nl_b(&mut n, xs_get(n, i, XS_RWIN) % 256);
+  nl_b(&mut n, xs_get(n, i, XS_FLAGS) % 256);
+  xs_zeros(&mut n, 7);
+  // XFRMA_ALG_AEAD: the name, the key length and tag length in bits, the key and salt
+  let klen = xs_get(n, i, XS_KLEN);
+  if klen == 16 || klen == 32 {
+    nla_head(&mut n, XFRMA_ALG_AEAD, 72 + klen + 4);
+    let name = "rfc4106(gcm(aes))";
+    let l = slen(name);
+    let mut c = 0;
+    while c < 64
+      invariant c <= 64 && net_ok(n)
+    {
+      if c < l {
+        nl_b(&mut n, cast[u64](sget(name, c)));
+      } else {
+        nl_b(&mut n, 0);
+      }
+      c = c + 1;
+    }
+    nl_32(&mut n, (klen + 4) * 8);
+    nl_32(&mut n, 128);
+    let mut j = 0;
+    while j < klen
+      invariant j <= klen && klen <= 32 && net_ok(n)
+    {
+      nl_b(&mut n, xs_get(n, i, XS_KEY + j / 8) / (1 << (8 * (j % 8))) % 256);
+      j = j + 1;
+    }
+    nl_32(&mut n, xs_get(n, i, XS_SALT));
+  }
+  nl_end(&mut n);
+}
+
+/// The association a struct xfrm_usersa_id at b[a..) names, or XSA_N.
+fn xs_by_id(n: &Net, b: &Bytes, a: u64, end: u64) -> u64
+  requires net_ok(n) && a <= end && end <= blen(b)
+  ensures result <= XSA_N
+{
+  if end - a < XFRM_USERSA_ID || rd8(b, a + 22) != IPPROTO_ESP {
+    return XSA_N;
+  }
+  return xs_find(n, n.ns, xs_addr(b, a), be32(b, a + 16));
+}
+
+/// One request on a NETLINK_XFRM socket: the message at b[at..end). Returns
+/// an errno (0: none; the answer, if any, is queued).
+fn xfrm_message(n: &mut Net, b: &Bytes, at: u64, end: u64, kind: u64, fl: u64, seq: u64, port: u64, admin: bool) -> u64
+  requires net_ok(n) && at + 16 <= end && end <= blen(b)
+  ensures net_ok(n)
+{
+  if kind == XFRM_MSG_NEWSA {
+    return xs_new(&mut n, b, at, end, fl, admin);
+  }
+  if !admin {
+    return NE_PERM;
+  }
+  if kind == XFRM_MSG_FLUSHSA {
+    let mut i = 0;
+    while i < XSA_N
+      invariant i <= XSA_N && net_ok(n)
+    {
+      if xs_get(n, i, XS_USED) == 1 && xs_get(n, i, XS_NS) == n.ns {
+        xs_clear(&mut n, i);
+      }
+      i = i + 1;
+    }
+    return 0;
+  }
+  if kind == XFRM_MSG_DELSA {
+    let i = xs_by_id(n, b, at + 16, end);
+    if i >= XSA_N {
+      return NE_SRCH;
+    }
+    xs_clear(&mut n, i);
+    return 0;
+  }
+  if kind == XFRM_MSG_GETSA {
+    if fl / 256 % 4 == 3 {
+      let mut i = 0;
+      while i < XSA_N
+        invariant i <= XSA_N && net_ok(n)
+      {
+        if xs_get(n, i, XS_USED) == 1 && xs_get(n, i, XS_NS) == n.ns {
+          xs_put(&mut n, i, seq, port, NLM_F_MULTI);
+        }
+        i = i + 1;
+      }
+      nl_done(&mut n, seq, port);
+      return 0;
+    }
+    let i = xs_by_id(n, b, at + 16, end);
+    if i >= XSA_N {
+      return NE_SRCH;
+    }
+    xs_put(&mut n, i, seq, port, 0);
+    return 0;
+  }
+  return NE_OPNOTSUPP;
+}
+
+/// The NETLINK_XFRM messages in b[0..len) sent on socket q: how many bytes
+/// were taken (whole messages).
+fn xfrm_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires net_ok(n) && q < NLS && len <= blen(b)
+  ensures net_ok(n)
+{
+  let was = n.ns;
+  let ns = get(n.nls, q * NL_W + NL_NS);
+  let port = get(n.nls, q * NL_W + NL_PORT);
+  if ns >= NNET || !ns_live(n, ns) {
+    return len;
+  }
+  n.ns = ns;
+  nlw_open(&mut n, q);
+  let mut at = 0;
+  let mut go = true;
+  while go && at < len && len - at >= 16
+    invariant at <= len && len <= blen(b) && net_ok(n) && ns < NNET
+  {
+    let ml = rd32(b, at);
+    if ml < 16 {
+      go = false;
+      at = len;
+    } else if ml > len - at {
+      go = false;
+    } else {
+      let kind = rd16(b, at + 4);
+      let fl = rd16(b, at + 6);
+      let seq = rd32(b, at + 8);
+      let end = at + ml;
+      let mut e = 0;
+      let mut quiet = false;
+      if kind < 16 {
+        quiet = true;                     // NLMSG_NOOP, _ERROR, _DONE
+      } else {
+        e = xfrm_message(&mut n, b, at, end, kind, fl, seq, port, admin);
+        quiet = e == 0 && (kind == XFRM_MSG_GETSA);
+      }
+      if e != 0 || (!quiet && fl / NLM_F_ACK % 2 == 1) {
+        nl_error(&mut n, b, at, e, port);
+      }
+      let step = (ml + 3) / 4 * 4;
+      if step > len - at {
+        at = end;
+        go = false;
+      } else {
+        at = at + step;
+      }
+    }
+  }
+  nlw_close(&mut n, q);
+  n.ns = was;
+  return len;
+}
