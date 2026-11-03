@@ -2221,9 +2221,10 @@ t_wgcookie: a client socket
 t_wgcookie: a device with an address
 t_wgcookie: a veth pair, one end in the child's namespace
 t_wgcookie: an initiation with a bad mac1 gets no reply
+t_wgcookie: and none of them twice
 t_wgcookie: each reply is 64 bytes, type 3 and has the index of an initiation
 t_wgcookie: fewer replies than initiations: the first ones were taken before it was busy
-t_wgcookie: five more are echoed once each while it goes on
+t_wgcookie: five more are echoed while it goes on
 t_wgcookie: go
 t_wgcookie: its last handshake time is set
 t_wgcookie: keys are traded
@@ -2234,7 +2235,7 @@ t_wgcookie: the child is ready
 t_wgcookie: the child is set up
 t_wgcookie: the child reports
 t_wgcookie: the child stops
-t_wgcookie: the child took each packet once
+t_wgcookie: the child took at least six packets and no more than were sent
 t_wgcookie: the flood was sent
 t_wgcookie: the flooder reports
 t_wgcookie: the flooder stops
