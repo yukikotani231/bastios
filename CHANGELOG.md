@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm`: Ctrl-V in the Alt-F2 Run prompt puts in the first line of the clipboard (`/tmp/bwm.clip`).
 - `bwm`: a middle click on a window's task bar button closes the window, as Alt-F4 does for the focused one.
 - `bwm`: a click on the task bar button of the focused window minimizes it (a click on any other button still raises it).
 - IPsec SA lifetimes: `xfrm_lifetime_cfg` is stored and reported by `GETSA` with the `xfrm_lifetime_cur` counters; a hard packet, byte, add-time or first-use limit deletes the association before it is used again, for sealing and for opening, and forged packets do not count. Soft limits are reported only. `t_xfrmlife` checks it.
