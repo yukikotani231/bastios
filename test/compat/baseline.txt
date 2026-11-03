@@ -1368,10 +1368,12 @@ t_ptrace: and at its exit the result, as an error
 t_ptrace: the tracee goes on to its end
 t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH
 t_ptrace2: PTRACE_DETACH with a signal delivers it
+t_ptrace2: PTRACE_DETACH right after PTRACE_INTERRUPT cut a traced read short: the process reads on and is not killed by SIGTRAP
 t_ptrace2: PTRACE_GETFPREGS gives the SSE state
 t_ptrace2: PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer
 t_ptrace2: PTRACE_GETSIGINFO at a fault: SIGSEGV, SEGV_MAPERR and the address
 t_ptrace2: PTRACE_GETSIGINFO at a signal stop gives the signal and its sender
+t_ptrace2: PTRACE_INTERRUPT of a tracee waiting in a traced read: the read ends, the event stop, then the read starts again
 t_ptrace2: PTRACE_LISTEN keeps a group-stopped tracee stopped; SIGCONT then wakes it
 t_ptrace2: PTRACE_O_EXITKILL kills the tracee when the tracer dies
 t_ptrace2: PTRACE_O_TRACECLONE reports a new thread, which is traced
@@ -1385,9 +1387,11 @@ t_ptrace2: PTRACE_POKEDATA of an unmapped address is EIO
 t_ptrace2: PTRACE_SEIZE reports a group-stop as PTRACE_EVENT_STOP
 t_ptrace2: PTRACE_SETOPTIONS with an unknown option is EINVAL
 t_ptrace2: PTRACE_SINGLESTEP from a signal stop inside raise() stops with SIGTRAP one instruction on, though SIGTRAP is blocked
+t_ptrace2: PTRACE_SYSCALL after seizing a tracee that waits in read: the first stop is the read's entry, then its exit
 t_ptrace2: SIGKILL ends a tracee in a signal stop
 t_ptrace2: a request on a process that is not a tracee of the caller is ESRCH
 t_ptrace2: a signal the tracee blocks does not stop it
+t_ptrace2: a traced futex wait that another process wakes stops at its exit with 0, before the next call
 t_ptrace2: a tracee runs on when its tracer dies
 t_ptrace2: a tracee stopped when its tracer dies runs again
 t_ptrace2: a tracer attaching to a stopped process sees it stop
