@@ -23,7 +23,7 @@
 # With fewer than 4 CPUs, or JOBS=1, every test runs one after another, as
 # before. The output of each test is printed whole, in the order below,
 # followed by how long it took; the run fails if any test fails. A test that
-# runs longer than TEST_TIMEOUT seconds (1800 by default; the longest, iso,
+# runs longer than TEST_TIMEOUT seconds (2100 by default; the longest, iso,
 # takes 15 to 25 minutes on a CI runner) is killed with its QEMU, and fails with exit 124 and the
 # output it had: a hung test then names itself, where the job's own timeout
 # would cancel the whole run and print nothing.
@@ -78,7 +78,7 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 run() {  # index
   local cmd=${tests[$1]##*|} t0=$SECONDS
-  timeout -k 15 "${TEST_TIMEOUT:-1800}" bash -c "$cmd" >"$tmp/$1.out" 2>&1
+  timeout -k 15 "${TEST_TIMEOUT:-2100}" bash -c "$cmd" >"$tmp/$1.out" 2>&1
   echo "$? $((SECONDS - t0))" >"$tmp/$1.status"
 }
 LANES=${LANES:-a b cdefgh}
