@@ -924,6 +924,7 @@ t_misc: voluntary_ctxt_switches counts the sleeps, and /proc/stat ctxt and getru
 t_misc: /proc/self/io counts the read and write calls and their characters
 t_misc: seccomp filter denies getpid
 t_misc: forty stacked seccomp filters
+t_misc: seccomp SECCOMP_RET_TRAP: the SIGSYS handler sees the call's registers as they were and answers it
 t_misc: statfs
 t_misc: strtod
 t_misc: sync

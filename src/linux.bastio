@@ -430,7 +430,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return KEEP;                          // stopped for its tracer (SECCOMP_RET_TRACE): the call starts again when it goes on
     }
     if !v.run {
-      ret(&mut k.procs, pid, v.ret);
+      if !sc_rollback(v.ret) {
+        ret(&mut k.procs, pid, v.ret);
+      }
       return KEEP;
     }
   }
