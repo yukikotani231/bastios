@@ -121,6 +121,7 @@ fn xs_ns_end(n: &mut Net, s: u64)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  assert XSA_BASE == WGPN * WGP_W && WGPX_LEN == XSA_BASE + XSA_N * XSA_W;   // the table sits right after the WireGuard peers
   let mut i = 0;
   while i < XSA_N
     invariant i <= XSA_N && net_ok(n)
