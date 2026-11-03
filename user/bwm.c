@@ -2527,7 +2527,7 @@ int main(int argc, char **argv)
                             last_click_ms = now;
                             last_click_maxed = under->maxed;
                         }
-                        drag = !dbl && my < under->y + TITLE_H ? under : NULL;
+                        drag = !dbl && (my < under->y + TITLE_H || k_alt) ? under : NULL;   /* Alt-drag moves a window by any part of it */
                         if (drag)
                             under->maxed = 0;                    /* moved by hand: no longer "maximized" */
                         if (edges) {

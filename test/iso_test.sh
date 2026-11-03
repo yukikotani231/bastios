@@ -590,6 +590,19 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and at(100, 200) == (255, 255, 0) and at(350, 200) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) a shared window is resized with new shared memory")
             fails += not good
+            # With Alt held, a drag from inside the window (the pointer is at its grip, 220 right and
+            # 105 down of where this puts it, inside the contents) moves it, and the client sees no click.
+            mark_ad = len(out)
+            monitor("mouse_move -220 -105", "sendkey alt 4000")
+            time.sleep(0.5)
+            monitor("mouse_button 1", "mouse_move 50 0", "mouse_move 50 0", "mouse_button 0")
+            time.sleep(1)
+            w, h, px = screendump()
+            good = at(100, 200) != (255, 255, 0) and at(250, 200) == (255, 255, 0) and b"bhello: mouse" not in bytes(out[mark_ad:])
+            print(("ok  " if good else "FAIL"), f"({name}) an Alt-drag from inside a window moves it without a click for the client")
+            if not good:
+                print("pixels", [at(x, 200) for x in (100, 250, 350)])
+            fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
