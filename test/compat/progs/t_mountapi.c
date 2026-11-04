@@ -1,6 +1,8 @@
 /* The new mount API: fsopen, fsconfig, fsmount and move_mount make a tmpfs
  * on a directory with the options asked for, and refuse what Linux refuses. */
 #include "compat.h"
+#include <sys/statvfs.h>
+#include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/mount.h>
 #include <sys/stat.h>
@@ -106,6 +108,35 @@ int main(void) {
     if (cl >= 0)
         close(cl);
     EXPECT("it unmounts", umount("/tmp/oc_dst") == 0 && access("/tmp/oc_dst/f", F_OK) != 0);
+
+    /* Mount attributes of a bind mount: set when it is made, changed by a remount. */
+    mkdir("/tmp/oc_dst", 0755);
+    int xf = open("/tmp/oc_src/run", O_CREAT | O_WRONLY, 0755);
+    if (xf >= 0) {
+        write(xf, "#!/bin/sh\nexit 0\n", 17);
+        close(xf);
+    }
+    EXPECT("a bind mount", mount("/tmp/oc_src", "/tmp/oc_dst", NULL, MS_BIND, NULL) == 0);
+    struct statvfs sv;
+    EXPECT("it has no attributes", statvfs("/tmp/oc_dst", &sv) == 0 && !(sv.f_flag & (ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RDONLY)));
+    EXPECT("remounting it sets nosuid, nodev, noexec and read-only",
+           mount(NULL, "/tmp/oc_dst", NULL, MS_BIND | MS_REMOUNT | MS_NOSUID | MS_NODEV | MS_NOEXEC | MS_RDONLY, NULL) == 0);
+    EXPECT("statvfs reports them", statvfs("/tmp/oc_dst", &sv) == 0 && (sv.f_flag & ST_NOSUID) && (sv.f_flag & ST_NODEV) && (sv.f_flag & ST_NOEXEC) && (sv.f_flag & ST_RDONLY));
+    EXPECT("so does /proc/mounts", has("/tmp/oc_dst", "ro") && has("/tmp/oc_dst", "nosuid") && has("/tmp/oc_dst", "nodev") && has("/tmp/oc_dst", "noexec"));
+    {
+        pid_t xp = fork();
+        if (xp == 0) {
+            execl("/tmp/oc_dst/run", "run", (char *)0);
+            _exit(errno == EACCES ? 0 : 1);
+        }
+        int xs = 0;
+        waitpid(xp, &xs, 0);
+        EXPECT("noexec refuses to run a file in it", WIFEXITED(xs) && WEXITSTATUS(xs) == 0);
+    }
+    EXPECT("the source is not changed", mount("/tmp/oc_src", "/tmp/oc_dst", NULL, MS_BIND | MS_REMOUNT, NULL) == 0 && statvfs("/tmp/oc_src", &sv) == 0 && !(sv.f_flag & ST_NOEXEC));
+    EXPECT("a remount without flags clears them", statvfs("/tmp/oc_dst", &sv) == 0 && !(sv.f_flag & (ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RDONLY)));
+    umount("/tmp/oc_dst");
+    unlink("/tmp/oc_src/run");
     unlink("/tmp/oc_src/f");
     rmdir("/tmp/oc_src");
     rmdir("/tmp/oc_dst");

@@ -1032,11 +1032,11 @@ fn lx_statfs_path(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
     r = lx_statfs(&mut k, pid, b, PROC_MAGIC, 0);
   } else if vfs_in_mount(&mut k.fs, pn, false) {
     let mf = vfs_path_mflags(&mut k.fs, pn);
-    r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC, mf);
+    r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC, mf | lpath_stflags(k));
   } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
     r = lx_statfs_disk(&mut k, pid, b);   // disk/ itself, or a name under it
   } else {
-    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC, 0);
+    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC, lpath_stflags(k));
   }
   return r;
 }

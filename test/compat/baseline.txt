@@ -1128,6 +1128,14 @@ t_mountapi: move_mount attaches the clone
 t_mountapi: open_tree with a clone of a directory is a handle
 t_mountapi: the clone is attached once
 t_mountapi: the target shows the files
+t_mountapi: a bind mount
+t_mountapi: a remount without flags clears them
+t_mountapi: it has no attributes
+t_mountapi: noexec refuses to run a file in it
+t_mountapi: remounting it sets nosuid, nodev, noexec and read-only
+t_mountapi: so does /proc/mounts
+t_mountapi: statvfs reports them
+t_mountapi: the source is not changed
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
