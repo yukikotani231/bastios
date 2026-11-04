@@ -931,6 +931,7 @@ t_mem: MAP_SHARED file mapped by two processes
 t_mem: MAP_SHARED file mapping across fork
 t_mem: a writable MAP_SHARED mapping is written back after seventy read-only ones
 t_mem: a MAP_SHARED mapping from a read-only descriptor sees what is written to the file later, in another process too, and cannot become writable
+t_mem: seventy read-only MAP_SHARED mappings still read their file after a writable mapping takes a record
 t_mem: forty writable MAP_SHARED mappings are each written back
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap

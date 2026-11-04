@@ -1458,8 +1458,9 @@ fn map_no_write(k: &Kernel, pid: u64, from: u64, to: u64) -> bool
 const MP_GUARD: u64 = 2;
 
 /// Guarded record i of process pid gives up its slot (map_record): each
-/// page of the page cache it maps becomes a private copy first, read-only,
-/// as such a mapping was before records could guard it. It then no longer
+/// page of the page cache it maps becomes a private copy first, read-only
+/// (not executable, whatever the mapping's PROT_EXEC), as such a mapping
+/// was before records could guard it. It then no longer
 /// sees later writes to the file. A page that finds no memory for its copy
 /// is left unmapped. False, with the record kept guarded, if the pages
 /// cannot change now: win_op leaves a space alone while another processor
@@ -1486,7 +1487,7 @@ fn map_unguard(k: &mut Kernel, pid: u64, i: u64) -> bool
       win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, p, p + 1, 0);
       if lx_map_pages(&mut k.mem, &mut k.spaces, pid, p, p + 1, false) {
         force_to_user(&mut k.spaces, pid, USER_BASE + p * 4096, k.fs.xfer, XFER);
-        win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, p, p + 1, 0);
+        win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, p, p + 1, 1);   // read-only (code there no longer runs)
       }
     }
     p = p + 1;

@@ -201,6 +201,25 @@ int main(void) {
                if (r >= 0) close(r);
                if (w >= 0) close(w);
                ok; }));
+    EXPECT("seventy read-only MAP_SHARED mappings still read their file after a writable mapping takes a record", ({
+               int ok = 1;
+               char *r[70];
+               for (int i = 0; i < 70; i++) {
+                   int f = open("cm_f", O_RDONLY);
+                   r[i] = f >= 0 ? mmap(0, 4096, PROT_READ, MAP_SHARED, f, 0) : MAP_FAILED;
+                   ok &= r[i] != MAP_FAILED;
+                   if (f >= 0) close(f);
+               }
+               int g = open("cm_g", O_RDWR | O_CREAT | O_TRUNC, 0644);
+               char *m = g >= 0 && ftruncate(g, 4096) == 0 ? mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, g, 0) : MAP_FAILED;
+               ok &= m != MAP_FAILED;
+               if (m != MAP_FAILED) { m[0] = 'w'; munmap(m, 4096); }
+               char c = 0;
+               ok &= g >= 0 && pread(g, &c, 1, 0) == 1 && c == 'w';
+               for (int i = 0; i < 70; i++)
+                   if (r[i] != MAP_FAILED) { ok &= r[i][0] == 'M' && r[i][1] == 'U'; munmap(r[i], 4096); }
+               if (g >= 0) { close(g); unlink("cm_g"); }
+               ok; }));
     EXPECT("forty writable MAP_SHARED mappings are each written back", ({
                int ok = 1;
                char *m[40];
