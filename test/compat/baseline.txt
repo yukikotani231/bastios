@@ -1112,6 +1112,11 @@ t_mountapi: open_tree of a missing path is ENOENT
 t_mountapi: open_tree on a bad descriptor is EBADF
 t_mountapi: open_tree with a bad flag is EINVAL
 t_mountapi: open_tree without a clone is a handle
+t_mountapi: its files are not in the target yet
+t_mountapi: move_mount attaches the clone
+t_mountapi: open_tree with a clone of a directory is a handle
+t_mountapi: the clone is attached once
+t_mountapi: the target shows the files
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
