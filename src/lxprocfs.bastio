@@ -1860,6 +1860,14 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
           if mf / 8 % 2 == 1 {
             a = put_s(&mut o, a, ",noexec");
           }
+          if mf / 1024 % 2 == 1 {
+            a = put_s(&mut o, a, ",noatime");
+          } else {
+            a = put_s(&mut o, a, ",relatime");     // the default; atime is kept as relatime keeps it
+          }
+          if mf / 2048 % 2 == 1 {
+            a = put_s(&mut o, a, ",nodiratime");
+          }
           a = put_s(&mut o, a, " 0 0\n");
         }
       }
