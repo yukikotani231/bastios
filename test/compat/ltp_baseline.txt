@@ -118,6 +118,7 @@ inotify06
 inotify07
 inotify09
 inotify11
+inotify12
 io_cancel01
 io_destroy02
 io_getevents01

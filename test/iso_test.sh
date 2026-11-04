@@ -848,6 +848,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = before[w * 3 * 745:] != after[w * 3 * 745:]       # the button is gone from the bar
             print(("ok  " if good else "FAIL"), f"({name}) a middle click on a task bar button closes the window")
             fails += not good
+            # A double click on the empty desktop starts a terminal window.
+            monitor("mouse_move 0 -250", "mouse_move 0 -50")
+            time.sleep(0.5)
+            mark = len(out)
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a double click on the empty desktop starts a terminal")
+            fails += not good
+            time.sleep(1)
+            monitor("sendkey alt-f4")
+            time.sleep(0.5)
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)

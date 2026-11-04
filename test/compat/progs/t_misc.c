@@ -19,6 +19,8 @@
 #include <stddef.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
+#include <signal.h>
+#include <ucontext.h>
 
 /* The classic BPF and seccomp definitions musl does not ship. */
 struct sock_filter { unsigned short code; unsigned char jt, jf; unsigned int k; };
@@ -31,6 +33,29 @@ struct sock_fprog { unsigned short len; struct sock_filter *filter; };
 #define SECCOMP_MODE_FILTER 2
 #define SECCOMP_RET_ALLOW 0x7fff0000u
 #define SECCOMP_RET_ERRNO 0x00050000u
+#define SECCOMP_RET_TRAP 0x00030000u
+
+/* A SIGSYS handler for SECCOMP_RET_TRAP that answers getppid itself, as
+ * the sandboxes of Firefox and Chromium answer the calls they forward: the
+ * call's registers are as they were when it was made (the number in rax,
+ * or the first argument in x0), and the result it leaves in the return
+ * register is what the call returns. */
+static volatile int trap_seen;
+static void trap_answer(int sig, siginfo_t *si, void *ctx) {
+    ucontext_t *uc = ctx;
+    (void)sig;
+#ifdef __x86_64__
+    if (si->si_syscall == SYS_getppid && uc->uc_mcontext.gregs[REG_RAX] == SYS_getppid) {
+        uc->uc_mcontext.gregs[REG_RAX] = 4242;
+        trap_seen = 1;
+    }
+#else
+    if (si->si_syscall == SYS_getppid && uc->uc_mcontext.regs[8] == SYS_getppid && uc->uc_mcontext.regs[0] == 77) {
+        uc->uc_mcontext.regs[0] = 4242;
+        trap_seen = 1;
+    }
+#endif
+}
 
 /* The number after `key` in the file at path, or -1. */
 static long file_num(const char *path, const char *key) {
@@ -243,6 +268,31 @@ int main(void) {
             if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(12);
             long r = syscall(SYS_getpid);
             _exit(r == -1 && errno == EPERM && syscall(SYS_gettid) > 0 ? 0 : 13);
+        }
+        int st = 0;
+        if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();
+        else fail("status %#x", st);
+    }
+    /* SECCOMP_RET_TRAP: the handler sees the call as it was made and
+     * gives the result. */
+    if (begin("seccomp SECCOMP_RET_TRAP: the SIGSYS handler sees the call's registers as they were and answers it")) {
+        pid_t c = fork();
+        if (c == 0) {
+            struct sigaction sa = {0};
+            sa.sa_sigaction = trap_answer;
+            sa.sa_flags = SA_SIGINFO;
+            if (sigaction(SIGSYS, &sa, 0) != 0) _exit(9);
+            struct sock_filter f[] = {
+                BPF_STMT(BPF_LD_W_ABS, 0),
+                BPF_JUMP(BPF_JEQ_K, SYS_getppid, 0, 1),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_TRAP),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_ALLOW),
+            };
+            struct sock_fprog prog = { sizeof f / sizeof f[0], f };
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(10);
+            if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(11);
+            long r = syscall(SYS_getppid, 77);
+            _exit(r == 4242 && trap_seen ? 0 : 12);
         }
         int st = 0;
         if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();

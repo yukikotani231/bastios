@@ -430,7 +430,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return KEEP;                          // stopped for its tracer (SECCOMP_RET_TRACE): the call starts again when it goes on
     }
     if !v.run {
-      ret(&mut k.procs, pid, v.ret);
+      if !sc_rollback(v.ret) {
+        ret(&mut k.procs, pid, v.ret);
+      }
       return KEEP;
     }
   }
@@ -671,8 +673,13 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     let flags = pget(k.procs, pid, F_REGS + R_R10);
     let fd = pget(k.procs, pid, F_REGS + R_R8);
     let off = pget(k.procs, pid, F_REGS + R_R9);
-    if flags / MAP_FIXED % 2 == 1 && !win_quiet(&mut k, pid) {
-      return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
+    // MAP_FIXED unmaps, and a mapping that is not plain read-write has its
+    // pages protected after they are mapped (read_only): both wait until
+    // no other thread of pid runs on a processor, as win_op needs. (Private
+    // anonymous PROT_NONE maps nothing.)
+    let protects = prot_arg(c) != 2 && !(c == 0 && flags & MAP_ANONYMOUS != 0 && flags & MAP_SHARED_VALIDATE == MAP_PRIVATE);
+    if (flags / MAP_FIXED % 2 == 1 || protects) && !win_quiet(&mut k, pid) {
+      return lx_retry(&mut k, pid, n);
     }
     let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
     if r < 0x8000000000000000 {

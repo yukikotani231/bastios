@@ -610,10 +610,19 @@ fn sc_action(k: &mut Kernel, pid: u64, nr: u64) -> u64
 }
 
 /// What the system call nr that process pid just made comes to: 0 to go
-/// ahead, or the result to give instead (an errno, or ENOSYS after a
-/// signal), with `kill` set when the process dies of SIGSYS (or SIGKILL,
+/// ahead, or the result to give instead (an errno; SC_ROLLBACK for a
+/// SIGSYS handler to answer), with `kill` set when the process dies of SIGSYS (or SIGKILL,
 /// in strict mode).
 struct ScVerdict { run: bool, ret: u64, wait: bool, stop: bool }
+
+/// The ret of a verdict that leaves the call's registers alone
+/// (SECCOMP_RET_TRAP): never an errno or 0.
+const SC_ROLLBACK: u64 = 1;
+
+/// Whether a verdict's ret leaves the call's registers as they were (SECCOMP_RET_TRAP).
+fn sc_rollback(ret: u64) -> bool {
+  return ret == SC_ROLLBACK;
+}
 
 fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
   requires kok(k) && 1 <= pid && pid < NPROC
@@ -646,8 +655,12 @@ fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
   if hi == SCA_TRAP / 0x10000 {
     // The handler's siginfo says which call (si_syscall) and where it was
     // made (si_call_addr: the instruction after `syscall`).
+    // As on Linux, the call's registers stay as they were (the number in
+    // rax, the first argument in x0): a handler that answers the call
+    // itself (the sandboxes of Firefox and Chromium) reads them from its
+    // context and leaves the result there.
     post_w(&mut k, pid, 31, FAULT_MARK + SYS_MARK + (nr % 16384) * FAULT_CODE + pget(k.procs, pid, F_REGS + R_RIP) % FAULT_CODE);
-    return ScVerdict { run: false, ret: ENOSYS, wait: false, stop: false };
+    return ScVerdict { run: false, ret: SC_ROLLBACK, wait: false, stop: false };
   }
   if hi == SCA_USER_NOTIF / 0x10000 {
     let f1 = smaller(sp_get(k, pid * SC_PW + SP_F), SC_N);
