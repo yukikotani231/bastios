@@ -156,6 +156,56 @@ int main(void) {
            && statvfs("/tmp/oc_dst", &sv) == 0 && !(sv.f_flag & ST_RDONLY) && !(sv.f_flag & ST_NOEXEC) && (sv.f_flag & ST_NODEV) && (sv.f_flag & ST_NOSUID));
     EXPECT("mount_setattr on a path in no mount is EINVAL", syscall(MOUNT_SETATTR, AT_FDCWD, "/tmp/oc_src", 0, &ma2, sizeof ma2) == -1 && errno == EINVAL);
     umount("/tmp/oc_dst");
+    /* What crun does to a read-only path: clone it, make the clone read-only, put it back. */
+    {
+        int pc = syscall(OPEN_TREE, AT_FDCWD, "/proc/sys", 1 | 0x80000 | 0x8000);
+        struct mattr pro = { 1, 0, 0, 0 };
+        EXPECT("a procfs directory clones", pc >= 0 || errno == ENOSYS);
+        if (pc >= 0) {
+            EXPECT("and is set read-only", syscall(MOUNT_SETATTR, pc, "", 0x1000, &pro, sizeof pro) == 0);
+            EXPECT("and moved back over itself", syscall(MOVE_MOUNT, pc, "", AT_FDCWD, "/proc/sys", EMPTY) == 0);
+            umount("/proc/sys");
+            close(pc);
+        }
+        mkdir("/tmp/pp", 0755);
+        EXPECT("a proc mount", mount("proc", "/tmp/pp", "proc", 0, NULL) == 0);
+        pc = syscall(OPEN_TREE, AT_FDCWD, "/tmp/pp/sys", 1 | 0x80000 | 0x8000);
+        EXPECT("clones a directory of it", pc >= 0 || errno == ENOSYS);
+        if (pc >= 0) {
+            EXPECT("sets it read-only", syscall(MOUNT_SETATTR, pc, "", 0x1000, &pro, sizeof pro) == 0);
+            EXPECT("moves it back over itself", syscall(MOVE_MOUNT, pc, "", AT_FDCWD, "/tmp/pp/sys", EMPTY) == 0);
+            umount("/tmp/pp/sys");
+            close(pc);
+        }
+        umount("/tmp/pp");
+        rmdir("/tmp/pp");
+        {
+            /* A name through /proc/self/fd/N is the descriptor's own description: no clone of it, so a program (crun) falls back to mount(2). */
+            mkdir("/tmp/pp", 0755);
+            mount("proc", "/tmp/pp", "proc", 0, NULL);
+            int tfd = open("/tmp/pp/sys", O_PATH | O_DIRECTORY);
+            char pfd[64];
+            snprintf(pfd, sizeof pfd, "/proc/self/fd/%d", tfd);
+            EXPECT("a clone through /proc/self/fd/N is ENOSYS", syscall(OPEN_TREE, AT_FDCWD, pfd, 1 | 0x80000 | 0x8000) == -1 && errno == ENOSYS);
+            EXPECT("and mount(2) binds onto it", mount("/tmp/pp/sys", pfd, NULL, MS_BIND, NULL) == 0);
+            int c3 = syscall(OPEN_TREE, AT_FDCWD, "/tmp/pp/sys", 1 | 0x80000 | 0x8000);
+            EXPECT("move_mount onto a descriptor with T_EMPTY_PATH", c3 >= 0 && syscall(MOVE_MOUNT, c3, "", tfd, "", EMPTY | 0x40) == 0);
+            close(tfd);
+            umount("/tmp/pp/sys");
+            umount("/tmp/pp");
+            rmdir("/tmp/pp");
+        }
+        int rfd = open("/", O_RDONLY | O_DIRECTORY);
+        pc = syscall(OPEN_TREE, rfd, "proc/sys", 1 | 0x80000 | 0x8000);
+        EXPECT("a relative one clones", pc >= 0);
+        EXPECT("and is set read-only (relative)", pc >= 0 && syscall(MOUNT_SETATTR, pc, "", 0x1000, &pro, sizeof pro) == 0);
+        EXPECT("and moved back (relative to a descriptor)", pc >= 0 && syscall(MOVE_MOUNT, pc, "", rfd, "proc/sys", EMPTY) == 0);
+        umount("/proc/sys");
+        if (pc >= 0) close(pc);
+        pc = syscall(OPEN_TREE, AT_FDCWD, "proc/sys", 1 | 0x80000 | 0x8000);
+        EXPECT("and moved back (relative to the cwd)", pc >= 0 && chdir("/") == 0 && syscall(MOVE_MOUNT, pc, "", AT_FDCWD, "proc/sys", EMPTY) == 0);
+        umount("/proc/sys");
+    }
     unlink("/tmp/oc_src/run");
     unlink("/tmp/oc_src/f");
     rmdir("/tmp/oc_src");

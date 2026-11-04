@@ -48,6 +48,7 @@ const MOUNT_ATTR_NODIRATIME: u64 = 0x80;
 const MOUNT_ATTR_NOSYMFOLLOW: u64 = 0x200000;
 
 const MOVE_MOUNT_EMPTY_PATH: u64 = 4;           // MOVE_MOUNT_F_EMPTY_PATH
+const MOVE_MOUNT_T_EMPTY_PATH: u64 = 0x40;     // the target is the descriptor itself
 const MOVE_MOUNT_OK: u64 = 0x377;               // F_SYMLINKS, F_AUTOMOUNTS, F_EMPTY_PATH, T_SYMLINKS, T_AUTOMOUNTS, T_EMPTY_PATH, SET_GROUP, BENEATH
 
 const OPEN_TREE_CLONE: u64 = 1;
@@ -384,15 +385,15 @@ fn lx_move_mount(k: &mut Kernel, pid: u64, from_dfd: u64, from_path: u64, to_dfd
   if cd < OFD_N && of_get(k.ofd, cd, OF_ACC) & ACC_CLONE != 0 {
     // A clone of a directory (open_tree): a bind mount of the directory it
     // names, made now.
-    let dl = base_len(k, pid, cd);
-    let mut c = 0;
-    while c < dl
-      invariant c <= dl && dl <= FNAME_MAX && kok(k) && pid < NPROC && cd < OFD_N
-    {
-      bset(&mut k.fs.xfer, c, base_byte(k, pid, cd, c));
-      c = c + 1;
+    let mut tp = to_path;
+    if flags & MOVE_MOUNT_T_EMPTY_PATH != 0 && str_empty(&mut k, pid, to_path) {
+      tp = NO_RESULT;
     }
-    let r = ns_mount_at(&mut k, pid, 0, dl, to_dfd, to_path, MK_BIND, st_to_ms(of_get(k.ofd, cd, OF_ACC) / 32 % 16384));
+    let dl = dir_resolved(&mut k, pid, cd);
+    if dl == NO_RESULT {
+      return k.perr;
+    }
+    let r = ns_mount_at(&mut k, pid, 0, dl, to_dfd, tp, MK_BIND, st_to_ms(of_get(k.ofd, cd, OF_ACC) / 32 % 16384));
     if r == 0 {
       of_set(&mut k.ofd, cd, OF_ACC, ACC_PATH);   // attached: it is a handle again
     }
@@ -563,6 +564,9 @@ fn lx_open_tree(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64) -> u6
   }
   if flags & OPEN_TREE_CLONE != 0 && dir_at(&mut k, n) == NO_FILE {
     return ENOSYS;                          // a copy of a file's mount: not supported
+  }
+  if flags & OPEN_TREE_CLONE != 0 && n <= XFER && proc_fd(k.procs, k.fs.xfer, n) != NO_RESULT {
+    return ENOSYS;                          // a name through /proc/self/fd/N shares the descriptor's description: no clone of it
   }
   let n2 = lx_path_at(&mut k, pid, dfd % 0x100000000, path);   // path_meta may have used the transfer buffer
   if n2 == NO_RESULT {
