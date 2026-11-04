@@ -76,7 +76,7 @@ alive
 
 == x11: a wxWidgets program, Audacity, draws its window on the X screen
 # timeout 400
-$ bb kill $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 2; bb mkdir -p /disk/a; bb tar -xf /disk/wx.tar -C /disk/a && bb rm /disk/wx.tar; /disk/fakebwm 300 'x' >/disk/fb7.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/a -d 6 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/audacity >/disk/au.out 2>&1 & until bb grep -q typed /disk/fb7.out; do bb sleep 1; done; bb cat /disk/fb7.out; bb grep -q 'pixels drawn' /disk/fb7.out || { bb tail -q -n 5 /disk/au.out /disk/xlog | bb cut -c1-100; }; bb ps | bb grep -q '/usr/bin/audacity' && echo alive || bb cat /disk/au.out
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/a; bb tar -xf /disk/wx.tar -C /disk/a && bb rm /disk/wx.tar; /disk/fakebwm 300 'x' >/disk/fb7.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/a -d 6 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/audacity >/disk/au.out 2>&1 & until bb grep -q typed /disk/fb7.out; do bb sleep 1; done; bb cat /disk/fb7.out; bb grep -q 'pixels drawn' /disk/fb7.out || { bb tail -q -n 5 /disk/au.out /disk/xlog | bb cut -c1-100; }; bb ps | bb grep -q '/usr/bin/audacity' && echo alive || bb cat /disk/au.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :6
 fakebwm: pixels drawn
