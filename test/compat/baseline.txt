@@ -178,21 +178,30 @@ t_alg: a bad address is EFAULT and the message is as it was
 t_alg: a datagram AF_ALG socket is refused
 t_alg: a key longer than the socket takes is EINVAL
 t_alg: a key setting on a hash with no key is ENOSYS
+t_alg: a key setting on sha1 is ENOSYS
 t_alg: a message past the limit is refused and the message is as it was
 t_alg: a short read returns the start of the digest
 t_alg: a type that is not hash is ENOENT
 t_alg: accepting an hmac with no key is ENOKEY
+t_alg: accepting hmac(sha1) with no key is ENOKEY
 t_alg: accepting on a socket not bound is EINVAL
 t_alg: an accepted socket works after the bound one is closed
 t_alg: an unknown algorithm is ENOENT
+t_alg: hmac(md5), RFC 2202 test case 1
+t_alg: hmac(md5), RFC 2202 test case 2
+t_alg: hmac(sha1), RFC 2202 test case 1
+t_alg: hmac(sha1), RFC 2202 test case 2
 t_alg: hmac(sha256), RFC 4231 test case 1
 t_alg: hmac(sha256), RFC 4231 test case 2
 t_alg: hmac(sha384), RFC 4231 test case 2
+t_alg: md5 of abc
 t_alg: pieces sent with MSG_MORE hash as one message
 t_alg: poll reports an accepted socket ready
 t_alg: reading the digest begins a new message
 t_alg: sending to a socket that was not accepted is refused
 t_alg: sendmsg with three buffers is one message
+t_alg: sha1 is not an aead
+t_alg: sha1 of abc
 t_alg: sha256 of abc
 t_alg: sha256 of nothing
 t_alg: sha384 of abc

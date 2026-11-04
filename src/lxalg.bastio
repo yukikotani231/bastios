@@ -1,8 +1,9 @@
 // AF_ALG: the kernel's hash functions for a program, as Linux gives them.
 //
 //   fd = socket(AF_ALG, SOCK_SEQPACKET, 0);
-//   bind(fd, {AF_ALG, "hash", 0, 0, "sha256"});    // or sha384, sha512,
-//                                                  // hmac(sha256), hmac(sha384)
+//   bind(fd, {AF_ALG, "hash", 0, 0, "sha256"});    // or sha384, sha512, sha1, md5,
+//                                                  // hmac(sha256), hmac(sha384),
+//                                                  // hmac(sha1), hmac(md5)
 //   setsockopt(fd, SOL_ALG, ALG_SET_KEY, key, n);  // hmac only
 //   op = accept(fd, 0, 0);
 //   send(op, data, n, MSG_MORE); ...               // the message, in pieces
@@ -42,6 +43,8 @@
 // do not have. An hmac key may be ALG_KEYMAX
 // bytes.
 
+import "core/sha1.bastio";
+import "core/md5.bastio";
 import "core/sha256.bastio";
 import "core/sha512.bastio";
 import "core/aesgcm.bastio";
@@ -74,12 +77,16 @@ const EBADMSG: u64 = 18446744073709551542;   // 2^64 - 74
 const ALG_SHA256: u64 = 1;
 const ALG_SHA384: u64 = 2;
 const ALG_SHA512: u64 = 3;
-const ALG_HMAC256: u64 = 4;
-const ALG_HMAC384: u64 = 5;
-const ALG_GCM: u64 = 6;                 // aead: gcm(aes); the algorithms from here on are AEADs
-const ALG_CHACHA: u64 = 7;              // aead: rfc7539(chacha20,poly1305)
-const ALG_CTR: u64 = 8;                 // skcipher: ctr(aes); the algorithms from here on are skciphers
-const ALG_CBC: u64 = 9;                 // skcipher: cbc(aes)
+const ALG_SHA1: u64 = 4;
+const ALG_MD5: u64 = 5;
+const ALG_HMAC256: u64 = 6;
+const ALG_HMAC384: u64 = 7;
+const ALG_HMACSHA1: u64 = 8;
+const ALG_HMACMD5: u64 = 9;
+const ALG_GCM: u64 = 10;                // aead: gcm(aes); the algorithms from here on are AEADs
+const ALG_CHACHA: u64 = 11;             // aead: rfc7539(chacha20,poly1305)
+const ALG_CTR: u64 = 12;                // skcipher: ctr(aes); the algorithms from here on are skciphers
+const ALG_CBC: u64 = 13;                // skcipher: cbc(aes)
 
 fn algr(s: u64, f: u64) -> u64
   requires s < ALG_N && f < ALG_W
@@ -235,6 +242,18 @@ fn alg_by_name(x: &Bytes) -> u64
   if xfer_is(x, 24, 24 + n, "sha512") {
     return ALG_SHA512;
   }
+  if xfer_is(x, 24, 24 + n, "sha1") {
+    return ALG_SHA1;
+  }
+  if xfer_is(x, 24, 24 + n, "md5") {
+    return ALG_MD5;
+  }
+  if xfer_is(x, 24, 24 + n, "hmac(sha1)") {
+    return ALG_HMACSHA1;
+  }
+  if xfer_is(x, 24, 24 + n, "hmac(md5)") {
+    return ALG_HMACMD5;
+  }
   if xfer_is(x, 24, 24 + n, "hmac(sha256)") {
     return ALG_HMAC256;
   }
@@ -305,7 +324,7 @@ fn alg_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
 
 /// Whether algorithm id is an hmac.
 fn alg_keyed(id: u64) -> bool {
-  return id == ALG_HMAC256 || id == ALG_HMAC384 || id >= ALG_GCM;
+  return id == ALG_HMAC256 || id == ALG_HMAC384 || id == ALG_HMACSHA1 || id == ALG_HMACMD5 || id >= ALG_GCM;
 }
 
 /// Whether n bytes is a key length algorithm id takes.
@@ -498,6 +517,18 @@ fn alg_digest(id: u64, key: &Bytes, msg: &Bytes) -> Bytes {
   }
   if id == ALG_SHA512 {
     return sha512(msg);
+  }
+  if id == ALG_SHA1 {
+    return sha1(msg);
+  }
+  if id == ALG_MD5 {
+    return md5(msg);
+  }
+  if id == ALG_HMACSHA1 {
+    return hmac_sha1(key, msg);
+  }
+  if id == ALG_HMACMD5 {
+    return hmac_md5(key, msg);
   }
   if id == ALG_HMAC256 {
     return hmac_sha256(key, msg);
