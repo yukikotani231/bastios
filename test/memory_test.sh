@@ -268,7 +268,10 @@ check("a group's swapped bytes stay under its memory.swap.max", good, why)
 run("kill -9 $big; sleep 1; rmdir /sys/fs/cgroup/sl /sys/fs/cgroup/sm")
 t = run(f"/disk/mhog touch {HUGE}; echo rc=$?")
 check("a program bigger than memory and swap is killed", "Out of memory: Killed process" in t and "rc=137" in t, t)
-check("the system carries on after it", "alive" in run("echo alive") and meminfo("SwapFree") == SWAP_KB)
+# The killed program's slots are free again. A few pages of the shell may have gone to the
+# swap file while the killer looked for something to swap out (swap_out tries the next
+# process when the biggest has nothing to give): they stay there until touched.
+check("the system carries on after it", "alive" in run("echo alive") and SWAP_KB - meminfo("SwapFree") < 256)
 qemu.kill(); qemu.wait()
 print("memory: %d failed" % fails)
 sys.exit(1 if fails else 0)
