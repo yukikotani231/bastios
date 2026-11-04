@@ -1058,6 +1058,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- With `PTRACE_O_TRACEEXIT`, a tracee resumed by `PTRACE_SYSCALL` from its exit event stop now ends, as on Linux. It stopped again before the exit call it runs once more after that stop, so `strace -f` lost track of it ("exiting, ptrace_syscall_info.op == 1") and the thread looped through `exit` stops forever, which kept multi-threaded programs such as Firefox from finishing under strace.
 - An edge-triggered epoll entry (`EPOLLET`) on an eventfd or a pipe is reported once per change, as on Linux, instead of on every `epoll_wait` while the descriptor stays readable. A program whose wake-up eventfd is left unread, as mio's waker leaves it, spun a processor at 100% (one of Firefox's threads did). Edge-triggered entries on sockets and timerfds are still reported like level-triggered ones.
 
 - The copy of the Multiboot 1 boot information keeps only the flags whose

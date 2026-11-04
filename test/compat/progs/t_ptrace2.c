@@ -253,6 +253,30 @@ int main(void)
            int ev = event_of(c); unsigned long msg = 0; ptrace(PTRACE_GETEVENTMSG, c, 0, &msg);
            ok = ok && ev == PTRACE_EVENT_EXIT && (msg >> 8) == 5;
            ptrace(PTRACE_CONT, c, 0, 0); int cx = wst(c); ok = ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 5; ok; }));
+    EXPECT("after the exit event stop, PTRACE_SYSCALL lets the tracee end with no more system call stops", ({
+           c = traced_child(body_exit5); int ok = stopped_with(c, SIGSTOP);
+           ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)(PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD));
+           ptrace(PTRACE_SYSCALL, c, 0, 0);
+           int n = 0, seen = 0, after = 0, cx = -1;
+           while ((cx = wst(c)) != -1 && WIFSTOPPED(cx) && ++n < 100) {
+               if (cx >> 16 == PTRACE_EVENT_EXIT) seen = 1; else if (seen) after++;
+               ptrace(PTRACE_SYSCALL, c, 0, 0);
+           }
+           if (n >= 100) { kill(c, SIGKILL); wst(c); }
+           ok && seen && after == 0 && WIFEXITED(cx) && WEXITSTATUS(cx) == 5; }));
+    EXPECT("strace -f style tracing of a thread that exits lets the process finish", ({
+           c = traced_child(body_thread); int ok = stopped_with(c, SIGSTOP);
+           ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)(PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD));
+           ptrace(PTRACE_SYSCALL, c, 0, 0);
+           int n = 0, cx = -1;
+           for (;;) {
+               int st = 0; pid_t p = waitpid(-1, &st, __WALL);
+               if (p == -1) break;
+               if (p == c && !WIFSTOPPED(st)) { cx = st; break; }
+               if (++n > 1000) { kill(c, SIGKILL); wst(c); break; }
+               if (WIFSTOPPED(st)) ptrace(PTRACE_SYSCALL, p, 0, 0);
+           }
+           ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 0; }));
     EXPECT("PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop", ({
            c = traced_child(body_term); int ok = stopped_with(c, SIGSTOP);
            ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACEEXIT);

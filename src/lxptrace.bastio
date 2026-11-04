@@ -261,7 +261,10 @@ fn pt_sys_entry(k: &mut Kernel, p: u64, restarted: bool) -> bool
   ensures kok(k)
 {
   let t0 = tr2_get(k, p);
-  if tr_tracer(k, p) == 0 || t0 % 2 == 0 {
+  if tr_tracer(k, p) == 0 || t0 % 2 == 0 || t0 / TS_XEV % 2 == 1 {
+    // After the exit event stop the exit call runs again unseen: on Linux
+    // the thread is past its last system call stop by then (strace took a
+    // stop there for a new call and lost track of the thread).
     return false;
   }
   let nr = smaller(pget(k.procs, p, F_REGS + R_LXNR), 1023);
