@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm`: holding Alt and dragging with the right button resizes a resizable window from anywhere in it (its lower right corner follows the pointer).
 - `bwm`: a double click on the empty desktop starts a terminal window.
 - `bwm`: the mouse wheel over the task bar goes through the windows like Alt-Tab and Alt-Shift-Tab.
 - IPsec extended sequence numbers (`XFRM_STATE_ESN`, `XFRMA_REPLAY_ESN_VAL`): 64-bit counting on send, the high half inferred on receive (RFC 4303 A.2.2) and bound into the AEAD data (RFC 4106), a replay window that works across the 2^32 wrap, and the counters reported by `GETSA`. `t_esn` checks the wrap, replays, and packets sealed under a wrong high half.
