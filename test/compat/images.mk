@@ -27,7 +27,8 @@ JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c
 # (jlesage/puddletag) and QDirStat, a Qt 5 disk usage viewer
 # (jlesage/qdirstat) and FileZilla, a GTK 3 FTP client (jlesage/filezilla) and Avidemux, a Qt 5 video editor
 # (jlesage/avidemux) and HandBrake, a GTK 3 video transcoder
-# (jlesage/handbrake), for x11.txt.
+# (jlesage/handbrake) and MKVToolNix, a Qt 5 Matroska tool
+# (jlesage/mkvtoolnix), for x11.txt.
 X11_SERVER_IMAGE := slieb/xvfb-run@sha256:295c246aa1da131a977d23eb20d6bfe58fed6728edc3a8c0cee13c6570547982
 X11_CLIENT_IMAGE := jbonds/xterm@sha256:bac17f91159dffccecd9d3c73bea2c16c6b2de0f98cb81803e157dabb401c2ec
 X11_GTK_IMAGE := jlesage/putty@sha256:ecd5868c45a512fef25a6219f6559a3966136ca3f1652998e30584a91f901034
@@ -41,6 +42,7 @@ X11_DIRSTAT_IMAGE := jlesage/qdirstat@sha256:e7daf42e334e9bb29d516a468b2280055f4
 X11_FILEZILLA_IMAGE := jlesage/filezilla@sha256:123fc4d7aac55b482b9936ece2c8208e56530875e75624c53cd674739ecba121
 X11_AVIDEMUX_IMAGE := jlesage/avidemux@sha256:1031e94ad4b27f9dc9e50a4c5c48608574248a2045b772ecb5417ac5d70464f0
 X11_HANDBRAKE_IMAGE := jlesage/handbrake@sha256:6f3a121e235d34e7299080e8cbac5284060e942fb2b137f777e2521fb7af65ae
+X11_MKV_IMAGE := jlesage/mkvtoolnix@sha256:768768cd651071d4a64a8e51583268aaac57f24a0483ae04022b3cc23d356036
 RUBY_IMAGE ?= library/ruby@sha256:730b265fc537e93f4ad335031ba95f8a9df88dc75bd9462968b92f368a115f6d
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
