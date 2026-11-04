@@ -14,8 +14,9 @@
 // k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
 // read end and of its write end, the FIFO it belongs to + 1 (0 for an
 // anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it,
-// the size F_SETPIPE_SZ gave it (0: PIPE_CAP), and 1 once a read end
-// has had O_ASYNC; the ring itself is
+// the size F_SETPIPE_SZ gave it (0: PIPE_CAP), 1 once a read end
+// has had O_ASYNC, and a count of its changes (pipe_changed, for
+// edge-triggered epoll, modulo ET_GENS); the ring itself is
 // slot p of k.pipebuf: PIPE_PAGE bytes at first, doubling up to PIPE_CAP
 // as the pipe fills (pipe_ready, pipe_grow), a position's byte at that
 // position modulo the ring's length.
@@ -374,8 +375,20 @@ fn pipe_keep(t: &mut Buf, p: u64, r: &Ring)
   requires len(t) == PIPES_LEN && p < NPIPES
   ensures len(t) == PIPES_LEN
 {
+  if pi_get(t, p, 0) != r.h || pi_get(t, p, 1) != r.n {
+    pipe_changed(&mut t, p);
+  }
   pi_set(&mut t, p, 0, r.h);
   pi_set(&mut t, p, 1, r.n);
+}
+
+/// Counts a change of pipe p (bytes in or out, an end closed), which an
+/// edge-triggered epoll entry on either end is told of (et_gen).
+fn pipe_changed(t: &mut Buf, p: u64)
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures len(t) == PIPES_LEN
+{
+  pi_set(&mut t, p, 8, (pi_get(t, p, 8) % ET_GENS + 1) % ET_GENS);
 }
 
 /// How many bytes pipe p may hold: PIPE_CAP unless F_SETPIPE_SZ made it
@@ -696,12 +709,14 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     if w / PIPE_BOTH % 2 == 1 && wl > 0 {
       pi_set(&mut k.pipes, x, 3, wl - 1);     // it was a writer too (a FIFO opened O_RDWR)
     }
+    pipe_changed(&mut k.pipes, x);
     pipe_release(&mut k, x);
   } else if kind == OF_PIPE_W && x < NPIPES {
     let left = pi_get(k.pipes, x, 3);
     if left > 0 {
       pi_set(&mut k.pipes, x, 3, left - 1);   // one description fewer on this end
     }
+    pipe_changed(&mut k.pipes, x);
     pipe_release(&mut k, x);
   } else if kind == OF_SOCK {
     sock_close(&mut k.nic, x);
