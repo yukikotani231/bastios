@@ -262,14 +262,14 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
     return 0;
   }
   if remount && flags & MS_BIND != 0 {
-    return ns_remount(&mut k, pid, target, flags & MS_RDONLY != 0);
+    return ns_remount(&mut k, pid, target, flags);
   }
   if flags & MS_BIND != 0 {
     return ns_mount(&mut k, pid, source, target, MK_BIND, flags);
   }
   if remount {
     // A namespace's own mount first, then the file layer's.
-    let r = ns_remount(&mut k, pid, target, flags & MS_RDONLY != 0);
+    let r = ns_remount(&mut k, pid, target, flags);
     if r != EINVAL {
       return r;
     }
