@@ -123,7 +123,7 @@ alive
 # timeout 400
 $ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/a; bb tar -xf /disk/avidemux.tar -C /disk/a && bb rm /disk/avidemux.tar; /disk/fakebwm 300 'x' >/disk/fb12.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/a -d 11 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/avidemux3_qt5 >/disk/avd.out 2>&1 & until bb grep -q typed /disk/fb12.out; do bb sleep 1; done; bb cat /disk/fb12.out; bb ps | bb grep -q '/usr/bin/avidemux3_qt5' && echo alive || bb cat /disk/avd.out
 fakebwm: listening
-fakebwm: window 270x600 X11 :11
+fakebwm: window 800x600 X11 :11
 fakebwm: pixels drawn
 fakebwm: typed
 alive
