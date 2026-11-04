@@ -25,7 +25,7 @@
 // place.
 //
 // An unlinked file that is still open keeps its directory and name in the
-// newest GH_N ghosts (gh_save), so events on it still reach watches on that
+// newest GH_N (seven) ghosts (gh_save), so events on it still reach watches on that
 // directory unless they asked for IN_EXCL_UNLINK.
 //
 // Not done: events from BastiOS's native system calls (src/syscall.bastio)
