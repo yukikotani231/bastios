@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- AF_ALG hashes `sha1`, `md5`, `hmac(sha1)` and `hmac(md5)`, for the programs and protocols that still ask for them (both hashes are broken for collisions; the kernel's own code uses neither).
 - IPsec ESP in UDP (RFC 3948, NAT traversal): `XFRMA_ENCAP` with `UDP_ENCAP_ESPINUDP` on a state wraps its ESP packets in UDP and takes them from the encap port, dropping keep-alives and leaving IKE messages to sockets. `t_espudp` checks transport and tunnel mode, replays, forgeries and plain ESP for such a state.
 - `bwm`: holding Alt and dragging with the right button resizes a resizable window from anywhere in it (its lower right corner follows the pointer).
 - `bwm`: a double click on the empty desktop starts a terminal window.
