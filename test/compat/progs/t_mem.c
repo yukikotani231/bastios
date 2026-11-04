@@ -201,6 +201,33 @@ int main(void) {
                if (r >= 0) close(r);
                if (w >= 0) close(w);
                ok; }));
+    EXPECT("a memfd mapped MAP_SHARED keeps what was written through the mapping when the caches are dropped, for a later mapping in another process", ({
+               /* Firefox's shared font list: the parent writes a memfd through
+                  its mapping, memory runs short (the page cache is shrunk),
+                  and a content process started later maps it */
+               int ok = 1, st = 0;
+               int w = memfd_create("kept_shared", MFD_CLOEXEC);
+               char *pw = w >= 0 && ftruncate(w, 16384) == 0 ? mmap(0, 16384, PROT_READ | PROT_WRITE, MAP_SHARED, w, 0) : MAP_FAILED;
+               ok &= pw != MAP_FAILED;
+               if (ok) {
+                   for (int i = 0; i < 4; i++) pw[i * 4096 + 7] = 'A' + i;
+                   int f = open("/proc/sys/vm/drop_caches", O_WRONLY);
+                   ok &= f >= 0 && write(f, "3", 1) == 1;
+                   if (f >= 0) close(f);
+                   pid_t c = fork();
+                   if (c == 0) {
+                       volatile char *q = mmap(0, 16384, PROT_READ, MAP_SHARED, w, 0);
+                       int good = q != MAP_FAILED;
+                       for (int i = 0; good && i < 4; i++) good = q[i * 4096 + 7] == 'A' + i;
+                       pw[7] = 'z';                         /* and it is still the same memory */
+                       good &= q != MAP_FAILED && q[7] == 'z';
+                       _exit(good ? 0 : 1);
+                   }
+                   ok &= c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+                   munmap(pw, 16384);
+               }
+               if (w >= 0) close(w);
+               ok; }));
     EXPECT("seventy read-only MAP_SHARED mappings still read their file after a writable mapping takes a record", ({
                int ok = 1;
                char *r[70];

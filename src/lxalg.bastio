@@ -25,7 +25,7 @@
 // tag), and the read gives the associated data again, then the result, all of
 // it or none. A wrong tag is EBADMSG and no text comes out.
 //
-// Symmetric ciphers (type "skcipher": ctr(aes), cbc(aes), keys of 16 or 32
+// Symmetric ciphers (type "skcipher": ctr(aes), cbc(aes), keys of 16, 24 or 32
 // bytes) take ALG_SET_OP and a 16-byte ALG_SET_IV in the control messages and
 // are read as a whole. The operation and the IV stay on the socket and the IV
 // moves on with each operation, so successive messages continue one chain, as
@@ -38,10 +38,8 @@
 // referenced, so a file's pages are neither read after the call returns nor
 // ever written to, whatever the cipher does.
 //
-// ALG_N sockets at most, each with ALG_BUF bytes of message. Not done:
-// AES-192, other modes (ecb, xts) and md5 and sha1, which the libraries here
-// do not have. An hmac key may be ALG_KEYMAX
-// bytes.
+// ALG_N sockets at most, each with ALG_BUF bytes of message. Not done: other
+// modes (ecb, xts). An hmac key may be ALG_KEYMAX bytes.
 
 import "core/sha1.bastio";
 import "core/md5.bastio";
@@ -336,7 +334,7 @@ fn alg_keylen_ok(id: u64, n: u64) -> bool {
     return n == 32;
   }
   if alg_skc_id(id) {
-    return n == 16 || n == 32;              // AES-128 and AES-256; no AES-192
+    return n == 16 || n == 24 || n == 32;   // AES-128, AES-192 and AES-256
   }
   return n <= ALG_KEYMAX;
 }
@@ -735,13 +733,24 @@ fn alg_ctr_next(iv: &Bytes, blocks: u64) -> Bytes
   return out;
 }
 
+/// The expanded AES key of 16, 24 or 32 bytes.
+fn alg_aes_key(key: &Bytes) -> Aes
+  requires blen(key) == 16 || blen(key) == 24 || blen(key) == 32
+  ensures aes_ok(result)
+{
+  if blen(key) == 24 {
+    return aes192_new(key);
+  }
+  return gcm_key(key);
+}
+
 /// Encrypts (enc) or decrypts msg under the skcipher id; None if the key or
 /// IV does not fit or a CBC message is not whole blocks.
 fn alg_skc(id: u64, enc: bool, key: &Bytes, iv: &Bytes, msg: &Bytes) -> Option[Bytes] {
-  if blen(iv) != 16 || blen(msg) >= 274877906944 || (blen(key) != 16 && blen(key) != 32) {
+  if blen(iv) != 16 || blen(msg) >= 274877906944 || (blen(key) != 16 && blen(key) != 24 && blen(key) != 32) {
     return Option[Bytes]::None;
   }
-  let a = gcm_key(key);
+  let a = alg_aes_key(key);
   if id == ALG_CTR {
     let out = aes_ctr(a, iv, msg);
     aes_free(a);
