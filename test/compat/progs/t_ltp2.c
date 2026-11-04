@@ -37,6 +37,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <sys/timerfd.h>
+#include <sys/eventfd.h>
 
 static volatile int ticks;
 static void vt(int s) { (void)s; ticks++; }
@@ -1185,6 +1186,43 @@ int main(void) {
            close(ep);
            close(fi);
            rmdir("/tmp/mpet");
+           ok; }));
+    EXPECT("an edge-triggered epoll entry on an eventfd left unread is reported once per write, not again and again", ({
+           int ev = eventfd(0, EFD_NONBLOCK);
+           int ep = epoll_create1(0);
+           uint64_t one = 1;
+           struct epoll_event e = { .events = EPOLLIN | EPOLLET, .data.u64 = ~0ull }, out[2];
+           int ok = ev >= 0 && ep >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, ev, &e) == 0;
+           ok = ok && epoll_wait(ep, out, 2, 0) == 0;
+           ok = ok && write(ev, &one, 8) == 8;
+           ok = ok && epoll_wait(ep, out, 2, 0) == 1 && out[0].data.u64 == ~0ull;
+           ok = ok && epoll_wait(ep, out, 2, 0) == 0 && epoll_wait(ep, out, 2, 20) == 0;   // still unread: no new edge
+           ok = ok && write(ev, &one, 8) == 8;
+           ok = ok && epoll_wait(ep, out, 2, 0) == 1;                                       // a second write is a new edge
+           ok = ok && epoll_wait(ep, out, 2, 0) == 0;
+           uint64_t got = 0;
+           ok = ok && read(ev, &got, 8) == 8 && got == 2 && epoll_wait(ep, out, 2, 0) == 0;
+           ok = ok && write(ev, &one, 8) == 8 && epoll_wait(ep, out, 2, 0) == 1;            // read to 0, written again
+           ok = ok && epoll_ctl(ep, EPOLL_CTL_MOD, ev, &e) == 0 && epoll_wait(ep, out, 2, 0) == 1;   // MOD looks again
+           close(ep);
+           close(ev);
+           ok; }));
+    EXPECT("an edge-triggered epoll entry on a pipe is reported once per write and when the writer closes", ({
+           int p[2];
+           int ok = pipe2(p, O_NONBLOCK) == 0;
+           int ep = epoll_create1(0);
+           struct epoll_event e = { .events = EPOLLIN | EPOLLET }, out[2];
+           ok = ok && ep >= 0 && epoll_ctl(ep, EPOLL_CTL_ADD, p[0], &e) == 0;
+           ok = ok && epoll_wait(ep, out, 2, 0) == 0;
+           ok = ok && write(p[1], "a", 1) == 1 && epoll_wait(ep, out, 2, 0) == 1 && epoll_wait(ep, out, 2, 0) == 0;
+           ok = ok && write(p[1], "b", 1) == 1 && epoll_wait(ep, out, 2, 0) == 1 && epoll_wait(ep, out, 2, 0) == 0;
+           char b[4];
+           ok = ok && read(p[0], b, 4) == 2 && epoll_wait(ep, out, 2, 0) == 0;
+           ok = ok && write(p[1], "c", 1) == 1 && epoll_wait(ep, out, 2, 0) == 1;
+           close(p[1]);
+           ok = ok && epoll_wait(ep, out, 2, 0) == 1 && (out[0].events & EPOLLHUP) && epoll_wait(ep, out, 2, 0) == 0;
+           close(ep);
+           close(p[0]);
            ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;

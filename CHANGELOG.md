@@ -1057,6 +1057,8 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Fixed
 
+- An edge-triggered epoll entry (`EPOLLET`) on an eventfd or a pipe is reported once per change, as on Linux, instead of on every `epoll_wait` while the descriptor stays readable. A program whose wake-up eventfd is left unread, as mio's waker leaves it, spun a processor at 100% (one of Firefox's threads did). Edge-triggered entries on sockets and timerfds are still reported like level-triggered ones.
+
 - The copy of the Multiboot 1 boot information keeps only the flags whose
   fields point into the copy (memory size, memory map, framebuffer), and
   the memory map walks no longer stall on an entry size that wraps 32
