@@ -136,11 +136,22 @@ fn anon_evict(k: &mut Kernel, pid: u64, want: u64) -> u64
   // record covers that is not there yet is mapped. A page that stays in the
   // swap file is still there to its fault (swap_fault comes first).
   swap_reach(&mut k, tgid(k.procs, pid), pid, first, end);
-  if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, first, end, false) {
-    return AN_N;
-  }
   if anon_xbit(k, pid, best) {
-    win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, first, end, 6);   // read, write and run
+    // Pages that may run code are mapped one by one as their faults map
+    // them (anon_touch). A WOP_PROTECT after lx_map_pages would not do:
+    // win_op leaves the pages alone while another processor runs a thread
+    // of the process, and they would stay no-execute.
+    let mut q = first;
+    while q < end
+      invariant first <= q && q <= end && end <= WPAGES && kok(k) && pid < NPROC && best < AN_N
+    {
+      if !anon_touch(&mut k.mem, &mut k.spaces, k.anon, pid, q) {
+        return AN_N;
+      }
+      q = q + 1;
+    }
+  } else if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, first, end, false) {
+    return AN_N;
   }
   k.anon = set(k.anon, an_at(pid, best, 0), 0);
   k.anon = set(k.anon, an_at(pid, best, 1), 0);

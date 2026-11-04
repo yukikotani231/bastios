@@ -957,7 +957,7 @@ const HOLE_N: u64 = 32;              // address space holes munmap left, per pro
 const HOLES_LEN: u64 = NPROC * 64;         // NPROC * HOLE_N * 2
 const LZ_W: u64 = 4;                  // lazy code: first page + 1 (0: none), pages, file hold, file offset
 const LAZY_LEN: u64 = NPROC * LZ_W;
-const AN_N: u64 = 64;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
+const AN_N: u64 = 32;                  // anonymous memory not touched yet: records per process (src/lxanon.bastio)
 const AN_EVICT: u64 = 256;             // pages a record may span to be mapped now for a free slot (anon_evict)
 const ANON_LEN: u64 = NPROC * AN_N * 2;  // first page + 1 (0: free), pages (+ AN_X)
 // Added to a record's page count if its pages may also run code: the flag

@@ -41,6 +41,25 @@ static int fill_one(const char *path, const struct stat *st, int type, struct FT
 }
 static char *cow_buf;
 static volatile int fast_phase;
+static volatile int spin_stop;
+static void *spin_thread(void *a) {      /* keeps a second processor on the process's space */
+    (void)a;
+    while (!spin_stop) { }
+    return 0;
+}
+
+/* Runs one `ret` written to page p (fresh, never touched before). */
+static void run_ret(unsigned char *p) {
+#if defined(__x86_64__)
+    p[0] = 0xc3;
+#else
+    unsigned int ret = 0xd65f03c0;
+    memcpy(p, &ret, 4);
+    __builtin___clear_cache((char *)p, (char *)p + 4);
+#endif
+    ((void (*)(void))p)();
+}
+
 static char *fast_page;
 /* Runs only system calls the kernel answers without its lock (getpid), so the
  * processor keeps its translations between them, until the other thread has
@@ -462,6 +481,28 @@ int main(void) {
                if (sep[i] != MAP_FAILED) munmap(sep[i], 4096);
            }
            ok; }));
+    EXPECT("memory that may run code stays runnable when its record gives up its slot to a later mmap, while another thread runs on the other processor", ({
+           pid_t c = fork();
+           if (c == 0) {
+               enum { NX = 100 };
+               unsigned char *x[NX]; char *sep[NX];
+               pthread_t t; spin_stop = 0;
+               if (pthread_create(&t, 0, spin_thread, 0)) _exit(2);
+               for (int i = 0; i < NX; i++) {     /* untouched, each kept apart by a read-only page */
+                   x[i] = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                   sep[i] = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                   if (x[i] == MAP_FAILED || sep[i] == MAP_FAILED) _exit(3);
+               }
+               for (int i = 0; i < NX; i++) {     /* larger mappings take the slots of the one-page ones */
+                   char *r = mmap(0, 64 << 10, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                   if (r == MAP_FAILED) _exit(4);
+               }
+               for (int i = 0; i < NX; i++) run_ret(x[i]);
+               spin_stop = 1; pthread_join(t, 0);
+               _exit(0);
+           }
+           int st = 0;
+           c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
     EXPECT("pages come when first touched even after 400 scattered pages were handed back with MADV_DONTNEED (jemalloc's purge): then 4 GiB of mmap touched at both ends, and the pages between keep what they hold", ({
            size_t m = 16 << 20;
            unsigned char *h = mmap(0, m, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
