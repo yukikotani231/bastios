@@ -154,3 +154,12 @@ fakebwm: window 800x600 X11 :14
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a Qt 5 transport stream muxer, tsMuxeR, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/u; bb tar -xf /disk/tsmuxer.tar -C /disk/u && bb rm /disk/tsmuxer.tar; /disk/fakebwm 300 'x' >/disk/fb16.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/u -d 15 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp QT_XCB_GL_INTEGRATION=none /usr/bin/tsMuxerGUI >/disk/tsm.out 2>&1 & until bb grep -q typed /disk/fb16.out; do bb sleep 1; done; bb cat /disk/fb16.out; bb ps | bb grep -q '/usr/bin/tsMuxerGUI' && echo alive || bb cat /disk/tsm.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :15
+fakebwm: pixels drawn
+fakebwm: typed
+alive
