@@ -108,6 +108,21 @@ int main(void) {
         if (f) fclose(f); ok; }));
     close(fd);
 
+    EXPECT("a write to an unlinked open file still reaches the mark on its directory", ({
+        mkdir("fa_ul", 0755);
+        int ufd = fanotify_init(FAN_CLASS_NOTIF | FAN_NONBLOCK | FAN_CLOEXEC, O_RDONLY);
+        fan_mark(ufd, FAN_MARK_ADD, FAN_MODIFY | FAN_EVENT_ON_CHILD, "fa_ul");
+        int w = open("fa_ul/f", O_CREAT | O_RDWR, 0644);
+        unlink("fa_ul/f");
+        struct fanotify_event_metadata um;
+        write(w, "x", 1);
+        int got = next(ufd, &um) && (um.mask & FAN_MODIFY);
+        if (got && um.fd >= 0) close(um.fd);
+        close(w);
+        close(ufd);
+        rmdir("fa_ul");
+        got; }));
+
     unlink("fa_f");
     rmdir("fa_d");
     return done();

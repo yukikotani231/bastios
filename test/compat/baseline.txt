@@ -410,6 +410,37 @@ t_dockerd: readlinkat of an empty path on an O_PATH|O_NOFOLLOW handle of a /proc
   + t_esn: the parent's end has an address
   + t_esn: the sender still counts on
   + t_esn: without IPsec the datagram is echoed
+  + t_esn: GETSA reports the ESN state of the parent's sending association
+  + t_esn: GETSA says the sender is at 1:3
+  + t_esn: a child in a new network namespace
+  + t_esn: a client socket
+  + t_esn: a number below the wrap and outside the window is not
+  + t_esn: a number whose high half is far ahead is not taken (the window cannot jump on an inferred half)
+  + t_esn: a packet numbered 0xFFFFFFF5, below the wrap but inside the window, is echoed
+  + t_esn: a packet sealed under the high half 0 for the low half 0x10, which the receiver reads as 1:0x10, is not
+  + t_esn: a packet sealed under the high half 2 for the low half 0x11 is not
+  + t_esn: a packet sealed with the 8 bytes of a 32-bit association is not
+  + t_esn: a packet with a bit of its IV changed is not
+  + t_esn: a raw ESP socket opens
+  + t_esn: a sealed packet numbered 1:0x10 is echoed
+  + t_esn: a veth pair, one end in the child's namespace
+  + t_esn: after those, the next real packet 1:0x12 is echoed: no forgery moved the window
+  + t_esn: and played again it is not
+  + t_esn: and the answers took the parent's other association's numbers from 1
+  + t_esn: and the window is where it was: 1:0x14 is echoed
+  + t_esn: go
+  + t_esn: netlink sockets
+  + t_esn: played again it is not
+  + t_esn: six datagrams are echoed through the wrap of the sequence number
+  + t_esn: the child has them too
+  + t_esn: the child is ready
+  + t_esn: the child reports
+  + t_esn: the child stops
+  + t_esn: the child took in exactly the datagrams that were whole, fresh and ours
+  + t_esn: the parent has ESN associations
+  + t_esn: the parent's end has an address
+  + t_esn: the sender still counts on
+  + t_esn: without IPsec the datagram is echoed
 t_esp: a child in a new network namespace
 t_esp: a client socket
 t_esp: a datagram that goes out plain is dropped by the child, whose in policy asks for ESP
@@ -462,6 +493,33 @@ t_esp: the parent is configured for tunnel mode
 t_esp: the parent's end has an address
 t_esp: the same packet again is not
 t_esp: without IPsec the datagram is echoed
+  + t_espudp: GETSA reports the encapsulation
+  + t_espudp: a child in a new network namespace
+  + t_espudp: a client socket
+  + t_espudp: a datagram that starts with four zero bytes goes to the socket layer: no socket, so ECONNREFUSED
+  + t_espudp: a one-byte keep-alive is sent
+  + t_espudp: a packet sealed by hand and sent in UDP to port 4500 is echoed
+  + t_espudp: a raw ESP socket and a UDP socket to port 4500 open
+  + t_espudp: a veth pair, one end in the child's namespace
+  + t_espudp: and a real packet sent in UDP after all that is echoed
+  + t_espudp: datagrams of five sizes are echoed through ESP in UDP (transport mode)
+  + t_espudp: datagrams of five sizes are echoed through ESP in UDP (tunnel mode)
+  + t_espudp: go
+  + t_espudp: netlink sockets
+  + t_espudp: played again it is not
+  + t_espudp: the child is ready
+  + t_espudp: the child is too
+  + t_espudp: the child reports
+  + t_espudp: the child stops
+  + t_espudp: the child took in exactly the datagrams that were whole, fresh and ours
+  + t_espudp: the next real packet is echoed: the forged one did not move the window
+  + t_espudp: the out policy is removed for the hand-made packets
+  + t_espudp: the parent is configured for transport mode
+  + t_espudp: the parent is configured for tunnel mode
+  + t_espudp: the parent's end has an address
+  + t_espudp: the same kind of packet as plain ESP (protocol 50) is not taken by an association that wants UDP
+  + t_espudp: with a bit of the ciphertext changed it is not
+  + t_espudp: without IPsec the datagram is echoed
 t_fanotify: a child's event comes to its directory
 t_fanotify: the content classes are accepted, both at once are refused, and a permission mask is refused
 t_fanotify: a directory mark with FAN_EVENT_ON_CHILD
@@ -486,6 +544,7 @@ t_fanotify: reading the event's descriptor makes no event
 t_fanotify: remove the mark
 t_fanotify: the event says who did it
 t_fanotify: the event's descriptor reads the file
+t_fanotify: a write to an unlinked open file still reaches the mark on its directory
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
 t_fdlock: memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC
 t_fdlock: 200 separate byte-range locks on one file

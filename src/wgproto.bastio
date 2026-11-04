@@ -373,17 +373,49 @@ fn wg_cookie_or_none(n: &Net, p: u64, ticks: u64) -> Bytes
   return balloc(0);
 }
 
-/// The peer of device i that answered with our index idx and has not yet
-/// confirmed that session: the response it got a cookie reply for.
-fn wg_peer_unconfirmed(n: &Net, i: u64, idx: u64) -> u64
-  requires net_ok(n) && i < IFN
+/// The slot of the ring of peer p's last four responses that holds our index idx, or 4.
+fn wg_ring_find(n: &Net, p: u64, idx: u64) -> u64
+  requires net_ok(n) && p < WGPN && idx < 4294967296
+  ensures result <= 4
+{
+  let mut j = 0;
+  while j < 4
+    invariant j <= 4 && net_ok(n)
+  {
+    if wvw(n, p, WGV_RING + 3 * j) == idx + 1 {
+      return j;
+    }
+    j = j + 1;
+  }
+  return 4;
+}
+
+/// Remembers the response (full, 92 bytes) we sent peer p under our index idx:
+/// a busy initiator answers it with a cookie reply that names idx and is
+/// sealed with this mac1. Four are kept, because a slow device may start
+/// answering a retried initiation before it has read the cookie reply to the
+/// response before.
+fn wg_ring_put(n: &mut Net, p: u64, idx: u64, full: &Bytes)
+  requires net_ok(n) && p < WGPN && idx < 4294967296 && blen(full) == MSG_RESP
+  ensures net_ok(n)
+{
+  let j = wvw(n, p, WGV_RHEAD) % 4;
+  wvs(&mut n, p, WGV_RING + 3 * j, idx + 1);
+  wvs(&mut n, p, WGV_RING + 3 * j + 1, load_le64(full, 60));
+  wvs(&mut n, p, WGV_RING + 3 * j + 2, load_le64(full, 68));
+  wvs(&mut n, p, WGV_RHEAD, (j + 1) % 4);
+}
+
+/// The peer of device i that sent a response under our index idx (one of its last four), or WGPN.
+fn wg_peer_ring(n: &Net, i: u64, idx: u64) -> u64
+  requires net_ok(n) && i < IFN && idx < 4294967296
   ensures result <= WGPN
 {
   let mut p = 0;
   while p < WGPN
     invariant p <= WGPN && net_ok(n)
   {
-    if wpw(n, p, WGP_OWNER) == i + 1 && wpw(n, p, WGP_SVALID) == 1 && wpw(n, p, WGP_ISINIT) == 0 && wpw(n, p, WGP_CONF) == 0 && wpw(n, p, WGP_HS) != 1 && wpw(n, p, WGP_LIDX) == idx {
+    if wpw(n, p, WGP_OWNER) == i + 1 && wg_ring_find(n, p, idx) < 4 {
       return p;
     }
     p = p + 1;
@@ -397,17 +429,26 @@ fn wg_on_cookie(n: &mut Net, i: u64, msg: &Bytes, ticks: u64)
   requires net_ok(n) && i < IFN && blen(msg) == MSG_COOKIE
   ensures net_ok(n)
 {
-  let mut p = wg_peer_waiting(n, i, cast[u64](load_le32(msg, 4)));
+  let idx = cast[u64](load_le32(msg, 4));
+  let mut p = wg_peer_waiting(n, i, idx);
   let mut asked = true;
   if p >= WGPN {
-    p = wg_peer_unconfirmed(n, i, cast[u64](load_le32(msg, 4)));
+    p = wg_peer_ring(n, i, idx);
     asked = false;
   }
   if p >= WGPN || ticks > 4611686018427387904 {
     return;
   }
   let rpub = wg_pbytes(n, p, WGP_PUB, 4);
-  let mac1 = wg_cpbytes(n, p, WGC_MAC1, 2);
+  let mut mac1 = wg_cpbytes(n, p, WGC_MAC1, 2);
+  if !asked {
+    // the answer to a response of ours: sealed with that response's mac1
+    let j = wg_ring_find(n, p, idx);
+    if j < 4 {
+      store_le64(&mut mac1, 0, wvw(n, p, WGV_RING + 3 * j + 1));
+      store_le64(&mut mac1, 8, wvw(n, p, WGV_RING + 3 * j + 2));
+    }
+  }
   match wgn_consume_cookie_reply(msg, rpub, mac1) {
     Option::None => {},
     Option::Some(c) => {
@@ -510,10 +551,7 @@ fn wg_respond(n: &mut Net, i: u64, p: u64, who: &Bytes, st: &mut Bytes, msg: &By
       wg_set_endpoint(&mut n, p, src_ip, src_port);
       wg_session(&mut n, p, keys, idx, ridx, ticks, 0);
       if blen(full) == MSG_RESP {
-        if wpw(n, p, WGP_HS) != 1 {
-          wcps(&mut n, p, WGC_MAC1, load_le64(full, 60));
-          wcps(&mut n, p, WGC_MAC1 + 1, load_le64(full, 68));
-        }
+        wg_ring_put(&mut n, p, idx, full);
         wg_send_peer(&mut n, i, p, full, MSG_RESP);
       }
       bfree(full);

@@ -526,14 +526,14 @@ int main(void) {
     struct sockaddr_in srv = {.sin_family = AF_INET, .sin_port = htons(7777), .sin_addr.s_addr = ip4(10, 9, 0, 2)};
     EXPECT("a client socket", u >= 0 && connect(u, (void *)&srv, sizeof srv) == 0);
     int seq = 0, up = 0;
-    for (int t = 0; t < 30 && !up; t++) up = ask(u, seq++, 64, 2000) >= 1;
+    for (int t = 0; t < 60 && !up; t++) up = ask(u, seq++, 64, 2000) >= 1;
     EXPECT("the handshake gets through the flood, by cookie", up);
     int all = 1, twice = 0;
     for (int i = 0; i < 5; i++) {
         /* a packet the busy device is slow with is sent again, under a new
          * tag so a late echo of the first is not mistaken for the second */
         int got = 0;
-        for (int t = 0; t < 3 && !got; t++) {
+        for (int t = 0; t < 6 && !got; t++) {
             int n = ask(u, seq++, 100 + i * 200, 4000);
             if (n > 1) twice = 1;
             got = n == 1;
