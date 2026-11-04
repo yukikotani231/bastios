@@ -51,6 +51,9 @@ const XFRMA_ALG_AEAD: u64 = 18;
 const XFRMA_REPLAY_ESN_VAL: u64 = 23;
 const XFRM_STATE_ESN: u64 = 128;          // in the state flags: 64-bit sequence numbers
 const XS_F_ESNATTR: u64 = 256;            // in XS_FLAGS: the state was made with an ESN replay state
+const XFRMA_ENCAP: u64 = 4;
+const XFRM_ENCAP_LEN: u64 = 24;           // struct xfrm_encap_tmpl
+const UDP_ENCAP_ESPINUDP: u64 = 2;
 const XFRM_ESN_HEAD: u64 = 24;            // struct xfrm_replay_state_esn without its bitmap
 const XFRM_USERSA: u64 = 224;             // struct xfrm_usersa_info
 const XFRM_USERSA_ID: u64 = 24;           // struct xfrm_usersa_id
@@ -77,6 +80,7 @@ const XS_RTOP: u64 = 16;                  // the highest sequence number receive
 const XS_RMAP: u64 = 17;                  // the replay bitmap, four words
 const XS_PKTS: u64 = 21;
 const XS_BYTES: u64 = 22;
+const XS_ENCAP: u64 = 23;                 // 0, or 1 + 65536 * source port + 2^32 * destination port: ESP in UDP
 
 // A lifetime row (XL_W words at XL_BASE in Net.wgp, one per association row).
 // The limits are what xfrm_lifetime_cfg held; 0 and ~0 both mean no limit.
@@ -402,6 +406,22 @@ fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u6
       return NE_INVAL;                    // the window comes from the ESN state, and must fit its bitmap
     }
   }
+  let ck = nla_find(b, attrs, end, XFRMA_ENCAP);
+  let mut encap = 0;
+  if ck != 0 {
+    if nla_len(b, ck) < XFRM_ENCAP_LEN {
+      return NE_INVAL;
+    }
+    if rd16(b, ck) != UDP_ENCAP_ESPINUDP {
+      return NE_OPNOTSUPP;                // ESP in UDP (RFC 3948) only
+    }
+    let esport = be16(b, ck + 2);
+    let edport = be16(b, ck + 4);
+    if esport == 0 || edport == 0 {
+      return NE_INVAL;
+    }
+    encap = 1 + esport * 65536 + edport * 4294967296;
+  }
   let dst = xs_addr(b, sa + 56);
   let spi = be32(b, sa + 56 + 16);
   let src = xs_addr(b, sa + 80);
@@ -444,6 +464,7 @@ fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u6
     w = w + 1;
   }
   xs_set(&mut n, row, XS_FLAGS, flags);
+  xs_set(&mut n, row, XS_ENCAP, encap);
   if ek != 0 {
     // oseq and seq (and, with ESN, their high halves) start the counters
     xs_set(&mut n, row, XS_FLAGS, flags + XS_F_ESNATTR);
@@ -544,6 +565,16 @@ fn xs_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
       j = j + 1;
     }
     nl_32(&mut n, xs_get(n, i, XS_SALT));
+  }
+  let encap = xs_get(n, i, XS_ENCAP);
+  if encap % 2 == 1 {
+    nla_head(&mut n, XFRMA_ENCAP, XFRM_ENCAP_LEN);
+    nl_16(&mut n, UDP_ENCAP_ESPINUDP);
+    nl_b(&mut n, encap / 16777216 % 256);       // sport, network order
+    nl_b(&mut n, encap / 65536 % 256);
+    nl_b(&mut n, encap / 4294967296 / 256 % 256);
+    nl_b(&mut n, encap / 4294967296 % 256);
+    xs_zeros(&mut n, 18);                       // padding and the original address
   }
   if xs_get(n, i, XS_FLAGS) / XS_F_ESNATTR % 2 == 1 {
     // XFRMA_REPLAY_ESN_VAL: the counters; the bitmap is not reported (zeros)
@@ -1055,6 +1086,7 @@ fn xfrm_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
 // from the wire again; a packet that comes in plain is dropped when an in
 // policy asks for ESP.
 
+const ESP_UDP: u64 = 8;                   // the UDP header of ESP in UDP
 const ESP_OVER: u64 = 52;                 // outer IPv4 header, ESP header, IV and ICV: 20 + 8 + 8 + 16
 const ESP_WIN: u64 = 256;                 // the replay bitmap's bits
 
@@ -1318,7 +1350,12 @@ fn esp_out(n: &mut Net, flen: u64) -> u64
   }
   let pad = (4 - (body + 2) % 4) % 4;
   let plen = body + pad + 2;
-  if 14 + ESP_OVER + plen > FRAME_MAX {
+  let encap = xs_get(n, sa, XS_ENCAP);
+  let mut eo = 0;
+  if encap % 2 == 1 {
+    eo = ESP_UDP;
+  }
+  if 14 + ESP_OVER + eo + plen > FRAME_MAX {
     return 1;                         // would not fit a frame: no fragmenting
   }
   let cur = xs_get(n, sa, XS_SEQ);
@@ -1354,7 +1391,7 @@ fn esp_out(n: &mut Net, flen: u64) -> u64
     aad = esp_aad(spi, seq % 4294967296);
   }
   let sealed = gcm_seal(key, nonce, aad, plain);
-  let total = ESP_OVER + plen;
+  let total = ESP_OVER + eo + plen;
   let mut src2 = src;
   let mut dst2 = dst;
   if tunnel {
@@ -1370,15 +1407,26 @@ fn esp_out(n: &mut Net, flen: u64) -> u64
   put16(&mut n.out, 18, n.tx % 65536);
   put16(&mut n.out, 20, 0);
   bset(&mut n.out, 22, 64);
-  bset(&mut n.out, 23, cast[u8](IPPROTO_ESP));
+  if eo == 0 {
+    bset(&mut n.out, 23, cast[u8](IPPROTO_ESP));
+  } else {
+    bset(&mut n.out, 23, cast[u8](IP_UDP));
+  }
   put16(&mut n.out, 24, 0);
   put32(&mut n.out, 26, src2);
   put32(&mut n.out, 30, dst2);
   put16(&mut n.out, 24, csum(n.out, 14, 20));
-  put32(&mut n.out, 34, spi);
-  put32(&mut n.out, 38, seq % 4294967296);
-  bcopy(&mut n.out, 42, nonce, 4, 8);
-  bcopy(&mut n.out, 50, sealed, 0, plen + 16);
+  if eo == ESP_UDP {
+    // RFC 3948: the UDP header, with no checksum, carries the ESP packet
+    put16(&mut n.out, 34, encap / 65536 % 65536);
+    put16(&mut n.out, 36, encap / 4294967296 % 65536);
+    put16(&mut n.out, 38, total - 20);
+    put16(&mut n.out, 40, 0);
+  }
+  put32(&mut n.out, 34 + eo, spi);
+  put32(&mut n.out, 38 + eo, seq % 4294967296);
+  bcopy(&mut n.out, 42 + eo, nonce, 4, 8);
+  bcopy(&mut n.out, 50 + eo, sealed, 0, plen + 16);
   bfree(sealed);
   bfree(aad);
   bfree(nonce);
@@ -1423,6 +1471,9 @@ fn esp_plain_ok(n: &Net, src: u64, dst: u64, proto: u64) -> bool
 {
   if proto == IPPROTO_ESP {
     return true;
+  }
+  if proto == IP_UDP && esp_encap_port(n, be16(n.pkt, 36)) {
+    return true;                      // ESP in UDP: the policy is for what is inside
   }
   let p = xp_lookup(n, n.ns, 0, src, dst, proto);
   if p >= XP_N {
@@ -1504,21 +1555,68 @@ fn esp_accept(n: &mut Net, sa: u64, seq: u64, plain: &Bytes)
   }
 }
 
+/// Whether some association of this namespace takes ESP in UDP on port dport.
+fn esp_encap_port(n: &Net, dport: u64) -> bool
+  requires net_ok(n)
+{
+  let mut i = 0;
+  while i < XSA_N
+    invariant i <= XSA_N
+  {
+    let e = xs_get(n, i, XS_ENCAP);
+    if xs_get(n, i, XS_USED) == 1 && xs_get(n, i, XS_NS) == n.ns && e % 2 == 1 && e / 65536 % 65536 == dport {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
+/// A UDP datagram (ulen bytes with its header, at 34 in n.pkt) for a port
+/// that takes ESP in UDP (RFC 3948). True if it was one: an ESP packet, or a
+/// one-byte keep-alive (0xff), dropped; false for what is meant for the socket
+/// (an IKE message, which starts with four zero bytes after the UDP header).
+fn esp_in_udp(n: &mut Net, ulen: u64) -> bool
+  requires net_ok(n) && 8 <= ulen && 34 + ulen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if ulen == 9 && bget(n.pkt, 42) == 0xff {
+    return true;
+  }
+  if ulen < 8 + 4 || be32(n.pkt, 42) == 0 {
+    return false;
+  }
+  esp_in_at(&mut n, ESP_UDP, ulen - ESP_UDP);
+  return true;
+}
+
 /// An ESP packet (total bytes of IPv4 packet at 14 in n.pkt) for this machine.
 fn esp_in(n: &mut Net, total: u64)
   requires net_ok(n) && 20 <= total && 14 + total <= FRAME_MAX
   ensures net_ok(n)
 {
-  if total < 56 || (total - 52) % 4 != 0 || n.lo_split {
+  esp_in_at(&mut n, 0, total - 20);
+}
+
+/// The ESP packet of elen bytes that starts at 34 + eo in n.pkt (eo is 8 behind
+/// a UDP header).
+fn esp_in_at(n: &mut Net, eo: u64, elen: u64)
+  requires net_ok(n) && eo <= 8 && 34 + eo + elen <= FRAME_MAX
+  ensures net_ok(n)
+{
+  if elen < 36 || (elen - 32) % 4 != 0 || n.lo_split {
     return;                           // not a whole ESP packet (ICV 16, IV 8, at least 4 of payload)
   }
   let dst = be32(n.pkt, 30);
-  let spi = be32(n.pkt, 34);
-  let lo = be32(n.pkt, 38);
+  let spi = be32(n.pkt, 34 + eo);
+  let lo = be32(n.pkt, 38 + eo);
   xs_reap(&mut n);
   let sa = xs_find(n, n.ns, dst, spi);
   if sa >= XSA_N {
     return;
+  }
+  if (xs_get(n, sa, XS_ENCAP) % 2 == 1) != (eo == ESP_UDP) {
+    return;                           // plain ESP for an association that wants UDP, or the reverse
   }
   let seq = esp_seq_full(n, sa, lo);
   if !esp_seq_ok(n, sa, seq) {
@@ -1526,13 +1624,13 @@ fn esp_in(n: &mut Net, total: u64)
   }
   let key = esp_key(n, sa);
   let mut nonce = esp_nonce(n, sa);
-  bcopy(&mut nonce, 4, n.pkt, 42, 8);
-  let mut aad = bytes_slice(n.pkt, 34, 42);
+  bcopy(&mut nonce, 4, n.pkt, 42 + eo, 8);
+  let mut aad = bytes_slice(n.pkt, 34 + eo, 42 + eo);
   if xs_esn(n, sa) {
     bfree(aad);
     aad = esp_aad_esn(spi, seq);
   }
-  let sealed = bytes_slice(n.pkt, 50, 14 + total);
+  let sealed = bytes_slice(n.pkt, 50 + eo, 34 + eo + elen);
   match gcm_open(key, nonce, aad, sealed) {
     Option::None => {},
     Option::Some(plain) => {

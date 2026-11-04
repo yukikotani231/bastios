@@ -1037,6 +1037,9 @@ fn udp_in(n: &mut Net, total: u64)
   if be32(n.pkt, 30) == IP_MAX {
     return;                           // other broadcasts: nobody listens
   }
+  if 14 + 20 + ulen <= FRAME_MAX && esp_encap_port(n, dport) && esp_in_udp(&mut n, ulen) {
+    return;                           // ESP in UDP (src/xfrm.bastio)
+  }
   let s = sock_find_in(n, dport, is_v6tok(be32(n.pkt, 26)));
   if s < SOCKS {
     udp_deliver(&mut n, s, ulen);
