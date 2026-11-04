@@ -16,6 +16,10 @@
 // on Linux); when only it is left, or the others hold nothing, the
 // faulting process gets its SIGSEGV as before.
 //
+// A thread group is counted where its address space lives (cg_resident):
+// the row of the member whose call was handled last, and while a thread of
+// it runs on a processor, the last count that could be taken.
+//
 // What this does not do: kill for memory the kernel itself holds (its heap
 // is separate and a shortage there still halts, src/proc.bastio), or for a
 // system call that finds no page (that call returns ENOMEM, as before).
@@ -61,7 +65,7 @@ fn oom_score(k: &mut Kernel, g: u64) -> u64
     return 0;
   }
   let total = smaller(pool_size(k.mem.pool), NPAGES);
-  if total == 0 || !has_space(&mut k.spaces, g) {
+  if total == 0 {
     return 0;
   }
   let pages = cg_resident(&mut k, g);
@@ -181,7 +185,7 @@ fn oom_fault(k: &mut Kernel, con: &mut Con, p: u64, want: bool) -> u64
   if find_free(&mut k.mem) < NPAGES {
     return OOM_NONE;                        // there is a page: the fault failed for another reason
   }
-  if pc_shrink(&mut k.fs.pc, &mut k.mem, PC_N) > 0 && find_free(&mut k.mem) < NPAGES {
+  if pc_reclaim(&mut k) > 0 && find_free(&mut k.mem) < NPAGES {
     return OOM_RETRY;
   }
   if swap_out(&mut k, 32) > 0 && find_free(&mut k.mem) < NPAGES {
