@@ -888,17 +888,16 @@ static void draw_cursor(int mx, int my)
         }
 }
 
-/* Writes n bytes to the screen at byte offset at. The device takes what it takes per write (the position moves on), so this goes on until all are in. */
+/* Writes n bytes to the screen at byte offset at. The device takes what it takes per write, so this goes on until all are in. */
 static int fb_put(off_t at, const void *p, size_t n)
 {
     const char *src = p;
-    if (lseek(fb, at, SEEK_SET) != at)
-        return -1;
     while (n) {
-        ssize_t got = write(fb, src, n);
+        ssize_t got = pwrite(fb, src, n, at);                 /* at the offset in one call: lseek and write were two */
         if (got <= 0)
             return -1;
         src += got;
+        at += got;
         n -= (size_t)got;
     }
     return 0;
@@ -2123,6 +2122,43 @@ int main(int argc, char **argv)
     flush(0, 0, W, H, mx, my);
     printf("bwm: ready %ux%u\n", W, H);
     fflush(stdout);
+    if (getenv("BWM_BENCH") && nz > 0) {                      /* BWM_BENCH=N: time N frames of a drag, a full redraw and a pointer move, then stop */
+        int n = atoi(getenv("BWM_BENCH"));
+        struct win *w = z[nz - 1];
+        long long t0, t1;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t0 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        for (int i = 0; i < n; i++) {                         /* a drag: the old and the new place of the window are painted and written */
+            int ox = w->x, oy = w->y, ow = w->w, oh = w->h;
+            w->x += i & 1 ? -9 : 9;
+            w->y += i & 1 ? -7 : 7;
+            int x0 = ox < w->x ? ox : w->x, y0 = oy < w->y ? oy : w->y;
+            int x1 = ox + ow > w->x + w->w ? ox + ow : w->x + w->w, y1 = oy + oh > w->y + w->h ? oy + oh : w->y + w->h;
+            draw_scene(x0, y0, x1, y1);
+            flush(x0, y0, x1, y1, mx, my);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        printf("bwm: bench drag %lld us a frame\n", (t1 - t0) / (n ? n : 1));
+        t0 = t1;
+        for (int i = 0; i < n; i++) {
+            draw_scene(0, 0, W, H);
+            flush(0, 0, W, H, mx, my);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        printf("bwm: bench full %lld us a frame\n", (t1 - t0) / (n ? n : 1));
+        t0 = t1;
+        for (int i = 0; i < n; i++)
+            flush(mx - CUR_R, my - CUR_R, mx + CUR_BOX, my + CUR_BOX, mx + (i & 7), my);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        printf("bwm: bench pointer %lld us a frame\n", (t1 - t0) / (n ? n : 1));
+        printf("bwm: bench done\n");
+        fflush(stdout);
+        return 0;
+    }
     if (child && fork() == 0) {                               /* -c PROGRAM [ARGS]: start a client */
         const char *img = strcmp(child[0], "bfiles") == 0 || strcmp(child[0], "bsys") == 0 || strcmp(child[0], "bview") == 0 ? "bterm" : child[0];     /* bfiles is bterm under that name */
         execv(img[0] == '/' ? img : (snprintf(path, sizeof path, "/bin/%s", img), path), child);
@@ -2679,14 +2715,19 @@ int main(int argc, char **argv)
             draw_scene(dx0, dy0, dx1, dy1);
             if (flush(dx0, dy0, dx1, dy1, mx, my) != 0)
                 break;
-            if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
-                break;
-        } else if (mx != ox || my != oy) {
-            if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
-                break;
         }
-        if (mx != ox || my != oy)
-            flush(mx - CUR_R, my - CUR_R, mx + CUR_BOX, my + CUR_BOX, mx, my);
+        if (mx != ox || my != oy) {
+            /* The pointer moved: the box it left and the box it is in. Close together they are one piece, so a small move is one set of
+             * rows written, not two (a row is a system call). */
+            if (abs(mx - ox) < CUR_BOX && abs(my - oy) < CUR_BOX) {
+                if (flush((mx < ox ? mx : ox) - CUR_R, (my < oy ? my : oy) - CUR_R, (mx > ox ? mx : ox) + CUR_BOX, (my > oy ? my : oy) + CUR_BOX, mx, my) != 0)
+                    break;
+            } else {
+                if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
+                    break;
+                flush(mx - CUR_R, my - CUR_R, mx + CUR_BOX, my + CUR_BOX, mx, my);
+            }
+        }
     }
     if (have_tty)
         tcsetattr(0, TCSANOW, &old);

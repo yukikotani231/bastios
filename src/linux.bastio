@@ -3210,6 +3210,16 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     let mut got = 0;
     if f != NO_FILE && off <= 0xFFFFFFFFFFFFFFFF - done {
       got = vfs_read_at(&mut k.fs, f, off + done, step);
+      if got == NO_FD && f >= NFILES && f - NFILES < DSLOTS && off + done < vfs_size(&mut k.fs, f) {
+        // A disk file's block the bounded wait for the disk could not
+        // get (disk_read_wait gives up on a disk that does not answer):
+        // the mapping fails rather than hold zeros where the file has
+        // data.
+        if at / 4096 <= WPAGES && pages <= WPAGES - at / 4096 {
+          win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
+        }
+        return EIO;
+      }
       if got == NO_FD {
         got = 0;
       }
