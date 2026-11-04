@@ -100,7 +100,7 @@ const SY_NETUNIX: u64 = 25;            // /proc/net/unix
 const SY_NETRAW: u64 = 26;             // /proc/net/raw
 const SY_NETROUTE: u64 = 27;           // /proc/net/route
 const SY_NETARP: u64 = 28;             // /proc/net/arp
-const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern ("core": a dump goes to a file of that name, src/lxcore.bastio)
+const SY_CORE: u64 = 29;               // /proc/sys/kernel/core_pattern (the pattern a dump is named by, kept in k.evt from CP_AT; src/lxcore.bastio)
 const SY_NROPEN: u64 = 30;             // /proc/sys/fs/nr_open
 const SY_DROP: u64 = 31;               // /proc/sys/vm/drop_caches: written, kept for nothing
 const SY_NETIF6: u64 = 80;             // /proc/net/if_inet6 (SY_SC's 32 .. 72 end before)
@@ -862,7 +862,7 @@ fn is_px_timens(f: u64) -> bool {
 }
 
 fn proc_writable(f: u64) -> bool {
-  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || f == PROC_DEV + PSYS + SY_PID_MAX || f == PROC_DEV + PSYS + SY_NROPEN || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_IPC + 5 || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
+  return is_px_timens(f) || is_mem_file(f) || is_px_adj(f) || is_sct_file(f) || is_ino_file(f) || f == PROC_DEV + PSYS + SY_PID_MAX || f == PROC_DEV + PSYS + SY_NROPEN || is_nextid_file(f) || f == PROC_DEV + PSYS + SY_IPC || f == PROC_DEV + PSYS + SY_IPC + 5 || f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 || f == PROC_DEV + PSYS + SY_PIPE_MAX || f == PROC_DEV + PSYS + SY_CORE || f == PROC_DEV + PSYS + SY_DROP || is_um_file(f) || (is_cg_file(f) && cgf_writable(cgd_f(f)));
 }
 
 /// What stat says about /proc file f (a proc_file device).
@@ -2078,6 +2078,52 @@ fn environ_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
   return len;
 }
 
+/// 256 to the power j (at most 7).
+fn pw256(j: u64) -> u64
+  ensures result >= 1 && result <= 72057594037927936
+{
+  if j == 0 { return 1; }
+  if j == 1 { return 256; }
+  if j == 2 { return 65536; }
+  if j == 3 { return 16777216; }
+  if j == 4 { return 4294967296; }
+  if j == 5 { return 1099511627776; }
+  if j == 6 { return 281474976710656; }
+  return 72057594037927936;
+}
+
+/// Byte i of the core pattern (see CP_AT).
+fn cp_byte(k: &Kernel, i: u64) -> u64
+  requires kok(k)
+  ensures result < 256
+{
+  if i >= CP_MAX {
+    return 0;
+  }
+  let w = evg(k, CP_AT + 1 + i / 8) / pw256(i % 8);
+  return w % 256;
+}
+
+/// The text of /proc/sys/kernel/core_pattern: the pattern and a newline.
+fn core_pattern_text(k: &Kernel, o: &mut Bytes) -> u64
+  requires kok(k) && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let cl = evg(k, CP_AT);
+  if cl == 0 {
+    return put_s(&mut o, 0, "core\n");
+  }
+  let mut ci = 0;
+  while ci + 1 < cl && ci < CP_MAX
+    invariant ci <= CP_MAX && blen(o) == PROC_OUT && kok(k)
+  {
+    bset(&mut o, ci, cast[u8](cp_byte(k, ci)));
+    ci = ci + 1;
+  }
+  bset(&mut o, ci, 10);
+  return ci + 1;
+}
+
 /// Writes /proc file f into o. Returns its length.
 fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   requires kok(k) && pid < NPROC && blen(o) == PROC_OUT
@@ -2445,7 +2491,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       return uts_proc_text(k, pid, what - SY_UTS, &mut o);
     }
     if what == SY_CORE {
-      return put_s(&mut o, 0, "core\n");
+      return core_pattern_text(k, &mut o);
     }
     if what == SY_NROPEN {
       let a = put_n(&mut o, 0, nr_open(k));
@@ -3934,6 +3980,50 @@ fn next_id_write(k: &mut Kernel, f: u64, n: u64, start: u64) -> u64
   return n;
 }
 
+/// A write to /proc/sys/kernel/core_pattern: the first CP_MAX bytes up to a
+/// newline or NUL are the new pattern (src/lxcore.bastio says what it may
+/// hold). An empty one is the default, "core".
+fn core_pattern_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == 0 {
+    return 0;
+  }
+  let m = smaller(n, CP_MAX);
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, m) != m {
+    return EFAULT;
+  }
+  let mut l = 0;
+  while l < m && bget(k.fs.xfer, l) != 10 && bget(k.fs.xfer, l) != 0
+    invariant l <= m && m <= CP_MAX && blen(k.fs.xfer) == XBUF && kok(k)
+  {
+    l = l + 1;
+  }
+  let mut i = 0;
+  while i < 16
+    invariant i <= 16 && kok(k)
+  {
+    evs(&mut k, CP_AT + 1 + i, 0);
+    i = i + 1;
+  }
+  i = 0;
+  while i < l
+    invariant i <= l && l <= CP_MAX && blen(k.fs.xfer) == XBUF && kok(k)
+  {
+    let sh = pw256(i % 8);
+    let w = evg(k, CP_AT + 1 + i / 8);
+    evs(&mut k, CP_AT + 1 + i / 8, w | (cast[u64](bget(k.fs.xfer, i)) * sh));
+    i = i + 1;
+  }
+  if l == 0 {
+    evs(&mut k, CP_AT, 0);
+  } else {
+    evs(&mut k, CP_AT, l + 1);
+  }
+  return n;
+}
+
 fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -3946,6 +4036,9 @@ fn proc_write(k: &mut Kernel, pid: u64, f: u64, va: u64, n: u64) -> u64
   }
   if f == PROC_DEV + PSYS + SY_UTS || f == PROC_DEV + PSYS + SY_UTS + 1 {
     return uts_proc_write(&mut k, pid, f - (PROC_DEV + PSYS + SY_UTS), va, n);   // src/lxsys.bastio
+  }
+  if f == PROC_DEV + PSYS + SY_CORE {
+    return core_pattern_write(&mut k, pid, va, n);
   }
   if !proc_writable(f) || n == 0 || n > 32 {
     return EINVAL;
@@ -3974,7 +4067,7 @@ fn uts_file_index(f: u64) -> u64
 /// Whether a write of the transfer buffer can set /proc file f: the number
 /// files, which need no user memory beyond that buffer.
 fn proc_xfer_writable(f: u64) -> bool {
-  return proc_writable(f) && !is_mem_file(f) && !is_cg_file(f) && !is_um_file(f) && f != PROC_DEV + PSYS + SY_UTS && f != PROC_DEV + PSYS + SY_UTS + 1;
+  return proc_writable(f) && !is_mem_file(f) && !is_cg_file(f) && !is_um_file(f) && f != PROC_DEV + PSYS + SY_UTS && f != PROC_DEV + PSYS + SY_UTS + 1 && f != PROC_DEV + PSYS + SY_CORE;
 }
 
 /// The part of proc_write after the bytes are in the transfer buffer: n of
