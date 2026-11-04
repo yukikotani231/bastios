@@ -58,7 +58,7 @@ const MNT_STAGES: u64 = 8;
 const MNT_FLAGSHIFT: u64 = 64;
 
 fn is_mountapi_call(n: u64) -> bool {
-  return n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN || n == LX_FSCONFIG || n == LX_FSMOUNT;
+  return n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_MOUNT_SETATTR;
 }
 
 /// Is the NUL-terminated string at user address va s (at most 16 bytes)?
@@ -392,7 +392,7 @@ fn lx_move_mount(k: &mut Kernel, pid: u64, from_dfd: u64, from_path: u64, to_dfd
       bset(&mut k.fs.xfer, c, base_byte(k, pid, cd, c));
       c = c + 1;
     }
-    let r = ns_mount_at(&mut k, pid, 0, dl, to_dfd, to_path, MK_BIND, 0);
+    let r = ns_mount_at(&mut k, pid, 0, dl, to_dfd, to_path, MK_BIND, st_to_ms(of_get(k.ofd, cd, OF_ACC) / 32 % 16384));
     if r == 0 {
       of_set(&mut k.ofd, cd, OF_ACC, ACC_PATH);   // attached: it is a handle again
     }
@@ -432,6 +432,111 @@ fn lx_move_mount(k: &mut Kernel, pid: u64, from_dfd: u64, from_path: u64, to_dfd
   return r;
 }
 
+/// The statfs flags (ST_*) of mount(2) flags f (MS_*): nosymfollow is the
+/// one that differs.
+fn ms_to_st(f: u64) -> u64
+  ensures result < 16384
+{
+  return f % 16 + (f / 1024 % 4) * 1024 + (f / 256 % 2) * 8192;
+}
+
+/// The mount(2) flags of statfs flags s.
+fn st_to_ms(s: u64) -> u64 {
+  return s % 16 + (s / 1024 % 4) * 1024 + (s / 8192 % 2) * 256;
+}
+
+/// mount_setattr(dfd, path, flags, attr, size): changes the attributes of a
+/// mount. On the clone of a directory open_tree made, they are kept for
+/// move_mount; otherwise they are those of the mount the path is in, when
+/// it is one of the namespace's own (a bind mount, proc, ...). Propagation
+/// is accepted and changes nothing, as for mount(2); an ID-mapped mount is
+/// ENOSYS.
+fn lx_mount_setattr(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64, uattr: u64, usize: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !0x9900 != 0 {
+    return EINVAL;                          // AT_EMPTY_PATH, AT_RECURSIVE, AT_SYMLINK_NOFOLLOW, AT_NO_AUTOMOUNT
+  }
+  if usize < 32 {
+    return EINVAL;
+  }
+  if usize > 4096 {
+    return E2BIG;
+  }
+  if uattr < USER_BASE || uattr >= USER_BASE + USER_SIZE - 32 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, uattr, &mut k.fs.xfer, 32) != 32 {
+    return EFAULT;
+  }
+  let set = get_u64(k.fs.xfer, 0);
+  let clr = get_u64(k.fs.xfer, 8);
+  let prop = get_u64(k.fs.xfer, 16);
+  let userns = get_u64(k.fs.xfer, 24);
+  if set & 0x100000 != 0 || clr & 0x100000 != 0 || userns != 0 {
+    return ENOSYS;                          // ID-mapped mounts
+  }
+  if prop != 0 && prop != 0x20000 && prop != 0x40000 && prop != 0x80000 && prop != 0x100000 {
+    return EINVAL;
+  }
+  let sf = attr_flags(set);
+  let mut clr2 = clr;
+  let mut clrst = 0;
+  if clr & MOUNT_ATTR_ATIME != 0 {
+    clrst = 1024;                           // the atime field: back to relatime
+    clr2 = clr - (clr & MOUNT_ATTR_ATIME);
+  }
+  let cf = attr_flags(clr2);
+  if sf == NO_RESULT || cf == NO_RESULT || set & clr != 0 {
+    return EINVAL;
+  }
+  let setst = ms_to_st(sf);
+  clrst = (clrst | ms_to_st(cf)) % 16384;
+  let empty = flags & AT_EMPTY_PATH_FLAG != 0 && str_empty(&mut k, pid, path);
+  if empty {
+    let h = dir_ofd(k, pid, dfd % 0x100000000);
+    if h >= OFD_N {
+      if fd_get(k.lxfd, pid, dfd % 0x100000000) == 0 {
+        return EBADF;
+      }
+      return ENOTDIR;
+    }
+    let acc = of_get(k.ofd, h, OF_ACC);
+    if acc & ACC_CLONE != 0 {
+      let cur = acc / 32 % 16384;
+      let nst = (cur & !clrst) | setst;
+      of_set(&mut k.ofd, h, OF_ACC, acc % 32 + nst * 32);
+      return 0;
+    }
+    // The directory the descriptor holds, looked up as a path.
+    let dl = base_len(k, pid, h);
+    if dl == 0 {
+      return EINVAL;
+    }
+    let mut c = 0;
+    while c < dl
+      invariant c <= dl && dl <= FNAME_MAX && kok(k) && pid < NPROC && h < OFD_N
+    {
+      bset(&mut k.fs.xfer, c, base_byte(k, pid, h, c));
+      c = c + 1;
+    }
+    let pn = lx_path_xfer(&mut k, pid, dl, OFD_N, true);
+    if pn == NO_RESULT {
+      return k.perr;
+    }
+    return ns_set_attrs(&mut k, pid, setst, clrst);
+  }
+  let n = lx_path_at(&mut k, pid, dfd % 0x100000000, path);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  if setst == 0 && clrst == 0 {
+    return 0;                               // propagation only: there is none between namespaces here
+  }
+  return ns_set_attrs(&mut k, pid, setst, clrst);
+}
+
 /// open_tree(dfd, path, flags): a handle (as O_PATH) for the path. A clone
 /// of a directory (OPEN_TREE_CLONE) is the same handle marked ACC_CLONE:
 /// move_mount binds the directory it names where the program says (a bind
@@ -445,7 +550,7 @@ fn lx_open_tree(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64) -> u6
   if flags & !OPEN_TREE_OK != 0 {
     return EINVAL;
   }
-  if flags & AT_EMPTY_PATH_FLAG != 0 {
+  if flags & AT_EMPTY_PATH_FLAG != 0 && str_empty(&mut k, pid, path) {
     return ENOSYS;                          // a handle for the descriptor itself
   }
   let n = lx_path_at(&mut k, pid, dfd % 0x100000000, path);
@@ -483,6 +588,9 @@ fn lx_mountapi_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, fu
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
   if n == LX_OPEN_TREE {
     return lx_open_tree(&mut k, pid, a, b, c % 0x100000000);
+  }
+  if n == LX_MOUNT_SETATTR {
+    return lx_mount_setattr(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
   }
   if n == LX_FSOPEN {
     return lx_fsopen(&mut k, pid, a, b);

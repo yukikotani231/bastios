@@ -14,6 +14,8 @@
 #define MOVE_MOUNT 429
 #define OPEN_TREE 428
 #define EMPTY 4
+#define MOUNT_SETATTR 442
+struct mattr { unsigned long long set, clr, prop, userns; };
 
 static int has(const char *dir, const char *opt) {
     char line[512], mp[256], opts[256];
@@ -135,6 +137,24 @@ int main(void) {
     }
     EXPECT("the source is not changed", mount("/tmp/oc_src", "/tmp/oc_dst", NULL, MS_BIND | MS_REMOUNT, NULL) == 0 && statvfs("/tmp/oc_src", &sv) == 0 && !(sv.f_flag & ST_NOEXEC));
     EXPECT("a remount without flags clears them", statvfs("/tmp/oc_dst", &sv) == 0 && !(sv.f_flag & (ST_NOSUID | ST_NODEV | ST_NOEXEC | ST_RDONLY)));
+    umount("/tmp/oc_dst");
+
+    /* mount_setattr: on a clone before it is attached, and on a mount that exists. */
+    struct mattr ma = { 1 | 2 | 8, 0, 0, 0 };           /* MOUNT_ATTR_RDONLY | NOSUID | NOEXEC */
+    EXPECT("mount_setattr with a short struct is EINVAL", syscall(MOUNT_SETATTR, AT_FDCWD, "/tmp/oc_src", 0, &ma, 8) == -1 && errno == EINVAL);
+    EXPECT("with a bad flag is EINVAL", syscall(MOUNT_SETATTR, AT_FDCWD, "/tmp/oc_src", 0x40, &ma, sizeof ma) == -1 && errno == EINVAL);
+    struct mattr bad = { 0x4000, 0, 0, 0 };
+    EXPECT("with an unknown attribute is EINVAL", syscall(MOUNT_SETATTR, AT_FDCWD, "/tmp/oc_src", 0, &bad, sizeof bad) == -1 && errno == EINVAL);
+    cl = syscall(OPEN_TREE, AT_FDCWD, "/tmp/oc_src", 1 | 0x80000);
+    EXPECT("mount_setattr sets attributes on a clone", cl >= 0 && syscall(MOUNT_SETATTR, cl, "", 0x1000, &ma, sizeof ma) == 0);
+    EXPECT("then move_mount attaches it with them", cl >= 0 && syscall(MOVE_MOUNT, cl, "", AT_FDCWD, "/tmp/oc_dst", EMPTY) == 0
+           && statvfs("/tmp/oc_dst", &sv) == 0 && (sv.f_flag & ST_RDONLY) && (sv.f_flag & ST_NOSUID) && (sv.f_flag & ST_NOEXEC) && !(sv.f_flag & ST_NODEV));
+    if (cl >= 0)
+        close(cl);
+    struct mattr ma2 = { 4, 1 | 8, 0, 0 };              /* set nodev, clear rdonly and noexec */
+    EXPECT("mount_setattr changes a mount that exists", syscall(MOUNT_SETATTR, AT_FDCWD, "/tmp/oc_dst", 0, &ma2, sizeof ma2) == 0
+           && statvfs("/tmp/oc_dst", &sv) == 0 && !(sv.f_flag & ST_RDONLY) && !(sv.f_flag & ST_NOEXEC) && (sv.f_flag & ST_NODEV) && (sv.f_flag & ST_NOSUID));
+    EXPECT("mount_setattr on a path in no mount is EINVAL", syscall(MOUNT_SETATTR, AT_FDCWD, "/tmp/oc_src", 0, &ma2, sizeof ma2) == -1 && errno == EINVAL);
     umount("/tmp/oc_dst");
     unlink("/tmp/oc_src/run");
     unlink("/tmp/oc_src/f");

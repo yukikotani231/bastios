@@ -1136,6 +1136,13 @@ t_mountapi: remounting it sets nosuid, nodev, noexec and read-only
 t_mountapi: so does /proc/mounts
 t_mountapi: statvfs reports them
 t_mountapi: the source is not changed
+t_mountapi: mount_setattr changes a mount that exists
+t_mountapi: mount_setattr on a path in no mount is EINVAL
+t_mountapi: mount_setattr sets attributes on a clone
+t_mountapi: mount_setattr with a short struct is EINVAL
+t_mountapi: with a bad flag is EINVAL
+t_mountapi: with an unknown attribute is EINVAL
+t_mountapi: then move_mount attaches it with them
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket

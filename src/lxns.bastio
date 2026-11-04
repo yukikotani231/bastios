@@ -2097,6 +2097,9 @@ fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, ta
     mf = ovf;
   }
   mf = mf - mf / 64 % 4194304 * 64 + mt_attrs(flags);   // the attributes the mount(2) flags ask for
+  if presrc != NO_RESULT && flags % 2 == 1 && mf & MT_RO == 0 {
+    mf = mf + MT_RO;                        // a clone attached by move_mount takes read-only from its attributes (mount(2)'s MS_BIND needs a remount)
+  }
   let ok = ns_add(&mut k, ns, mf, src, sl);
   bfree(src);
   if !ok {
@@ -2210,6 +2213,25 @@ fn ns_remount(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
   if flags % 2 == 1 {
     f = f + MT_RO;
   }
+  me_set(&mut k, e, ME_FLAGS, f);
+  return 0;
+}
+
+/// mount_setattr on the mount the last lookup went through: its statfs
+/// flags become (flags & !clr) | set. EINVAL if the lookup went through no
+/// mount of the namespace's own.
+fn ns_set_attrs(k: &mut Kernel, pid: u64, set: u64, clr: u64) -> u64
+  requires kok(k) && pid < NPROC && set < 16384 && clr < 16384
+  ensures kok(k)
+{
+  let e = ns_at(k, ns_of(k, pid));
+  if e >= MT_N {
+    return EINVAL;
+  }
+  let fl = me_get(k, e, ME_FLAGS);
+  let cur = me_stflags(k, e) % 16384;
+  let st = (cur & !clr) | set;
+  let f = fl % MT_RO + (fl / MT_OWN % 2) * MT_OWN + (st / 2 * 2) * 32 + (st % 2) * MT_RO;
   me_set(&mut k, e, ME_FLAGS, f);
   return 0;
 }
