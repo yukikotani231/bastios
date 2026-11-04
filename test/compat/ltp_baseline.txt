@@ -652,6 +652,7 @@ open10
 open11
 open15
 open_by_handle_at01
+open_tree02
 open_by_handle_at02
 openat01
 openat201
