@@ -223,6 +223,23 @@ int main(void) {
            for (int i = 0; i < 3; i++)
                ok = ok && got[i] >= 0 && write(got[i], "0123" + i, 1) == 1 && read(p[i][0], &x, 1) == 1 && x == "0123"[i];
            ok; }));
+    EXPECT("SCM_RIGHTS passes twelve descriptors in one message (Firefox's IPC sends nine)", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
+           enum { N = 12 }; int p[N][2]; int fds[N]; for (int i = 0; i < N; i++) { pipe(p[i]); fds[i] = p[i][1]; }
+           char cb[CMSG_SPACE(N * sizeof(int))] = {0}; struct iovec v = {"f", 1};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+           struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
+           memcpy(CMSG_DATA(h), fds, sizeof fds);
+           int ok = sendmsg(sv[0], &m, 0) == 1;
+           char rb[CMSG_SPACE(N * sizeof(int))]; char x; struct iovec rv = {&x, 1};
+           struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+           int got[N]; for (int i = 0; i < N; i++) got[i] = -1;
+           ok = ok && recvmsg(sv[1], &r, 0) == 1 && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_type == SCM_RIGHTS && h->cmsg_len == CMSG_LEN(sizeof got) &&
+                !(r.msg_flags & MSG_CTRUNC) && (memcpy(got, CMSG_DATA(h), sizeof got), 1);
+           for (int i = 0; i < N; i++)
+               ok = ok && got[i] >= 0 && write(got[i], "abcdefghijkl" + i, 1) == 1 && read(p[i][0], &x, 1) == 1 && x == "abcdefghijkl"[i];
+           for (int i = 0; i < N; i++) { close(p[i][0]); close(p[i][1]); if (got[i] >= 0) close(got[i]); }
+           close(sv[0]); close(sv[1]);
+           ok; }));
     EXPECT("SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
            int p[3][2]; int fds[3]; for (int i = 0; i < 3; i++) { pipe(p[i]); fds[i] = p[i][1]; }
            char cb[CMSG_SPACE(3 * sizeof(int))] = {0}; struct iovec v = {"f", 1};
