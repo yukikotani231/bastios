@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bfiles` and `bsys` keep their pixels in memory shared with `bwm`, as `bterm` does, and send a damage instead of the whole window for each repaint: a repaint of the file manager costs about 1 ms where it cost about 70 ms (QEMU without KVM; `BFILES_BENCH=N` in `test/iso_test.sh` measures it).
 - AF_ALG `ctr(aes)` and `cbc(aes)` take 24-byte keys (AES-192).
 - `bterm` tells `bwm` what it drew in one message instead of one a row, and draws plain text with a faster loop: a full screen of scrolling text costs it about 1 ms where it cost 8 ms (QEMU without KVM; `BTERM_BENCH=N` in `test/iso_test.sh` measures it).
 - AF_ALG hashes `sha1`, `md5`, `hmac(sha1)` and `hmac(md5)`, for the programs and protocols that still ask for them (both hashes are broken for collisions; the kernel's own code uses neither).
