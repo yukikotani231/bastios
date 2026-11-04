@@ -394,13 +394,19 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
         # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
         # dragging and typing, driven through QEMU's monitor.
-        def monitor(*cmds, gap=0.15):
+        # The pauses are most of the test's run time (about 450 s of 940 s
+        # in a measured BIOS run, 460 calls), so they are kept short: the
+        # callers that need the guest to have acted wait for the screen or
+        # the serial line themselves.
+        # Keys keep the long gap between them (Alt-Shift with three arrow keys
+        # in one call lost one at 0.08 s); only the mouse's are cut.
+        def monitor(*cmds, gap=None):
             m3 = socket.socket(socket.AF_UNIX)
             m3.connect(mon_path)
             for c in cmds:
                 m3.sendall(c.encode() + b"\n")
-                time.sleep(gap)
-            time.sleep(0.4)
+                time.sleep(gap if gap is not None else 0.08 if c.startswith("mouse_") else 0.15)
+            time.sleep(0.2)
             m3.close()
         mark = len(out)
         q.stdin.write(b"bwm\r"); q.stdin.flush()
@@ -635,7 +641,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("pixels", [at(x, 200) for x in (100, 250, 350)])
             fails += not good
-            time.sleep(3)                                    # Alt is up before the next key (it was held for 4 s)
+            time.sleep(5)                                    # Alt is up before the next key (it is held for 4 s from the sendkey, and the calls before this one are short now)
             # Alt-Shift with an arrow key moves the focused window 16 pixels.
             def left_edge():
                 w, h, px = screendump()
