@@ -76,7 +76,7 @@ alive
 
 == x11: a wxWidgets program, Audacity, draws its window on the X screen
 # timeout 400
-$ bb kill $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 2; bb mkdir -p /disk/a; bb tar -xf /disk/wx.tar -C /disk/a && bb rm /disk/wx.tar; /disk/fakebwm 300 'x' >/disk/fb7.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/a -d 6 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/audacity >/disk/au.out 2>&1 & until bb grep -q typed /disk/fb7.out; do bb sleep 1; done; bb cat /disk/fb7.out; bb grep -q 'pixels drawn' /disk/fb7.out || { bb tail -q -n 5 /disk/au.out /disk/xlog | bb cut -c1-100; }; bb ps | bb grep -q '/usr/bin/audacity' && echo alive || bb cat /disk/au.out
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/a; bb tar -xf /disk/wx.tar -C /disk/a && bb rm /disk/wx.tar; /disk/fakebwm 300 'x' >/disk/fb7.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/a -d 6 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/audacity >/disk/au.out 2>&1 & until bb grep -q typed /disk/fb7.out; do bb sleep 1; done; bb cat /disk/fb7.out; bb grep -q 'pixels drawn' /disk/fb7.out || { bb tail -q -n 5 /disk/au.out /disk/xlog | bb cut -c1-100; }; bb ps | bb grep -q '/usr/bin/audacity' && echo alive || bb cat /disk/au.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :6
 fakebwm: pixels drawn
@@ -151,6 +151,15 @@ alive
 $ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/z; bb tar -xf /disk/czkawka.tar -C /disk/z && bb rm /disk/czkawka.tar; /disk/fakebwm 300 'x' >/disk/fb15.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/z -d 14 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/czkawka_gui >/disk/czk.out 2>&1 & until bb grep -q typed /disk/fb15.out; do bb sleep 1; done; bb cat /disk/fb15.out; bb ps | bb grep -q '/usr/bin/czkawka_gui' && echo alive || bb cat /disk/czk.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :14
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11: a Qt 5 transport stream muxer, tsMuxeR, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/u; bb tar -xf /disk/tsmuxer.tar -C /disk/u && bb rm /disk/tsmuxer.tar; /disk/fakebwm 300 'x' >/disk/fb16.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/u -d 15 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp QT_XCB_GL_INTEGRATION=none /usr/bin/tsMuxerGUI >/disk/tsm.out 2>&1 & until bb grep -q typed /disk/fb16.out; do bb sleep 1; done; bb cat /disk/fb16.out; bb ps | bb grep -q '/usr/bin/tsMuxerGUI' && echo alive || bb cat /disk/tsm.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :15
 fakebwm: pixels drawn
 fakebwm: typed
 alive
