@@ -1098,6 +1098,10 @@ t_mountapi: move_mount with a name that is not there is ENOENT
 t_mountapi: nothing can be made in it
 t_mountapi: the directory is a mount point
 t_mountapi: with the flag from fsconfig
+t_mountapi: open_tree of a missing path is ENOENT
+t_mountapi: open_tree on a bad descriptor is EBADF
+t_mountapi: open_tree with a bad flag is EINVAL
+t_mountapi: open_tree without a clone is a handle
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
