@@ -1897,6 +1897,7 @@ x11: x11: a Java Swing program, the JDownloader installer, draws its window on t
 x11: x11: a wxWidgets program, Audacity, draws its window on the X screen
 x11: x11: a Python program with PyQt 5, dupeGuru, draws its window on the X screen
 x11: x11: a Python tag editor with PyQt 5, puddletag, draws its window on the X screen
+x11: x11: a Qt 5 program, QDirStat, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
