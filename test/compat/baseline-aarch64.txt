@@ -1577,6 +1577,8 @@ t_ptrace: a sleeping seized tracee is stopped by PTRACE_INTERRUPT
 t_ptrace: it can be resumed and then killed
 t_ptrace: /proc/self/mem reads and writes the program's own memory
 t_ptrace: /proc/PID/mem reads and writes another process's memory
+t_ptrace: strace -f style tracing of posix_spawn: the clone ends with a stop after the vfork event, and stops pair up
+t_ptrace: the same with PTRACE_O_TRACEVFORKDONE: the stop after the clone follows the vfork-done stop
 t_pty: IUTF8 can be set
 t_pty: erasing a wide character echoes whole erasures
 t_pty: erasing a two-byte character takes back one cell

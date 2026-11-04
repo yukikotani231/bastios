@@ -17,6 +17,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <stdint.h>
+#include <spawn.h>
 
 
 /* The classic BPF and seccomp definitions musl does not ship. */
@@ -107,6 +108,60 @@ static int wait_stop(pid_t c, int *sig) {
     if (waitpid(c, &st, 0) != c || !WIFSTOPPED(st)) return 0;
     *sig = WSTOPSIG(st);
     return 1;
+}
+
+/* posix_spawn (a clone with CLONE_VM | CLONE_VFORK, which borrows the
+ * memory) in a child traced with PTRACE_SYSCALL and PTRACE_O_TRACEVFORK plus
+ * `opts`: 1 if the child's stops pair up as entries and exits, and the stop
+ * after the vfork event (and vfork-done, if asked for) is the end of the
+ * clone, returning the new child's pid. */
+static int spawn_traced(char **argv, int opts)
+{
+    pid_t c = fork();
+    if (c == 0) {
+        ptrace(PTRACE_TRACEME, 0, 0, 0);
+        raise(SIGSTOP);
+        pid_t q;
+        char *av[] = {"t_ptrace", "exec-child", 0};
+        if (posix_spawn(&q, "/proc/self/exe", 0, 0, av, 0) != 0 && posix_spawn(&q, argv[0], 0, 0, av, 0) != 0) _exit(90);
+        int qs = 0;
+        waitpid(q, &qs, 0);
+        _exit(WIFEXITED(qs) && WEXITSTATUS(qs) == 7 ? 0 : 91);
+    }
+    int st = 0;
+    waitpid(c, &st, 0);
+    ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)(opts | PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACEVFORK));
+    ptrace(PTRACE_SYSCALL, c, 0, 0);
+    int ok = 1, inside = 0, after = 0, n = 0, cx = -1;
+    long kid = 0;
+    for (;;) {
+        pid_t p = waitpid(-1, &st, __WALL);
+        if (p == -1) break;
+        if (p != c) {
+            if (WIFSTOPPED(st)) ptrace(PTRACE_CONT, p, 0, 0);
+            continue;
+        }
+        if (!WIFSTOPPED(st)) { cx = st; break; }
+        if (++n > 2000) { ok = 0; kill(c, SIGKILL); continue; }
+        int sig = WSTOPSIG(st), ev = st >> 16;
+        if (sig == (SIGTRAP | 0x80)) {
+            struct sysinfo si;
+            memset(&si, 0, sizeof si);
+            ptrace(PTRACE_GET_SYSCALL_INFO, c, (void *)sizeof si, &si);
+            if (si.op != (inside ? 2 : 1)) ok = 0;
+            if (after && !(si.op == 2 && si.exit.rval == kid)) ok = 0;
+            after = 0;
+            inside = !inside;
+        } else if (ev == PTRACE_EVENT_VFORK) {
+            unsigned long m = 0;
+            ptrace(PTRACE_GETEVENTMSG, c, 0, &m);
+            kid = (long)m;
+            after = 1;
+        }
+        int pass = sig == SIGTRAP || sig == (SIGTRAP | 0x80) ? 0 : sig;
+        ptrace(PTRACE_SYSCALL, c, 0, (void *)(long)pass);
+    }
+    return ok && kid > 0 && WIFEXITED(cx) && WEXITSTATUS(cx) == 0;
 }
 
 int main(int argc, char **argv) {
@@ -624,5 +679,9 @@ int main(int argc, char **argv) {
                cf >= 0 && e == 4 && cur == 55 && f == 4 && WIFEXITED(st) && WEXITSTATUS(st) == 0);
         if (cf >= 0) close(cf);
     }
+    EXPECT("strace -f style tracing of posix_spawn: the clone ends with a stop after the vfork event, and stops pair up",
+           spawn_traced(argv, 0));
+    EXPECT("the same with PTRACE_O_TRACEVFORKDONE: the stop after the clone follows the vfork-done stop",
+           spawn_traced(argv, PTRACE_O_TRACEVFORKDONE));
     return done();
 }

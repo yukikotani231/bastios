@@ -1296,6 +1296,14 @@ fn lx_deliver(k: &mut Kernel, mmu: &Mmu, p: u64) -> bool
   if pget(k.procs, p, F_SIGPEND) == 0 {
     return true;                            // nothing pending: the common case
   }
+  if tr_get(k, p) % 65536 != 0 && tr2_get(k, p) / TS_NOENT % 2 == 1 {
+    // Its tracer let it go from the stop before a call, which it makes
+    // again now (src/lxptrace.bastio): the call comes first, as on Linux,
+    // where it runs straight from that stop. A signal taken here came
+    // between the two stops of the call, and the tracer saw the call's
+    // exit stop go missing.
+    return true;
+  }
   let mut s = 1;
   while s <= NSIG
     invariant 1 <= s && s <= NSIG + 1 && kok(k)

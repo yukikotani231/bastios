@@ -203,21 +203,35 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
     next = sat_add(next, TS_RENTRY);              // it waits in a call whose start the tracer has not seen (since)
   }
   tr2_put(&mut k, c, sat_add(next, t / TS_XEV % 2 * TS_XEV));
-  if t / TS_VFDONE % 2 == 1 && t / TS_EV % 16 == 2 && !detach {
-    // The vfork event is over: the vfork-done one comes next, with the
-    // same message (the child's id).
-    tr2_put(&mut k, c, tr2_get(k, c) % TS_EV + EV_VFORK_DONE * TS_EV + t / TS_MSG % 65536 * TS_MSG);
-    post_from(&mut k, c, 5, c);
-  }
+  // Resumed from the event stop of a vfork that borrows the address space
+  // (pt_vfork_stop; a vfork that copies it owes its stop after the call,
+  // above).
+  let vev = t / TS_EV % 16 == 2 && !detach;
   jc_set(&mut k, c, jc_get(k, c) / JC_EXECED % 2 * JC_EXECED);   // the stop is no news any more
   if sig != 0 {
     pset(&mut k.procs, c, F_SIGPEND, pget(k.procs, c, F_SIGPEND) | sbit(sig));
   }
   if state(k.procs, c) == STOPPED {
     if vfork_lent(&mut k, c) {
-      pset(&mut k.procs, c, F_STATE, LXVFORK);   // it still waits for its vfork child
+      pset(&mut k.procs, c, F_STATE, LXVFORK);   // it still waits for its vfork child (then pt_vfork_done)
+    } else if vev && t / TS_VFDONE % 2 == 1 {
+      // The child let go while c was in the vfork event stop: the
+      // vfork-done stop comes next, with the same message (the child's
+      // id), and then the stop after the call.
+      let mut owe = 0;
+      if sys {
+        owe = TS_OWE;
+      }
+      tr2_put(&mut k, c, tr2_get(k, c) % TS_EV + owe + EV_VFORK_DONE * TS_EV + t / TS_MSG % 65536 * TS_MSG);
+      tr_stop(&mut k, c, 5);
     } else {
       pset(&mut k.procs, c, F_STATE, READY);
+      if vev && sys {
+        // The child let go while c was in the vfork event stop: the
+        // stop after the call is next.
+        tr2_put(&mut k, c, TS_SYS + TS_EXIT + t / TS_NR % 1024 * TS_NR);
+        tr_stop(&mut k, c, 5 + 128 * (tr_opt(w) % 2));
+      }
     }
   }
 }
@@ -342,8 +356,8 @@ fn pt_sys_exit(k: &mut Kernel, p: u64) -> bool
 {
   let t = tr2_get(k, p);
   let st = state(k.procs, p);
-  if tr_tracer(k, p) == 0 || t % 2 == 0 || pget(k.procs, p, F_RESTART) != 0 || (st != READY && st != RUNNING) {
-    return false;
+  if tr_tracer(k, p) == 0 || t % 2 == 0 || pget(k.procs, p, F_RESTART) != 0 || (st != READY && st != RUNNING) || t / TS_XEV % 2 == 1 {
+    return false;                           // (TS_XEV: past the exit event, the last stop)
   }
   let ev = t / TS_EV % 16;
   if ev != 0 && ev != EV_STOP && has_sig(pget(k.procs, p, F_SIGPEND), 5) {
@@ -485,16 +499,30 @@ fn vfork_lent(k: &mut Kernel, p: u64) -> bool
   }
 }
 
-/// Process p's vfork child c has let go of the address space: with
-/// PTRACE_O_TRACEVFORKDONE p's tracer is told (the child's id is the message).
+/// Process p's vfork child c has let go of the address space, and p's vfork
+/// call is over: with PTRACE_O_TRACEVFORKDONE p's tracer is told (the child's
+/// id is the message). If the tracer watches system calls, the stop after
+/// the call comes next, as on Linux: right away, or once the tracer resumes
+/// p from the vfork-done stop (TS_OWE). p is READY when this is called. Without it strace took p's next call
+/// for the end of this one and stayed one stop off from then on.
 fn pt_vfork_done(k: &mut Kernel, p: u64, c: u64)
   requires kok(k) && 1 <= p && p < NPROC && c < NPROC
   ensures kok(k)
 {
   let w = tr_get(k, p);
-  if w % 65536 != 0 && tr_opt(w) / 32 % 2 == 1 {
-    tr2_put(&mut k, p, tr2_get(k, p) % TS_EV + EV_VFORK_DONE * TS_EV + vpid_of(k, p, c) % 65536 * TS_MSG);
-    post_from(&mut k, p, 5, p);
+  if w % 65536 == 0 {
+    return;
+  }
+  let t = tr2_get(k, p);
+  let low = t % TS_EV - t % TS_EV / TS_OWE % 2 * TS_OWE;
+  if tr_opt(w) / 32 % 2 == 1 {
+    // Stopped right away: a signal posted to p now would only be taken
+    // after its next call had begun.
+    tr2_put(&mut k, p, low + t % 2 * TS_OWE + EV_VFORK_DONE * TS_EV + vpid_of(k, p, c) % 65536 * TS_MSG);
+    tr_stop(&mut k, p, 5);
+  } else if t % 2 == 1 {
+    tr2_put(&mut k, p, TS_SYS + TS_EXIT + t / TS_NR % 1024 * TS_NR);
+    tr_stop(&mut k, p, 5 + 128 * (tr_opt(w) % 2));
   }
 }
 
