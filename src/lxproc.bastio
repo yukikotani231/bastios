@@ -464,7 +464,7 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
     k.perr = EACCES;                        // no execute permission (src/lxperm.bastio)
     return none;
   }
-  if vfs_path_mflags(&mut k.fs, n) / 8 % 2 == 1 {
+  if vfs_path_mflags(&mut k.fs, n) / 8 % 2 == 1 || lpath_stflags(k) / 8 % 2 == 1 {
     k.perr = EACCES;                        // a noexec mount
     return none;
   }

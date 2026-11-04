@@ -37,6 +37,12 @@ const ME_SEQ: u64 = 4;
 
 const MT_RO: u64 = 16;                    // flags: read-only
 const MT_OWN: u64 = 32;                   // flags: the source is an in-memory directory made for the mount
+const MT_NOSUID: u64 = 64;                // flags: the mount's attributes, as the statfs flag (ST_*) times 32
+const MT_NODEV: u64 = 128;
+const MT_NOEXEC: u64 = 256;
+const MT_NOATIME: u64 = 32768;
+const MT_NODIRATIME: u64 = 65536;
+const MT_NOSYMF: u64 = 262144;
 const MK_BIND: u64 = 1;
 const MK_PROC: u64 = 2;
 const MK_DEV: u64 = 3;
@@ -182,3 +188,12 @@ fn ns_src_covers(k: &Kernel, e: u64, n: u64) -> bool
   return true;
 }
 
+
+/// The attribute bits of a mount's flags for the mount(2) flags f
+/// (MS_NOSUID 2, MS_NODEV 4, MS_NOEXEC 8, MS_NOSYMFOLLOW 256, MS_NOATIME
+/// 1024, MS_NODIRATIME 2048).
+fn mt_attrs(f: u64) -> u64
+  ensures result < 1048576
+{
+  return ((f % 16) / 2 * 2 + (f / 1024 % 4) * 1024) * 32 + (f / 256 % 2) * MT_NOSYMF;
+}
