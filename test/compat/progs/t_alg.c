@@ -1,4 +1,4 @@
-/* AF_ALG hash sockets: sha256, sha384, sha512, hmac(sha256) and hmac(sha384)
+/* AF_ALG hash sockets: sha256, sha384, sha512, sha1, md5, hmac(sha256), hmac(sha384), hmac(sha1) and hmac(md5)
  * through socket, bind, setsockopt(ALG_SET_KEY), accept, send and read, with
  * the published test vectors. The last checks are about what the kernel
  * keeps: the data and the key are copies, so changing the memory that was
@@ -76,7 +76,7 @@ static const char *digest(const char *name, const void *key, int klen, const voi
     int op = op_for(name, key, klen);
     if (op < 0) return out;
     if (n > 0 && send(op, data, n, 0) != n) { close(op); return out; }
-    int want = !strncmp(name, "sha512", 6) ? 64 : strstr(name, "384") ? 48 : 32;
+    int want = strstr(name, "sha512") ? 64 : strstr(name, "384") ? 48 : strstr(name, "sha1") ? 20 : strstr(name, "md5") ? 16 : 32;
     if (read(op, d, sizeof d) != want) { close(op); return out; }
     hex(d, want, out);
     close(op);
@@ -163,6 +163,23 @@ int main(void) {
     }));
     EXPECT("hmac(sha256), RFC 4231 test case 2", strcmp(digest("hmac(sha256)", "Jefe", 4, "what do ya want for nothing?", 28), HMAC256_2) == 0);
     EXPECT("hmac(sha384), RFC 4231 test case 2", strcmp(digest("hmac(sha384)", "Jefe", 4, "what do ya want for nothing?", 28), HMAC384_2) == 0);
+    EXPECT("sha1 of abc", strcmp(digest("sha1", NULL, 0, "abc", 3), "a9993e364706816aba3e25717850c26c9cd0d89d") == 0);
+    EXPECT("md5 of abc", strcmp(digest("md5", NULL, 0, "abc", 3), "900150983cd24fb0d6963f7d28e17f72") == 0);
+    EXPECT("hmac(sha1), RFC 2202 test case 1", ({
+        unsigned char key[20];
+        memset(key, 0x0b, sizeof key);
+        strcmp(digest("hmac(sha1)", key, 20, "Hi There", 8), "b617318655057264e28bc0b6fb378c8ef146be00") == 0;
+    }));
+    EXPECT("hmac(sha1), RFC 2202 test case 2", strcmp(digest("hmac(sha1)", "Jefe", 4, "what do ya want for nothing?", 28), "effcdf6ae5eb2fa2d27416d5f184df9c259a7c79") == 0);
+    EXPECT("hmac(md5), RFC 2202 test case 1", ({
+        unsigned char key[16];
+        memset(key, 0x0b, sizeof key);
+        strcmp(digest("hmac(md5)", key, 16, "Hi There", 8), "9294727a3638bb1c13f48ef8158bfc9d") == 0;
+    }));
+    EXPECT("hmac(md5), RFC 2202 test case 2", strcmp(digest("hmac(md5)", "Jefe", 4, "what do ya want for nothing?", 28), "750c783e6ab0b503eaa86e310a5db738") == 0);
+    EXPECT("accepting hmac(sha1) with no key is ENOKEY", ({ int s = bound("hash", "hmac(sha1)"); int op = accept(s, NULL, NULL); int r = op < 0 && errno == ENOKEY; close(s); r; }));
+    EXPECT("a key setting on sha1 is ENOSYS", ({ int s = bound("hash", "sha1"); int r = setsockopt(s, SOL_ALG, ALG_SET_KEY, "k", 1) < 0 && errno == ENOSYS; close(s); r; }));
+    EXPECT("sha1 is not an aead", ({ int s = bound("aead", "sha1"); s < 0 && errno == ENOENT; }));
     EXPECT("a key setting on a hash with no key is ENOSYS", ({ int s = bound("hash", "sha256"); int r = setsockopt(s, SOL_ALG, ALG_SET_KEY, "k", 1) < 0 && errno == ENOSYS; close(s); r; }));
     EXPECT("accepting an hmac with no key is ENOKEY", ({ int s = bound("hash", "hmac(sha256)"); int op = accept(s, NULL, NULL); int r = op < 0 && errno == ENOKEY; close(s); r; }));
     EXPECT("accepting on a socket not bound is EINVAL", ({ int s = socket(AF_ALG, SOCK_SEQPACKET, 0); int op = accept(s, NULL, NULL); int r = op < 0 && errno == EINVAL; close(s); r; }));

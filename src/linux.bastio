@@ -3080,12 +3080,16 @@ fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u
   let can_write = mode / O_WRITE % 2 == 1;
   let pages = (n + 4095) / 4096;
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
-  // instead of fresh ones, if the file was opened for writing. From a
-  // descriptor that may only read, it gets a copy, as a private mapping
-  // does: mprotect could make the mapping writable later, and a write to
-  // the cache's page would reach every reader of the file
-  // (docs/security.md). Such a copy does not see later writes to the file.
-  let cached = sh && !anon && f != NO_FILE && can_write;
+  // instead of fresh ones, so it sees what other processes write to the
+  // file (Firefox's content processes read the font list and other shared
+  // memory that the parent keeps writing, through descriptors that may
+  // only read). From such a descriptor the pages must never become
+  // writable, or a write would reach every reader of the file
+  // (docs/security.md): its record says so to mprotect (map_no_write) and
+  // is never given up for another (map_record), so it needs a free record
+  // now. Without one the mapping gets a copy, as a private mapping does,
+  // and the copy does not see later writes to the file.
+  let cached = sh && !anon && f != NO_FILE && (can_write || map_room(k, pid));
   // A private mapping the program cannot write maps the page cache's pages
   // for the part of the file that fills whole pages, read-only and marked
   // as program text: no copy, and mprotect gives a private one before a
@@ -3127,7 +3131,7 @@ fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u
         hole_add(&mut k, pid, hp, hp + pages);
         return ENOMEM;
       }
-      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
+      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh, can_write);
     }
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
@@ -3136,7 +3140,7 @@ fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
-      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
+      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh, can_write);
     }
     let brk = pget(k.procs, pid, F_BRK);
     let low = pget(k.procs, pid, F_MMAP);
@@ -3156,14 +3160,14 @@ fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
-  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
+  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, ro, f, sh, can_write);
 }
 
 /// The rest of mmap once window offset `at` has its pages (a `cached`
 /// mapping gets the page cache's instead): a file's bytes copied in, the
 /// mapping recorded if shared, and write access taken away without
 /// PROT_WRITE.
-fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, ro: bool, f: u64, sh: bool) -> u64
+fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, ro: bool, f: u64, sh: bool, can_write: bool) -> u64
   requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES && off % 4096 == 0
   ensures kok(k)
   ensures lx_user_addr_or_errno(result)
@@ -3173,7 +3177,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     read_only(&mut k, pid, at / 4096, pages, prot);
     // /dev/zero opened read-only (lx_mmap checked the rest)
     if flags / MAP_ANONYMOUS % 2 == 0 && sh && ofd_lacks(k, fd_ofd(k, pid, fd), ACC_NOWRITE) {
-      map_record(&mut k, pid, fd, at / 4096, pages, off);
+      map_record(&mut k, pid, fd, at / 4096, pages, off, false);
     }
     return USER_BASE + at;
   }
@@ -3181,11 +3185,16 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     if at / 4096 > WPAGES || pages > WPAGES - at / 4096 {
       return ENOMEM;
     }
-    let r = lx_map_file_shared(&mut k, pid, at / 4096, pages, f, off);
+    let r = lx_map_file_shared(&mut k, pid, at / 4096, pages, f, off, can_write);
     if r != 0 {
       return r;
     }
-    map_record(&mut k, pid, fd, at / 4096, pages, off);
+    if !map_record(&mut k, pid, fd, at / 4096, pages, off, !can_write) && !can_write {
+      // No record to keep the pages from becoming writable (lx_mmap saw a
+      // free one): they go again.
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
+      return ENOMEM;
+    }
     read_only(&mut k, pid, at / 4096, pages, prot);
     bus_mark(&mut k, pid, at / 4096, pages);     // pages past the file's end: SIGBUS
     return USER_BASE + at;
@@ -3237,7 +3246,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     done = done + step;
   }
   if sh {
-    map_record(&mut k, pid, fd, at / 4096, pages, off);
+    map_record(&mut k, pid, fd, at / 4096, pages, off, false);
   }
   read_only(&mut k, pid, at / 4096, pages, prot);
   if sh {

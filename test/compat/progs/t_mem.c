@@ -162,6 +162,64 @@ int main(void) {
                ok &= g >= 0 && pread(g, &c, 1, 5) == 1 && c == 'W';
                if (g >= 0) { close(g); unlink("cm_g"); }
                ok; }));
+    EXPECT("a MAP_SHARED mapping from a read-only descriptor sees what is written to the file later, in another process too, and cannot become writable", ({
+               /* Firefox's shared memory: a memfd, reopened read-only through
+                  /proc/self/fd, mapped by a child before the parent writes */
+               int ok = 1;
+               int w = memfd_create("ro_shared", MFD_CLOEXEC);
+               char path[64];
+               snprintf(path, sizeof path, "/proc/self/fd/%d", w);
+               int r = w >= 0 && ftruncate(w, 8192) == 0 ? open(path, O_RDONLY | O_CLOEXEC) : -1;
+               char *pw = r >= 0 ? mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, w, 0) : MAP_FAILED;
+               volatile char *pr = r >= 0 ? mmap(0, 8192, PROT_READ, MAP_SHARED, r, 0) : MAP_FAILED;
+               int go[2], back[2];
+               ok &= pw != MAP_FAILED && pr != MAP_FAILED && pipe(go) == 0 && pipe(back) == 0;
+               if (ok) {
+                   ok &= pr[0] == 0 && pr[4096] == 0;          /* both pages there before the writes */
+                   pid_t c = fork();
+                   if (c == 0) {
+                       char x;
+                       volatile char *q = mmap(0, 8192, PROT_READ, MAP_SHARED, r, 0);
+                       int good = q != MAP_FAILED && q[0] == 0 && q[4096] == 0;
+                       write(back[1], "m", 1);
+                       good &= read(go[0], &x, 1) == 1 && q[0] == 'a' && q[4096] == 'b';
+                       good &= mprotect((void *)q, 8192, PROT_READ | PROT_WRITE) == -1 && errno == EACCES;
+                       _exit(good ? 0 : 1);
+                   }
+                   char x;
+                   ok &= c > 0 && read(back[0], &x, 1) == 1;
+                   pw[0] = 'a';
+                   pw[4096] = 'b';
+                   ok &= write(go[1], "w", 1) == 1;
+                   ok &= c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+                   ok &= pr[0] == 'a' && pr[4096] == 'b';
+                   ok &= mprotect((void *)pr, 8192, PROT_READ | PROT_WRITE) == -1 && errno == EACCES;
+                   close(go[0]); close(go[1]); close(back[0]); close(back[1]);
+               }
+               if (pw != MAP_FAILED) munmap(pw, 8192);
+               if (pr != MAP_FAILED) munmap((void *)pr, 8192);
+               if (r >= 0) close(r);
+               if (w >= 0) close(w);
+               ok; }));
+    EXPECT("seventy read-only MAP_SHARED mappings still read their file after a writable mapping takes a record", ({
+               int ok = 1;
+               char *r[70];
+               for (int i = 0; i < 70; i++) {
+                   int f = open("cm_f", O_RDONLY);
+                   r[i] = f >= 0 ? mmap(0, 4096, PROT_READ, MAP_SHARED, f, 0) : MAP_FAILED;
+                   ok &= r[i] != MAP_FAILED;
+                   if (f >= 0) close(f);
+               }
+               int g = open("cm_g", O_RDWR | O_CREAT | O_TRUNC, 0644);
+               char *m = g >= 0 && ftruncate(g, 4096) == 0 ? mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, g, 0) : MAP_FAILED;
+               ok &= m != MAP_FAILED;
+               if (m != MAP_FAILED) { m[0] = 'w'; munmap(m, 4096); }
+               char c = 0;
+               ok &= g >= 0 && pread(g, &c, 1, 0) == 1 && c == 'w';
+               for (int i = 0; i < 70; i++)
+                   if (r[i] != MAP_FAILED) { ok &= r[i][0] == 'M' && r[i][1] == 'U'; munmap(r[i], 4096); }
+               if (g >= 0) { close(g); unlink("cm_g"); }
+               ok; }));
     EXPECT("forty writable MAP_SHARED mappings are each written back", ({
                int ok = 1;
                char *m[40];
