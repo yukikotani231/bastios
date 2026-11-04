@@ -380,6 +380,24 @@ fn lx_move_mount(k: &mut Kernel, pid: u64, from_dfd: u64, from_path: u64, to_dfd
   if flags & MOVE_MOUNT_EMPTY_PATH == 0 {
     return ENOENT;
   }
+  let cd = dir_ofd(k, pid, from_dfd % 0x100000000);
+  if cd < OFD_N && of_get(k.ofd, cd, OF_ACC) & ACC_CLONE != 0 {
+    // A clone of a directory (open_tree): a bind mount of the directory it
+    // names, made now.
+    let dl = base_len(k, pid, cd);
+    let mut c = 0;
+    while c < dl
+      invariant c <= dl && dl <= FNAME_MAX && kok(k) && pid < NPROC && cd < OFD_N
+    {
+      bset(&mut k.fs.xfer, c, base_byte(k, pid, cd, c));
+      c = c + 1;
+    }
+    let r = ns_mount_at(&mut k, pid, 0, dl, to_dfd, to_path, MK_BIND, 0);
+    if r == 0 {
+      of_set(&mut k.ofd, cd, OF_ACC, ACC_PATH);   // attached: it is a handle again
+    }
+    return r;
+  }
   let h = mnt_desc(k, pid, from_dfd % 0x100000000);
   if h >= OFD_N {
     if fd_ofd(k, pid, from_dfd % 0x100000000) >= OFD_N {
@@ -415,9 +433,11 @@ fn lx_move_mount(k: &mut Kernel, pid: u64, from_dfd: u64, from_path: u64, to_dfd
 }
 
 /// open_tree(dfd, path, flags): a handle (as O_PATH) for the path. A clone
-/// of a mount (OPEN_TREE_CLONE) needs a detached copy of a mount, which
-/// this kernel cannot make yet, so it answers ENOSYS once the arguments are
-/// right and a program falls back to mount(2), as runc and crun do.
+/// of a directory (OPEN_TREE_CLONE) is the same handle marked ACC_CLONE:
+/// move_mount binds the directory it names where the program says (a bind
+/// is a view of the same files, which is what a non-recursive clone is).
+/// A clone of a file, or a recursive one, answers ENOSYS once the arguments
+/// are right and a program falls back to mount(2), as runc and crun do.
 fn lx_open_tree(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -436,14 +456,21 @@ fn lx_open_tree(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64) -> u6
   if vfs_lookup(&mut k.fs, n) == NO_FILE && dir_at(&mut k, n) == NO_FILE && !there.ok {
     return ENOENT;
   }
-  if flags & OPEN_TREE_CLONE != 0 {
-    return ENOSYS;
+  if flags & OPEN_TREE_CLONE != 0 && dir_at(&mut k, n) == NO_FILE {
+    return ENOSYS;                          // a copy of a file's mount: not supported
   }
   let n2 = lx_path_at(&mut k, pid, dfd % 0x100000000, path);   // path_meta may have used the transfer buffer
   if n2 == NO_RESULT {
     return k.perr;
   }
-  return lx_open_n(&mut k, pid, n2, LO_PATH | (flags & LO_CLOEXEC), 0);
+  let fd = lx_open_n(&mut k, pid, n2, LO_PATH | (flags & LO_CLOEXEC), 0);
+  if flags & OPEN_TREE_CLONE != 0 && fd < LXNFD {
+    let ho = fd_ofd(k, pid, fd);
+    if ho < OFD_N {
+      of_set(&mut k.ofd, ho, OF_ACC, ACC_PATH | ACC_CLONE);
+    }
+  }
+  return fd;
 }
 
 /// The new mount API's calls; full says whether the caller may change the

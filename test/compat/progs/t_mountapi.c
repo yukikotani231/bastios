@@ -84,5 +84,30 @@ int main(void) {
     EXPECT("open_tree without a clone is a handle", ot >= 0 && fstat(ot, &st) == 0 && S_ISDIR(st.st_mode));
     if (ot >= 0)
         close(ot);
+
+    /* A clone of a directory attaches as a bind mount of it. */
+    mkdir("/tmp/oc_src", 0755);
+    mkdir("/tmp/oc_dst", 0755);
+    int sf = open("/tmp/oc_src/f", O_CREAT | O_WRONLY, 0644);
+    if (sf >= 0) {
+        write(sf, "clone", 5);
+        close(sf);
+    }
+    int cl = syscall(OPEN_TREE, AT_FDCWD, "/tmp/oc_src", 1 | 0x80000);   /* OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC */
+    EXPECT("open_tree with a clone of a directory is a handle", cl >= 0 && fstat(cl, &st) == 0 && S_ISDIR(st.st_mode));
+    char cb[8] = "";
+    EXPECT("its files are not in the target yet", access("/tmp/oc_dst/f", F_OK) != 0);
+    EXPECT("move_mount attaches the clone", cl >= 0 && syscall(MOVE_MOUNT, cl, "", AT_FDCWD, "/tmp/oc_dst", EMPTY) == 0);
+    int cf = open("/tmp/oc_dst/f", O_RDONLY);
+    EXPECT("the target shows the files", cf >= 0 && read(cf, cb, sizeof cb) == 5 && memcmp(cb, "clone", 5) == 0);
+    if (cf >= 0)
+        close(cf);
+    EXPECT("the clone is attached once", cl >= 0 && syscall(MOVE_MOUNT, cl, "", AT_FDCWD, "/tmp/oc_dst", EMPTY) == -1);
+    if (cl >= 0)
+        close(cl);
+    EXPECT("it unmounts", umount("/tmp/oc_dst") == 0 && access("/tmp/oc_dst/f", F_OK) != 0);
+    unlink("/tmp/oc_src/f");
+    rmdir("/tmp/oc_src");
+    rmdir("/tmp/oc_dst");
     return nfail != 0;
 }

@@ -1930,6 +1930,17 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  return ns_mount_at(&mut k, pid, source, NO_RESULT, AT_FDCWD, target, kind, flags);
+}
+
+/// ns_mount with the target relative to directory descriptor tdfd, and a
+/// bind's source either at user address source or, if presrc is not
+/// NO_RESULT, already in the first presrc bytes of the transfer buffer (as
+/// move_mount of a cloned directory has it).
+fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, target: u64, kind: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC && (presrc == NO_RESULT || presrc <= FNAME_MAX)
+  ensures kok(k)
+{
   let ns = ns_of(k, pid);
   let mut src = balloc(PBUF);
   let mut sl = 0;
@@ -1937,7 +1948,10 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
   let mut ovf = 0;
   let mut nsfm = false;
   if kind == MK_BIND {
-    let n = lx_path_at(&mut k, pid, AT_FDCWD, source);
+    let mut n = presrc;
+    if presrc == NO_RESULT {
+      n = lx_path_at(&mut k, pid, AT_FDCWD, source);
+    }
     if n == NO_RESULT {
       bfree(src);
       return k.perr;
@@ -1998,7 +2012,7 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
   } else {
     sl = kind_source(kind, &mut src);
   }
-  let n = lx_path_at(&mut k, pid, AT_FDCWD, target);
+  let n = lx_path_at(&mut k, pid, tdfd, target);
   if n == NO_RESULT {
     bfree(src);
     return k.perr;
