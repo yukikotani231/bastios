@@ -2408,6 +2408,7 @@ t_wgcfg: two allowed IPs
 t_wgcfg: two peers
 t_mem: MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again
 t_mem: a file written with write(2) and mapped MAP_SHARED is the same memory to a mapping made after the page cache has filled up
+t_mem: a memfd mapped MAP_SHARED keeps what was written through the mapping when the caches are dropped, for a later mapping in another process
 t_wgcfg: a port that a socket holds
 t_wgcfg: and the device keeps its port
 t_wgcfg: deleting it frees its port
