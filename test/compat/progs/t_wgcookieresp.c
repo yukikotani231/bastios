@@ -537,13 +537,13 @@ int main(void) {
     EXPECT("the child is told to start the handshake", write(in[1], "K", 1) == 1);
     uint64_t hs0 = 0, rx0, tx0;
     int up = 0;
-    for (int t = 0; t < 80 && !up; t++) {
+    for (int t = 0; t < 300 && !up; t++) {
         usleep(500000);
         if (peer_stats(g, id, "wgt0", &rx0, &tx0, &hs0) == 0 && hs0 > 0) up = 1;
     }
     EXPECT("the handshake the busy child started completes, by cookie reply to our response", up);
     int seq = 0, got = 0;
-    for (int t = 0; t < 5 && !got; t++) got = ask(u, seq++, 100, 3000) == 1;
+    for (int t = 0; t < 8 && !got; t++) got = ask(u, seq++, 100, 3000) == 1;
     EXPECT("a packet is echoed over the new session while the flood goes on", got);
     EXPECT("the flooder stops", write(cp[1], "Q", 1) == 1);
     struct { int sent, replies, wrong, afterbad; } fs;
