@@ -978,6 +978,22 @@ static void raise_win(struct win *w)
     z[nz - 1] = w;
 }
 
+/* Alt-Tab and the wheel over the task bar: the window at the bottom comes up
+ * or, going back, the top one goes to the bottom. */
+static void cycle_windows(int back)
+{
+    if (nz < 2)
+        return;
+    if (back) {
+        struct win *t = z[nz - 1];
+        memmove(&z[1], &z[0], (nz - 1) * sizeof z[0]);
+        z[0] = t;
+    } else {
+        raise_win(z[0]);
+    }
+    touch_all();
+}
+
 /* ---- clients ---- */
 
 static void to_client(int cli, uint32_t type, const void *p, uint32_t len);
@@ -2338,16 +2354,7 @@ int main(int argc, char **argv)
                         menu_sel = 0;
                         touch_all();
                     } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
-                        if (nz > 1) {
-                            if (k_shift) {                              /* the other way: the top one goes to the bottom */
-                                struct win *t = z[nz - 1];
-                                memmove(&z[1], &z[0], (nz - 1) * sizeof z[0]);
-                                z[0] = t;
-                            } else {
-                                raise_win(z[0]);
-                            }
-                            touch_all();
-                        }
+                        cycle_windows(k_shift);
                     } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_ctrl && !k_shift) {
                         struct win *t = focus();                    /* Ctrl-Alt-arrows: grow or shrink a resizable window by 16 pixels */
                         if (t && t->resizable) {
@@ -2519,6 +2526,8 @@ int main(int argc, char **argv)
                     buttons = m[0];
                     continue;
                 }
+                if (wheel && in_bar && !menu_open && !run_on)
+                    cycle_windows(wheel < 0);            /* the wheel over the task bar goes through the windows */
                 if ((m[0] & 2) && !(buttons & 2) && !in_bar && !under && !menu_open) {
                     menu_show(mx, my);                   /* a right click on the desktop opens the menu there */
                     menu_mx = mx; menu_my = my;
