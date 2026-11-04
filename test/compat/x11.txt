@@ -145,3 +145,12 @@ fakebwm: window 800x600 X11 :13
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a GTK 4 duplicate finder in Rust, Czkawka, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/z; bb tar -xf /disk/czkawka.tar -C /disk/z && bb rm /disk/czkawka.tar; /disk/fakebwm 300 'x' >/disk/fb15.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/z -d 14 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/czkawka_gui >/disk/czk.out 2>&1 & until bb grep -q typed /disk/fb15.out; do bb sleep 1; done; bb cat /disk/fb15.out; bb ps | bb grep -q '/usr/bin/czkawka_gui' && echo alive || bb cat /disk/czk.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :14
+fakebwm: pixels drawn
+fakebwm: typed
+alive
