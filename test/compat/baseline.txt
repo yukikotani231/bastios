@@ -247,6 +247,10 @@ t_algskc: ctr(aes) takes any length: 20 bytes give the first 20 of the 32
 t_algskc: ctr(aes) with a 128-bit key encrypts the SP 800-38A F.5.1 message and decrypts it
 t_algskc: ctr(aes) with a 192-bit key gives F.5.3
 t_algskc: ctr(aes) with a 256-bit key gives F.5.5
+t_algskc: ecb(aes) gives the same block twice for the same input, and a short message is EINVAL
+t_algskc: ecb(aes) takes a zero-length IV and refuses a 16-byte one
+t_algskc: ecb(aes) with a 128-bit key encrypts SP 800-38A F.1.1 and decrypts it, with no IV
+t_algskc: ecb(aes) with a 192-bit key gives F.1.3
 t_algskc: encrypting from a file leaves the file as the plaintext
 t_algskc: no operation, or no IV, is EINVAL
 t_algskc: reading into the memory that was sent is fine and gives the same result

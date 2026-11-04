@@ -1,6 +1,6 @@
-/* AF_ALG symmetric ciphers: ctr(aes) and cbc(aes) through socket, bind,
+/* AF_ALG symmetric ciphers: ctr(aes), cbc(aes) and ecb(aes) through socket, bind,
  * setsockopt(ALG_SET_KEY), accept, sendmsg with ALG_SET_OP and ALG_SET_IV,
- * and read, with the vectors of NIST SP 800-38A (F.2 and F.5, both key
+ * and read, with the vectors of NIST SP 800-38A (F.1, F.2 and F.5, both key
  * sizes, and AES-192). Also what the kernel keeps and what it refuses: the input is a
  * copy (changing the memory that was sent changes nothing), the result goes
  * only to the buffer read into, a CBC message that is not whole blocks, a
@@ -217,6 +217,49 @@ int main(void) {
     EXPECT("ctr(aes) with a 192-bit key gives F.5.3", ({
         int op = skc_op("ctr(aes)", k192, 24);
         int ok = op >= 0 && same(op, 1, IVCTR, P12, "1abc932417521ca24f2b0459fe7e6e0b090339ec0aa6faefd5ccc2c6f4ce8e94");
+        if (op >= 0) close(op);
+        ok;
+    }));
+    EXPECT("ecb(aes) with a 128-bit key encrypts SP 800-38A F.1.1 and decrypts it, with no IV", ({
+        int op = skc_op("ecb(aes)", k128, 16);
+        unsigned char in[32], want[32];
+        unhex(P12, in);
+        unhex("3ad77bb40d7a3660a89ecaf32466ef97f5d3d58503b9699de785895a96fdbaaf", want);
+        long r = op >= 0 ? skc_run(op, 1, NULL, 0, in, 32, out, sizeof out) : -1;
+        int ok = r == 32 && memcmp(out, want, 32) == 0;
+        long d = op >= 0 ? skc_run(op, 0, NULL, 0, want, 32, out, sizeof out) : -1;
+        ok = ok && d == 32 && memcmp(out, in, 32) == 0;
+        if (op >= 0) close(op);
+        ok;
+    }));
+    EXPECT("ecb(aes) with a 192-bit key gives F.1.3", ({
+        int op = skc_op("ecb(aes)", k192, 24);
+        unsigned char in[32], want[32];
+        unhex(P12, in);
+        unhex("bd334f1d6e45f25ff712a214571fa5cc974104846d0ad3ad7734ecb3ecee4eef", want);
+        long r = op >= 0 ? skc_run(op, 1, NULL, 0, in, 32, out, sizeof out) : -1;
+        int ok = r == 32 && memcmp(out, want, 32) == 0;
+        if (op >= 0) close(op);
+        ok;
+    }));
+    EXPECT("ecb(aes) takes a zero-length IV and refuses a 16-byte one", ({
+        int op = skc_op("ecb(aes)", k128, 16);
+        unsigned char in[16] = {0};
+        long a = op >= 0 ? skc_run(op, 1, zero, 0, in, 16, out, sizeof out) : -1;
+        long b = op >= 0 ? skc_send(op, 1, zero, 16, in, 16) : 0;
+        if (op >= 0) close(op);
+        a == 16 && b == -EINVAL;
+    }));
+    EXPECT("ecb(aes) gives the same block twice for the same input, and a short message is EINVAL", ({
+        int op = skc_op("ecb(aes)", k128, 16);
+        unsigned char in[32], x[48] = {0};
+        unhex(P12, in);
+        memcpy(in + 16, in, 16);
+        long r = op >= 0 ? skc_run(op, 1, NULL, 0, in, 32, out, sizeof out) : -1;
+        int ok = r == 32 && memcmp(out, out + 16, 16) == 0;
+        memset(out, 0x5a, 48);
+        long e = op >= 0 ? skc_run(op, 1, NULL, 0, x, 20, out, sizeof out) : 0;
+        ok = ok && e == -EINVAL && out[0] == 0x5a;
         if (op >= 0) close(op);
         ok;
     }));
