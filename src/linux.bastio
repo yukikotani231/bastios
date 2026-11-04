@@ -921,6 +921,10 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, lx_mount_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
+  if is_landlock_call(n) {
+    ret(&mut k.procs, pid, lx_landlock_call(&mut k, pid, n, a, b, c));   // src/lxlandlock.bastio
+    return KEEP;
+  }
   if is_procfs_call(n) {
     ret(&mut k.procs, pid, lx_procfs_call(&mut k, pid, n, a, b, c));
     return KEEP;

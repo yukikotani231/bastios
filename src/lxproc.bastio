@@ -418,6 +418,13 @@ fn src_named(k: &mut Kernel, pid: u64, n: u64) -> Src
   if n == NO_RESULT {
     return none;
   }
+  if n <= FNAME_MAX {
+    let ll_e = ll_deny(k, pid, LL_EXECUTE, n);   // Landlock (src/lxlandlock.bastio)
+    if ll_e != 0 {
+      k.perr = ll_e;
+      return none;
+    }
+  }
   let mut pf = 0;
   if n <= XFER {
     pf = proc_node(k, n);

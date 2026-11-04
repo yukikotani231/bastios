@@ -147,6 +147,11 @@ keyctl21
 keyctl22
 keyctl24
 kill11
+landlock01
+landlock02
+landlock03
+landlock04
+landlock07
 lgetxattr01
 lgetxattr02
 listxattr01
