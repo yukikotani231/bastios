@@ -819,9 +819,46 @@ fn futex_group(procs: &Buf, pid: u64, key: u64) -> u64
   return tgid(procs, pid);
 }
 
-/// The index of the entry of futex_waitv waiter q's keys (k.wv, set when
-/// it started waiting) that is key `addr` in group g (as futex_key and
-/// futex_group give them), or NO_RESULT.
+/// Whether p is blocked in futex_waitv (so its slot of k.wv is in use).
+fn waitv_live(procs: &Buf, p: u64) -> bool
+  requires ptab_ok(procs) && p < NPROC
+{
+  return pget(procs, p, F_REGS + R_LXNR) == LX_FUTEX_WAITV && pget(procs, p, F_FUTEX) == FUTEX_WV;
+}
+
+/// The slot of k.wv process p's waitv uses: the one it owns, else a free
+/// one or one whose owner no longer waits; WV_N if all are in use.
+fn waitv_slot(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k) && result <= WV_N
+{
+  let mut s = 0;
+  while s < WV_N
+    invariant s <= WV_N && kok(k)
+  {
+    if wget(k.wv, s * WV_ROW) == p + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  s = 0;
+  while s < WV_N
+    invariant s <= WV_N && kok(k)
+  {
+    let o = wget(k.wv, s * WV_ROW);
+    if o == 0 || o > NPROC || !waitv_live(k.procs, o - 1) {
+      wset(&mut k.wv, s * WV_ROW, p + 1);
+      wset(&mut k.wv, s * WV_ROW + 1, 0);
+      return s;
+    }
+    s = s + 1;
+  }
+  return WV_N;
+}
+
+/// The index of the entry of futex_waitv waiter q's keys (its slot of
+/// k.wv, set when it started waiting) that is key `addr` in group g (as
+/// futex_key and futex_group give them), or NO_RESULT.
 fn waitv_match(k: &mut Kernel, q: u64, g: u64, addr: u64) -> u64
   requires kok(k) && q < NPROC
   ensures kok(k) && (result == NO_RESULT || result < WV_MAX)
@@ -829,15 +866,23 @@ fn waitv_match(k: &mut Kernel, q: u64, g: u64, addr: u64) -> u64
   if g != 0 && tgid(k.procs, q) != g {
     return NO_RESULT;
   }
-  let nr = smaller(wget(k.wv, q * WV_ROW), WV_MAX);
-  let mut i = 0;
-  while i < nr
-    invariant i <= nr && nr <= WV_MAX && kok(k)
+  let mut s = 0;
+  while s < WV_N
+    invariant s <= WV_N && kok(k)
   {
-    if wget(k.wv, q * WV_ROW + 1 + i) == addr {
-      return i;
+    if wget(k.wv, s * WV_ROW) == q + 1 {
+      let nr = smaller(wget(k.wv, s * WV_ROW + 1), WV_MAX);
+      let mut i = 0;
+      while i < nr
+        invariant i <= nr && nr <= WV_MAX && s < WV_N && kok(k)
+      {
+        if wget(k.wv, s * WV_ROW + 2 + i) == addr {
+          return i;
+        }
+        i = i + 1;
+      }
     }
-    i = i + 1;
+    s = s + 1;
   }
   return NO_RESULT;
 }
@@ -1248,9 +1293,15 @@ fn lx_futex_waitv(k: &mut Kernel, pid: u64, was: u64, waiters: u64, nr: u64, fla
       }
       i = i + 1;
     }
+    let sl = waitv_slot(&mut k, pid);
+    if sl >= WV_N {
+      bfree(eb);
+      ret(&mut k.procs, pid, ENOMEM);
+      return KEEP;
+    }
     i = 0;
     while i < n
-      invariant i <= n && n <= WV_MAX && blen(eb) == 32 && kok(k) && pid < NPROC && waiters < 0x800000000000
+      invariant i <= n && n <= WV_MAX && blen(eb) == 32 && kok(k) && pid < NPROC && waiters < 0x800000000000 && sl < WV_N
     {
       if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, waiters + 24 * i, &mut eb, 24) != 24 {
         bfree(eb);
@@ -1275,11 +1326,11 @@ fn lx_futex_waitv(k: &mut Kernel, pid: u64, was: u64, waiters: u64, nr: u64, fla
         ret(&mut k.procs, pid, EAGAIN);
         return KEEP;
       }
-      wset(&mut k.wv, pid * WV_ROW + 1 + i, futex_key(&mut k, pid, ua, get_u64(eb, 16) % 0x100000000));
+      wset(&mut k.wv, sl * WV_ROW + 2 + i, futex_key(&mut k, pid, ua, get_u64(eb, 16) % 0x100000000));
       i = i + 1;
     }
     bfree(eb);
-    wset(&mut k.wv, pid * WV_ROW, n);
+    wset(&mut k.wv, sl * WV_ROW + 1, n);
   } else {
     let f = pget(k.procs, pid, F_FUTEX);
     if f >= FUTEX_WV_NOTE && f < FUTEX_WV_NOTE + WV_MAX {
