@@ -408,7 +408,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(gap if gap is not None else 0.08 if c.startswith("mouse_") else 0.15)
             time.sleep(0.2)
             m3.close()
-        if os.environ.get("BWM_BENCH") or os.environ.get("BTERM_BENCH"):   # BWM_BENCH=N: print what N frames of bwm cost (not a check)
+        if os.environ.get("BWM_BENCH") or os.environ.get("BTERM_BENCH") or os.environ.get("BFILES_BENCH"):   # BWM_BENCH=N: print what N frames of bwm cost (not a check)
             mark = len(out)
             q.stdin.write(b"ash\r"); q.stdin.flush()
             until(b"# ", mark)
@@ -425,6 +425,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 if os.environ.get("BWM_BENCH_ONLY"):
                     subprocess.run(["pkill", "-x", "qemu-system-x86"])
                     sys.exit(0)
+            if os.environ.get("BFILES_BENCH"):
+                mark = len(out)
+                q.stdin.write(f"BFILES_BENCH={os.environ['BFILES_BENCH']} bwm -c bfiles\r".encode()); q.stdin.flush()
+                until(b"bfiles: bench done", mark)
+                print(f"bench ({name}):", " | ".join(l.strip() for l in out[mark:].decode(errors="replace").splitlines() if "bfiles: bench" in l and "done" not in l))
+                subprocess.run(["pkill", "-x", "qemu-system-x86"])
+                sys.exit(0)
             mark = len(out)
             q.stdin.write(b"exit\r"); q.stdin.flush()
             until(b"bastios> ", mark)
