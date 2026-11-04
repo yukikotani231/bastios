@@ -25,7 +25,10 @@ import "snd.bastio";
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 1024;
-const STRIDE: u64 = 81 + REGS_EXT;
+// A row is a whole number of 64-byte cache lines on x86-64: with 81 words a
+// row, a 255-processor boot under QEMU TCG took about 9 minutes where 80 or
+// 88 take seconds (why is not pinned down; rows sharing lines is the guess).
+const STRIDE: u64 = 88 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const FORK_SPAN: u64 = 64;           // how far above the lowest free id a fork may number on (new_fork_pid)
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
