@@ -25,11 +25,12 @@
 // tag), and the read gives the associated data again, then the result, all of
 // it or none. A wrong tag is EBADMSG and no text comes out.
 //
-// Symmetric ciphers (type "skcipher": ctr(aes), cbc(aes), keys of 16, 24 or 32
-// bytes) take ALG_SET_OP and a 16-byte ALG_SET_IV in the control messages and
-// are read as a whole. The operation and the IV stay on the socket and the IV
+// Symmetric ciphers (type "skcipher": ctr(aes), cbc(aes), ecb(aes), keys of 16, 24
+// or 32 bytes) take ALG_SET_OP and a 16-byte ALG_SET_IV (none for ecb, which
+// takes a zero-length one and none at all) in the control messages and are
+// read as a whole. The operation and the IV stay on the socket and the IV
 // moves on with each operation, so successive messages continue one chain, as
-// in Linux; CBC needs whole 16-byte blocks. The input is a copy made at send
+// in Linux; CBC and ECB need whole 16-byte blocks. The input is a copy made at send
 // and the output a copy made at read: nothing is encrypted or decrypted in
 // place in a program's memory or in a page of a file.
 //
@@ -85,6 +86,7 @@ const ALG_GCM: u64 = 10;                // aead: gcm(aes); the algorithms from h
 const ALG_CHACHA: u64 = 11;             // aead: rfc7539(chacha20,poly1305)
 const ALG_CTR: u64 = 12;                // skcipher: ctr(aes); the algorithms from here on are skciphers
 const ALG_CBC: u64 = 13;                // skcipher: cbc(aes)
+const ALG_ECB: u64 = 14;                // skcipher: ecb(aes), which takes no IV
 
 fn algr(s: u64, f: u64) -> u64
   requires s < ALG_N && f < ALG_W
@@ -270,6 +272,9 @@ fn alg_by_name(x: &Bytes) -> u64
   if xfer_is(x, 24, 24 + n, "cbc(aes)") {
     return ALG_CBC;
   }
+  if xfer_is(x, 24, 24 + n, "ecb(aes)") {
+    return ALG_ECB;
+  }
   return 0;
 }
 
@@ -285,7 +290,7 @@ fn alg_skc_id(id: u64) -> bool {
 
 /// bind(fd, struct sockaddr_alg): the type "hash" with one of the hashes,
 /// "aead" with gcm(aes) or rfc7539(chacha20,poly1305), or "skcipher" with
-/// ctr(aes) or cbc(aes).
+/// ctr(aes), cbc(aes) or ecb(aes).
 fn alg_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -687,11 +692,15 @@ fn alg_aead_recv(k: &mut Kernel, pid: u64, s: u64, buf: u64, n: u64) -> u64
   }
 }
 
-/// The IV length a cipher takes: 16 for AES, 12 for an AEAD.
-fn alg_ivlen(skc: bool) -> u64
-  ensures result == 12 || result == 16
+/// The IV length algorithm id takes: 16 for AES in CTR or CBC mode, none for
+/// ECB, 12 for an AEAD.
+fn alg_ivlen(id: u64) -> u64
+  ensures result == 0 || result == 12 || result == 16
 {
-  if skc {
+  if id == ALG_ECB {
+    return 0;
+  }
+  if alg_skc_id(id) {
     return 16;
   }
   return 12;
@@ -756,6 +765,16 @@ fn alg_skc(id: u64, enc: bool, key: &Bytes, iv: &Bytes, msg: &Bytes) -> Option[B
     aes_free(a);
     return Option[Bytes]::Some(out);
   }
+  if id == ALG_ECB && blen(msg) % 16 == 0 {
+    if enc {
+      let out = aes_ecb_encrypt(a, msg);
+      aes_free(a);
+      return Option[Bytes]::Some(out);
+    }
+    let out = aes_ecb_decrypt(a, msg);
+    aes_free(a);
+    return Option[Bytes]::Some(out);
+  }
   if id == ALG_CBC && blen(msg) % 16 == 0 {
     if enc {
       let out = aes_cbc_encrypt(a, iv, msg);
@@ -780,7 +799,7 @@ fn alg_skc_next(id: u64, enc: bool, iv: &Bytes, msg: &Bytes, out: &Bytes) -> Byt
   if id == ALG_CTR {
     return alg_ctr_next(iv, (blen(msg) + 15) / 16);
   }
-  if blen(msg) < 16 {
+  if id == ALG_ECB || blen(msg) < 16 {
     return bytes_slice(iv, 0, 16);
   }
   if enc {
@@ -801,12 +820,12 @@ fn alg_skc_recv(k: &mut Kernel, pid: u64, s: u64, buf: u64, n: u64) -> u64
   ensures kok(k)
 {
   let op = alg_get(k, s, ALG_OP);
-  if op == 0 || alg_get(k, s, ALG_IVSET) != 1 {
+  let id = alg_get(k, s, ALG_ID);
+  if op == 0 || (id != ALG_ECB && alg_get(k, s, ALG_IVSET) != 1) {
     return EINVAL;
   }
-  let id = alg_get(k, s, ALG_ID);
   let mlen = smaller(alg_get(k, s, ALG_MLEN), ALG_BUF);
-  if (id == ALG_CBC && mlen % 16 != 0) || n < mlen {
+  if ((id == ALG_CBC || id == ALG_ECB) && mlen % 16 != 0) || n < mlen {
     return EINVAL;
   }
   if mlen == 0 {
@@ -852,7 +871,7 @@ fn alg_skc_recv(k: &mut Kernel, pid: u64, s: u64, buf: u64, n: u64) -> u64
 }
 
 /// The control messages of a sendmsg on an AEAD or skcipher socket: ALG_SET_OP,
-/// ALG_SET_IV (12 bytes) and ALG_SET_AEAD_ASSOCLEN.
+/// ALG_SET_IV (12 bytes, 16 for CTR and CBC, none for ECB) and ALG_SET_AEAD_ASSOCLEN.
 fn alg_cmsgs(k: &mut Kernel, pid: u64, s: u64, ctl: u64, clen: u64) -> u64
   requires kok(k) && pid < NPROC && s < ALG_N
   ensures kok(k)
@@ -882,17 +901,21 @@ fn alg_cmsgs(k: &mut Kernel, pid: u64, s: u64, ctl: u64, clen: u64) -> u64
       let skc = alg_skc_id(alg_get(k, s, ALG_ID));
       if t == ALG_SET_IV {
         // struct af_alg_iv: the length (12 for an AEAD, 16 for AES) and the IV
-        let ivn = alg_ivlen(skc);
+        let ivn = alg_ivlen(alg_get(k, s, ALG_ID));
         if len < 20 + ivn || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ctl + pos + 16, &mut k.fs.xfer, 4 + ivn) != 4 + ivn {
           return EINVAL;
         }
         if rd32(k.fs.xfer, 0) != ivn {
           return EINVAL;
         }
-        alg_set(&mut k, s, ALG_IV, rd64(k.fs.xfer, 4));
-        if skc {
+        if ivn == 0 {
+          alg_set(&mut k, s, ALG_IV, 0);          // ecb(aes): a zero-length IV is all it accepts
+          alg_set(&mut k, s, ALG_IV + 1, 0);
+        } else if skc {
+          alg_set(&mut k, s, ALG_IV, rd64(k.fs.xfer, 4));
           alg_set(&mut k, s, ALG_IV + 1, rd64(k.fs.xfer, 12));
         } else {
+          alg_set(&mut k, s, ALG_IV, rd64(k.fs.xfer, 4));
           alg_set(&mut k, s, ALG_IV + 1, rd32(k.fs.xfer, 12));
         }
         alg_set(&mut k, s, ALG_IVSET, 1);
