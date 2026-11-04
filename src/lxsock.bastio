@@ -1221,7 +1221,8 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   let mut r = ENOSYS;
   let dgram = sk_look(k, pid, a);
   if n != LX_SOCKET && n != LX_SOCKETPAIR && dgram.err == EBADF {
-    return EBADF;                           // no descriptor, or an O_PATH handle
+    ret(&mut k.procs, pid, EBADF);          // no descriptor, or an O_PATH handle
+    return KEEP;
   }
   if n == LX_SOCKET {
     r = lx_socket(&mut k, pid, a, b, c);
