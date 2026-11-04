@@ -1566,6 +1566,7 @@ t_ptrace2: PTRACE_O_TRACECLONE reports a new thread, which is traced
 t_ptrace2: PTRACE_O_TRACEEXIT stops the tracee at exit with the status as the event message
 t_ptrace2: after the exit event stop, PTRACE_SYSCALL lets the tracee end with no more system call stops
 t_ptrace2: strace -f style tracing of a thread that exits: the tracer hears of its end, and the process finishes
+t_ptrace2: a traced thread that ends with its process is reported to the tracer too
 t_ptrace2: PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop
 t_ptrace2: PTRACE_O_TRACEFORK: the event message is the new child's pid
 t_ptrace2: PTRACE_O_TRACESYSGOOD marks a system call stop with SIGTRAP | 0x80

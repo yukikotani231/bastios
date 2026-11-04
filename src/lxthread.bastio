@@ -258,11 +258,14 @@ fn group_take(k: &mut Kernel, mmu: &Mmu, p: u64)
 }
 
 /// Frees the row of thread q, which holds none of the group's shared
-/// state. Its children become the leader g's.
+/// state. Its children become the leader g's. A traced thread's row stays
+/// a zombie for its tracer (traced_end), whether the thread called exit or
+/// ended with its group or at another thread's execve.
 fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
   requires kok(k) && 1 <= q && q < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  let tw = tr_tracer(k, q);
   match take_space(&mut k.spaces, q) {
     Space::Empty => {},
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
@@ -289,6 +292,7 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
   rtq_clear(&mut k, q);
   pset(&mut k.procs, q, F_RESTART, 0);
   pset(&mut k.procs, q, F_STATE, FREE);
+  traced_end(&mut k, q, tw, 0);             // a traced thread waits for its tracer to hear of the end
 }
 
 /// For terminate (src/proc.bastio): process `p` ends. If it is one thread
@@ -716,9 +720,10 @@ fn lx_thread_exit(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
     terminate(&mut k, mmu, pid, 0);
     return;
   }
-  let tw = tr_tracer(k, pid);
   thread_free(&mut k, mmu, pid, g);
-  traced_end(&mut k, pid, tw, code % 256);
+  if state(k.procs, pid) == ZOMBIE {
+    pset(&mut k.procs, pid, F_CODE, code % 256);   // kept for its tracer (traced_end), which hears this code
+  }
 }
 
 /// Thread q of a group has ended and its row is freed; tw is its tracer

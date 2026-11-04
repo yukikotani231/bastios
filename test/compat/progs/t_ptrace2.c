@@ -205,6 +205,14 @@ static void body_thread(void)
     pthread_create(&t, 0, thread_fn, 0);
     pthread_join(t, 0);
 }
+static void *sleeper_fn(void *a) { (void)a; for (;;) pause(); return 0; }
+static void body_thread_left(void)
+{
+    pthread_t t;
+    pthread_create(&t, 0, sleeper_fn, 0);
+    usleep(100000);
+    _exit(4);                               /* exit_group with the thread still there */
+}
 static void body_segv(void) { *(volatile char *)0x10 = 1; }
 static void body_stopcont(void) { for (int i = 0; i < 2000; i++) usleep(1000); _exit(33); }
 
@@ -278,6 +286,20 @@ int main(void)
                if (WIFSTOPPED(st)) ptrace(PTRACE_SYSCALL, p, 0, 0);
            }
            ok && tx == 1 && WIFEXITED(cx) && WEXITSTATUS(cx) == 0; }));
+    EXPECT("a traced thread that ends with its process is reported to the tracer too", ({
+           c = traced_child(body_thread_left); int ok = stopped_with(c, SIGSTOP);
+           ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACECLONE);
+           ptrace(PTRACE_CONT, c, 0, 0);
+           int n = 0, cx = -1, tx = 0;
+           for (;;) {
+               int st = 0; pid_t p = waitpid(-1, &st, __WALL);
+               if (p == -1) break;
+               if (p == c && !WIFSTOPPED(st)) { cx = st; continue; }
+               if (p != c && WIFEXITED(st)) tx++;
+               if (++n > 100) { kill(c, SIGKILL); break; }
+               if (WIFSTOPPED(st)) ptrace(PTRACE_CONT, p, 0, 0);
+           }
+           ok && tx == 1 && WIFEXITED(cx) && WEXITSTATUS(cx) == 4; }));
     EXPECT("PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop", ({
            c = traced_child(body_term); int ok = stopped_with(c, SIGSTOP);
            ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACEEXIT);
