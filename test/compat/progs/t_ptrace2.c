@@ -264,19 +264,20 @@ int main(void)
            }
            if (n >= 100) { kill(c, SIGKILL); wst(c); }
            ok && seen && after == 0 && WIFEXITED(cx) && WEXITSTATUS(cx) == 5; }));
-    EXPECT("strace -f style tracing of a thread that exits lets the process finish", ({
+    EXPECT("strace -f style tracing of a thread that exits: the tracer hears of its end, and the process finishes", ({
            c = traced_child(body_thread); int ok = stopped_with(c, SIGSTOP);
            ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)(PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXIT | PTRACE_O_TRACESYSGOOD));
            ptrace(PTRACE_SYSCALL, c, 0, 0);
-           int n = 0, cx = -1;
+           int n = 0, cx = -1, tx = 0;
            for (;;) {
                int st = 0; pid_t p = waitpid(-1, &st, __WALL);
                if (p == -1) break;
                if (p == c && !WIFSTOPPED(st)) { cx = st; break; }
+               if (p != c && WIFEXITED(st)) tx++;   /* the thread's own end, as Linux reports it */
                if (++n > 1000) { kill(c, SIGKILL); wst(c); break; }
                if (WIFSTOPPED(st)) ptrace(PTRACE_SYSCALL, p, 0, 0);
            }
-           ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 0; }));
+           ok && tx == 1 && WIFEXITED(cx) && WEXITSTATUS(cx) == 0; }));
     EXPECT("PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop", ({
            c = traced_child(body_term); int ok = stopped_with(c, SIGSTOP);
            ptrace(PTRACE_SETOPTIONS, c, 0, (void *)(long)PTRACE_O_TRACEEXIT);

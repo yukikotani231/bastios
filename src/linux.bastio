@@ -490,7 +490,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;                          // PTRACE_O_TRACEEXIT: the tracer is told first
   }
   if n == LX_EXIT && thread_only(k.procs, pid) {
-    lx_thread_exit(&mut k, mmu, pid);
+    lx_thread_exit(&mut k, mmu, pid, a);
     return SWITCH;
   }
   if n == LX_EXIT || n == LX_EXIT_GROUP {
