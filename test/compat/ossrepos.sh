@@ -10,6 +10,23 @@ mkdir -p "$out"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
+# github.com drops a connection now and then; one failed fetch must not fail
+# the whole compat job, so git fetch is tried again a few times.
+real_git=$(command -v git)
+git() {
+  case " $* " in
+  *" fetch "*)
+    n=0
+    until "$real_git" "$@"; do
+      n=$((n + 1))
+      [ "$n" -ge 5 ] && return 1
+      echo "ossrepos: git fetch failed, try $((n + 1)) of 5" >&2
+      sleep $((n * 5))
+    done ;;
+  *) "$real_git" "$@" ;;
+  esac
+}
+
 mk() {  # NAME URL TAG-OR-COMMIT
   [ -d "$out/$1.git" ] && return 0
   mkdir "$work/$1"
@@ -34,7 +51,7 @@ mk cjson https://github.com/DaveGamble/cJSON v1.7.18
 rel() {  # NAME URL
   [ -d "$out/$1.git" ] && return 0
   mkdir "$work/$1"
-  curl -fsSL "$2" | tar xz -C "$work/$1" --strip-components=1
+  curl -fsSL --retry 4 --retry-all-errors "$2" | tar xz -C "$work/$1" --strip-components=1
   git -C "$work/$1" -c init.defaultBranch=main init -q
   git -C "$work/$1" add -A
   git -C "$work/$1" -c user.name=compat -c user.email=compat@example.invalid commit -q -m "$1 release"
