@@ -930,6 +930,7 @@ t_mem: MAP_SHARED anonymous across fork
 t_mem: MAP_SHARED file mapped by two processes
 t_mem: MAP_SHARED file mapping across fork
 t_mem: a writable MAP_SHARED mapping is written back after seventy read-only ones
+t_mem: a MAP_SHARED mapping from a read-only descriptor sees what is written to the file later, in another process too, and cannot become writable
 t_mem: forty writable MAP_SHARED mappings are each written back
 t_mem: MAP_SHARED write-back at exit, after close
 t_mem: MAP_SHARED write-back at munmap
@@ -1728,6 +1729,7 @@ t_sock2: MSG_PEEK leaves the bytes
 t_sock2: SA_RESTART restarts a read
 t_sock2: SCM_RIGHTS passes a descriptor
 t_sock2: SCM_RIGHTS passes several descriptors in one message
+t_sock2: SCM_RIGHTS passes twelve descriptors in one message (Firefox's IPC sends nine)
 t_sock2: SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC
 t_sock2: bytes sent before a message with descriptors are read first, and leave the descriptors for the recvmsg
 t_sock2: SCM_RIGHTS with a bad descriptor among several is EBADF
