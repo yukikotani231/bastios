@@ -2009,6 +2009,7 @@ x11: x11: a Python tag editor with PyQt 5, puddletag, draws its window on the X 
 x11: x11: a Qt 5 disk usage viewer, QDirStat, draws its window on the X screen
 x11: x11: a GTK 3 FTP client, FileZilla, draws its window on the X screen
 x11: x11: a Qt 5 video editor, Avidemux, draws its window on the X screen
+x11: x11: a GTK 3 video transcoder, HandBrake, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
