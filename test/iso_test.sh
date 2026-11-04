@@ -394,13 +394,19 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
         # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
         # dragging and typing, driven through QEMU's monitor.
-        def monitor(*cmds, gap=0.15):
+        # The pauses are most of the test's run time (about 450 s of 940 s
+        # in a measured BIOS run, 460 calls), so they are kept short: the
+        # callers that need the guest to have acted wait for the screen or
+        # the serial line themselves.
+        # Keys keep the long gap between them (Alt-Shift with three arrow keys
+        # in one call lost one at 0.08 s); only the mouse's are cut.
+        def monitor(*cmds, gap=None):
             m3 = socket.socket(socket.AF_UNIX)
             m3.connect(mon_path)
             for c in cmds:
                 m3.sendall(c.encode() + b"\n")
-                time.sleep(gap)
-            time.sleep(0.4)
+                time.sleep(gap if gap is not None else 0.08 if c.startswith("mouse_") else 0.15)
+            time.sleep(0.2)
             m3.close()
         mark = len(out)
         q.stdin.write(b"bwm\r"); q.stdin.flush()
@@ -464,6 +470,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             back = settle(lambda px: px == before)
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
+            fails += not good
+            # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
+            # a step the other way undoes it, and three in one direction go all the way round.
+            monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar
+            time.sleep(1)
+            before = above_bar()                 # the pointer is in the bar now: take the picture again
+            for _ in range(20):
+                px = above_bar()
+                if px == before:
+                    break
+                before = px
+            monitor("mouse_move 0 0 1")
+            once = settle(lambda px: px != before)
+            monitor("mouse_move 0 0 -1")
+            back = settle(lambda px: px == before)
+            monitor("mouse_move 0 0 1", "mouse_move 0 0 1", "mouse_move 0 0 1")
+            round3 = settle(lambda px: px == before)
+            good = once != before and back == before and round3 == before
+            print(("ok  " if good else "FAIL"), f"({name}) the wheel over the task bar cycles the windows")
             fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
@@ -616,7 +641,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("pixels", [at(x, 200) for x in (100, 250, 350)])
             fails += not good
-            time.sleep(3)                                    # Alt is up before the next key (it was held for 4 s)
+            time.sleep(5)                                    # Alt is up before the next key (it is held for 4 s from the sendkey, and the calls before this one are short now)
             # Alt-Shift with an arrow key moves the focused window 16 pixels.
             def left_edge():
                 w, h, px = screendump()

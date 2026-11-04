@@ -94,6 +94,9 @@ fn sk_look(k: &Kernel, pid: u64, fd: u64) -> Sk
   }
   let h = v - FD_OFD;
   let s = of_get(k.ofd, h, 2);
+  if of_get(k.ofd, h, 0) == OF_DIR && of_get(k.ofd, h, OF_ACC) & ACC_PATH != 0 {
+    return Sk { err: EBADF, h: 0, s: 0 };     // an O_PATH handle is no open file
+  }
   if of_get(k.ofd, h, 0) != OF_SOCK || s >= SOCKS {
     return Sk { err: ENOTSOCK, h: 0, s: 0 };
   }
@@ -1217,6 +1220,10 @@ fn lx_sock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   let f = pget(k.procs, pid, F_REGS + R_R9);
   let mut r = ENOSYS;
   let dgram = sk_look(k, pid, a);
+  if n != LX_SOCKET && n != LX_SOCKETPAIR && dgram.err == EBADF {
+    ret(&mut k.procs, pid, EBADF);          // no descriptor, or an O_PATH handle
+    return KEEP;
+  }
   if n == LX_SOCKET {
     r = lx_socket(&mut k, pid, a, b, c);
   } else if n == LX_BIND {

@@ -100,3 +100,21 @@ fakebwm: window 800x600 X11 :8
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a Qt 5 disk usage viewer, QDirStat, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/d; bb tar -xf /disk/dirstat.tar -C /disk/d && bb rm /disk/dirstat.tar; /disk/fakebwm 300 'x' >/disk/fb10.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/d -d 9 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/qdirstat >/disk/qds.out 2>&1 & until bb grep -q typed /disk/fb10.out; do bb sleep 1; done; bb cat /disk/fb10.out; bb ps | bb grep -q '/usr/bin/qdirstat' && echo alive || bb cat /disk/qds.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :9
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11: a GTK 3 FTP client, FileZilla, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/f; bb tar -xf /disk/filezilla.tar -C /disk/f && bb rm /disk/filezilla.tar; /disk/fakebwm 300 'x' >/disk/fb11.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/f -d 10 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/filezilla >/disk/fz.out 2>&1 & until bb grep -q typed /disk/fb11.out; do bb sleep 1; done; bb cat /disk/fb11.out; bb ps | bb grep -q '/usr/bin/filezilla' && echo alive || bb cat /disk/fz.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :10
+fakebwm: pixels drawn
+fakebwm: typed
+alive

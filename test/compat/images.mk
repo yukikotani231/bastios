@@ -24,7 +24,9 @@ JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c
 # program (jlesage/jdownloader-2, Alpine's OpenJDK) and Audacity, a wxWidgets (GTK 3)
 # program (jlesage/audacity) and dupeGuru, a Python program with PyQt 5
 # (jlesage/dupeguru) and puddletag, a tag editor in Python with PyQt 5
-# (jlesage/puddletag), for x11.txt.
+# (jlesage/puddletag) and QDirStat, a Qt 5 disk usage viewer
+# (jlesage/qdirstat) and FileZilla, a GTK 3 FTP client (jlesage/filezilla),
+# for x11.txt.
 X11_SERVER_IMAGE := slieb/xvfb-run@sha256:295c246aa1da131a977d23eb20d6bfe58fed6728edc3a8c0cee13c6570547982
 X11_CLIENT_IMAGE := jbonds/xterm@sha256:bac17f91159dffccecd9d3c73bea2c16c6b2de0f98cb81803e157dabb401c2ec
 X11_GTK_IMAGE := jlesage/putty@sha256:ecd5868c45a512fef25a6219f6559a3966136ca3f1652998e30584a91f901034
@@ -34,6 +36,8 @@ X11_JAVA_IMAGE := jlesage/jdownloader-2@sha256:b5e40d7e313f43db2a02124949703c45c
 X11_WX_IMAGE := jlesage/audacity@sha256:5ff22fadf705ddc828ae480671f61056288394ad7629eead4a628e16a29196a9
 X11_PY_IMAGE := jlesage/dupeguru@sha256:b88814675c5bd5d7202c8bbef2d17f783388d0c1990c41a4395275436804b4d3
 X11_TAG_IMAGE := jlesage/puddletag@sha256:19fc365f82a62da588c682ee724bc6f3f2c98aedc98a8bc2a710e9b56872bf37
+X11_DIRSTAT_IMAGE := jlesage/qdirstat@sha256:e7daf42e334e9bb29d516a468b2280055f4657cdd74d9dc7410cd941397e5c3a
+X11_FILEZILLA_IMAGE := jlesage/filezilla@sha256:123fc4d7aac55b482b9936ece2c8208e56530875e75624c53cd674739ecba121
 RUBY_IMAGE ?= library/ruby@sha256:730b265fc537e93f4ad335031ba95f8a9df88dc75bd9462968b92f368a115f6d
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
