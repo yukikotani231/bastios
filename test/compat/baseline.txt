@@ -1299,6 +1299,14 @@ t_newer: sysfs with an unknown name
 t_newer: telldir and seekdir
 t_newer: ustat for /'s device
 t_newer: waitid P_PIDFD
+t_newer: a range across a page boundary
+t_newer: a range past the end
+t_newer: cachestat counts the pages of a file
+t_newer: cachestat of a bad range pointer is EFAULT
+t_newer: cachestat of a closed descriptor is EBADF
+t_newer: cachestat of a pipe is EBADF
+t_newer: cachestat of a range
+t_newer: cachestat with flags is EINVAL
 t_nopie: a child sees the same addresses (fork)
 t_nopie: a null pointer faults
 t_nopie: absolute pointers in the data work

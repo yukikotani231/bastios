@@ -29,6 +29,7 @@ bind04
 bind05
 brk01
 brk02
+cachestat02
 capget01
 capget02
 capset01

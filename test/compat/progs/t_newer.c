@@ -260,6 +260,31 @@ int main(int argc, char **argv) {
      * a mask on Linux); an unknown command is EINVAL. */
     EXPECT("membarrier query", syscall(SYS_membarrier, 0, 0) >= 0);
     EXPECT("membarrier unknown command", syscall(SYS_membarrier, 1 << 30, 0) == -1 && errno == EINVAL);
+    /* cachestat: the pages of a range of a file; none for what is no file. */
+    {
+        struct { unsigned long long off, len; } rg = { 0, 0 };
+        struct { unsigned long long cache, dirty, wb, ev, rev; } cs;
+        int cf = open("nw_cs", O_RDWR | O_CREAT | O_TRUNC, 0600);
+        char pg[4096] = { 1 };
+        for (int i = 0; i < 3; i++)
+            write(cf, pg, 4096);
+        write(cf, pg, 10);
+        memset(&cs, 0xff, sizeof cs);
+        EXPECT("cachestat counts the pages of a file", syscall(451, cf, &rg, &cs, 0) == 0 && cs.cache == 4 && cs.dirty == 0 && cs.wb == 0 && cs.ev == 0 && cs.rev == 0);
+        rg.off = 4096; rg.len = 4096;
+        EXPECT("cachestat of a range", syscall(451, cf, &rg, &cs, 0) == 0 && cs.cache == 1);
+        rg.off = 4095; rg.len = 2;
+        EXPECT("a range across a page boundary", syscall(451, cf, &rg, &cs, 0) == 0 && cs.cache == 2);
+        rg.off = 100000; rg.len = 0;
+        EXPECT("a range past the end", syscall(451, cf, &rg, &cs, 0) == 0 && cs.cache == 0);
+        EXPECT("cachestat with flags is EINVAL", syscall(451, cf, &rg, &cs, 1) == -1 && errno == EINVAL);
+        EXPECT("cachestat of a bad range pointer is EFAULT", syscall(451, cf, 0, &cs, 0) == -1 && errno == EFAULT);
+        int pp[2];
+        EXPECT("cachestat of a pipe is EBADF", pipe(pp) == 0 && syscall(451, pp[0], &rg, &cs, 0) == -1 && errno == EBADF);
+        EXPECT("cachestat of a closed descriptor is EBADF", syscall(451, 999, &rg, &cs, 0) == -1 && errno == EBADF);
+        close(cf);
+        unlink("nw_cs");
+    }
     unlink("nw_x");
     unlink("nw_l");
     unlink("nw_f");
