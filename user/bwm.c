@@ -1352,6 +1352,7 @@ static int k_shift, k_ctrl, k_alt, k_caps;
 #define DOUBLE_CLICK_MS 400
 static struct win *last_click_win;        /* the window whose title bar was clicked last, and when */
 static long long last_click_ms;
+static long long desk_click_ms;           /* when the empty desktop was last clicked */
 static int last_click_maxed;              /* whether it was maximized before that click */
 static int clock_shown = -1;              /* the minute of the day the task bar shows */
 static unsigned rep_code;
@@ -2612,6 +2613,14 @@ int main(int argc, char **argv)
                 } else if (down && !(buttons & 1) && !in_bar && icon_at(mx, my) >= 0) {
                     if (launch_entry(icon_at(mx, my)))
                         running = 0;
+                } else if (down && !(buttons & 1) && !in_bar && !under && !menu_open) {
+                    long long now = now_ms();                    /* a double click on the empty desktop starts a terminal */
+                    if (desk_click_ms && now - desk_click_ms < DOUBLE_CLICK_MS) {
+                        desk_click_ms = 0;
+                        launch_terminal();
+                    } else {
+                        desk_click_ms = now;
+                    }
                 } else if (!down) {
                     drag = NULL;
                     if (sizing && !sizing->pend)
