@@ -379,6 +379,37 @@ t_dockerd: a peer's shutdown(SHUT_WR) is POLLRDHUP, not POLLHUP, and this end ca
 t_dockerd: inotify_add_watch on /proc/self/status succeeds
 t_dockerd: oom_score_adj takes a number with a trailing NUL
 t_dockerd: readlinkat of an empty path on an O_PATH|O_NOFOLLOW handle of a /proc/self/fd link is its target
+  + t_esn: GETSA reports the ESN state of the parent's sending association
+  + t_esn: GETSA says the sender is at 1:3
+  + t_esn: a child in a new network namespace
+  + t_esn: a client socket
+  + t_esn: a number below the wrap and outside the window is not
+  + t_esn: a number whose high half is far ahead is not taken (the window cannot jump on an inferred half)
+  + t_esn: a packet numbered 0xFFFFFFF5, below the wrap but inside the window, is echoed
+  + t_esn: a packet sealed under the high half 0 for the low half 0x10, which the receiver reads as 1:0x10, is not
+  + t_esn: a packet sealed under the high half 2 for the low half 0x11 is not
+  + t_esn: a packet sealed with the 8 bytes of a 32-bit association is not
+  + t_esn: a packet with a bit of its IV changed is not
+  + t_esn: a raw ESP socket opens
+  + t_esn: a sealed packet numbered 1:0x10 is echoed
+  + t_esn: a veth pair, one end in the child's namespace
+  + t_esn: after those, the next real packet 1:0x12 is echoed: no forgery moved the window
+  + t_esn: and played again it is not
+  + t_esn: and the answers took the parent's other association's numbers from 1
+  + t_esn: and the window is where it was: 1:0x14 is echoed
+  + t_esn: go
+  + t_esn: netlink sockets
+  + t_esn: played again it is not
+  + t_esn: six datagrams are echoed through the wrap of the sequence number
+  + t_esn: the child has them too
+  + t_esn: the child is ready
+  + t_esn: the child reports
+  + t_esn: the child stops
+  + t_esn: the child took in exactly the datagrams that were whole, fresh and ours
+  + t_esn: the parent has ESN associations
+  + t_esn: the parent's end has an address
+  + t_esn: the sender still counts on
+  + t_esn: without IPsec the datagram is echoed
 t_esp: a child in a new network namespace
 t_esp: a client socket
 t_esp: a datagram that goes out plain is dropped by the child, whose in policy asks for ESP
@@ -1897,6 +1928,7 @@ x11: x11: a Java Swing program, the JDownloader installer, draws its window on t
 x11: x11: a wxWidgets program, Audacity, draws its window on the X screen
 x11: x11: a Python program with PyQt 5, dupeGuru, draws its window on the X screen
 x11: x11: a Python tag editor with PyQt 5, puddletag, draws its window on the X screen
+x11: x11: a Qt 5 disk usage viewer, QDirStat, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
