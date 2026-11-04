@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- IPsec extended sequence numbers (`XFRM_STATE_ESN`, `XFRMA_REPLAY_ESN_VAL`): 64-bit counting on send, the high half inferred on receive (RFC 4303 A.2.2) and bound into the AEAD data (RFC 4106), a replay window that works across the 2^32 wrap, and the counters reported by `GETSA`. `t_esn` checks the wrap, replays, and packets sealed under a wrong high half.
 - `bwm`: Shift-Insert in the Alt-F2 Run prompt pastes like Ctrl-V.
 - WireGuard cookie replies to responses: a busy initiator answers a handshake response that has no valid mac2 with a cookie reply instead of doing the Diffie-Hellman work; the responder keeps the cookie for its unconfirmed session and puts the mac2 on the responses it sends next. `t_wgcookieresp` checks that a handshake started by a busy device completes this way.
 - WireGuard previous session: the session a rekey replaces stays as a receive-only session for up to 180 s, so packets in flight under the old keys are still taken (once each; later ones are refused). `t_wgprev` checks it.

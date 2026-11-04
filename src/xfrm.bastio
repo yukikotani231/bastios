@@ -30,8 +30,7 @@
 // action (allow or block) and, for allow, at most one ESP template (reqid,
 // mode, tunnel ends). The lower the priority number the earlier it applies.
 //
-// Not done yet: the packet path (what is sent through an association and
-// what comes in), lifetimes and the replay state's notifications.
+// Not done yet: the replay state's notifications.
 
 const NETLINK_XFRM: u64 = 6;
 const XFRM_MSG_NEWSA: u64 = 16;
@@ -49,6 +48,10 @@ const XFRMA_ALG_CRYPT: u64 = 2;
 const XFRMA_ALG_COMP: u64 = 3;
 const XFRMA_ALG_AUTH_TRUNC: u64 = 20;
 const XFRMA_ALG_AEAD: u64 = 18;
+const XFRMA_REPLAY_ESN_VAL: u64 = 23;
+const XFRM_STATE_ESN: u64 = 128;          // in the state flags: 64-bit sequence numbers
+const XS_F_ESNATTR: u64 = 256;            // in XS_FLAGS: the state was made with an ESN replay state
+const XFRM_ESN_HEAD: u64 = 24;            // struct xfrm_replay_state_esn without its bitmap
 const XFRM_USERSA: u64 = 224;             // struct xfrm_usersa_info
 const XFRM_USERSA_ID: u64 = 24;           // struct xfrm_usersa_id
 const XFRM_USERPOLICY: u64 = 168;         // struct xfrm_userpolicy_info
@@ -378,6 +381,27 @@ fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u6
   if al - XFRM_ALGO_AEAD_HEAD < kbits / 8 {
     return NE_INVAL;
   }
+  let flags = rd8(b, sa + 216);
+  let ek = nla_find(b, attrs, end, XFRMA_REPLAY_ESN_VAL);
+  let mut esnwin = window;
+  if ek == 0 {
+    if flags / XFRM_STATE_ESN % 2 == 1 {
+      return NE_INVAL;                    // ESN needs its replay state
+    }
+  } else {
+    let el = nla_len(b, ek);
+    if el < XFRM_ESN_HEAD {
+      return NE_INVAL;
+    }
+    let bmp = rd32(b, ek);
+    if bmp > 4096 || (el < XFRM_ESN_HEAD + bmp * 4 && el != XFRM_ESN_HEAD) {
+      return NE_INVAL;
+    }
+    esnwin = rd32(b, ek + 20);
+    if window != 0 || esnwin > bmp * 32 {
+      return NE_INVAL;                    // the window comes from the ESN state, and must fit its bitmap
+    }
+  }
   let dst = xs_addr(b, sa + 56);
   let spi = be32(b, sa + 56 + 16);
   let src = xs_addr(b, sa + 80);
@@ -405,7 +429,7 @@ fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u6
   xs_set(&mut n, row, XS_SRC, src);
   xs_set(&mut n, row, XS_MODE, mode);
   xs_set(&mut n, row, XS_REQID, rd32(b, sa + 208));
-  xs_set(&mut n, row, XS_RWIN, smaller(window, 255));
+  xs_set(&mut n, row, XS_RWIN, smaller(esnwin, 255));
   xs_set(&mut n, row, XS_SEQ, 0);
   let klen = kbits / 8 - 4;
   xs_set(&mut n, row, XS_KLEN, klen);
@@ -419,7 +443,19 @@ fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u6
     }
     w = w + 1;
   }
-  xs_set(&mut n, row, XS_FLAGS, rd8(b, sa + 216));
+  xs_set(&mut n, row, XS_FLAGS, flags);
+  if ek != 0 {
+    // oseq and seq (and, with ESN, their high halves) start the counters
+    xs_set(&mut n, row, XS_FLAGS, flags + XS_F_ESNATTR);
+    let mut oseq = rd32(b, ek + 4);
+    let mut top = rd32(b, ek + 8);
+    if flags / XFRM_STATE_ESN % 2 == 1 {
+      oseq = oseq + rd32(b, ek + 12) * 4294967296;
+      top = top + rd32(b, ek + 16) * 4294967296;
+    }
+    xs_set(&mut n, row, XS_SEQ, oseq);
+    xs_set(&mut n, row, XS_RTOP, top);
+  }
   let mut l = 0;
   while l < 8
     invariant l <= 8 && net_ok(n)
@@ -508,6 +544,21 @@ fn xs_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
       j = j + 1;
     }
     nl_32(&mut n, xs_get(n, i, XS_SALT));
+  }
+  if xs_get(n, i, XS_FLAGS) / XS_F_ESNATTR % 2 == 1 {
+    // XFRMA_REPLAY_ESN_VAL: the counters; the bitmap is not reported (zeros)
+    let win = smaller(xs_get(n, i, XS_RWIN), 255);
+    let words = (win + 31) / 32 + 1;
+    let oseq = xs_get(n, i, XS_SEQ);
+    let top = xs_get(n, i, XS_RTOP);
+    nla_head(&mut n, XFRMA_REPLAY_ESN_VAL, XFRM_ESN_HEAD + words * 4);
+    nl_32(&mut n, words);
+    nl_32(&mut n, oseq % 4294967296);
+    nl_32(&mut n, top % 4294967296);
+    nl_32(&mut n, oseq / 4294967296 % 4294967296);
+    nl_32(&mut n, top / 4294967296 % 4294967296);
+    nl_32(&mut n, win);
+    xs_zeros(&mut n, words * 4);
   }
   nl_end(&mut n);
 }
@@ -1048,6 +1099,25 @@ fn esp_aad(spi: u64, seq: u64) -> Bytes
   return b;
 }
 
+/// The additional data of an ESN packet (RFC 4106, section 5): the SPI, then
+/// the high and the low 32 bits of the 64-bit sequence number.
+fn esp_aad_esn(spi: u64, seq: u64) -> Bytes
+  requires spi <= 4294967295
+  ensures blen(result) == 12
+{
+  let mut b = balloc(12);
+  store_be32(&mut b, 0, cast[u32](spi));
+  store_be32(&mut b, 4, cast[u32](seq / 4294967296 % 4294967296));
+  store_be32(&mut b, 8, cast[u32](seq % 4294967296));
+  return b;
+}
+
+fn xs_esn(n: &Net, sa: u64) -> bool
+  requires net_ok(n) && sa < XSA_N
+{
+  return xs_get(n, sa, XS_FLAGS) / XFRM_STATE_ESN % 2 == 1;
+}
+
 /// The association an out policy p's template uses for a packet to dst, or XSA_N.
 fn esp_sa_out(n: &Net, p: u64, dst: u64) -> u64
   requires net_ok(n) && p < XP_N
@@ -1091,10 +1161,10 @@ fn esp_bit_clear(n: &mut Net, sa: u64, b: u64)
 fn esp_seq_ok(n: &Net, sa: u64, seq: u64) -> bool
   requires net_ok(n) && sa < XSA_N
 {
-  if seq == 0 || seq > 4294967295 {
+  if seq == 0 || !xs_esn(n, sa) && seq > 4294967295 {
     return false;
   }
-  let top = xs_get(n, sa, XS_RTOP) % 4294967296;
+  let top = xs_get(n, sa, XS_RTOP);
   if seq > top {
     return true;
   }
@@ -1110,13 +1180,51 @@ fn esp_seq_ok(n: &Net, sa: u64, seq: u64) -> bool
   return xs_get(n, sa, XS_RMAP + b / 64) / (1 << (b % 64)) % 2 == 0;
 }
 
+/// The 64-bit sequence number a packet of an ESN association carries when its
+/// ESP header holds lo (RFC 4303, appendix A.2.2): the high half that puts it
+/// in or just above the window under the highest number received. 0 if there
+/// is none (the space is used up, or the window would lie below zero). For an
+/// association without ESN, lo itself.
+fn esp_seq_full(n: &Net, sa: u64, lo: u64) -> u64
+  requires net_ok(n) && sa < XSA_N && lo <= 4294967295
+{
+  if !xs_esn(n, sa) {
+    return lo;
+  }
+  let top = xs_get(n, sa, XS_RTOP);
+  let tl = top % 4294967296;
+  let th = top / 4294967296 % 4294967296;
+  let mut win = smaller(xs_get(n, sa, XS_RWIN), 255);
+  if win == 0 {
+    win = 1;
+  }
+  if tl + 1 >= win {
+    let bottom = tl + 1 - win;
+    if lo >= bottom {
+      return th * 4294967296 + lo;
+    }
+    if th >= 4294967295 {
+      return 0;
+    }
+    return (th + 1) * 4294967296 + lo;
+  }
+  let bottom = 4294967296 + tl + 1 - win;
+  if lo >= bottom {
+    if th == 0 {
+      return 0;
+    }
+    return (th - 1) * 4294967296 + lo;
+  }
+  return th * 4294967296 + lo;
+}
+
 /// Records seq (which esp_seq_ok took and a packet then authenticated) as
 /// received; the window moves up if seq is above it.
 fn esp_seq_set(n: &mut Net, sa: u64, seq: u64)
-  requires net_ok(n) && sa < XSA_N && seq <= 4294967295
+  requires net_ok(n) && sa < XSA_N
   ensures net_ok(n)
 {
-  let top = xs_get(n, sa, XS_RTOP) % 4294967296;
+  let top = xs_get(n, sa, XS_RTOP);
   if seq > top {
     let d = seq - top;
     if d >= ESP_WIN {
@@ -1130,7 +1238,7 @@ fn esp_seq_set(n: &mut Net, sa: u64, seq: u64)
     } else {
       let mut j = 0;
       while j < d
-        invariant j <= d && d < ESP_WIN && top + d <= 4294967295 && net_ok(n) && sa < XSA_N
+        invariant j <= d && d < ESP_WIN && top + d == seq && net_ok(n) && sa < XSA_N
       {
         esp_bit_clear(&mut n, sa, (top + j + 1) % ESP_WIN);
         j = j + 1;
@@ -1214,7 +1322,8 @@ fn esp_out(n: &mut Net, flen: u64) -> u64
     return 1;                         // would not fit a frame: no fragmenting
   }
   let cur = xs_get(n, sa, XS_SEQ);
-  if cur >= 4294967295 {
+  let esn = xs_esn(n, sa);
+  if !esn && cur >= 4294967295 || cur >= 18446744073709551615 {
     return 1;                         // the sequence numbers are used up
   }
   let seq = cur + 1;
@@ -1233,8 +1342,17 @@ fn esp_out(n: &mut Net, flen: u64) -> u64
   bset(&mut plain, body + pad + 1, cast[u8](nh));
   let key = esp_key(n, sa);
   let mut nonce = esp_nonce(n, sa);
-  store_be32(&mut nonce, 8, cast[u32](seq));
-  let aad = esp_aad(spi, seq);
+  store_be32(&mut nonce, 8, cast[u32](seq % 4294967296));
+  let mut aad = balloc(0);
+  if esn {
+    // the IV is the whole 64-bit number, so a nonce is never used twice
+    store_be32(&mut nonce, 4, cast[u32](seq / 4294967296 % 4294967296));
+    bfree(aad);
+    aad = esp_aad_esn(spi, seq);
+  } else {
+    bfree(aad);
+    aad = esp_aad(spi, seq % 4294967296);
+  }
   let sealed = gcm_seal(key, nonce, aad, plain);
   let total = ESP_OVER + plen;
   let mut src2 = src;
@@ -1258,7 +1376,7 @@ fn esp_out(n: &mut Net, flen: u64) -> u64
   put32(&mut n.out, 30, dst2);
   put16(&mut n.out, 24, csum(n.out, 14, 20));
   put32(&mut n.out, 34, spi);
-  put32(&mut n.out, 38, seq);
+  put32(&mut n.out, 38, seq % 4294967296);
   bcopy(&mut n.out, 42, nonce, 4, 8);
   bcopy(&mut n.out, 50, sealed, 0, plen + 16);
   bfree(sealed);
@@ -1317,7 +1435,7 @@ fn esp_plain_ok(n: &Net, src: u64, dst: u64, proto: u64) -> bool
 /// padding, pad length and next header) of association sa goes round the
 /// loopback queue, if it is whole and a policy lets it in.
 fn esp_accept(n: &mut Net, sa: u64, seq: u64, plain: &Bytes)
-  requires net_ok(n) && sa < XSA_N && seq <= 4294967295 && blen(plain) <= FRAME_MAX - 34
+  requires net_ok(n) && sa < XSA_N && blen(plain) <= FRAME_MAX - 34
   ensures net_ok(n)
 {
   esp_seq_set(&mut n, sa, seq);
@@ -1396,16 +1514,24 @@ fn esp_in(n: &mut Net, total: u64)
   }
   let dst = be32(n.pkt, 30);
   let spi = be32(n.pkt, 34);
-  let seq = be32(n.pkt, 38);
+  let lo = be32(n.pkt, 38);
   xs_reap(&mut n);
   let sa = xs_find(n, n.ns, dst, spi);
-  if sa >= XSA_N || !esp_seq_ok(n, sa, seq) {
+  if sa >= XSA_N {
+    return;
+  }
+  let seq = esp_seq_full(n, sa, lo);
+  if !esp_seq_ok(n, sa, seq) {
     return;
   }
   let key = esp_key(n, sa);
   let mut nonce = esp_nonce(n, sa);
   bcopy(&mut nonce, 4, n.pkt, 42, 8);
-  let aad = bytes_slice(n.pkt, 34, 42);
+  let mut aad = bytes_slice(n.pkt, 34, 42);
+  if xs_esn(n, sa) {
+    bfree(aad);
+    aad = esp_aad_esn(spi, seq);
+  }
   let sealed = bytes_slice(n.pkt, 50, 14 + total);
   match gcm_open(key, nonce, aad, sealed) {
     Option::None => {},
