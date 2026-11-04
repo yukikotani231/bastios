@@ -389,7 +389,9 @@ static void flooder(const uint8_t *pub) {
                 int n = recv(u, r, sizeof r, 0);
                 uint32_t idx;
                 if (n > 8) memcpy(&idx, r + 4, 4);
-                if (n == 64 && r[0] == 3 && r[1] == 0 && r[2] == 0 && r[3] == 0 && idx >= base && idx < base + 12) st.replies++;
+                /* a slow device answers a burst after the next one was sent, so the
+                 * index may belong to any burst so far */
+                if (n == 64 && r[0] == 3 && r[1] == 0 && r[2] == 0 && r[3] == 0 && idx >= 0x70000000 && idx < base + 12 && (idx - 0x70000000) % 16 < 12) st.replies++;
                 else st.wrong++;
             }
         }
@@ -399,8 +401,19 @@ static void flooder(const uint8_t *pub) {
         uint8_t m[148], r[256];
         forge(m, 0x71000000, pub, 0, 1);
         sendto(u, m, 148, 0, (void *)&to, sizeof to);
-        struct pollfd pf = {u, POLLIN, 0};
-        if (poll(&pf, 1, 700) == 1 && recv(u, r, sizeof r, 0) > 0) st.afterbad++;
+        /* replies to the earlier bursts may still be on their way: only one
+         * that carries the index of the bad initiation counts against it */
+        for (int t = 0; t < 3000;) {
+            struct pollfd pf = {u, POLLIN, 0};
+            int w = poll(&pf, 1, 100);
+            t += 100;
+            if (w == 1) {
+                uint32_t idx = 0;
+                int n = recv(u, r, sizeof r, 0);
+                if (n > 8) memcpy(&idx, r + 4, 4);
+                if (n > 0 && idx == 0x71000000) st.afterbad++;
+            }
+        }
     }
     write(flood_out, &st, sizeof st);
 }
@@ -537,13 +550,13 @@ int main(void) {
     EXPECT("the child is told to start the handshake", write(in[1], "K", 1) == 1);
     uint64_t hs0 = 0, rx0, tx0;
     int up = 0;
-    for (int t = 0; t < 80 && !up; t++) {
+    for (int t = 0; t < 300 && !up; t++) {
         usleep(500000);
         if (peer_stats(g, id, "wgt0", &rx0, &tx0, &hs0) == 0 && hs0 > 0) up = 1;
     }
     EXPECT("the handshake the busy child started completes, by cookie reply to our response", up);
     int seq = 0, got = 0;
-    for (int t = 0; t < 5 && !got; t++) got = ask(u, seq++, 100, 3000) == 1;
+    for (int t = 0; t < 8 && !got; t++) got = ask(u, seq++, 100, 3000) == 1;
     EXPECT("a packet is echoed over the new session while the flood goes on", got);
     EXPECT("the flooder stops", write(cp[1], "Q", 1) == 1);
     struct { int sent, replies, wrong, afterbad; } fs;

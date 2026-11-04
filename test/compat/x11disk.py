@@ -9,7 +9,7 @@ and x11start (the script that starts them all).
 The checks unpack the roots under /disk/x, /disk/t, /disk/g and /disk/q, start Xvfb in the first
 and xterm in the second (which share the X socket through a bind mount).
 
-    x11disk.py OUT.img SERVER_IMAGE CLIENT_IMAGE GTK_IMAGE QT_IMAGE ... PY_IMAGE TAG_IMAGE DIRSTAT_IMAGE FILEZILLA_IMAGE AVIDEMUX_IMAGE HANDBRAKE_IMAGE MKV_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR
+    x11disk.py OUT.img SERVER_IMAGE CLIENT_IMAGE GTK_IMAGE QT_IMAGE ... PY_IMAGE TAG_IMAGE DIRSTAT_IMAGE FILEZILLA_IMAGE AVIDEMUX_IMAGE HANDBRAKE_IMAGE MKV_IMAGE CZKAWKA_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR
 
 The images are Docker Hub images, NAME@sha256:DIGEST (images.mk pins them),
 fetched and cached as alpinedisk.py does it.
@@ -66,13 +66,13 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
-    out, server, client, gtk, qt, qt2, java, wx, py, tag, dirstat, filezilla, avidemux, handbrake, mkv, busybox, bx11, fakebwm, x11start = args
+    out, server, client, gtk, qt, qt2, java, wx, py, tag, dirstat, filezilla, avidemux, handbrake, mkv, czkawka, busybox, bx11, fakebwm, x11start = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "x11")
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
     os.makedirs(work, exist_ok=True)
     unpacked = {}                  # tar -> the bytes its files take on the disk once unpacked
-    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru"), (tag, "tag.tar", "usr/bin/puddletag"), (dirstat, "dirstat.tar", "usr/bin/qdirstat"), (filezilla, "filezilla.tar", "usr/bin/filezilla"), (avidemux, "avidemux.tar", "usr/bin/avidemux3_qt5"), (handbrake, "handbrake.tar", "usr/bin/ghb"), (mkv, "mkv.tar", "usr/bin/mkvtoolnix-gui")):
+    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru"), (tag, "tag.tar", "usr/bin/puddletag"), (dirstat, "dirstat.tar", "usr/bin/qdirstat"), (filezilla, "filezilla.tar", "usr/bin/filezilla"), (avidemux, "avidemux.tar", "usr/bin/avidemux3_qt5"), (handbrake, "handbrake.tar", "usr/bin/ghb"), (mkv, "mkv.tar", "usr/bin/mkvtoolnix-gui"), (czkawka, "czkawka.tar", "usr/bin/czkawka_gui")):
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
@@ -115,6 +115,7 @@ def main():
                                f"filezilla.tar={os.path.join(work, 'filezilla.tar')}",
                                f"avidemux.tar={os.path.join(work, 'avidemux.tar')}",
                                f"handbrake.tar={os.path.join(work, 'handbrake.tar')}",
-                               f"mkv.tar={os.path.join(work, 'mkv.tar')}"], env)
+                               f"mkv.tar={os.path.join(work, 'mkv.tar')}",
+                               f"czkawka.tar={os.path.join(work, 'czkawka.tar')}"], env)
 
 main()

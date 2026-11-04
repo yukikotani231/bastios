@@ -228,7 +228,7 @@ t_alg: rfc7539 refuses a changed tag
 t_alg: rfc7539(chacha20,poly1305) opens what it sealed, with associated data
 t_alg: the tag size can be set to 16 and not to 8
 t_alg: the text is copied: changing the buffer after the send changes nothing
-t_algskc: a 12-byte IV is refused, as is a 24-byte key
+t_algskc: a 12-byte IV is refused, as is a 23-byte key
 t_algskc: a CBC message that is not whole blocks is EINVAL and gives nothing
 t_algskc: a bad address for the result leaves the message to be read again
 t_algskc: a buffer too small for the result is EINVAL and nothing is written
@@ -241,9 +241,11 @@ t_algskc: an unknown skcipher is ENOENT, and so is a hash name of that type
 t_algskc: and a counter continues after the blocks it used
 t_algskc: and decrypts it
 t_algskc: cbc(aes) with a 128-bit key encrypts the SP 800-38A F.2.1 message
+t_algskc: cbc(aes) with a 192-bit key encrypts SP 800-38A F.2.3 and decrypts it
 t_algskc: cbc(aes) with a 256-bit key encrypts F.2.5 and decrypts it
 t_algskc: ctr(aes) takes any length: 20 bytes give the first 20 of the 32
 t_algskc: ctr(aes) with a 128-bit key encrypts the SP 800-38A F.5.1 message and decrypts it
+t_algskc: ctr(aes) with a 192-bit key gives F.5.3
 t_algskc: ctr(aes) with a 256-bit key gives F.5.5
 t_algskc: encrypting from a file leaves the file as the plaintext
 t_algskc: no operation, or no IV, is EINVAL
@@ -1843,6 +1845,7 @@ t_sysv: msgmni is written: that many queues, then ENOSPC
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
+t_thread: oom_score counts the memory a thread touched, while it waits and while it runs
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: fork while another thread writes copies one moment of the parent
@@ -2051,6 +2054,7 @@ x11: x11: a GTK 3 FTP client, FileZilla, draws its window on the X screen
 x11: x11: a Qt 5 video editor, Avidemux, draws its window on the X screen
 x11: x11: a GTK 3 video transcoder, HandBrake, draws its window on the X screen
 x11: x11: a Qt 5 Matroska tool, MKVToolNix, draws its window on the X screen
+x11: x11: a GTK 4 duplicate finder in Rust, Czkawka, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
@@ -2435,6 +2439,7 @@ t_wgcfg: two allowed IPs
 t_wgcfg: two peers
 t_mem: MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again
 t_mem: a file written with write(2) and mapped MAP_SHARED is the same memory to a mapping made after the page cache has filled up
+t_mem: a memfd mapped MAP_SHARED keeps what was written through the mapping when the caches are dropped, for a later mapping in another process
 t_wgcfg: a port that a socket holds
 t_wgcfg: and the device keeps its port
 t_wgcfg: deleting it frees its port

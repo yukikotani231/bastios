@@ -50,10 +50,11 @@
 //
 // Not done: the cache does not replace the file's own bytes, so a mapped
 // page is still written back at msync, munmap and exit (src/lxmem.bastio);
-// a slot the clock takes when every slot is a MAP_SHARED page, or that
-// pc_shrink empties when memory is short, may hold a page a process still
-// maps (a later mmap of that part of the file then gets a fresh copy,
-// which the next write-back reconciles).
+// a slot the clock takes when every slot is a MAP_SHARED page may hold a
+// page a process still maps (a later mmap of that part of the file then
+// gets a fresh copy, which the next write-back reconciles). pc_shrink
+// leaves the MAP_SHARED pages of files that some process's mapping record
+// names (a mapping past the MAP_N records is not seen).
 
 import "pages.bastio";
 
@@ -788,11 +789,34 @@ fn any_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
   return true;
 }
 
+/// Whether the first n words of keep (all of them if n is larger) hold h.
+fn pc_kept(keep: &Buf, n: u64, h: u64) -> bool
+{
+  if n > len(keep) {
+    return true;                            // more files than the list holds: keep every one
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= len(keep)
+  {
+    if get(keep, i) == h {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 /// Memory is short: gives up the cache's hold on up to `want` pages,
 /// program text included (it is read again from the file when a program
 /// runs next). A page a process maps stays until the process lets go of it.
+/// A MAP_SHARED page of a file in the first nk words of keep (the files a
+/// process's shared mapping records name, mapped_files) stays in the cache:
+/// writes to it reach the file only at write-back, so a later mapping of
+/// that part of the file would get stale bytes (zeros, for a memfd) and no
+/// longer share memory with the processes that map it now.
 /// Returns how many slots it emptied.
-fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
+fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64, keep: &Buf, nk: u64) -> u64
   requires pc_ok(c) && mem_ok(m)
   ensures pc_ok(c) && mem_ok(m)
   ensures result <= want
@@ -807,7 +831,9 @@ fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
           invariant i <= PC_N && n <= want && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
           invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
         {
-          if get(c.keys, 3 * i) != 0 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512) {
+          let k1 = get(c.keys, 3 * i);
+          let held = k1 != 0 && get(c.keys, 3 * i + 2) == 2 && pc_kept(keep, nk, k1 - 1);
+          if k1 != 0 && !held && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512) {
             pc_unkey(&mut c.keys, &mut c.link, i);
             n = n + 1;
           }

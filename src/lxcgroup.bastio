@@ -1063,24 +1063,39 @@ fn cg_text(k: &mut Kernel, pid: u64, d: u64, o: &mut Bytes) -> u64
   return 0;                                 // cgroup.kill is write-only
 }
 
-/// The pages mapped in the address space of row q, or 0 when they cannot
-/// be counted now (another processor runs the space).
+/// The pages mapped in the address space of process q (any member of a
+/// thread group: the space is counted where it lives), or, when they cannot
+/// be counted now (another processor runs the space), the count taken last
+/// (F_RSSM, 0 if none was).
 fn cg_resident(k: &mut Kernel, q: u64) -> u64
   requires kok(k) && q < NPROC
   ensures kok(k) && result <= WPAGES
 {
+  // A thread group's space lives in the row of the member whose call was
+  // handled last (group_take), often not the leader's.
+  let mut r = q;
   if !has_space(&mut k.spaces, q) {
-    return 0;
+    if pget(k.procs, q, F_TGID) == 0 {
+      return 0;
+    }
+    r = holder(&mut k, tgid(k.procs, q));
+    if r == 0 {
+      return smaller(pget(k.procs, q, F_RSSM), WPAGES);
+    }
   }
-  let c = win_op(&mut k.mem, &mut k.spaces, q, WOP_COUNT, 0, WPAGES, 0);
+  // While a thread of it runs on a processor its tables are lent out and
+  // cannot be walked: the count taken last stands in.
+  let c = win_op(&mut k.mem, &mut k.spaces, r, WOP_COUNT, 0, WPAGES, 0);
   if c > WPAGES {
-    return 0;
+    return smaller(pget(k.procs, q, F_RSSM), WPAGES);
   }
   let out = swap_count(k, q);              // swapped pages map the marker page: they hold no memory
-  if out >= c {
-    return 0;
+  let mut n = 0;
+  if out < c {
+    n = c - out;
   }
-  return c - out;
+  pset(&mut k.procs, q, F_RSSM, n);
+  return n;
 }
 
 /// memory.current of cgroup s: the bytes of memory the processes in it and

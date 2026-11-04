@@ -1516,6 +1516,57 @@ fn map_free_slot(k: &Kernel, pid: u64) -> u64
   return MAP_N;
 }
 
+const MAPPED_KEEP: u64 = 128;           // files pc_reclaim keeps the shared pages of (more: it keeps them all)
+
+/// Collects in out the page cache's handles of the files that some
+/// process's shared mapping records name; returns how many, MAPPED_KEEP + 1
+/// once there are more than out holds.
+fn mapped_files(k: &Kernel, out: &mut Buf) -> u64
+  requires kok(k) && len(out) == MAPPED_KEEP
+  ensures len(out) == MAPPED_KEEP && result <= MAPPED_KEEP + 1
+{
+  let mut n = 0;
+  let mut p = 0;
+  while p < NPROC && n <= MAPPED_KEEP
+    invariant p <= NPROC && n <= MAPPED_KEEP + 1 && len(out) == MAPPED_KEEP && kok(k)
+  {
+    let mut i = 0;
+    while i < MAP_N && n <= MAPPED_KEEP
+      invariant i <= MAP_N && p < NPROC && n <= MAPPED_KEEP + 1 && len(out) == MAPPED_KEEP && kok(k)
+    {
+      let h = wget(k.maps, mp_at(p, i, 2));
+      if wget(k.maps, mp_at(p, i, 0)) != 0 && h < OFD_N && of_get(k.ofd, h, 0) == OF_FILE {
+        let row = of_get(k.ofd, h, 2);
+        if row < FD_ROWS {
+          let f = row_file(k.fs, row);
+          if f != NO_FILE && !pc_kept(out, n, f) {
+            if n < MAPPED_KEEP {
+              out = set(out, n, f);
+            }
+            n = n + 1;
+          }
+        }
+      }
+      i = i + 1;
+    }
+    p = p + 1;
+  }
+  return n;
+}
+
+/// pc_shrink for memory that is short: every page the cache can give up,
+/// except the MAP_SHARED pages of files a process maps now (mapped_files).
+fn pc_reclaim(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut keep = alloc(MAPPED_KEEP);
+  let nk = mapped_files(k, &mut keep);
+  let n = pc_shrink(&mut k.fs.pc, &mut k.mem, PC_N, keep, nk);
+  free(keep);
+  return n;
+}
+
 /// Whether a guarded record (MP_GUARD) of process pid covers any of
 /// window pages from .. to.
 fn map_guarded(k: &Kernel, pid: u64, from: u64, to: u64) -> bool

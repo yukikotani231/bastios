@@ -25,7 +25,10 @@ import "snd.bastio";
 // ALARMS_LEN and HOLES_LEN follow it, and a
 // signal's sender word keeps the pid in 8 bits (post_from, src/lxsig.bastio).
 const NPROC: u64 = 1024;
-const STRIDE: u64 = 80 + REGS_EXT;
+// A row is a whole number of 64-byte cache lines on x86-64: with 81 words a
+// row, a 255-processor boot under QEMU TCG took about 9 minutes where 80 or
+// 88 take seconds (why is not pinned down; rows sharing lines is the guess).
+const STRIDE: u64 = 88 + REGS_EXT;
 const PTAB_LEN: u64 = NPROC * STRIDE;   // the most the table grows to
 const FORK_SPAN: u64 = 64;           // how far above the lowest free id a fork may number on (new_fork_pid)
 const PGROW: u64 = 32;               // rows the process table starts with (it doubles from there)
@@ -123,6 +126,7 @@ const F_TDUSER: u64 = 76 + REGS_EXT;  // a leader: the user ticks of its threads
 const F_TDSYS: u64 = 77 + REGS_EXT;   // ... and their system ns
 const F_RSSC: u64 = 79 + REGS_EXT;    // the last resident page count that could be taken (see anon_resident)
 const F_GSBASE: u64 = 78 + REGS_EXT;  // the user's GS base (arch_prctl ARCH_SET_GS; x86-64), loaded when the process enters user mode
+const F_RSSM: u64 = 80 + REGS_EXT;    // the last count of the pages its address space has mapped that could be taken (cg_resident)
 const F_XSIG: u64 = 70;              // Linux: the signal its parent gets when it ends, plus 1 (clone's exit_signal); 0 is SIGCHLD
 const F_NETNS: u64 = 64;             // network (src/netns.bastio, src/lxnetlink.bastio)
 // File permission bits (src/lxperm.bastio).
@@ -1974,6 +1978,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
   }
   pset(&mut procs, pid, F_GSBASE, 0);
   pset(&mut procs, pid, F_RSSC, 0);
+  pset(&mut procs, pid, F_RSSM, 0);
   pset(&mut procs, pid, F_PROG, NPROGS);       // a file: NPROGS + 1 + its handle, for /proc/PID/exe
   if src.file && src.f < HFILES {
     pset(&mut procs, pid, F_PROG, NPROGS + 1 + src.f);
