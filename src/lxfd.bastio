@@ -679,6 +679,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     ino_closed(&mut k, x, true);
   } else if kind == OF_INOTIFY && x < INO_N {
     ino_free(&mut k, x);
+  } else if kind == OF_LL {
+    ll_closed(&mut k, x);                   // src/lxlandlock.bastio
   } else if kind == OF_SECCOMP && x < SC_N {
     sc_listener_closed(&mut k, x);          // src/lxseccomp.bastio
   } else if kind == OF_DEV && x == DEV_FB {
@@ -1153,6 +1155,26 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   }
   if (flags % 4 != 0 || flags & LO_CREAT != 0) && flags & LO_PATH == 0 && dir_at(&mut k, n) != NO_FILE {
     return EISDIR;                          // a directory is not written through open
+  }
+  if ll_active(k, pid) && flags & LO_PATH == 0 {
+    let isd = dir_at(&mut k, n) != NO_FILE;
+    let ex = vfs_lookup(&mut k.fs, n) != NO_FILE;
+    let mut ll_e = 0;
+    if isd {
+      ll_e = ll_deny(k, pid, LL_READ_DIR, n);
+    } else if !ex && flags & LO_CREAT != 0 {
+      ll_e = ll_deny_in(k, pid, LL_MAKE_REG, n);
+    } else {
+      if flags % 4 != 1 {
+        ll_e = ll_deny(k, pid, LL_READ_FILE, n);
+      }
+      if ll_e == 0 && (flags % 4 != 0 || flags & LO_TRUNC != 0) {
+        ll_e = ll_deny(k, pid, LL_WRITE_FILE, n);
+      }
+    }
+    if ll_e != 0 {
+      return ll_e;
+    }
   }
   if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && path_ro(&mut k, n) {
     let exists = vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
