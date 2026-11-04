@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `pwrite64` on `/dev/fb0` stores pixels at the given offset and leaves the file position alone, as on Linux's fbdev. `bwm` uses it for every row it puts on the screen (one system call where `lseek` and `write` took two), and writes the box a pointer left and the one it is in as one piece when they are close. In a no-KVM QEMU run a full redraw went from 26 to 16 ms and a pointer move from 2.6 to 1.6 ms; a window drag stayed near 10 ms. `BWM_BENCH=N bwm` prints these timings (and `BWM_BENCH_ONLY=1 BWM_BENCH=N test/iso_test.sh` gets them from the ISO).
 - `bwm`: holding Alt and dragging with the right button resizes a resizable window from anywhere in it (its lower right corner follows the pointer).
 - `bwm`: a double click on the empty desktop starts a terminal window.
 - `bwm`: the mouse wheel over the task bar goes through the windows like Alt-Tab and Alt-Shift-Tab.
