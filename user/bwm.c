@@ -2209,6 +2209,10 @@ int main(int argc, char **argv)
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
+                        if (code == 110 && k_shift) {                      /* Shift-Insert pastes, as in a terminal window */
+                            out[0] = 22;
+                            m = 1;
+                        }
                         if (code != 15)
                             tab_k = 0;
                         if ((code == 103 || code == 108) && run_nh > 0) {      /* Up and Down: earlier commands */
@@ -2281,6 +2285,19 @@ int main(int argc, char **argv)
                                 memmove(run_buf + e, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
                                 run_n -= run_cur - e;
                                 run_cur = e;
+                            } else if (c == 22) {                  /* Ctrl-V: the first line of the clipboard, at the cursor */
+                                char clip[160];
+                                int fd = open("/tmp/bwm.clip", O_RDONLY | O_CLOEXEC);
+                                ssize_t got = fd >= 0 ? read(fd, clip, sizeof clip) : 0;
+                                if (fd >= 0)
+                                    close(fd);
+                                for (ssize_t k = 0; k < got && clip[k] != '\n' && run_n < (int)sizeof run_buf - 1; k++) {
+                                    if (clip[k] < 32 || clip[k] >= 127)
+                                        continue;
+                                    memmove(run_buf + run_cur + 1, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                    run_buf[run_cur++] = clip[k];
+                                    run_n++;
+                                }
                             } else if (c == 1) {                   /* Ctrl-A, Ctrl-E: start and end */
                                 run_cur = 0;
                             } else if (c == 5) {

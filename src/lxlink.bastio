@@ -323,6 +323,11 @@ fn lx_symlink(k: &mut Kernel, pid: u64, tva: u64, dirfd: u64, path: u64) -> u64
     bfree(tb);
     return EEXIST;
   }
+  let ll_e = ll_deny_in(k, pid, LL_MAKE_SYM, n);
+  if ll_e != 0 {
+    bfree(tb);
+    return ll_e;
+  }
   if path_ro(&mut k, n) {
     bfree(tb);
     return EROFS;
@@ -419,6 +424,11 @@ fn lx_hardlink(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath
   if vfs_dev_of(&mut k.fs, m) != src_dev {
     bfree(t);
     return EXDEV;                           // another file system: a mount, the disk
+  }
+  let ll_e = ll_deny_in(k, pid, LL_MAKE_REG, m);
+  if ll_e != 0 {
+    bfree(t);
+    return ll_e;
   }
   if path_ro(&mut k, m) && vfs_lookup(&mut k.fs, m) == NO_FILE {
     bfree(t);

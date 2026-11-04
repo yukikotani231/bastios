@@ -729,6 +729,10 @@ fn lx_mkdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64) -> u64
   if em.ok {
     return EEXIST;                          // /dev, /proc and the like
   }
+  let ll_e = ll_deny_in(k, pid, LL_MAKE_DIR, n);
+  if ll_e != 0 {
+    return ll_e;
+  }
   if path_ro(&mut k, n) {
     return EROFS;
   }
@@ -805,6 +809,10 @@ fn lx_rmdir(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   if vfs_is_mount(&mut k.fs, n) {
     return EBUSY;                           // a tmpfs mount's directory (src/lxmount.bastio)
   }
+  let ll_e = ll_deny_in(k, pid, LL_REMOVE_DIR, n);
+  if ll_e != 0 {
+    return ll_e;
+  }
   if path_ro(&mut k, n) {
     return EROFS;
   }
@@ -844,6 +852,12 @@ fn lx_unlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64) -> u64
   let st = ovl_stash(&mut k, n);               // in an overlay mount: src/lxns.bastio
   if dir_at(&mut k, n) != NO_FILE {
     return EISDIR;
+  }
+  if vfs_lookup(&mut k.fs, n) != NO_FILE {
+    let ll_e = ll_deny_in(k, pid, LL_REMOVE_FILE, n);
+    if ll_e != 0 {
+      return ll_e;
+    }
   }
   if path_ro(&mut k, n) && vfs_lookup(&mut k.fs, n) != NO_FILE {
     return EROFS;
@@ -963,6 +977,16 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
   if vfs_is_mount(&mut k.fs, n) {
     return EBUSY;
   }
+  if ll_active(k, pid) {
+    let mut lacc = LL_REMOVE_FILE;
+    if dir_at(&mut k, n) != NO_FILE {
+      lacc = LL_REMOVE_DIR;
+    }
+    let ll_e = ll_deny_in(k, pid, lacc, n);
+    if ll_e != 0 {
+      return ll_e;
+    }
+  }
   if path_ro(&mut k, n) {
     return EROFS;
   }
@@ -986,6 +1010,18 @@ fn lx_rename(k: &mut Kernel, pid: u64, odir: u64, opath: u64, ndir: u64, npath: 
     bfree(t);
     bfree(lg);
     return ENOTDIR;                         // a file renamed to "new/"
+  }
+  if ll_active(k, pid) {
+    let mut lacc = LL_MAKE_REG;
+    if dir_at(&mut k, n) != NO_FILE {
+      lacc = LL_MAKE_DIR;
+    }
+    let ll_e = ll_deny_in(k, pid, lacc, m);
+    if ll_e != 0 {
+      bfree(t);
+      bfree(lg);
+      return ll_e;
+    }
   }
   if path_ro(&mut k, m) {
     bfree(t);

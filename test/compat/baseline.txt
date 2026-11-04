@@ -983,6 +983,36 @@ t_more: utimensat and llistxattr act on a dangling link itself
 t_more: vfork + _exit
 t_more: vmsplice into a pipe, EAGAIN on an empty tee
 t_more: what a mapping wrote past the end of a file reads as zeros
+t_mountapi: a context is created
+t_mountapi: a context is created once
+t_mountapi: a file can be made in it
+t_mountapi: a flag parameter
+t_mountapi: a flag with a value is EINVAL
+t_mountapi: a mount object is not a context
+t_mountapi: a read-only mount object
+t_mountapi: a second context
+t_mountapi: a string parameter
+t_mountapi: an unknown command is EOPNOTSUPP
+t_mountapi: an unknown flag parameter is EINVAL
+t_mountapi: and the attributes from fsmount
+t_mountapi: fsmount
+t_mountapi: fsmount before the context is created is EINVAL
+t_mountapi: fsmount of a closed descriptor is EBADF
+t_mountapi: fsmount with a bad attribute is EINVAL
+t_mountapi: fsopen of an unknown type is ENODEV
+t_mountapi: fsopen of tmpfs
+t_mountapi: fsopen with a bad flag is EINVAL
+t_mountapi: it can be attached once
+t_mountapi: it is read-only
+t_mountapi: it unmounts
+t_mountapi: it unmounts again
+t_mountapi: move_mount attaches it
+t_mountapi: move_mount to a name that is not there is ENOENT
+t_mountapi: move_mount with a bad flag is EINVAL
+t_mountapi: move_mount with a name that is not there is ENOENT
+t_mountapi: nothing can be made in it
+t_mountapi: the directory is a mount point
+t_mountapi: with the flag from fsconfig
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -1871,6 +1901,7 @@ x11: x11: a larger Qt 5 program, KeePassXC, draws its window on the X screen
 x11: x11: a Java Swing program, the JDownloader installer, draws its window on the X screen
 x11: x11: a wxWidgets program, Audacity, draws its window on the X screen
 x11: x11: a Python program with PyQt 5, dupeGuru, draws its window on the X screen
+x11: x11: a Python tag editor with PyQt 5, puddletag, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
@@ -2292,6 +2323,32 @@ t_wgcookie: the handshake gets through the flood, by cookie
 t_wgcookie: the parent's end has an address
 t_wgcookie: the peer is set up, the child's endpoint direct
 t_wgcookie: the peer shows traffic both ways and a handshake
+t_wgcookieresp: a child in a new network namespace
+t_wgcookieresp: a client socket
+t_wgcookieresp: a device with an address
+t_wgcookieresp: a packet is echoed over the new session while the flood goes on
+t_wgcookieresp: a veth pair, one end in the child's namespace
+t_wgcookieresp: an initiation with a bad mac1 gets no reply
+t_wgcookieresp: each reply is 64 bytes, type 3 and has the index of an initiation
+t_wgcookieresp: fewer replies than initiations: the first ones were taken before it was busy
+t_wgcookieresp: go
+t_wgcookieresp: its last handshake time is set
+t_wgcookieresp: keys are traded
+t_wgcookieresp: sockets
+t_wgcookieresp: the BLAKE2s used here gives the known digest of abc
+t_wgcookieresp: the busy device answered with cookie replies
+t_wgcookieresp: the child is ready
+t_wgcookieresp: the child is set up
+t_wgcookieresp: the child is told to start the handshake
+t_wgcookieresp: the child reports
+t_wgcookieresp: the child stops
+t_wgcookieresp: the child took the packet
+t_wgcookieresp: the flood was sent
+t_wgcookieresp: the flooder reports
+t_wgcookieresp: the flooder stops
+t_wgcookieresp: the handshake the busy child started completes, by cookie reply to our response
+t_wgcookieresp: the parent's end has an address
+t_wgcookieresp: the peer is set up (no keep-alive: this side never starts a handshake)
 t_wghs: a capture socket
 t_wghs: a message of an unknown type gets none
 t_wghs: a peer without a keep-alive starts nothing
@@ -2319,6 +2376,30 @@ t_wghs: wgb knows wga
 t_wghs: wgc starts a handshake with wgd
 t_wghs: wgd knows wgc
 t_wghs: wge, unknown to wgd, gets nowhere
+t_wgprev: a child in a new network namespace
+t_wgprev: a client socket
+t_wgprev: a device with an address
+t_wgprev: a last handshake time
+t_wgprev: a packet sent under the old keys is still taken after the rekey, and echoed once
+t_wgprev: a veth pair, one end in the child's namespace
+t_wgprev: go
+t_wgprev: it is not taken once the old session is 180 s old
+t_wgprev: keys are traded
+t_wgprev: nothing came back while they were held
+t_wgprev: sockets
+t_wgprev: the child is ready
+t_wgprev: the child is set up
+t_wgprev: the child stops
+t_wgprev: the first old packet is released twice
+t_wgprev: the parent's end has an address
+t_wgprev: the peer is set up with the relay as its endpoint
+t_wgprev: the relay's control socket
+t_wgprev: the second old packet is released late
+t_wgprev: the session is renewed
+t_wgprev: the tunnel carries new traffic
+t_wgprev: the tunnel comes up
+t_wgprev: the tunnel still works
+t_wgprev: two messages are held
 t_wgtun: sockets
 t_wgtun: a child in a new network namespace
 t_wgtun: the child is ready
@@ -2450,3 +2531,9 @@ t_xfrmlife: they did not use up the limit: three real datagrams pass
 t_xfrmlife: two more datagrams: the counters add up
 t_xfrmlife: unused for four seconds, it still carries a datagram
 t_xfrmlife: without IPsec the datagram is echoed
+t_landlock: a restricted child is held to its rules
+t_landlock: a rule below a directory
+t_landlock: a ruleset is made
+t_landlock: an unknown access is EINVAL
+t_landlock: the ABI version is 1
+t_landlock: the parent is not restricted

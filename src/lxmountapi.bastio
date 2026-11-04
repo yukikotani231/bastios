@@ -1,0 +1,435 @@
+// The new mount API: fsopen, fsconfig, fsmount and move_mount. A program
+// that mounts with it opens a file system context (fsopen), sets its
+// parameters (fsconfig), creates it (FSCONFIG_CMD_CREATE), turns it into a
+// mount object (fsmount) and attaches that to a directory (move_mount).
+//
+// All three descriptors are one kind of open file description (OF_MNT),
+// whose word 2 is the file system type (FST_*) + 8 * its stage + 64 * the
+// mount flags it will have (the MS_* bits mount(2) takes), and whose word
+// 3 is 0, or 1 + the source it was given (a disk image file and its loop
+// device, or an ext image file): the stage is 0 while it is being
+// configured, 1 once created, 2 for a mount object from fsmount and 3
+// once move_mount attached it.
+//
+// Different from Linux: a mount object is not a detached mount tree of its
+// own. The mount is made by move_mount, on the directory it names, with
+// the same rules as mount(2) (src/lxmount.bastio): a tmpfs, a bstdisk3
+// image or an ext image, the directory in memory and empty. A mount object
+// can be attached once, and fsopen of another file system type (proc,
+// sysfs, overlay, ...) is ENOSYS, so that a program falls back on mount(2); open_tree, fspick, mount_setattr and
+// moving a mount that exists are not supported. The parameters a tmpfs
+// takes (size, mode, uid, gid, nr_inodes) are accepted and, as for
+// mount(2)'s data, not used.
+
+import "lxmount.bastio";
+import "lxevent.bastio";
+
+const OF_MNT: u64 = 22;               // a file system context or a mount object: see above
+
+const FSOPEN_CLOEXEC: u64 = 1;
+const FSMOUNT_CLOEXEC: u64 = 1;
+const FSCONFIG_SET_FLAG: u64 = 0;
+const FSCONFIG_SET_STRING: u64 = 1;
+const FSCONFIG_SET_BINARY: u64 = 2;
+const FSCONFIG_SET_PATH: u64 = 3;
+const FSCONFIG_SET_PATH_EMPTY: u64 = 4;
+const FSCONFIG_SET_FD: u64 = 5;
+const FSCONFIG_CMD_CREATE: u64 = 6;
+const FSCONFIG_CMD_RECONFIGURE: u64 = 7;
+
+const MOUNT_ATTR_RDONLY: u64 = 1;
+const MOUNT_ATTR_NOSUID: u64 = 2;
+const MOUNT_ATTR_NODEV: u64 = 4;
+const MOUNT_ATTR_NOEXEC: u64 = 8;
+const MOUNT_ATTR_ATIME: u64 = 0x70;   // the field: relatime (0), noatime (0x10), strictatime (0x20)
+const MOUNT_ATTR_NOATIME: u64 = 0x10;
+const MOUNT_ATTR_STRICTATIME: u64 = 0x20;
+const MOUNT_ATTR_NODIRATIME: u64 = 0x80;
+const MOUNT_ATTR_NOSYMFOLLOW: u64 = 0x200000;
+
+const MOVE_MOUNT_EMPTY_PATH: u64 = 4;           // MOVE_MOUNT_F_EMPTY_PATH
+const MOVE_MOUNT_OK: u64 = 0x377;               // F_SYMLINKS, F_AUTOMOUNTS, F_EMPTY_PATH, T_SYMLINKS, T_AUTOMOUNTS, T_EMPTY_PATH, SET_GROUP, BENEATH
+
+const MNT_STAGES: u64 = 8;
+const MNT_FLAGSHIFT: u64 = 64;
+
+fn is_mountapi_call(n: u64) -> bool {
+  return n == LX_MOVE_MOUNT || n == LX_FSOPEN || n == LX_FSCONFIG || n == LX_FSMOUNT;
+}
+
+/// Is the NUL-terminated string at user address va s (at most 16 bytes)?
+fn key_is(k: &mut Kernel, pid: u64, va: u64, s: Str) -> bool
+  requires kok(k) && pid < NPROC && va >= USER_BASE && va < USER_BASE + USER_SIZE - 17
+  ensures kok(k)
+{
+  let l = slen(s);
+  if l > 16 {
+    return false;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, l + 1) != l + 1 {
+    return false;
+  }
+  return xfer_is(k.fs.xfer, 0, l, s) && bget(k.fs.xfer, l) == 0;
+}
+
+/// Is the byte at user address va NUL: an empty string? False if it cannot
+/// be read.
+fn str_empty(k: &mut Kernel, pid: u64, va: u64) -> bool
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if va < USER_BASE || va >= USER_BASE + USER_SIZE - 1 {
+    return false;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, 1) != 1 {
+    return false;
+  }
+  return bget(k.fs.xfer, 0) == 0;
+}
+
+/// The mount(2) flags of mount attributes attrs (MOUNT_ATTR_*), or
+/// NO_RESULT for an attribute that is not supported.
+fn attr_flags(attrs: u64) -> u64
+  ensures result == NO_RESULT || result < 8192
+{
+  let known = MOUNT_ATTR_RDONLY + MOUNT_ATTR_NOSUID + MOUNT_ATTR_NODEV + MOUNT_ATTR_NOEXEC
+    + MOUNT_ATTR_ATIME + MOUNT_ATTR_NODIRATIME + MOUNT_ATTR_NOSYMFOLLOW;
+  if attrs & !known != 0 {
+    return NO_RESULT;
+  }
+  let at = attrs & MOUNT_ATTR_ATIME;
+  if at != 0 && at != MOUNT_ATTR_NOATIME && at != MOUNT_ATTR_STRICTATIME {
+    return NO_RESULT;
+  }
+  let mut f = 0;
+  if attrs & MOUNT_ATTR_RDONLY != 0 {
+    f = f + MS_RDONLY;
+  }
+  if attrs & MOUNT_ATTR_NOSUID != 0 {
+    f = f + 2;
+  }
+  if attrs & MOUNT_ATTR_NODEV != 0 {
+    f = f + 4;
+  }
+  if attrs & MOUNT_ATTR_NOEXEC != 0 {
+    f = f + 8;
+  }
+  if at == MOUNT_ATTR_NOATIME {
+    f = f + 1024;
+  }
+  if attrs & MOUNT_ATTR_NODIRATIME != 0 {
+    f = f + 2048;
+  }
+  if attrs & MOUNT_ATTR_NOSYMFOLLOW != 0 {
+    f = f + MS_NOSYMFOLLOW;
+  }
+  return f;
+}
+
+/// The description of descriptor fd if it is a file system context or a
+/// mount object, else OFD_N.
+fn mnt_desc(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires fds_ok(k) && pid < NPROC
+  ensures result <= OFD_N
+{
+  let h = fd_ofd(k, pid, fd);
+  if h < OFD_N && of_get(k.ofd, h, 0) == OF_MNT {
+    return h;
+  }
+  return OFD_N;
+}
+
+/// fsopen(fsname, flags).
+fn lx_fsopen(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !FSOPEN_CLOEXEC != 0 {
+    return EINVAL;
+  }
+  let t = fs_type(&mut k, pid, name);
+  if t > FST_NS {
+    return ENOSYS;                          // proc, overlay, ...: runtimes fall back on mount(2) for these
+  }
+  if t != FST_TMPFS && t != FST_BSTDISK && t != FST_EXT4 {
+    return ENODEV;
+  }
+  return ev_install(&mut k, pid, OF_MNT, t, 0, flags & FSOPEN_CLOEXEC != 0);
+}
+
+/// fsconfig(fd, cmd, key, value, aux) on a context fd. The arguments of
+/// each command are checked first, in Linux's order, then the descriptor.
+fn lx_fsconfig(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, key: u64, value: u64, aux: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let aux_neg = aux >= 0x80000000;          // a negative int
+  if cmd == FSCONFIG_SET_FLAG {
+    if key == 0 || value != 0 || aux != 0 {
+      return EINVAL;
+    }
+  } else if cmd == FSCONFIG_SET_STRING {
+    if key == 0 || value == 0 || aux != 0 {
+      return EINVAL;
+    }
+  } else if cmd == FSCONFIG_SET_BINARY {
+    if key == 0 || value == 0 || aux == 0 || aux > 1048576 {
+      return EINVAL;
+    }
+  } else if cmd == FSCONFIG_SET_PATH || cmd == FSCONFIG_SET_PATH_EMPTY {
+    if key == 0 || value == 0 || (aux != AT_FDCWD && aux_neg) {
+      return EINVAL;
+    }
+  } else if cmd == FSCONFIG_SET_FD {
+    if key == 0 || value != 0 || aux_neg {
+      return EINVAL;
+    }
+  } else if cmd == FSCONFIG_CMD_CREATE || cmd == FSCONFIG_CMD_RECONFIGURE {
+    if key != 0 || value != 0 || aux != 0 {
+      return EINVAL;
+    }
+  } else {
+    return EOPNOTSUPP;
+  }
+  if fd >= 0x80000000 {
+    return EINVAL;                          // a negative descriptor
+  }
+  let h = mnt_desc(k, pid, fd);
+  if h >= OFD_N {
+    if fd_ofd(k, pid, fd) >= OFD_N {
+      return EBADF;
+    }
+    return EINVAL;
+  }
+  let x = of_get(k.ofd, h, 2);
+  let t = x % MNT_STAGES;
+  let stage = x / MNT_STAGES % MNT_STAGES;
+  let flags = x / MNT_FLAGSHIFT;
+  if stage >= 2 {
+    return EINVAL;                          // a mount object, not a context
+  }
+  if cmd == FSCONFIG_CMD_RECONFIGURE {
+    return EOPNOTSUPP;
+  }
+  if cmd == FSCONFIG_CMD_CREATE {
+    if stage != 0 {
+      return EBUSY;
+    }
+    if t != FST_TMPFS && of_get(k.ofd, h, 3) == 0 {
+      return EINVAL;                        // no source: "no device specified"
+    }
+    of_set(&mut k.ofd, h, 2, x + MNT_STAGES);
+    return 0;
+  }
+  if stage != 0 {
+    return EBUSY;                           // after FSCONFIG_CMD_CREATE
+  }
+  if cmd == FSCONFIG_SET_BINARY || cmd == FSCONFIG_SET_PATH || cmd == FSCONFIG_SET_PATH_EMPTY || cmd == FSCONFIG_SET_FD {
+    return EOPNOTSUPP;                      // no parameter of these types
+  }
+  if key < USER_BASE || key >= USER_BASE + USER_SIZE - 17 {
+    return EFAULT;
+  }
+  if cmd == FSCONFIG_SET_FLAG {
+    if value != 0 {
+      return EINVAL;
+    }
+    // The flag parameters of mount(8): each sets or clears one mount flag.
+    let mut set = NO_RESULT;
+    let mut bit = 0;
+    if key_is(&mut k, pid, key, "ro") {
+      set = 1;
+      bit = MS_RDONLY;
+    } else if key_is(&mut k, pid, key, "rw") {
+      set = 0;
+      bit = MS_RDONLY;
+    } else if key_is(&mut k, pid, key, "nosuid") {
+      set = 1;
+      bit = 2;
+    } else if key_is(&mut k, pid, key, "suid") {
+      set = 0;
+      bit = 2;
+    } else if key_is(&mut k, pid, key, "nodev") {
+      set = 1;
+      bit = 4;
+    } else if key_is(&mut k, pid, key, "dev") {
+      set = 0;
+      bit = 4;
+    } else if key_is(&mut k, pid, key, "noexec") {
+      set = 1;
+      bit = 8;
+    } else if key_is(&mut k, pid, key, "exec") {
+      set = 0;
+      bit = 8;
+    } else if key_is(&mut k, pid, key, "noatime") {
+      set = 1;
+      bit = 1024;
+    } else if key_is(&mut k, pid, key, "atime") {
+      set = 0;
+      bit = 1024;
+    } else if key_is(&mut k, pid, key, "nodiratime") {
+      set = 1;
+      bit = 2048;
+    } else if key_is(&mut k, pid, key, "diratime") {
+      set = 0;
+      bit = 2048;
+    } else if key_is(&mut k, pid, key, "relatime") || key_is(&mut k, pid, key, "norelatime")
+       || key_is(&mut k, pid, key, "strictatime") || key_is(&mut k, pid, key, "sync")
+       || key_is(&mut k, pid, key, "async") {
+      return 0;                             // kept as they are: nothing here depends on them
+    } else if key_is(&mut k, pid, key, "nosymfollow") {
+      set = 1;
+      bit = MS_NOSYMFOLLOW;
+    }
+    if set == NO_RESULT {
+      return EINVAL;                        // no such parameter
+    }
+    let mut nf = flags;
+    if flags / bit % 2 == 1 && set == 0 {
+      nf = flags - bit;
+    }
+    if flags / bit % 2 == 0 && set == 1 {
+      nf = flags + bit;
+    }
+    of_set(&mut k.ofd, h, 2, t + MNT_STAGES * stage + MNT_FLAGSHIFT * nf);
+    return 0;
+  }
+  if cmd != FSCONFIG_SET_STRING {
+    return EINVAL;
+  }
+  if key_is(&mut k, pid, key, "source") {
+    if value < USER_BASE || value >= USER_BASE + USER_SIZE - 9 {
+      return EFAULT;
+    }
+    if t == FST_TMPFS {
+      of_set(&mut k.ofd, h, 3, 1);          // any name: a tmpfs has no device
+      return 0;
+    }
+    if t == FST_EXT4 {
+      let e = ext_image(&mut k, pid, value);
+      if e == NO_FILE {
+        return k.perr;
+      }
+      of_set(&mut k.ofd, h, 3, sat_add(e, 1));
+      return 0;
+    }
+    let ldev = source_loop(&mut k, pid, value);
+    let img = image_file(&mut k, pid, value);
+    if img >= NFILES {
+      return k.perr;
+    }
+    if ldev > LO_NODEV {
+      return EINVAL;
+    }
+    of_set(&mut k.ofd, h, 3, 1 + img * 256 + ldev);
+    return 0;
+  }
+  if t == FST_TMPFS && (key_is(&mut k, pid, key, "size") || key_is(&mut k, pid, key, "mode")
+     || key_is(&mut k, pid, key, "uid") || key_is(&mut k, pid, key, "gid")
+     || key_is(&mut k, pid, key, "nr_inodes") || key_is(&mut k, pid, key, "nr_blocks")) {
+    return 0;                               // accepted, not used (as mount(2)'s data)
+  }
+  return EINVAL;
+}
+
+/// fsmount(fd, flags, attrs): a mount object for the created context fd.
+fn lx_fsmount(k: &mut Kernel, pid: u64, fd: u64, flags: u64, attrs: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !FSMOUNT_CLOEXEC != 0 {
+    return EINVAL;
+  }
+  let af = attr_flags(attrs);
+  if af == NO_RESULT {
+    return EINVAL;
+  }
+  let h = mnt_desc(k, pid, fd);
+  if h >= OFD_N {
+    if fd_ofd(k, pid, fd) >= OFD_N {
+      return EBADF;
+    }
+    return EINVAL;
+  }
+  let x = of_get(k.ofd, h, 2);
+  if x / MNT_STAGES % MNT_STAGES != 1 {
+    return EINVAL;                          // not created yet, or already a mount object
+  }
+  let nf = (x / MNT_FLAGSHIFT % 8192) | af;
+  return ev_install(&mut k, pid, OF_MNT, x % MNT_STAGES + MNT_STAGES * 2 + MNT_FLAGSHIFT * nf,
+    of_get(k.ofd, h, 3), flags & FSMOUNT_CLOEXEC != 0);
+}
+
+/// move_mount(from_dfd, from_path, to_dfd, to_path, flags): attaches the
+/// mount object from_dfd names (with MOVE_MOUNT_F_EMPTY_PATH and an empty
+/// from_path) to the directory to_path names.
+fn lx_move_mount(k: &mut Kernel, pid: u64, from_dfd: u64, from_path: u64, to_dfd: u64, to_path: u64, flags: u64, full: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !MOVE_MOUNT_OK != 0 {
+    return EINVAL;
+  }
+  if !str_empty(&mut k, pid, from_path) {
+    return ENOENT;                          // a name below a mount object: there is none (and no mount that exists moves)
+  }
+  if flags & MOVE_MOUNT_EMPTY_PATH == 0 {
+    return ENOENT;
+  }
+  let h = mnt_desc(k, pid, from_dfd % 0x100000000);
+  if h >= OFD_N {
+    if fd_ofd(k, pid, from_dfd % 0x100000000) >= OFD_N {
+      return EBADF;
+    }
+    return EINVAL;
+  }
+  let x = of_get(k.ofd, h, 2);
+  if x / MNT_STAGES % MNT_STAGES != 2 {
+    return EINVAL;
+  }
+  let t = x % MNT_STAGES;
+  let w = of_get(k.ofd, h, 3);
+  let mut img = NFILES;
+  let mut eimg = NO_FILE;
+  let mut ldev = LO_NODEV;
+  if t == FST_BSTDISK && w >= 1 {
+    img = smaller((w - 1) / 256, NFILES);
+    ldev = (w - 1) % 256;
+  }
+  if t == FST_EXT4 && w >= 1 {
+    eimg = w - 1;
+  }
+  let n = lx_path_at(&mut k, pid, to_dfd, to_path);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  let r = mount_at(&mut k, pid, t, img, eimg, ldev, n, x / MNT_FLAGSHIFT, false, full);
+  if r == 0 {
+    of_set(&mut k.ofd, h, 2, x + MNT_STAGES);   // attached
+  }
+  return r;
+}
+
+/// The new mount API's calls; full says whether the caller may change the
+/// machine's mounts, as for mount(2). fsconfig's key is the third
+/// argument, its value the fourth (r10).
+fn lx_mountapi_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, full: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  if n == LX_FSOPEN {
+    return lx_fsopen(&mut k, pid, a, b);
+  }
+  if n == LX_FSCONFIG {
+    return lx_fsconfig(&mut k, pid, a % 0x100000000, b % 0x100000000, c, r10, pget(k.procs, pid, F_REGS + R_R8) % 0x100000000);
+  }
+  if n == LX_FSMOUNT {
+    return lx_fsmount(&mut k, pid, a % 0x100000000, b % 0x100000000, c % 0x100000000);
+  }
+  let r = lx_move_mount(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8) % 0x100000000, full);
+  if r == 0 {
+    k.sys = set(k.sys, SYS_MNTEV, sat_add(get(k.sys, SYS_MNTEV), 1));   // wakes pollers of /proc/mounts
+  }
+  return r;
+}

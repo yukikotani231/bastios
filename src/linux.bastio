@@ -928,6 +928,10 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, lx_mount_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
+  if is_landlock_call(n) {
+    ret(&mut k.procs, pid, lx_landlock_call(&mut k, pid, n, a, b, c));   // src/lxlandlock.bastio
+    return KEEP;
+  }
   if is_procfs_call(n) {
     ret(&mut k.procs, pid, lx_procfs_call(&mut k, pid, n, a, b, c));
     return KEEP;
@@ -999,8 +1003,8 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, lx_bpf(&mut k, pid, a, b, c));   // src/lxbpf.bastio
     return KEEP;
   }
-  // The new mount API (runc and crun use it when present) likewise falls
-  // back on ENOSYS.
+  // open_tree and fspick of the new mount API (runc and crun use it when
+  // present) likewise fall back on ENOSYS; the rest is src/lxmountapi.bastio.
   if n >= LX_IO_URING_SETUP && n <= LX_IO_URING_REGISTER {
     return lx_uring_call(&mut con, &mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }

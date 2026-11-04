@@ -630,6 +630,9 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   }
   let e = ep.x;
   let target = fd_look(k, pid, fd);
+  if target.kind == K_BAD && fd < LXNFD && mnt_desc(k, pid, fd) < OFD_N {
+    return EPERM;                           // a file system context or mount object (src/lxmountapi.bastio) cannot be watched
+  }
   if target.kind == K_BAD || fd >= LXNFD {
     return EBADF;
   }
@@ -1093,6 +1096,10 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, dev: u64
   }
   xfer_load(&mut k, t, 0, n);               // path_meta may have used the transfer buffer
   bfree(t);
+  let ll_e = ll_deny_in(k, pid, ll_make_for(ty), n);
+  if ll_e != 0 {
+    return ll_e;
+  }
   if path_ro(&mut k, n) {
     return EROFS;
   }
