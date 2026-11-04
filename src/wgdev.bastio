@@ -99,6 +99,8 @@ const WGV_LIDX: u64 = 1;
 const WGV_RK: u64 = 2;                    // the receiving key (four words)
 const WGV_BORN: u64 = 6;
 const WGV_RMAX: u64 = 7;                  // the replay window, as in WGP_RMAX
+const WGV_RHEAD: u64 = 24;                //   the ring of the last four responses we sent: the next slot,
+const WGV_RING: u64 = 25;                 //   then 3 words per slot: our index + 1 (0: none) and the 16-byte mac1
 const WGV_RWIN: u64 = 8;                  //   and WGP_RWIN (16 words)
 // Cookie state words (Net.wgp after the policies): per device
 const WGC_CSEC: u64 = 0;                  // the cookie secret (four words), made from fresh random bytes
