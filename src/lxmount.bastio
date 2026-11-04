@@ -310,6 +310,17 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   if n == NO_RESULT {
     return k.perr;
   }
+  return mount_at(&mut k, pid, t, img, eimg, ldev, n, flags, remount, full);
+}
+
+/// The mount of file system type t on the directory the first n bytes of the
+/// transfer buffer name, with the image (img, ldev) or ext image (eimg) it
+/// is made from: the end of mount(2), and of move_mount(2) for a mount
+/// fsmount made.
+fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n: u64, flags: u64, remount: bool, full: bool) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX && img <= NFILES
+  ensures kok(k)
+{
   if !full && t == FST_TMPFS && !remount && n != 0 {
     return ns_tmpfs(&mut k, pid, n, flags & MS_RDONLY != 0);   // a user namespace's own mount
   }
@@ -365,6 +376,9 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
     return 0;
   }
   if t == FST_BSTDISK {
+    if img >= NFILES {
+      return EINVAL;
+    }
     let r = vfs_lo_mount(&mut k.fs, &mut k.mem, img, i, ldev, flags & MS_RDONLY != 0);
     if r == LO_BUSY {
       return EBUSY;
@@ -448,7 +462,7 @@ fn ro_err(k: &mut Kernel, n: u64) -> u64
 }
 
 fn is_mount_call(n: u64) -> bool {
-  return n == LX_MOUNT || n == LX_UMOUNT2 || n == LX_PIVOT_ROOT || n == LX_SETNS;
+  return n == LX_MOUNT || n == LX_UMOUNT2 || n == LX_PIVOT_ROOT || n == LX_SETNS || is_mountapi_call(n);
 }
 
 fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
@@ -464,6 +478,9 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
   let full = cap_has(k, pid, CAP_SYS_ADMIN);
   if !full && !mnt_admin(k, pid) {
     return EPERM;
+  }
+  if is_mountapi_call(n) {
+    return lx_mountapi_call(&mut k, pid, n, a, b, c, full);   // src/lxmountapi.bastio
   }
   let mut r = 0;
   if n == LX_MOUNT {

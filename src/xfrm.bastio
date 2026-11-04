@@ -247,7 +247,7 @@ fn xs_ns_end(n: &mut Net, s: u64)
   ensures net_ok(n)
 {
   assert XSA_BASE == WGPN * WGP_W && XP_BASE == XSA_BASE + XSA_N * XSA_W && WGC_PBASE == XP_BASE + XP_N * XP_W
-    && WGC_DBASE == WGC_PBASE + WGPN * WGC_PW && XL_BASE == WGC_DBASE + IFN * WGC_DW && WGPX_LEN == XL_BASE + XSA_N * XL_W;   // the tables sit one after the other
+    && WGC_DBASE == WGC_PBASE + WGPN * WGC_PW && XL_BASE == WGC_DBASE + IFN * WGC_DW && WGV_BASE == XL_BASE + XSA_N * XL_W && WGPX_LEN == WGV_BASE + WGPN * WGV_W;   // the tables sit one after the other
   let mut i = 0;
   while i < XSA_N
     invariant i <= XSA_N && net_ok(n)

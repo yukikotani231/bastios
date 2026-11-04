@@ -91,6 +91,15 @@ const WGP_ISINIT: u64 = 72;               // 1: we started the handshake of the 
 const WGP_LTX: u64 = 73;                  // tick of the last packet sent to the peer
 const WGP_CONF: u64 = 71;                 // 1: the session has carried a packet from the peer
 const WIN_BITS: u64 = 1024;
+// The previous session (Net.wgp after the IPsec lifetimes), per peer. It only receives: packets the
+// peer sent under the old keys just before a new handshake finished are still taken, until it is
+// REJECT_AFTER old.
+const WGV_VALID: u64 = 0;
+const WGV_LIDX: u64 = 1;
+const WGV_RK: u64 = 2;                    // the receiving key (four words)
+const WGV_BORN: u64 = 6;
+const WGV_RMAX: u64 = 7;                  // the replay window, as in WGP_RMAX
+const WGV_RWIN: u64 = 8;                  //   and WGP_RWIN (16 words)
 // Cookie state words (Net.wgp after the policies): per device
 const WGC_CSEC: u64 = 0;                  // the cookie secret (four words), made from fresh random bytes
 const WGC_CSECT: u64 = 4;                 // tick it was made at, plus 1 (0: none yet)
@@ -156,11 +165,39 @@ fn wcps(n: &mut Net, p: u64, f: u64, v: u64)
   n.wgp = set(n.wgp, WGC_PBASE + p * WGC_PW + f, v);
 }
 
+fn wvw(n: &Net, p: u64, f: u64) -> u64
+  requires net_ok(n) && p < WGPN && f < WGV_W
+{
+  return get(n.wgp, WGV_BASE + p * WGV_W + f);
+}
+
+fn wvs(n: &mut Net, p: u64, f: u64, v: u64)
+  requires net_ok(n) && p < WGPN && f < WGV_W
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, WGV_BASE + p * WGV_W + f, v);
+}
+
+/// Erases peer p's previous session, keys included.
+fn wg_prev_wipe(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let mut f = 0;
+  while f < WGV_W
+    invariant f <= WGV_W && net_ok(n)
+  {
+    wvs(&mut n, p, f, 0);
+    f = f + 1;
+  }
+}
+
 /// Frees peer p and erases everything it held, session keys included.
 fn wg_peer_wipe(n: &mut Net, p: u64)
   requires net_ok(n) && p < WGPN
   ensures net_ok(n)
 {
+  wg_prev_wipe(&mut n, p);
   let mut c = 0;
   while c < WGC_PW
     invariant c <= WGC_PW && net_ok(n)
@@ -708,6 +745,7 @@ fn wg_peer_set(n: &mut Net, i: u64, b: &Bytes, from: u64, to: u64) -> u64
       wps(&mut n, p, f, 0);
       f = f + 1;
     }
+    wg_prev_wipe(&mut n, p);
     let mut c = 0;
     while c < WGC_PW
       invariant c <= WGC_PW && net_ok(n)
