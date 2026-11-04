@@ -10,6 +10,7 @@
 #define FSCONFIG 431
 #define FSMOUNT 432
 #define MOVE_MOUNT 429
+#define OPEN_TREE 428
 #define EMPTY 4
 
 static int has(const char *dir, const char *opt) {
@@ -73,5 +74,15 @@ int main(void) {
     EXPECT("it is read-only", has("/tmp/ma", "ro") && has("/tmp/ma", "relatime"));
     EXPECT("nothing can be made in it", open("/tmp/ma/y", O_CREAT | O_WRONLY, 0644) == -1 && errno == EROFS);
     EXPECT("it unmounts again", umount("/tmp/ma") == 0);
+
+    /* open_tree: arguments are checked in Linux's order; a plain one is a handle. */
+    EXPECT("open_tree with a bad flag is EINVAL", syscall(OPEN_TREE, AT_FDCWD, "/tmp", 0xFFFFFFFFu) == -1 && errno == EINVAL);
+    EXPECT("open_tree of a missing path is ENOENT", syscall(OPEN_TREE, AT_FDCWD, "/tmp/nosuch", 1) == -1 && errno == ENOENT);
+    EXPECT("open_tree on a bad descriptor is EBADF", syscall(OPEN_TREE, -1, "ma", 1) == -1 && errno == EBADF);
+    int ot = syscall(OPEN_TREE, AT_FDCWD, "/tmp/ma", 0);
+    struct stat st;
+    EXPECT("open_tree without a clone is a handle", ot >= 0 && fstat(ot, &st) == 0 && S_ISDIR(st.st_mode));
+    if (ot >= 0)
+        close(ot);
     return nfail != 0;
 }

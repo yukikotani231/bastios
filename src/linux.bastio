@@ -996,14 +996,13 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, lx_bpf(&mut k, pid, a, b, c));   // src/lxbpf.bastio
     return KEEP;
   }
-  // open_tree and fspick of the new mount API (runc and crun use it when
-  // present) likewise fall back on ENOSYS; the rest is src/lxmountapi.bastio.
+  // fspick of the new mount API likewise falls back on ENOSYS; the rest
+  // (open_tree included) is src/lxmountapi.bastio.
   if n >= LX_IO_URING_SETUP && n <= LX_IO_URING_REGISTER {
     return lx_uring_call(&mut con, &mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
   }
   if n == LX_RSEQ
-      || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
-      || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
+      || n == LX_FSPICK {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }

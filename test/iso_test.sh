@@ -471,6 +471,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
             fails += not good
+            # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
+            # a step the other way undoes it, and three in one direction go all the way round.
+            monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar
+            time.sleep(1)
+            before = above_bar()                 # the pointer is in the bar now: take the picture again
+            for _ in range(20):
+                px = above_bar()
+                if px == before:
+                    break
+                before = px
+            monitor("mouse_move 0 0 1")
+            once = settle(lambda px: px != before)
+            monitor("mouse_move 0 0 -1")
+            back = settle(lambda px: px == before)
+            monitor("mouse_move 0 0 1", "mouse_move 0 0 1", "mouse_move 0 0 1")
+            round3 = settle(lambda px: px == before)
+            good = once != before and back == before and round3 == before
+            print(("ok  " if good else "FAIL"), f"({name}) the wheel over the task bar cycles the windows")
+            fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")

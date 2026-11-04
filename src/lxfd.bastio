@@ -1617,6 +1617,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
       return ENFILE;
     }
     dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
+    if flags & LO_PATH != 0 {
+      of_set(&mut k.ofd, hd, OF_ACC, ACC_PATH);
+    }
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;
