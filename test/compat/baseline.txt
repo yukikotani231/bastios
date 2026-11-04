@@ -486,6 +486,7 @@ t_fanotify: reading the event's descriptor makes no event
 t_fanotify: remove the mark
 t_fanotify: the event says who did it
 t_fanotify: the event's descriptor reads the file
+t_fanotify: a write to an unlinked open file still reaches the mark on its directory
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
 t_fdlock: memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC
 t_fdlock: 200 separate byte-range locks on one file

@@ -755,6 +755,26 @@ fn gh_note(k: &mut Kernel, f: u64, m: u64)
   }
 }
 
+/// The directory the unlinked file f was in (see gh_save), or NO_FILE.
+fn gh_parent(k: &Kernel, f: u64) -> u64
+  requires kok(k)
+{
+  if f >= HFILES {
+    return NO_FILE;
+  }
+  let mut e = 0;
+  while e < GH_N
+    invariant e <= GH_N && kok(k)
+  {
+    let at = GH_AT + e * GH_W;
+    if iget(k, at) == f + 1 {
+      return iget(k, at + 1);
+    }
+    e = e + 1;
+  }
+  return NO_FILE;
+}
+
 /// An event on handle f that its directory hears of too (IN_ACCESS,
 /// IN_MODIFY, IN_ATTRIB, IN_OPEN, IN_CLOSE_*): to the watches on the
 /// directory its name is in, with that name, then to those on f. The
@@ -1762,6 +1782,12 @@ fn fan_event(k: &mut Kernel, f: u64, mask: u64)
       pl = s - 1;
     }
     parent = vfs_dir_lookup(&mut k.fs, pl);
+  }
+  if n == 0 {
+    let gp = gh_parent(k, f);               // unlinked, still open: its directory's marks with FAN_EVENT_ON_CHILD still hear
+    if gp != NO_FILE {
+      parent = gp;
+    }
   }
   let mut i = 0;
   while i < INO_N
