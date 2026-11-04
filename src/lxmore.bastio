@@ -60,7 +60,8 @@ fn pipe_put_xfer(k: &mut Kernel, p: u64, n: u64) -> u64
 
 /// Writes the first n transfer bytes to descriptor `out` of process pid,
 /// at `off` (a file's own offset when off is u64::MAX). The count written,
-/// or -errno, EAGAIN for a full pipe, CON_FULL or DISK_RETRY.
+/// or -errno (ENOSPC or EFBIG when a file takes none of it), EAGAIN for a
+/// full pipe, CON_FULL or DISK_RETRY.
 fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC && n <= XFER
   ensures kok(k) && con_ok(con)
@@ -137,6 +138,24 @@ fn put_xfer(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, n: u64, off: u64)
   if w == VFS_MISS {
     return DISK_RETRY;
   }
+  if w == 0 && n > 0 && d.x < FD_ROWS {
+    // Not a byte could be written: past the largest file the file system
+    // keeps (EFBIG) or out of room (ENOSPC), as write(2) says. A count of
+    // 0 here would read as the end of the source file to the caller
+    // (BusyBox tar's sendfile then said "short read" on a full disk).
+    let mut at = was;
+    if off != 0xFFFFFFFFFFFFFFFF {
+      at = off;
+    }
+    let mut limit = DFILE_MAX;
+    if fget(k.fs.ftab, d.x, FD_FS) == FS_RAM {
+      limit = FILE_MAX;
+    }
+    if at >= limit {
+      return EFBIG;
+    }
+    return ENOSPC;
+  }
   return w;
 }
 
@@ -158,8 +177,10 @@ fn out_writable(k: &Kernel, pid: u64, fd: u64) -> bool
 /// sendfile(out, in, offp, count) and copy_file_range(in, inoffp, out,
 /// outoffp, count, flags): copies from file `in` (at *inp, or its own
 /// offset when inp is 0) to `out` (at *outp, or its own offset). Stops
-/// short when the destination fills; the count, or -errno (EAGAIN,
-/// CON_FULL or DISK_RETRY when nothing was copied yet).
+/// short when the destination fills; the count, or -errno (ENOSPC or
+/// EFBIG for a file that takes nothing more; EAGAIN, CON_FULL or
+/// DISK_RETRY, the source's disk or the destination lagging, when nothing
+/// was copied yet).
 fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u64, from: u64, count: u64, cfr: bool) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
   ensures kok(k) && con_ok(con)
@@ -225,8 +246,15 @@ fn lx_copy(con: &mut Con, k: &mut Kernel, pid: u64, out: u64, outp: u64, inp: u6
     invariant done <= total && kok(k) && con_ok(con)
   {
     let step = smaller(XFER, total - done);
-    let got = vfs_read_at(&mut k.fs, f, sat_add(ioff, done), step);
-    if got == NO_FD || got == 0 {
+    // The read sleeps for the disk rather than waiting a bounded while
+    // and taking a block it could not get for the end of the file.
+    let got = vfs_read_try(&mut k.fs, f, sat_add(ioff, done), step);
+    if got == VFS_MISS {
+      if done == 0 {
+        return DISK_RETRY;                  // nothing moved yet: the call restarts once the disk has caught up
+      }
+      err = 1;                              // a short count; the caller asks again for the rest
+    } else if got == NO_FD || got == 0 {
       err = 1;                              // the end of the file (or no file)
     } else {
       let mut at = ooff;

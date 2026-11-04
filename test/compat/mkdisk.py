@@ -132,8 +132,11 @@ def main():
                 chunk = data[k:k + BLOCK]
                 img[d * BLOCK:d * BLOCK + len(chunk)] = chunk
         entry(1, dest.split("/")[-1].encode(), parent, len(data), root)
+    # The blocks past the last one used are zeros: they stay a hole in the
+    # file, so the free space costs the host's disk nothing until written.
     with open(out, "wb") as f:
-        f.write(img)
+        f.write(memoryview(img)[:(nxt + 1) * BLOCK])
+        f.truncate(len(img))
 
 if __name__ == "__main__":
     main()

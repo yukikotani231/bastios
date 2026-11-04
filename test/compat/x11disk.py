@@ -26,9 +26,21 @@ def keep(name):
     # were hard-linked to it are written out as files (see write_tar)
     return name != "cache" and not name.startswith(("opt/", "cache/")) and "/share/doc/" not in name and "/share/man/" not in name and not name.startswith("usr/share/man/")
 
+BLOCK, PTRS, DENT = 4096, 512, 256   # src/diskfs.bastio
+
+def disk_bytes(n):
+    """What a file of n bytes takes on a BastiOS disk once unpacked: its data
+    blocks, its root map and a map per 512 blocks (a small file takes three
+    blocks, so a root of many small files takes much more than its tar)."""
+    b = (n + BLOCK - 1) // BLOCK
+    return 0 if b == 0 else (b + 1 + (b + PTRS - 1) // PTRS) * BLOCK
+
 def write_tar(files, path, only=None):
     """Writes the files that keep() allows to the tar file path; only, if given,
-    says which of them (by name) go into this file."""
+    says which of them (by name) go into this file. Returns how many bytes of
+    the disk the files take once the tar is unpacked there (disk_bytes, and
+    a directory entry each)."""
+    unpacked = 0
     with tarfile.open(path, "w") as t:
         for name, (ti, body) in sorted(files.items()):
             if not keep(name) or (only is not None and not only(name)):
@@ -38,10 +50,15 @@ def write_tar(files, path, only=None):
                 body = files[ti.linkname.lstrip("./")][1]
                 ti = copy.copy(ti)
                 ti.type, ti.linkname, ti.size = tarfile.REGTYPE, "", len(body)
+            unpacked += DENT
             if ti.isfile():
                 t.addfile(ti, io.BytesIO(body))
+                unpacked += disk_bytes(len(body))
             else:
                 t.addfile(ti)
+                if ti.issym():
+                    unpacked += disk_bytes(len(ti.linkname))
+    return unpacked
 
 def main():
     args = sys.argv[1:]
@@ -54,19 +71,34 @@ def main():
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
     os.makedirs(work, exist_ok=True)
+    unpacked = {}                  # tar -> the bytes its files take on the disk once unpacked
     for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru"), (tag, "tag.tar", "usr/bin/puddletag"), (dirstat, "dirstat.tar", "usr/bin/qdirstat"), (filezilla, "filezilla.tar", "usr/bin/filezilla"), (avidemux, "avidemux.tar", "usr/bin/avidemux3_qt5"), (handbrake, "handbrake.tar", "usr/bin/ghb"), (mkv, "mkv.tar", "usr/bin/mkvtoolnix-gui")):
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
         if tar == "tag.tar":
-            # puddletag's root is 640 MB; as one file it ended in "tar: short read"
-            # in CI, so its biggest libraries are a file of their own (tag2.tar)
+            # puddletag's root is 640 MB: its biggest libraries are a file of
+            # their own (tag2.tar), unpacked after tag.tar is removed, so the
+            # case needs less free space at once
             big = lambda n: n.startswith(("usr/lib/libLLVM", "usr/lib/libgallium"))
-            write_tar(files, os.path.join(work, tar), lambda n: not big(n))
-            write_tar(files, os.path.join(work, "tag2.tar"), big)
+            unpacked[tar] = write_tar(files, os.path.join(work, tar), lambda n: not big(n))
+            unpacked["tag2.tar"] = write_tar(files, os.path.join(work, "tag2.tar"), big)
             continue
-        write_tar(files, os.path.join(work, tar))
-    env = dict(os.environ, MKDISK_FREE_MB="1400")
+        unpacked[tar] = write_tar(files, os.path.join(work, tar))
+    # The free space the lane needs: the cases unpack every root and keep it,
+    # removing each tar after it is unpacked but server.tar and client.tar.
+    # Unpacked, a root takes more than its tar (disk_bytes), and that much
+    # more stays taken, case after case. With 900 MB, a fixed figure, the
+    # disk filled partway through the puddletag root, and BusyBox tar said
+    # "short read". So: what the kept roots take, what every root takes past
+    # its tar, the largest root once more (the case unpacking it), and 128 MiB
+    # for what the programs write.
+    size = lambda tar: os.path.getsize(os.path.join(work, tar))
+    kept = ("server.tar", "client.tar")
+    past = sum(max(0, unpacked[t] - size(t)) for t in unpacked if t not in kept)
+    free = sum(unpacked[t] for t in kept) + past + max(unpacked[t] for t in unpacked if t not in kept) + (128 << 20)
+    env = dict(os.environ, MKDISK_FREE_MB=str((free >> 20) + 1))
+    print(f"x11disk: {free >> 20} MiB free for the cases", file=sys.stderr)
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
                                f"busybox={busybox}", f"bx11={bx11}", f"fakebwm={fakebwm}", f"x11start={x11start}",
                                f"server.tar={os.path.join(work, 'server.tar')}",

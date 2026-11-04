@@ -266,6 +266,10 @@ t_core: the core file names the signal, the program counter and the variable
 t_core: a null write ends the child with SIGSEGV
 t_core: RLIMIT_CORE above 0 leaves a core file, and the wait status says so
 t_core: RLIMIT_CORE 0 leaves no core file, and the status has no core flag
+t_core: a dump goes to the file the pattern expands to
+t_core: a pipe pattern leaves no dump
+t_core: and reads back with a newline
+t_core: core_pattern can be written
 t_cred: a child inherits ids; /proc/self/status shows them
 t_cred: an unprivileged process keeps to the ids it holds
 t_cred: getgrnam finds users
