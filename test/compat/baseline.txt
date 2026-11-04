@@ -1810,6 +1810,7 @@ t_sysv: msgmni is written: that many queues, then ENOSPC
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
+t_thread: oom_score counts the memory a thread touched, while it waits and while it runs
 t_thread: 4 threads, mutex
 t_thread: condition variable
 t_thread: fork while another thread writes copies one moment of the parent
