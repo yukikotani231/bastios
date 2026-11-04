@@ -190,8 +190,16 @@ fn splice_to_pipe(k: &mut Kernel, pid: u64, row: u64, inp: u64, p: u64, len: u64
       }
       stop = true;
     } else {
-      let got = vfs_read_at(&mut k.fs, f, sat_add(ioff, done), smaller(step, room));
-      if got == NO_FD || got == 0 {
+      // The read sleeps for the disk (vfs_read_try) rather than waiting a
+      // bounded while and taking a block it could not get for the end of
+      // the file.
+      let got = vfs_read_try(&mut k.fs, f, sat_add(ioff, done), smaller(step, room));
+      if got == VFS_MISS {
+        if done == 0 {
+          return DISK_RETRY;                // nothing moved yet: the call restarts once the disk has caught up
+        }
+        stop = true;                        // a short count; the caller asks again for the rest
+      } else if got == NO_FD || got == 0 {
         stop = true;                        // the end of the file
       } else {
         let w = pipe_put_xfer(&mut k, p, got);
@@ -421,6 +429,13 @@ fn lx_splice_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u6
   }
   if r == SP_WAIT {
     return lx_retry(&mut k, pid, n);        // an empty source or a full pipe: wait
+  }
+  if r == DISK_RETRY {
+    // A file's blocks are not in the cache yet: the source file's
+    // (splice_to_pipe), or the old blocks a write into the middle of a
+    // file needs (put_xfer). Nothing moved; the call restarts once the
+    // disk has caught up. (It used to reach the program as a count.)
+    return disk_retry(&mut k, pid, n);
   }
   if r == EPIPE {
     ret(&mut k.procs, pid, r);

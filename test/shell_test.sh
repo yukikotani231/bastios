@@ -2187,7 +2187,7 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf", "mf=build/test/fullcopy"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf", "mf=build/test/fullcopy", "mc=build/test/fullcopy"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
@@ -2216,8 +2216,11 @@ for line, want, until in [
     # sendfile and copy_file_range into a file on a full disk fail with
     # ENOSPC, not a count of 0 (which reads as the end of the source:
     # BusyBox tar said "short read"); with the room back they copy it all
-    # (test/fullcopy.c, which fills the disk and empties it again).
-    ("/disk/mf /disk", b"fullcopy: ok", b"\n# "),
+    # (test/fullcopy.c, which fills the disk and empties it again). First,
+    # splice into and out of a file nothing has read since boot (mc): the
+    # calls wait for its blocks rather than hand the program the kernel's
+    # "try again" or a short count.
+    ("/disk/mf /disk /disk/mc", b"fullcopy: ok", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):

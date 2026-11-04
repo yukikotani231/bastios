@@ -3,7 +3,13 @@
  * of the source (BusyBox tar copies a member's data with sendfile and said
  * "short read" for a full disk). Then, with the room back, both copy the
  * whole source. Takes the directory to work in: a disk with a few MiB
- * free, which it fills and empties again. */
+ * free, which it fills and empties again.
+ *
+ * Given a second argument, a file of at least 12 KiB that nothing has read
+ * since boot (so its blocks are not in the cache), first splices from a
+ * pipe into the middle of it, which needs its old block read in, and from
+ * it into a pipe: both wait for the disk rather than come back with the
+ * kernel's internal "try again" or a short count. */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
@@ -75,10 +81,42 @@ static int same(const char *p)
     return ok;
 }
 
+/* splice into and out of a file whose blocks are not cached. */
+static int cold(const char *p)
+{
+    int fd = open(p, O_RDWR), pp[2];
+    if (fd < 0 || pipe(pp))
+        return fail("open the cold file");
+    char got[100], want[100];
+    if (write(pp[1], "XYZ", 3) != 3)
+        return fail("write the pipe");
+    loff_t o = 100;
+    errno = 0;
+    ssize_t r = splice(pp[0], NULL, fd, &o, 3, 0);
+    if (r != 3 || o != 103)
+        return printf("fullcopy: splice into a cold file returned %zd\n", r), fail("splice from a pipe into the middle of a cold file moves 3 bytes");
+    if (pread(fd, got, 3, 100) != 3 || memcmp(got, "XYZ", 3))
+        return fail("the spliced bytes are in the file");
+    loff_t i = 8192 + 7;
+    errno = 0;
+    r = splice(fd, &i, pp[1], NULL, sizeof got, 0);
+    if (r != (ssize_t)sizeof got || i != 8192 + 7 + (loff_t)sizeof got)
+        return printf("fullcopy: splice out of a cold file returned %zd\n", r), fail("splice from a cold file into a pipe moves 100 bytes");
+    if (read(pp[0], got, sizeof got) != (ssize_t)sizeof got || pread(fd, want, sizeof want, 8192 + 7) != (ssize_t)sizeof want
+        || memcmp(got, want, sizeof got))
+        return fail("the pipe holds the file's bytes");
+    close(fd);
+    close(pp[0]);
+    close(pp[1]);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 2)
+    if (argc != 2 && argc != 3)
         return fail("usage");
+    if (argc == 3 && cold(argv[2]))
+        return 1;
     const char *names[4] = {"fc_src", "fc_fill", "fc_out1", "fc_out2"};
     for (int i = 0; i < 4; i++)
         snprintf(path[i], sizeof path[i], "%s/%s", argv[1], names[i]);
