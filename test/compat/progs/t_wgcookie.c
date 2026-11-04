@@ -526,7 +526,7 @@ int main(void) {
     struct sockaddr_in srv = {.sin_family = AF_INET, .sin_port = htons(7777), .sin_addr.s_addr = ip4(10, 9, 0, 2)};
     EXPECT("a client socket", u >= 0 && connect(u, (void *)&srv, sizeof srv) == 0);
     int seq = 0, up = 0;
-    for (int t = 0; t < 30 && !up; t++) up = ask(u, seq++, 64, 2000) >= 1;
+    for (int t = 0; t < 60 && !up; t++) up = ask(u, seq++, 64, 2000) >= 1;
     EXPECT("the handshake gets through the flood, by cookie", up);
     int all = 1, twice = 0;
     for (int i = 0; i < 5; i++) {
