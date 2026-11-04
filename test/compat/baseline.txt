@@ -247,6 +247,10 @@ t_algskc: ctr(aes) takes any length: 20 bytes give the first 20 of the 32
 t_algskc: ctr(aes) with a 128-bit key encrypts the SP 800-38A F.5.1 message and decrypts it
 t_algskc: ctr(aes) with a 192-bit key gives F.5.3
 t_algskc: ctr(aes) with a 256-bit key gives F.5.5
+t_algskc: ecb(aes) gives the same block twice for the same input, and a short message is EINVAL
+t_algskc: ecb(aes) takes a zero-length IV and refuses a 16-byte one
+t_algskc: ecb(aes) with a 128-bit key encrypts SP 800-38A F.1.1 and decrypts it, with no IV
+t_algskc: ecb(aes) with a 192-bit key gives F.1.3
 t_algskc: encrypting from a file leaves the file as the plaintext
 t_algskc: no operation, or no IV, is EINVAL
 t_algskc: reading into the memory that was sent is fine and gives the same result
@@ -2224,6 +2228,8 @@ t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a 
 t_ltp2: a tmpfs mounted nosymfollow reports it, refuses to follow a link under it (ELOOP) but reads the link, and remount clears it
 t_ltp2: poll, select and epoll report POLLPRI|POLLERR once on /proc/self/mounts and mountinfo after a mount or umount, and reading does not take it back
 t_ltp2: an edge-triggered epoll entry on mountinfo is reported once when added and once after each change of the mount table
+t_ltp2: an edge-triggered epoll entry on an eventfd left unread is reported once per write, not again and again
+t_ltp2: an edge-triggered epoll entry on a pipe is reported once per write and when the writer closes
 alpine: nvim: the LSP client talks to the YAML language server under node and gets a diagnostic and the file's symbols
 t_ltp2: a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT
 t_ltp2: a unix stream socket that is bound to a name can still connect, and the connection carries data

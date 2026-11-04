@@ -988,7 +988,8 @@ const LX_TIMES: u64 = 100;
 const OF_SOCK: u64 = 5;               // x: the kernel socket; word 3: 2 * peer + nonblocking
 const OF_DEV: u64 = 7;                // x: the device (src/lxdev.bastio)
 const OF_TCP: u64 = 6;                // x: the kernel connection (TCBS: none yet); word 3: see src/lxtcp.bastio
-const OF_EVENT: u64 = 8;              // an eventfd: x the counter; word 3: nonblocking + 2 * semaphore (src/lxevent.bastio)
+const OF_EVENT: u64 = 8;              // an eventfd: x the counter; word 3: nonblocking + 2 * semaphore + 256 * changes (src/lxevent.bastio)
+const ET_GENS: u64 = 268435456;       // change counts (pipes, eventfds) wrap at this; see EPOLLET in src/lxevent.bastio
 const OF_TIMER: u64 = 9;              // a timerfd: x the timer; word 3: nonblocking
 const OF_EPOLL: u64 = 10;             // an epoll instance: x the instance; word 3: nonblocking
 const TFD_N: u64 = 256;               // timerfds, in k.evt from 0: TFD_STRIDE words each
@@ -1086,8 +1087,8 @@ const NPIPES: u64 = 2048;             // OFD_N / 2: each pipe has two descriptio
 const PIPE_CAP: u64 = 65536;          // bytes a pipe holds, as on Linux
 const PIPE_PAGE: u64 = 4096;          // the least F_SETPIPE_SZ gives a pipe
 const PIPE_ATOM: u64 = 4096;          // PIPE_BUF: writes this small go in whole
-const PIPE_STRIDE: u64 = 8;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity, O_ASYNC reader
-const PIPES_LEN: u64 = 16384;         // NPIPES * PIPE_STRIDE
+const PIPE_STRIDE: u64 = 9;           // head, count, readers, writers, FIFO + 1 (0: none), a writer came, capacity, O_ASYNC reader, changes (ET_GENS)
+const PIPES_LEN: u64 = 18432;         // NPIPES * PIPE_STRIDE
 
 // Pipe p's ring: PIPE_PAGE bytes it takes when it is opened, growing up
 // to PIPE_CAP as it fills, and gives back when both ends are closed. Slot p of k.pipebuf, which grows by one as
