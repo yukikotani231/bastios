@@ -22,7 +22,8 @@
 //
 // What stays eager: shared and read-only anonymous mappings (and
 // read-only executable ones),
-// MAP_POPULATE and MAP_LOCKED, and a mapping that finds every record in use.
+// MAP_POPULATE and MAP_LOCKED, and a mapping that finds every record in use
+// and no smaller record to give up its slot (anon_evict).
 // mprotect, mremap, mlock and the calls that need the pages there map the
 // rest of a recorded range first (anon_reach). A record split by an munmap
 // in its middle, with no free record for the right part, maps the right
@@ -87,11 +88,74 @@ fn anon_add_x(k: &mut Kernel, pid: u64, from: u64, to: u64, x: bool) -> bool
     i = i + 1;
   }
   if free == AN_N {
-    return false;
+    free = anon_evict(&mut k, pid, to - from);
+    if free >= AN_N {
+      return false;
+    }
   }
   k.anon = set(k.anon, an_at(pid, free, 0), from + 1);
   k.anon = set(k.anon, an_at(pid, free, 1), to - from + xw);
   return true;
+}
+
+/// Every record of process pid is in use: the record that spans the
+/// fewest pages, if fewer than want and at most AN_EVICT, has its pages
+/// mapped now, and its slot is given back for a range of want pages. AN_N
+/// if there is none, or memory ran out mapping its pages (the record then
+/// stays). A program that hands many scattered runs of pages back with
+/// MADV_DONTNEED (jemalloc's purge in Firefox) uses up the records; then a
+/// large mmap costs a small run's pages, and stays lazy.
+fn anon_evict(k: &mut Kernel, pid: u64, want: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut best = AN_N;
+  let mut best_pages = smaller(want, AN_EVICT + 1);
+  let mut i = 0;
+  while i < AN_N
+    invariant i <= AN_N && best <= AN_N && kok(k) && pid < NPROC
+  {
+    let first1 = get(k.anon, an_at(pid, i, 0));
+    let pages = get(k.anon, an_at(pid, i, 1)) % AN_X;
+    if first1 != 0 && pages < best_pages {
+      best = i;
+      best_pages = pages;
+    }
+    i = i + 1;
+  }
+  if best >= AN_N {
+    return AN_N;
+  }
+  let first1 = get(k.anon, an_at(pid, best, 0));
+  if first1 == 0 || first1 - 1 > WPAGES || best_pages > WPAGES - (first1 - 1) {
+    return AN_N;
+  }
+  let first = first1 - 1;
+  let end = first + best_pages;
+  // As anon_reach does: swapped pages come back first, then every page the
+  // record covers that is not there yet is mapped. A page that stays in the
+  // swap file is still there to its fault (swap_fault comes first).
+  swap_reach(&mut k, tgid(k.procs, pid), pid, first, end);
+  if anon_xbit(k, pid, best) {
+    // Pages that may run code are mapped one by one as their faults map
+    // them (anon_touch). A WOP_PROTECT after lx_map_pages would not do:
+    // win_op leaves the pages alone while another processor runs a thread
+    // of the process, and they would stay no-execute.
+    let mut q = first;
+    while q < end
+      invariant first <= q && q <= end && end <= WPAGES && kok(k) && pid < NPROC && best < AN_N
+    {
+      if !anon_touch(&mut k.mem, &mut k.spaces, k.anon, pid, q) {
+        return AN_N;
+      }
+      q = q + 1;
+    }
+  } else if !lx_map_pages(&mut k.mem, &mut k.spaces, pid, first, end, false) {
+    return AN_N;
+  }
+  k.anon = set(k.anon, an_at(pid, best, 0), 0);
+  k.anon = set(k.anon, an_at(pid, best, 1), 0);
+  return best;
 }
 
 /// Window pages from .. to of process pid are going away or being replaced

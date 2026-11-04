@@ -182,8 +182,11 @@ fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
   if level != SOL_SOCKET || kind != SCM_RIGHTS {
     return OFD_N;                           // another control message: ignored
   }
-  if len < CMSG_ONE || len > clen {
+  if len < 16 || len > clen {
     return EINVAL;
+  }
+  if len < CMSG_ONE {
+    return OFD_N;                           // a header with no descriptor in it: nothing to pass (as on Linux)
   }
   if len > CMSG_ONE + 4 * (SCM_MAX - 1) {
     return ETOOMANYREFS;                    // more than SCM_MAX descriptors

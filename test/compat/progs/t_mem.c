@@ -41,6 +41,25 @@ static int fill_one(const char *path, const struct stat *st, int type, struct FT
 }
 static char *cow_buf;
 static volatile int fast_phase;
+static volatile int spin_stop;
+static void *spin_thread(void *a) {      /* keeps a second processor on the process's space */
+    (void)a;
+    while (!spin_stop) { }
+    return 0;
+}
+
+/* Runs one `ret` written to page p (fresh, never touched before). */
+static void run_ret(unsigned char *p) {
+#if defined(__x86_64__)
+    p[0] = 0xc3;
+#else
+    unsigned int ret = 0xd65f03c0;
+    memcpy(p, &ret, 4);
+    __builtin___clear_cache((char *)p, (char *)p + 4);
+#endif
+    ((void (*)(void))p)();
+}
+
 static char *fast_page;
 /* Runs only system calls the kernel answers without its lock (getpid), so the
  * processor keeps its translations between them, until the other thread has
@@ -435,6 +454,76 @@ int main(void) {
                munmap(r, n);
            }
            for (int i = 0; i < 6; i++) if (res[i] != MAP_FAILED) munmap(res[i], sz[i]);
+           ok; }));
+    EXPECT("pages come when first touched even after 100 separate untouched mappings (a browser's thread stacks and heap chunks): then 4 GiB of mmap touched at both ends", ({
+           enum { NMAP = 100 };
+           char *small[NMAP], *sep[NMAP]; int ok = 1;
+           for (int i = 0; i < NMAP; i++) {         /* a read-only page after each keeps any two of them from touching */
+               small[i] = mmap(0, 64 << 10, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               sep[i] = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+               ok = ok && small[i] != MAP_FAILED && sep[i] != MAP_FAILED;
+           }
+           size_t n = (size_t)4 << 30;
+           char *r = ok ? mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+           ok = ok && r != MAP_FAILED;
+           if (r != MAP_FAILED) {
+               r[0] = 1; r[n - 1] = 2;
+               ok = ok && r[0] == 1 && r[n - 1] == 2 && r[n / 2] == 0;
+               munmap(r, n);
+           }
+           for (int i = 0; i < NMAP; i++) {
+               if (small[i] != MAP_FAILED) {
+                   ok = ok && small[i][0] == 0 && small[i][(64 << 10) - 1] == 0;
+                   small[i][4096] = 7;
+                   ok = ok && small[i][4096] == 7;
+                   munmap(small[i], 64 << 10);
+               }
+               if (sep[i] != MAP_FAILED) munmap(sep[i], 4096);
+           }
+           ok; }));
+    EXPECT("memory that may run code stays runnable when its record gives up its slot to a later mmap, while another thread runs on the other processor", ({
+           pid_t c = fork();
+           if (c == 0) {
+               enum { NX = 100 };
+               unsigned char *x[NX]; char *sep[NX];
+               pthread_t t; spin_stop = 0;
+               if (pthread_create(&t, 0, spin_thread, 0)) _exit(2);
+               for (int i = 0; i < NX; i++) {     /* untouched, each kept apart by a read-only page */
+                   x[i] = mmap(0, 4096, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                   sep[i] = mmap(0, 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                   if (x[i] == MAP_FAILED || sep[i] == MAP_FAILED) _exit(3);
+               }
+               for (int i = 0; i < NX; i++) {     /* larger mappings take the slots of the one-page ones */
+                   char *r = mmap(0, 64 << 10, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                   if (r == MAP_FAILED) _exit(4);
+               }
+               for (int i = 0; i < NX; i++) run_ret(x[i]);
+               spin_stop = 1; pthread_join(t, 0);
+               _exit(0);
+           }
+           int st = 0;
+           c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0; }));
+    EXPECT("pages come when first touched even after 400 scattered pages were handed back with MADV_DONTNEED (jemalloc's purge): then 4 GiB of mmap touched at both ends, and the pages between keep what they hold", ({
+           size_t m = 16 << 20;
+           unsigned char *h = mmap(0, m, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = h != MAP_FAILED;
+           if (ok) {
+               for (size_t i = 0; i < m; i += 4096) h[i] = (unsigned char)(i / 4096 % 251 + 1);
+               for (size_t i = 0; ok && i < 400; i++) ok = madvise(h + i * 8 * 4096, 4096, MADV_DONTNEED) == 0;
+               size_t n = (size_t)4 << 30;
+               char *r = ok ? mmap(0, n, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0) : MAP_FAILED;
+               ok = ok && r != MAP_FAILED;
+               if (r != MAP_FAILED) {
+                   r[0] = 1; r[n - 1] = 2;
+                   ok = ok && r[0] == 1 && r[n - 1] == 2 && r[n / 2] == 0;
+                   munmap(r, n);
+               }
+               for (size_t i = 0; ok && i < m; i += 4096) {
+                   size_t pg = i / 4096;
+                   ok = h[i] == (pg % 8 == 0 && pg < 3200 ? 0 : (unsigned char)(pg % 251 + 1));
+               }
+               munmap(h, m);
+           }
            ok; }));
     EXPECT("mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do", ({
            char *want = (char *)0x4000000000ul;      /* 256 GiB: the user address space is 512 GiB from 0 */
