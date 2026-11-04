@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- AF_ALG `ctr(aes)` and `cbc(aes)` take 24-byte keys (AES-192).
 - AF_ALG hashes `sha1`, `md5`, `hmac(sha1)` and `hmac(md5)`, for the programs and protocols that still ask for them (both hashes are broken for collisions; the kernel's own code uses neither).
 - `pwrite64` on `/dev/fb0` stores pixels at the given offset and leaves the file position alone, as on Linux's fbdev. `bwm` uses it for every row it puts on the screen (one system call where `lseek` and `write` took two), and writes the box a pointer left and the one it is in as one piece when they are close. In a no-KVM QEMU run a full redraw went from 26 to 16 ms and a pointer move from 2.6 to 1.6 ms; a window drag stayed near 10 ms. `BWM_BENCH=N bwm` prints these timings (and `BWM_BENCH_ONLY=1 BWM_BENCH=N test/iso_test.sh` gets them from the ISO).
 - IPsec ESP in UDP (RFC 3948, NAT traversal): `XFRMA_ENCAP` with `UDP_ENCAP_ESPINUDP` on a state wraps its ESP packets in UDP and takes them from the encap port, dropping keep-alives and leaving IKE messages to sockets. `t_espudp` checks transport and tunnel mode, replays, forgeries and plain ESP for such a state.

@@ -1,11 +1,11 @@
 /* AF_ALG symmetric ciphers: ctr(aes) and cbc(aes) through socket, bind,
  * setsockopt(ALG_SET_KEY), accept, sendmsg with ALG_SET_OP and ALG_SET_IV,
  * and read, with the vectors of NIST SP 800-38A (F.2 and F.5, both key
- * sizes). Also what the kernel keeps and what it refuses: the input is a
+ * sizes, and AES-192). Also what the kernel keeps and what it refuses: the input is a
  * copy (changing the memory that was sent changes nothing), the result goes
  * only to the buffer read into, a CBC message that is not whole blocks, a
  * buffer too small, a wrong IV length, a missing operation or IV and an
- * AES-192 key are errors that leave no output, and the IV goes on from one
+ * a key of 23 bytes are errors that leave no output, and the IV goes on from one
  * message to the next as in Linux. Last, sendfile and splice of a file's
  * bytes into the socket: they are a copy, and the file is never written to
  * (decrypting from a file must not turn the file into the plaintext), and
@@ -134,6 +134,7 @@ static int same(int op, int enc, const char *ivh, const char *inh, const char *w
 }
 
 #define K128 "2b7e151628aed2a6abf7158809cf4f3c"
+#define K192 "8e73b0f7da0e6452c810f32b809079e562f8ead2522c6b7b"
 #define K256 "603deb1015ca71be2b73aef0857d77811f352c073b6108d72d9810a30914dff4"
 #define P12 "6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e51"
 #define IVCBC "000102030405060708090a0b0c0d0e0f"
@@ -141,8 +142,9 @@ static int same(int op, int enc, const char *ivh, const char *inh, const char *w
 
 int main(void) {
     setup();
-    unsigned char k128[16], k256[32], k192[24] = {1}, zero[16] = {0}, ff[16], out[128];
+    unsigned char k128[16], k256[32], k192[24], k23[23] = {1}, zero[16] = {0}, ff[16], out[128];
     unhex(K128, k128);
+    unhex(K192, k192);
     unhex(K256, k256);
     memset(ff, 0xff, sizeof ff);
 
@@ -202,6 +204,19 @@ int main(void) {
         int op = skc_op("ctr(aes)", k256, 32);
         int ok = op >= 0 && same(op, 1, IVCTR, P12,
             "601ec313775789a5b7a7f504bbf3d228f443e3ca4d62b59aca84e990cacaf5c5");
+        if (op >= 0) close(op);
+        ok;
+    }));
+    EXPECT("cbc(aes) with a 192-bit key encrypts SP 800-38A F.2.3 and decrypts it", ({
+        int op = skc_op("cbc(aes)", k192, 24);
+        int ok = op >= 0 && same(op, 1, IVCBC, P12, "4f021db243bc633d7178183a9fa071e8b4d9ada9ad7dedf4e5e738763f69145a");
+        ok = ok && same(op, 0, IVCBC, "4f021db243bc633d7178183a9fa071e8b4d9ada9ad7dedf4e5e738763f69145a", P12);
+        if (op >= 0) close(op);
+        ok;
+    }));
+    EXPECT("ctr(aes) with a 192-bit key gives F.5.3", ({
+        int op = skc_op("ctr(aes)", k192, 24);
+        int ok = op >= 0 && same(op, 1, IVCTR, P12, "1abc932417521ca24f2b0459fe7e6e0b090339ec0aa6faefd5ccc2c6f4ce8e94");
         if (op >= 0) close(op);
         ok;
     }));
@@ -282,12 +297,12 @@ int main(void) {
         if (op >= 0) close(op);
         ok;
     }));
-    EXPECT("a 12-byte IV is refused, as is a 24-byte key", ({
+    EXPECT("a 12-byte IV is refused, as is a 23-byte key", ({
         int op = skc_op("cbc(aes)", k128, 16);
         unsigned char in[16] = {0};
         long r = op >= 0 ? skc_send(op, 1, zero, 12, in, 16) : 0;
         if (op >= 0) close(op);
-        int op2 = skc_op("cbc(aes)", k192, 24);
+        int op2 = skc_op("cbc(aes)", k23, 23);
         r == -EINVAL && op2 < 0 && errno == EINVAL;
     }));
     EXPECT("no operation, or no IV, is EINVAL", ({
