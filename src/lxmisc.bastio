@@ -574,6 +574,18 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
     of_set(&mut k.ofd, h, 3, at);
     return r;
   }
+  if write && d.kind == K_DEV && d.x == DEV_FB {
+    // /dev/fb0 seeks, so pwrite works: the pixels go to off and the position stays (one call where lseek and write took two).
+    let h = fd_ofd(k, pid, fd);
+    if h >= OFD_N {
+      return EBADF;
+    }
+    let at = of_get(k.ofd, h, 3);
+    of_set(&mut k.ofd, h, 3, off);
+    let r = fb_write(&mut k, pid, fd, va, n);
+    of_set(&mut k.ofd, h, 3, at);
+    return r;
+  }
   if write && d.kind == K_FILE && seal_no_write(&mut k, pid, fd) {
     return EPERM;                           // F_SEAL_WRITE
   }
@@ -958,6 +970,9 @@ fn lx_misc_done(k: &mut Kernel, pid: u64, n: u64, r: u64) -> u64
 {
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);       // pread/pwrite: blocks not cached yet
+  }
+  if r == CON_FULL {
+    return con_block(&mut k, pid, n);        // pwrite to /dev/fb0: the ring is full, wait for the pump
   }
   ret(&mut k.procs, pid, r);
   return KEEP;
