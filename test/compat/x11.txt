@@ -94,7 +94,7 @@ alive
 
 == x11: a Python tag editor with PyQt 5, puddletag, draws its window on the X screen
 # timeout 400
-$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/m; bb tar -xf /disk/tag.tar -C /disk/m && bb rm /disk/tag.tar && bb tar -xf /disk/tag2.tar -C /disk/m && bb rm /disk/tag2.tar || { bb ls -l /disk/tag.tar; bb grep -E 'MemFree|^Cached|Dirty|Writeback' /proc/meminfo; bb ps | bb wc -l; }; /disk/fakebwm 300 'x' >/disk/fb9.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/m -d 8 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp USER=root /usr/bin/puddletag >/disk/pdt.out 2>&1 & until bb grep -q typed /disk/fb9.out; do bb sleep 1; done; bb cat /disk/fb9.out; bb ps | bb grep -q '/usr/bin/puddletag' && echo alive || bb cat /disk/pdt.out
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/m; bb tar -xf /disk/tag.tar -C /disk/m && bb rm /disk/tag.tar && bb tar -xf /disk/tag2.tar -C /disk/m && bb rm /disk/tag2.tar || { bb ls -l /disk/tag.tar; bb df -k /disk; bb grep -E 'MemFree|^Cached|Dirty|Writeback' /proc/meminfo; bb ps | bb wc -l; }; /disk/fakebwm 300 'x' >/disk/fb9.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/m -d 8 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp USER=root /usr/bin/puddletag >/disk/pdt.out 2>&1 & until bb grep -q typed /disk/fb9.out; do bb sleep 1; done; bb cat /disk/fb9.out; bb ps | bb grep -q '/usr/bin/puddletag' && echo alive || bb cat /disk/pdt.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :8
 fakebwm: pixels drawn
@@ -133,6 +133,15 @@ alive
 $ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/h; bb tar -xf /disk/handbrake.tar -C /disk/h && bb rm /disk/handbrake.tar; /disk/fakebwm 300 'x' >/disk/fb13.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/h -d 12 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/ghb >/disk/hb.out 2>&1 & until bb grep -q typed /disk/fb13.out; do bb sleep 1; done; bb cat /disk/fb13.out; bb ps | bb grep -q '/usr/bin/ghb' && echo alive || bb cat /disk/hb.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :12
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11: a Qt 5 Matroska tool, MKVToolNix, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/m; bb tar -xf /disk/mkv.tar -C /disk/m && bb rm /disk/mkv.tar; /disk/fakebwm 300 'x' >/disk/fb14.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/m -d 13 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/mkvtoolnix-gui >/disk/mkv.out 2>&1 & until bb grep -q typed /disk/fb14.out; do bb sleep 1; done; bb cat /disk/fb14.out; bb ps | bb grep -q '/usr/bin/mkvtoolnix-gui' && echo alive || bb cat /disk/mkv.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :13
 fakebwm: pixels drawn
 fakebwm: typed
 alive

@@ -15,6 +15,9 @@ KERNEL=${KERNEL:-build/bastios.elf}
 # tell slow from broken.
 TIMEOUT=${TIMEOUT:-600}
 SMP=${SMP:-4}
+MUSLCC=${MUSLCC:-musl-gcc}
+mkdir -p build/test
+$MUSLCC -O2 -fPIE -static-pie -o build/test/fullcopy test/fullcopy.c || exit 1
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
 import os, re, socket, subprocess, sys, tempfile, time, select
@@ -2184,7 +2187,7 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf", "mf=build/test/fullcopy", "mc=build/test/fullcopy"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
@@ -2210,6 +2213,14 @@ for line, want, until in [
     # create): made by extending it, so nothing writes over those pages,
     # it must read as zeros: no newline byte, which the code has.
     ("s=$(stat -c %s /disk/my); rm /disk/my; truncate -s $s /disk/mz; echo nl=$(wc -l < /disk/mz); rm /disk/mz", b"nl=0\r\n", b"\n# "),
+    # sendfile and copy_file_range into a file on a full disk fail with
+    # ENOSPC, not a count of 0 (which reads as the end of the source:
+    # BusyBox tar said "short read"); with the room back they copy it all
+    # (test/fullcopy.c, which fills the disk and empties it again). First,
+    # splice into and out of a file nothing has read since boot (mc): the
+    # calls wait for its blocks rather than hand the program the kernel's
+    # "try again" or a short count.
+    ("/disk/mf /disk /disk/mc", b"fullcopy: ok", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):
