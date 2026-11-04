@@ -47,6 +47,19 @@ import "lxnsbase.bastio";
 
 const LX_PIVOT_ROOT: u64 = 155;
 
+/// The statfs flags (ST_RDONLY, ST_NOSUID, ...) of mount e.
+fn me_stflags(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result < 1048576
+{
+  let fl = me_get(k, e, ME_FLAGS);
+  let mut r = fl / 64 % 262144 * 2;
+  if fl & MT_RO != 0 {
+    r = r + 1;
+  }
+  return r;
+}
+
 /// Is mount e's key a prefix of p[0..c] that ends at a "/" or at c?
 fn me_covers(k: &Kernel, e: u64, p: &Bytes, c: u64) -> bool
   requires kok(k) && e < MT_N && c <= blen(p)
@@ -550,11 +563,7 @@ fn ovl_tr(k: &mut Kernel, e: u64, p: &Bytes, kl: u64, c: u64) -> u64
     k.perr = ENAMETOOLONG;
     return NO_RESULT;
   }
-  if me_get(k, e, ME_FLAGS) & MT_RO != 0 {
-    k.mns = set(k.mns, MNS_LRO, 1);
-  } else {
-    k.mns = set(k.mns, MNS_LRO, 0);
-  }
+  k.mns = set(k.mns, MNS_LRO, me_stflags(k, e));
   return n;
 }
 
@@ -613,11 +622,7 @@ fn ns_tr(k: &mut Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   }
   bytes_copy_span(&mut k.fs.xfer, w, p, r, c);
   w = w + (c - r);
-  if me_get(k, e, ME_FLAGS) & MT_RO != 0 {
-    k.mns = set(k.mns, MNS_LRO, 1);
-  } else {
-    k.mns = set(k.mns, MNS_LRO, 0);
-  }
+  k.mns = set(k.mns, MNS_LRO, me_stflags(k, e));
   return w;
 }
 
@@ -1022,7 +1027,14 @@ fn lpath_len(k: &Kernel) -> u64
 fn lpath_ro(k: &Kernel) -> bool
   requires kok(k)
 {
-  return get(k.mns, MNS_LRO) != 0;
+  return get(k.mns, MNS_LRO) % 2 == 1;
+}
+
+/// The statfs flags of the mount the last lookup went through (0 for none).
+fn lpath_stflags(k: &Kernel) -> u64
+  requires kok(k)
+{
+  return get(k.mns, MNS_LRO);
 }
 
 /// For a name the kernel makes itself, not looked up: in no mount.
@@ -1073,7 +1085,7 @@ fn me_release(k: &mut Kernel, e: u64)
   requires kok(k) && e < MT_N
   ensures kok(k)
 {
-  if me_get(k, e, ME_FLAGS) >= MT_OWN {
+  if me_get(k, e, ME_FLAGS) / MT_OWN % 2 == 1 {
     me_set(&mut k, e, ME_NS, MNS_MAX);
   } else {
     me_set(&mut k, e, ME_NS, 0);
@@ -1129,7 +1141,7 @@ fn me_copy_live(k: &Kernel, e: u64) -> bool
     invariant d <= MT_N && kok(k)
   {
     let v = me_get(k, d, ME_NS);
-    if d != e && v != 0 && v != MNS_MAX && me_get(k, d, ME_FLAGS) >= MT_OWN && me_same_src(k, d, e) {
+    if d != e && v != 0 && v != MNS_MAX && me_get(k, d, ME_FLAGS) / MT_OWN % 2 == 1 && me_same_src(k, d, e) {
       return true;
     }
     d = d + 1;
@@ -1933,6 +1945,43 @@ fn ns_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, kind: u64, flags
   return ns_mount_at(&mut k, pid, source, NO_RESULT, AT_FDCWD, target, kind, flags);
 }
 
+/// The target of ns_mount_at in the transfer buffer: the path at user
+/// address target, or, if target is NO_RESULT, the directory tdfd itself
+/// (move_mount with MOVE_MOUNT_T_EMPTY_PATH). Its length, or NO_RESULT with
+/// k.perr set.
+fn ns_target(k: &mut Kernel, pid: u64, tdfd: u64, target: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  if target != NO_RESULT {
+    return lx_path_at(&mut k, pid, tdfd, target);
+  }
+  let td = dir_ofd(k, pid, tdfd % 0x100000000);
+  if td >= OFD_N {
+    k.perr = EBADF;
+    return NO_RESULT;
+  }
+  return dir_resolved(&mut k, pid, td);
+}
+
+/// The name of the open directory h (a descriptor's logical name, see
+/// dir_ofd) resolved into the transfer buffer as a path walk would give it,
+/// which is where the file layer and the namespace mounts know it. Its
+/// length, or NO_RESULT with k.perr set.
+fn dir_resolved(k: &mut Kernel, pid: u64, h: u64) -> u64
+  requires kok(k) && pid < NPROC && h <= OFD_N
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  bset(&mut k.fs.xfer, 0, 46);
+  let r = lx_path_xfer(&mut k, pid, 1, h, true);
+  if r == NO_RESULT {
+    return NO_RESULT;
+  }
+  return perm_walk(&mut k, pid, r);
+}
+
 /// ns_mount with the target relative to directory descriptor tdfd, and a
 /// bind's source either at user address source or, if presrc is not
 /// NO_RESULT, already in the first presrc bytes of the transfer buffer (as
@@ -2012,7 +2061,7 @@ fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, ta
   } else {
     sl = kind_source(kind, &mut src);
   }
-  let n = lx_path_at(&mut k, pid, tdfd, target);
+  let n = ns_target(&mut k, pid, tdfd, target);
   if n == NO_RESULT {
     bfree(src);
     return k.perr;
@@ -2083,6 +2132,10 @@ fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, ta
   }
   if ovf != 0 {
     mf = ovf;
+  }
+  mf = mf - mf / 64 % 4194304 * 64 + mt_attrs(flags);   // the attributes the mount(2) flags ask for
+  if presrc != NO_RESULT && flags % 2 == 1 && mf & MT_RO == 0 {
+    mf = mf + MT_RO;                        // a clone attached by move_mount takes read-only from its attributes (mount(2)'s MS_BIND needs a remount)
   }
   let ok = ns_add(&mut k, ns, mf, src, sl);
   bfree(src);
@@ -2180,7 +2233,7 @@ fn ns_tmpfs(k: &mut Kernel, pid: u64, n: u64, ro: bool) -> u64
 
 /// MS_REMOUNT with MS_BIND: makes the latest mount at the target read-only
 /// or writable.
-fn ns_remount(k: &mut Kernel, pid: u64, target: u64, ro: bool) -> u64
+fn ns_remount(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -2193,12 +2246,30 @@ fn ns_remount(k: &mut Kernel, pid: u64, target: u64, ro: bool) -> u64
     return EINVAL;                          // not a mount
   }
   let fl = me_get(k, e, ME_FLAGS);
-  let f = fl % MT_RO + fl / MT_OWN * MT_OWN;
-  if ro {
-    me_set(&mut k, e, ME_FLAGS, f + MT_RO);
-  } else {
-    me_set(&mut k, e, ME_FLAGS, f);
+  let mut f = fl % MT_RO + (fl / MT_OWN % 2) * MT_OWN + mt_attrs(flags);
+  if flags % 2 == 1 {
+    f = f + MT_RO;
   }
+  me_set(&mut k, e, ME_FLAGS, f);
+  return 0;
+}
+
+/// mount_setattr on the mount the last lookup went through: its statfs
+/// flags become (flags & !clr) | set. EINVAL if the lookup went through no
+/// mount of the namespace's own.
+fn ns_set_attrs(k: &mut Kernel, pid: u64, set: u64, clr: u64) -> u64
+  requires kok(k) && pid < NPROC && set < 16384 && clr < 16384
+  ensures kok(k)
+{
+  let e = ns_at(k, ns_of(k, pid));
+  if e >= MT_N {
+    return EINVAL;
+  }
+  let fl = me_get(k, e, ME_FLAGS);
+  let cur = me_stflags(k, e) % 16384;
+  let st = (cur & !clr) | set;
+  let f = fl % MT_RO + (fl / MT_OWN % 2) * MT_OWN + (st / 2 * 2) * 32 + (st % 2) * MT_RO;
+  me_set(&mut k, e, ME_FLAGS, f);
   return 0;
 }
 
@@ -2479,11 +2550,31 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
         }
         w = put_c(&mut o, w, 32);
         w = put_s(&mut o, w, ty);
-        if me_get(k, e, ME_FLAGS) & MT_RO != 0 {
-          w = put_s(&mut o, w, " ro 0 0\n");
+        let st = me_stflags(k, e);
+        if st % 2 == 1 {
+          w = put_s(&mut o, w, " ro");
         } else {
-          w = put_s(&mut o, w, " rw 0 0\n");
+          w = put_s(&mut o, w, " rw");
         }
+        if st / 2 % 2 == 1 {
+          w = put_s(&mut o, w, ",nosuid");
+        }
+        if st / 4 % 2 == 1 {
+          w = put_s(&mut o, w, ",nodev");
+        }
+        if st / 8 % 2 == 1 {
+          w = put_s(&mut o, w, ",noexec");
+        }
+        if st / 1024 % 2 == 1 {
+          w = put_s(&mut o, w, ",noatime");
+        }
+        if st / 2048 % 2 == 1 {
+          w = put_s(&mut o, w, ",nodiratime");
+        }
+        if st / 8192 % 2 == 1 {
+          w = put_s(&mut o, w, ",nosymfollow");
+        }
+        w = put_s(&mut o, w, " 0 0\n");
       }
     }
     e = e + 1;

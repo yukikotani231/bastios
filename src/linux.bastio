@@ -47,6 +47,7 @@ const LX_MOVE_MOUNT: u64 = 429;
 const LX_FSOPEN: u64 = 430;
 const LX_FSCONFIG: u64 = 431;
 const LX_FSMOUNT: u64 = 432;
+const LX_MOUNT_SETATTR: u64 = 442;
 const LX_FSPICK: u64 = 433;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO (src/lxaio.bastio)
