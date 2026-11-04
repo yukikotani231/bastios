@@ -2018,6 +2018,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.lazy);
   free(sys.k.anon);
   free(sys.k.locks);
+  free(sys.k.wv);
   free(sys.k.loops);
   free(sys.k.ptys);
   bfree(sys.k.ptyb);

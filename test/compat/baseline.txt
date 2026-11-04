@@ -1307,6 +1307,15 @@ t_newer: cachestat of a closed descriptor is EBADF
 t_newer: cachestat of a pipe is EBADF
 t_newer: cachestat of a range
 t_newer: cachestat with flags is EINVAL
+t_newer: futex_waitv on private words is woken by a thread
+t_newer: futex_waitv returns the index woken
+t_newer: futex_waitv times out
+t_newer: futex_waitv with 129 words is EINVAL
+t_newer: futex_waitv with a bad clock is EINVAL
+t_newer: futex_waitv with a bad flag is EINVAL
+t_newer: futex_waitv with a word that differs is EAGAIN
+t_newer: futex_waitv with an unaligned word is EINVAL
+t_newer: futex_waitv without a timeout is woken too
 t_nopie: a child sees the same addresses (fork)
 t_nopie: a null pointer faults
 t_nopie: absolute pointers in the data work

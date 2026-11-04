@@ -112,6 +112,9 @@ fsmount01
 fsmount02
 fsopen01
 fsopen02
+futex_waitv01
+futex_waitv02
+futex_waitv03
 getxattr01
 getxattr02
 inotify02

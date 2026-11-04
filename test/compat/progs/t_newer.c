@@ -6,8 +6,11 @@
 #include "compat.h"
 #include <dirent.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include <sys/stat.h>
+#include <time.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <sys/syscall.h>
 #include <sys/uio.h>
@@ -54,6 +57,16 @@ static int has_name(const char *buf, long n, int old, const char *name, int *typ
         at += reclen;
     }
     return 0;
+}
+
+static unsigned pf[4];
+static void *wv_waker(void *a) {
+    for (int i = 0; i < 2000; i++) {
+        usleep(2000);
+        if (syscall(SYS_futex, &pf[3], 1 | 128, 1, NULL, NULL, 0) > 0)
+            break;
+    }
+    return a;
 }
 
 int main(int argc, char **argv) {
@@ -284,6 +297,68 @@ int main(int argc, char **argv) {
         EXPECT("cachestat of a closed descriptor is EBADF", syscall(451, 999, &rg, &cs, 0) == -1 && errno == EBADF);
         close(cf);
         unlink("nw_cs");
+    }
+    /* futex_waitv: wait on several words at once; the index of the one woken comes back. */
+    {
+        struct wv { unsigned long long val, uaddr; unsigned flags, reserved; };
+        unsigned *fw = mmap(NULL, 4096, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+        struct wv w[3];
+        for (int i = 0; i < 3; i++) {
+            fw[i] = 0;
+            w[i] = (struct wv){ 0, (unsigned long long)(unsigned long)&fw[i], 2, 0 };
+        }
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_nsec += 50 * 1000 * 1000;
+        if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
+        EXPECT("futex_waitv times out", syscall(449, w, 3, 0, &ts, CLOCK_MONOTONIC) == -1 && errno == ETIMEDOUT);
+        EXPECT("futex_waitv with a bad flag is EINVAL", (w[1].flags = 3, syscall(449, w, 3, 0, &ts, CLOCK_MONOTONIC) == -1 && errno == EINVAL));
+        w[1].flags = 2;
+        EXPECT("futex_waitv with a bad clock is EINVAL", syscall(449, w, 3, 0, &ts, 11) == -1 && errno == EINVAL);
+        EXPECT("futex_waitv with 129 words is EINVAL", syscall(449, w, 129, 0, NULL, 0) == -1 && errno == EINVAL);
+        w[2].uaddr = 1;
+        EXPECT("futex_waitv with an unaligned word is EINVAL", syscall(449, w, 3, 0, &ts, CLOCK_MONOTONIC) == -1 && errno == EINVAL);
+        w[2].uaddr = (unsigned long long)(unsigned long)&fw[2];
+        w[2].val = 1;
+        EXPECT("futex_waitv with a word that differs is EAGAIN", syscall(449, w, 3, 0, &ts, CLOCK_MONOTONIC) == -1 && errno == EAGAIN);
+        w[2].val = 0;
+        pid_t wp = fork();
+        if (wp == 0) {
+            usleep(30000);
+            fw[1] = 1;
+            syscall(SYS_futex, &fw[1], 1 /* FUTEX_WAKE */, 1, NULL, NULL, 0);
+            _exit(0);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        ts.tv_sec += 5;
+        EXPECT("futex_waitv returns the index woken", syscall(449, w, 3, 0, &ts, CLOCK_MONOTONIC) == 1);
+        int wst;
+        waitpid(wp, &wst, 0);
+        fw[1] = 0;
+        wp = fork();
+        if (wp == 0) {
+            usleep(30000);
+            syscall(SYS_futex, &fw[0], 1, 1, NULL, NULL, 0);
+            _exit(0);
+        }
+        EXPECT("futex_waitv without a timeout is woken too", syscall(449, w, 3, 0, NULL, 0) == 0);
+        waitpid(wp, &wst, 0);
+        munmap(fw, 4096);
+    }
+    /* futex_waitv with private words, woken by a thread of the same process. */
+    {
+        struct wv2 { unsigned long long val, uaddr; unsigned flags, reserved; };
+        static struct wv2 pw[4];
+        for (int i = 0; i < 4; i++)
+            pw[i] = (struct wv2){ 0, (unsigned long long)(unsigned long)&pf[i], 2 | 128, 0 };
+        pthread_t th;
+        int tr = pthread_create(&th, 0, wv_waker, 0);
+        struct timespec t2;
+        clock_gettime(CLOCK_MONOTONIC, &t2);
+        t2.tv_sec += 5;
+        EXPECT("futex_waitv on private words is woken by a thread", tr == 0 && syscall(449, pw, 4, 0, &t2, CLOCK_MONOTONIC) == 3);
+        if (tr == 0)
+            pthread_join(th, 0);
     }
     unlink("nw_x");
     unlink("nw_l");
