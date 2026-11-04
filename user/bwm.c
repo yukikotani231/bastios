@@ -1352,6 +1352,7 @@ static int k_shift, k_ctrl, k_alt, k_caps;
 #define DOUBLE_CLICK_MS 400
 static struct win *last_click_win;        /* the window whose title bar was clicked last, and when */
 static long long last_click_ms;
+static int ralt_on, raw_right;            /* Alt-right-drag resizes: whether one is going on, and whether the right button was down */
 static long long desk_click_ms;           /* when the empty desktop was last clicked */
 static int last_click_maxed;              /* whether it was maximized before that click */
 static int clock_shown = -1;              /* the minute of the day the task bar shows */
@@ -2510,9 +2511,17 @@ int main(int argc, char **argv)
                 if (my < 0) my = 0;
                 if (mx >= (int)W) mx = W - 1;
                 if (my >= (int)H) my = H - 1;
-                int down = m[0] & 1;
                 int in_bar = my >= (int)H - BAR_H;
                 struct win *under = in_bar ? NULL : hit(mx, my);
+                int right = (m[0] & 2) != 0;                 /* Alt with the right button on a resizable window drags its lower right corner, from anywhere in it */
+                if (!right)
+                    ralt_on = 0;
+                else if (!raw_right && k_alt && !(m[0] & 1) && under && under->resizable)
+                    ralt_on = 1;
+                raw_right = right;
+                if (ralt_on)
+                    m[0] = (unsigned char)((m[0] & ~3) | 1);   /* it goes on as a left press, with the corner as its edges */
+                int down = m[0] & 1;
                 if (menu_open && (dx || dy)) {
                     touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + menu_n * MENU_ITEM_H + 1);
                     menu_mx = mx; menu_my = my;
@@ -2561,7 +2570,9 @@ int main(int argc, char **argv)
                     int in_title = my >= under->y + BORDER && my < under->y + TITLE_H;
                     int on_max = under->resizable && in_title && mx >= title_btn(under, 1) && mx < title_btn(under, 1) + CLOSE_W - 2;
                     int on_min = in_title && mx >= title_btn(under, under->resizable ? 2 : 1) && mx < title_btn(under, under->resizable ? 2 : 1) + CLOSE_W - 2;
-                    int edges = edges_at(under, mx, my);
+                    int edges = ralt_on ? 10 : edges_at(under, mx, my);
+                    if (ralt_on)
+                        on_close = on_max = on_min = 0;
                     if (on_close) {
                         close_win(under);
                         under = NULL;

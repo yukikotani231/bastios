@@ -666,6 +666,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and until(b"bhello: resized 316 176", mark_rs) and until(b"bhello: resized 300 176", mark_rs)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Alt with the arrow keys resizes the window by 16 pixels")
             fails += not good
+            # Alt with the right button drags the lower right corner from anywhere in a resizable window.
+            mark_rs = len(out)
+            monitor("sendkey alt 4000")
+            time.sleep(0.5)
+            monitor("mouse_button 2", "mouse_move 40 0", "mouse_move 40 0", "mouse_button 0")
+            good = until(b"bhello: resized 380 176", mark_rs)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt and the right button resize a window from inside it")
+            fails += not good
+            time.sleep(5)
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
