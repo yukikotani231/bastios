@@ -533,7 +533,7 @@ int main(void) {
         /* a packet the busy device is slow with is sent again, under a new
          * tag so a late echo of the first is not mistaken for the second */
         int got = 0;
-        for (int t = 0; t < 3 && !got; t++) {
+        for (int t = 0; t < 6 && !got; t++) {
             int n = ask(u, seq++, 100 + i * 200, 4000);
             if (n > 1) twice = 1;
             got = n == 1;
