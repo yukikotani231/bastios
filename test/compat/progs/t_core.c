@@ -133,5 +133,42 @@ int main(void) {
         st = crash("co_b", 0, &pid);
         EXPECT("RLIMIT_CORE 0 leaves no core file, and the status has no core flag", WIFSIGNALED(st) && !WCOREDUMP(st) && stat("co_b/core", &sb) != 0);
     }
+    /* core_pattern names the file: %p, %s and %e expand, a pipe is refused. */
+    {
+        char old[256] = "core\n", rb[256] = "";
+        int pf = open("/proc/sys/kernel/core_pattern", O_RDONLY);
+        if (pf >= 0) {
+            ssize_t n = read(pf, old, sizeof old - 1);
+            old[n > 0 ? n : 0] = 0;
+            close(pf);
+        }
+        const char *pat = "pat_%p_%s";
+        pf = open("/proc/sys/kernel/core_pattern", O_WRONLY);
+        EXPECT("core_pattern can be written", pf >= 0 && write(pf, pat, strlen(pat)) == (ssize_t)strlen(pat));
+        if (pf >= 0)
+            close(pf);
+        pf = open("/proc/sys/kernel/core_pattern", O_RDONLY);
+        ssize_t n = pf >= 0 ? read(pf, rb, sizeof rb - 1) : -1;
+        if (pf >= 0)
+            close(pf);
+        EXPECT("and reads back with a newline", n == (ssize_t)strlen(pat) + 1 && strncmp(rb, pat, strlen(pat)) == 0 && rb[n - 1] == '\n');
+        st = crash("co_c", 1 << 26, &pid);
+        char path[128];
+        snprintf(path, sizeof path, "co_c/pat_%d_%d", (int)pid, SIGSEGV);
+        EXPECT("a dump goes to the file the pattern expands to", WCOREDUMP(st) && stat(path, &sb) == 0 && sb.st_size > 4096);
+        unlink(path);
+        pf = open("/proc/sys/kernel/core_pattern", O_WRONLY);
+        if (pf >= 0) {
+            write(pf, "|/bin/true", 10);
+            close(pf);
+        }
+        st = crash("co_d", 1 << 26, &pid);
+        EXPECT("a pipe pattern leaves no dump", WIFSIGNALED(st) && !WCOREDUMP(st));
+        pf = open("/proc/sys/kernel/core_pattern", O_WRONLY);
+        if (pf >= 0) {
+            write(pf, old, strlen(old));
+            close(pf);
+        }
+    }
     return done();
 }
