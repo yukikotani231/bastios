@@ -692,8 +692,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             mark_rs = len(out)
             monitor("sendkey ctrl-alt-right")
             good = until(b"bhello: resized 316 160", mark_rs)
-            monitor("sendkey ctrl-alt-down", "sendkey ctrl-alt-left")
-            good = good and until(b"bhello: resized 316 176", mark_rs) and until(b"bhello: resized 300 176", mark_rs)
+            # One key at a time, each after the client has seen the one before: two keys
+            # in one call lost the second on a loaded host.
+            monitor("sendkey ctrl-alt-down")
+            good = good and until(b"bhello: resized 316 176", mark_rs)
+            monitor("sendkey ctrl-alt-left")
+            good = good and until(b"bhello: resized 300 176", mark_rs)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Alt with the arrow keys resizes the window by 16 pixels")
             fails += not good
             # Alt with the right button drags the lower right corner from anywhere in a resizable window.
