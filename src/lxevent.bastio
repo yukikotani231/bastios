@@ -636,6 +636,9 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   if target.kind == K_BAD || fd >= LXNFD {
     return EBADF;
   }
+  if target.kind == K_DIR && ofd_lacks(k, fd_ofd(k, pid, fd), ACC_PATH) {
+    return EBADF;                           // an O_PATH handle cannot be watched
+  }
   if (target.kind == K_FILE && ur_find(k, row_file(k.fs, target.x)) >= URING_N) || target.kind == K_DIR
      || target.kind == K_DEV && no_poll_dev(target.x) {
     return EPERM;                           // a file is always ready: Linux will not watch one
