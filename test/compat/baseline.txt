@@ -2318,6 +2318,32 @@ t_wgcookie: the handshake gets through the flood, by cookie
 t_wgcookie: the parent's end has an address
 t_wgcookie: the peer is set up, the child's endpoint direct
 t_wgcookie: the peer shows traffic both ways and a handshake
+t_wgcookieresp: a child in a new network namespace
+t_wgcookieresp: a client socket
+t_wgcookieresp: a device with an address
+t_wgcookieresp: a packet is echoed over the new session while the flood goes on
+t_wgcookieresp: a veth pair, one end in the child's namespace
+t_wgcookieresp: an initiation with a bad mac1 gets no reply
+t_wgcookieresp: each reply is 64 bytes, type 3 and has the index of an initiation
+t_wgcookieresp: fewer replies than initiations: the first ones were taken before it was busy
+t_wgcookieresp: go
+t_wgcookieresp: its last handshake time is set
+t_wgcookieresp: keys are traded
+t_wgcookieresp: sockets
+t_wgcookieresp: the BLAKE2s used here gives the known digest of abc
+t_wgcookieresp: the busy device answered with cookie replies
+t_wgcookieresp: the child is ready
+t_wgcookieresp: the child is set up
+t_wgcookieresp: the child is told to start the handshake
+t_wgcookieresp: the child reports
+t_wgcookieresp: the child stops
+t_wgcookieresp: the child took the packet
+t_wgcookieresp: the flood was sent
+t_wgcookieresp: the flooder reports
+t_wgcookieresp: the flooder stops
+t_wgcookieresp: the handshake the busy child started completes, by cookie reply to our response
+t_wgcookieresp: the parent's end has an address
+t_wgcookieresp: the peer is set up (no keep-alive: this side never starts a handshake)
 t_wghs: a capture socket
 t_wghs: a message of an unknown type gets none
 t_wghs: a peer without a keep-alive starts nothing
@@ -2345,6 +2371,30 @@ t_wghs: wgb knows wga
 t_wghs: wgc starts a handshake with wgd
 t_wghs: wgd knows wgc
 t_wghs: wge, unknown to wgd, gets nowhere
+t_wgprev: a child in a new network namespace
+t_wgprev: a client socket
+t_wgprev: a device with an address
+t_wgprev: a last handshake time
+t_wgprev: a packet sent under the old keys is still taken after the rekey, and echoed once
+t_wgprev: a veth pair, one end in the child's namespace
+t_wgprev: go
+t_wgprev: it is not taken once the old session is 180 s old
+t_wgprev: keys are traded
+t_wgprev: nothing came back while they were held
+t_wgprev: sockets
+t_wgprev: the child is ready
+t_wgprev: the child is set up
+t_wgprev: the child stops
+t_wgprev: the first old packet is released twice
+t_wgprev: the parent's end has an address
+t_wgprev: the peer is set up with the relay as its endpoint
+t_wgprev: the relay's control socket
+t_wgprev: the second old packet is released late
+t_wgprev: the session is renewed
+t_wgprev: the tunnel carries new traffic
+t_wgprev: the tunnel comes up
+t_wgprev: the tunnel still works
+t_wgprev: two messages are held
 t_wgtun: sockets
 t_wgtun: a child in a new network namespace
 t_wgtun: the child is ready
