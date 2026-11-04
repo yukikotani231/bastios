@@ -611,6 +611,20 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   return done;
 }
 
+/// The end of sendmsg(2), recvmsg(2) and the mmsg calls: store the result, and
+/// raise SIGPIPE for a send on a broken pipe.
+fn lx_msg_done(k: &mut Kernel, pid: u64, n: u64, fl: u64, r: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  ret(&mut k.procs, pid, r);
+  if r == EPIPE && (n == LX_SENDMSG || n == LX_SENDMMSG) && fl / MSG_NOSIGNAL % 2 == 0 {
+    post_sig(&mut k, pid, SIGPIPE);
+    return SWITCH;
+  }
+  return KEEP;
+}
+
 /// The two calls. Returns KEEP or SWITCH, as linux_syscall does.
 fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
@@ -632,10 +646,5 @@ fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   if r == SK_WAIT {
     return lx_retry(&mut k, pid, n);
   }
-  ret(&mut k.procs, pid, r);
-  if r == EPIPE && (n == LX_SENDMSG || n == LX_SENDMMSG) && fl / MSG_NOSIGNAL % 2 == 0 {
-    post_sig(&mut k, pid, SIGPIPE);
-    return SWITCH;
-  }
-  return KEEP;
+  return lx_msg_done(&mut k, pid, n, fl, r);
 }

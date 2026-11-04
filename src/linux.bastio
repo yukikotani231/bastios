@@ -296,6 +296,23 @@ fn read_l3(l3: &mut PageTable, off: u64) -> Word
   return Word { ok: true, v: v };
 }
 
+/// The end of read(2): large reads look at memory.max, then the result is returned.
+fn lx_read_done(k: &mut Kernel, pid: u64, r: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if r >= READ_MAX / 2 && r <= READ_MAX {
+    // A read this large may have faulted its buffer in from the kernel
+    // (copy_to_user), which anon_fault's look at every 256th page never
+    // sees, and it can finish before a timer tick does (under KVM, 120 MiB
+    // from /dev/zero in a quarter of a second): memory.max is looked at
+    // here too. Outside a group with a limit the look ends at once.
+    cg_oom_tick(&mut k, pid);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
 /// read(2) and readv(2) (kept out of linux_syscall, whose proof is near the
 /// solver's limit).
 fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, was: u64) -> u64
@@ -376,16 +393,7 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
   }
-  if r >= READ_MAX / 2 && r <= READ_MAX {
-    // A read this large may have faulted its buffer in from the kernel
-    // (copy_to_user), which anon_fault's look at every 256th page never
-    // sees, and it can finish before a timer tick does (under KVM, 120 MiB
-    // from /dev/zero in a quarter of a second): memory.max is looked at
-    // here too. Outside a group with a limit the look ends at once.
-    cg_oom_tick(&mut k, pid);
-  }
-  ret(&mut k.procs, pid, r);
-  return KEEP;
+  return lx_read_done(&mut k, pid, r);
 }
 
 /// Handles the Linux system call process `pid` just made.
