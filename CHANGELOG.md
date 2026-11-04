@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm`: Shift-Insert in the Alt-F2 Run prompt pastes like Ctrl-V.
 - `bwm`: Ctrl-V in the Alt-F2 Run prompt puts in the first line of the clipboard (`/tmp/bwm.clip`).
 - `bwm`: a middle click on a window's task bar button closes the window, as Alt-F4 does for the focused one.
 - `bwm`: a click on the task bar button of the focused window minimizes it (a click on any other button still raises it).

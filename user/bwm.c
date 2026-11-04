@@ -2209,6 +2209,10 @@ int main(int argc, char **argv)
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
+                        if (code == 110 && k_shift) {                      /* Shift-Insert pastes, as in a terminal window */
+                            out[0] = 22;
+                            m = 1;
+                        }
                         if (code != 15)
                             tab_k = 0;
                         if ((code == 103 || code == 108) && run_nh > 0) {      /* Up and Down: earlier commands */

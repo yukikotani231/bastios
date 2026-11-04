@@ -939,6 +939,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             time.sleep(1)
             monitor("sendkey alt-f4")
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey alt-f2", "sendkey shift-insert", "sendkey ret")
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Shift-Insert in the Run prompt pastes the clipboard")
+            fails += not good
+            time.sleep(1)
+            monitor("sendkey alt-f4")
             # Tab completes the first word from /bin: mhel is mhello, whose output goes to a file.
             time.sleep(1)
             monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "mhel"], "sendkey tab")
