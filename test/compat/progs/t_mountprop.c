@@ -196,6 +196,41 @@ int main(void) {
         r;
     }) && has_field(D "/a", "master:") == 0 && !has_field(D "/a", "shared:") && cmd("umount " D "/a"));
 
+    /* crun binds onto /proc/self/fd/N of the mount point and then names it relative to its working directory */
+    EXPECT("a relative name finds the mount a descriptor path made", ({
+        int r = 0;
+        mkdir(D "/rel", 0755);
+        mkdir(D "/rel/vol", 0755);
+        int dfd = open(D "/rel", O_PATH | O_DIRECTORY);
+        int fd = open(D "/rel/vol", O_PATH | O_DIRECTORY);
+        char pp[64];
+        snprintf(pp, sizeof pp, "/proc/self/fd/%d", fd);
+        if (dfd >= 0 && fd >= 0 && mount(D "/c", pp, NULL, MS_BIND | MS_REC, NULL) == 0 && fchdir(dfd) == 0) {
+            r = prop("vol", MS_SHARED | MS_REC) && has_field(D "/rel/vol", "shared:");
+            if (chdir("/") < 0) r = 0;
+            cmd("umount " D "/rel/vol");
+        }
+        if (fd >= 0) close(fd);
+        if (dfd >= 0) close(dfd);
+        r;
+    }));
+
+    EXPECT("a relative name finds the mount move_mount made onto a descriptor", ({
+        int r = 0;
+        int dfd = open(D "/rel", O_PATH | O_DIRECTORY);
+        int fd = open(D "/rel/vol", O_PATH | O_DIRECTORY);
+        int tr = syscall(428, AT_FDCWD, D "/c", 1 | 0x80000 | 0x8000);   /* open_tree: OPEN_TREE_CLONE | OPEN_TREE_CLOEXEC | AT_RECURSIVE */
+        if (dfd >= 0 && fd >= 0 && tr >= 0 && syscall(429, tr, "", fd, "", 0x4 | 0x40) == 0 && fchdir(dfd) == 0) {   /* move_mount: F_EMPTY_PATH | T_EMPTY_PATH */
+            r = prop("vol", MS_SHARED | MS_REC) && has_field(D "/rel/vol", "shared:");
+            if (chdir("/") < 0) r = 0;
+            cmd("umount " D "/rel/vol");
+        }
+        if (tr >= 0) close(tr);
+        if (fd >= 0) close(fd);
+        if (dfd >= 0) close(dfd);
+        r;
+    }));
+
     /* another mount namespace */
     int p1[2], p2[2];
     EXPECT("start a helper process", pipe(p1) == 0 && pipe(p2) == 0);

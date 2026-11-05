@@ -2,6 +2,7 @@
  * identity, limits, system information. */
 #include "compat.h"
 #include <sys/auxv.h>
+#include <sys/prctl.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <sys/sysinfo.h>
@@ -305,6 +306,18 @@ int main(int argc, char **argv) {
            }
            hw && hw2 && pg && end; }));
     EXPECT("getauxval finds AT_HWCAP without setting errno", ({ errno = 0; getauxval(AT_HWCAP); errno == 0; }));
+    {
+        static char st[4096];
+        struct { unsigned v, pid; } hdr = { 0x20080522, 0 };
+        struct { unsigned e, p, i; } cd[2];
+        unsigned long long eff = 0, bnd = 0;
+        const char *q;
+        int got = slurp("/proc/self/status", st, sizeof st) > 0 && syscall(SYS_capget, &hdr, cd) == 0;
+        EXPECT("status has CapInh, CapPrm, CapEff, CapBnd and CapAmb", got && strstr(st, "\nCapInh:\t") && strstr(st, "\nCapPrm:\t") && strstr(st, "\nCapEff:\t") && strstr(st, "\nCapBnd:\t") && strstr(st, "\nCapAmb:\t0000000000000000\n"));
+        EXPECT("CapEff is what capget says", got && (q = strstr(st, "\nCapEff:\t")) && sscanf(q + 9, "%llx", &eff) == 1 && eff == (((unsigned long long)cd[1].e << 32) | cd[0].e));
+        EXPECT("dropping a capability from the bounding set shows in CapBnd", got && prctl(PR_CAPBSET_DROP, 13) == 0 && slurp("/proc/self/status", st, sizeof st) > 0
+               && (q = strstr(st, "\nCapBnd:\t")) && sscanf(q + 9, "%llx", &bnd) == 1 && !(bnd >> 13 & 1) && (bnd >> 12 & 1));
+    }
     EXPECT("readlink of /proc/self is the caller's id", ({ char lb[32], want[32]; ssize_t r = readlink("/proc/self", lb, sizeof lb - 1);
            snprintf(want, sizeof want, "%d", (int)getpid()); r > 0 && (lb[r] = 0, strcmp(lb, want) == 0); }));
     return done();
