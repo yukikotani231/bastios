@@ -1165,6 +1165,63 @@ t_mountapi: then move_mount attaches it with them
 t_mountapi: with a bad flag is EINVAL
 t_mountapi: with an unknown attribute is EINVAL
 t_mountapi: with the flag from fsconfig
+t_mountprop: MS_PRIVATE clears it
+t_mountprop: MS_SHARED again is a new group
+t_mountprop: MS_SHARED shows shared:N
+t_mountprop: MS_SLAVE leaves the group of the last peer
+t_mountprop: MS_UNBINDABLE shows unbindable
+t_mountprop: a bind is private at first
+t_mountprop: a bind of a shared mount is its peer
+t_mountprop: a mount below the master shows below the slave
+t_mountprop: a mount below the slave stays there
+t_mountprop: a mount here still shows there
+t_mountprop: a mount in the container reaches the host
+t_mountprop: a mount on the host appears in the container
+t_mountprop: a plain bind does not bring the mount along
+t_mountprop: a recursive bind does
+t_mountprop: a slave receives
+t_mountprop: an unbindable mount cannot be bound
+t_mountprop: an unmount here takes it from the slave
+t_mountprop: and goes when the container unmounts it
+t_mountprop: and goes when the host unmounts it
+t_mountprop: and private again
+t_mountprop: both are in one group
+t_mountprop: clean up
+t_mountprop: clean up the binds
+t_mountprop: it shows up below b
+t_mountprop: its mounts reach its peers, not its master
+t_mountprop: make a directory to mount on
+t_mountprop: make a shared
+t_mountprop: make the namespace private
+t_mountprop: make the sub directory
+t_mountprop: mount a tmpfs below a
+t_mountprop: private b: nothing passes
+t_mountprop: rbind of an unbindable mount below is left out
+t_mountprop: rbind: set up a with a mount in it
+t_mountprop: rshared on a slave keeps its master
+t_mountprop: start a helper process
+t_mountprop: the container lets go of c
+t_mountprop: the container lets go of d
+t_mountprop: the copy is a slave of the mount it came from
+t_mountprop: the helper binds v into c, a slave like v
+t_mountprop: the helper binds v into d
+t_mountprop: the helper gets a copy of the namespace
+t_mountprop: the helper makes v a slave
+t_mountprop: the helper mounts a tmpfs below v
+t_mountprop: the helper sees it
+t_mountprop: the helper unmounts its mount
+t_mountprop: the helper unmounts its own
+t_mountprop: the helper's mount stays in its namespace
+t_mountprop: the propagation of a plain directory is EINVAL
+t_mountprop: the root can be made shared
+t_mountprop: this namespace mounts one below v
+t_mountprop: this namespace sees it
+t_mountprop: this namespace unmounts its one
+t_mountprop: two types at once are EINVAL
+t_mountprop: unmounting below b unmounts below a
+t_mountprop: unshare a mount namespace
+t_mountprop: v is a shared mount
+t_mountprop: v is shared with the copy: the same group
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -2564,6 +2621,30 @@ t_wghs: wgb knows wga
 t_wghs: wgc starts a handshake with wgd
 t_wghs: wgd knows wgc
 t_wghs: wge, unknown to wgd, gets nowhere
+t_wgnext: a child in a new network namespace
+t_wgnext: a client socket
+t_wgnext: a device with an address
+t_wgnext: a last handshake time
+t_wgnext: a new handshake is asked for
+t_wgnext: a veth pair, one end in the child's namespace
+t_wgnext: and again
+t_wgnext: go
+t_wgnext: keys are traded
+t_wgnext: sockets
+t_wgnext: the child is ready
+t_wgnext: the child is set up
+t_wgnext: the child stops
+t_wgnext: the first response is to be dropped
+t_wgnext: the initiator has not completed the handshake
+t_wgnext: the parent's end has an address
+t_wgnext: the peer is set up with the relay as its endpoint
+t_wgnext: the relay's control socket
+t_wgnext: the responder answered and the relay dropped the response
+t_wgnext: the responder still sends under the old keys, which the initiator takes
+t_wgnext: the responder's last handshake is set
+t_wgnext: the session is renewed
+t_wgnext: the tunnel carries traffic on the new session
+t_wgnext: the tunnel comes up
 t_wgprev: a child in a new network namespace
 t_wgprev: a client socket
 t_wgprev: a device with an address

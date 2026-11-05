@@ -1811,12 +1811,20 @@ fn state_letter(s: u64, waiting: bool) -> u8 {
 
 /// /proc/mounts as process p sees it: one "SOURCE /MOUNTPOINT TYPE OPTIONS 0 0"
 /// line for the root, /proc, the disk, the tmpfs and loop mounts, and the
-/// mount namespace's own.
-fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
+/// mount namespace's own. With mi, the lines of mountinfo's mounts carry
+/// their optional fields after the "0 0" (see mountinfo_text).
+fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes, mi: bool) -> u64
   requires kok(k) && blen(o) == PROC_OUT
   ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
 {
-  let mut a = put_s(&mut o, 0, "rootfs / ramfs rw 0 0\nproc /proc proc rw 0 0\n");
+  let mut a = put_s(&mut o, 0, "rootfs / ramfs rw 0 0");
+  if mi && p < NPROC {
+    let re = mp_root(k, ns_of(k, p));
+    if re < MT_N {
+      a = mp_fields(k, re, &mut o, a);
+    }
+  }
+  a = put_s(&mut o, a, "\nproc /proc proc rw 0 0\n");
   if k.fs.disk.slots > 0 {
     a = put_s(&mut o, a, "disk /disk bstdisk3 rw 0 0\n");
   }
@@ -1901,7 +1909,7 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
     }
   }
   if p < NPROC {
-    a = ns_mounts_text(k, p, &mut o, a);   // the mount namespace's own (src/lxns.bastio)
+    a = ns_mounts_text(k, p, &mut o, a, mi);   // the mount namespace's own (src/lxns.bastio)
   }
   return a;
 }
@@ -1949,7 +1957,7 @@ fn mountinfo_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
   ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
 {
   let mut t = balloc(PROC_OUT);
-  let n = smaller(mounts_text(&mut k, p, &mut t), PROC_OUT);
+  let n = smaller(mounts_text(&mut k, p, &mut t, true), PROC_OUT);
   let mut a = 0;
   let mut i = 0;
   let mut id = 1;
@@ -1976,6 +1984,16 @@ fn mountinfo_text(k: &mut Kernel, p: u64, o: &mut Bytes) -> u64
     a = put_span(&mut o, a, t, ms, me, n);
     a = put_s(&mut o, a, " ");
     a = put_span(&mut o, a, t, os, oe, n);
+    // Past the "0 0", to the end of the line: the optional fields.
+    let z1 = tok_end(t, smaller(oe + 1, n), n);
+    let z2 = tok_end(t, smaller(z1 + 1, n), n);
+    let mut z3 = z2;
+    while z3 < n && bget(t, z3) != 10
+      invariant z3 >= z2 && z3 <= n && n <= PROC_OUT && blen(t) == PROC_OUT
+    {
+      z3 = z3 + 1;
+    }
+    a = put_span(&mut o, a, t, z2, z3, n);
     a = put_s(&mut o, a, " - ");
     a = put_span(&mut o, a, t, fs, fe, n);
     a = put_s(&mut o, a, " ");
@@ -2541,7 +2559,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
   // its address space (src/lxthread.bastio): any thread's files describe it.
   let mp = mm_of(&mut k, p);
   if what == PF_MOUNTS {
-    return mounts_text(&mut k, p, &mut o);
+    return mounts_text(&mut k, p, &mut o, false);
   }
   if what == PF_MOUNTINFO && p != 0 {
     return mountinfo_text(&mut k, p, &mut o);

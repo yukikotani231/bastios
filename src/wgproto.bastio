@@ -28,11 +28,15 @@ import "core/wgnoise.bastio";
 // at once with the cookie as the key of mac2. Not done: cookie replies to
 // responses (a response is read whatever its mac2 holds).
 //
-// What is not done yet: transport data, key rotation and the timers after the first
-// session. A responder's session is current at once rather than "next"
-// until the first packet confirms it. A responder's last-handshake time
-// stays 0 for the same reason (as in Linux, where the first packet received
-// on the new session sets it).
+// A responder that already has a confirmed session keeps sending under it
+// when it answers a new initiation: the new keys are its "next" session
+// (wg_next_set), which only receives, and which replaces the current one
+// (the old one becoming the previous one) when the first packet under it
+// authenticates (wg_on_next). So a response that is lost does not leave the
+// responder sending under keys the initiator never got. A responder with no
+// confirmed session takes the new keys as its current one at once. Its
+// last-handshake time is set by the first packet received on the new
+// session, as in Linux.
 
 const REKEY_TICKS: u64 = 1000;            // 10 s (Linux: 5 s)
 const HS_TRIES: u64 = 9;
@@ -527,6 +531,27 @@ fn wg_tai_newer(n: &Net, p: u64, who: &Bytes) -> bool
   return lo > wpw(n, p, WGP_TAI_LO);
 }
 
+/// Keeps keys (send || receive) as peer p's next session: the one a responder
+/// has answered with but the initiator has not yet used. It receives, and
+/// becomes the current session when the first packet under it authenticates
+/// (wg_on_next). It replaces an earlier next session that no packet came on.
+fn wg_next_set(n: &mut Net, p: u64, keys: &Bytes, lidx: u64, ridx: u64)
+  requires net_ok(n) && p < WGPN && blen(keys) == 64
+  ensures net_ok(n)
+{
+  wns(&mut n, p, WGN_VALID, 1);
+  wns(&mut n, p, WGN_LIDX, lidx);
+  wns(&mut n, p, WGN_RIDX, ridx);
+  wns(&mut n, p, WGN_BORN, n.now);
+  let mut k = 0;
+  while k < 8
+    invariant k <= 8 && net_ok(n)
+  {
+    wns(&mut n, p, WGN_SK + k, load_le64(keys, k * 8));
+    k = k + 1;
+  }
+}
+
 /// Answers a verified initiation of peer p: who is the consumed initiation
 /// (static key, timestamp, ephemeral key), st its state, msg the datagram.
 /// ent as for wg_initiate.
@@ -549,7 +574,11 @@ fn wg_respond(n: &mut Net, i: u64, p: u64, who: &Bytes, st: &mut Bytes, msg: &By
       wps(&mut n, p, WGP_TAI_HI, load_be64(who, 32));
       wps(&mut n, p, WGP_TAI_LO, cast[u64](load_be32(who, 40)));
       wg_set_endpoint(&mut n, p, src_ip, src_port);
-      wg_session(&mut n, p, keys, idx, ridx, ticks, 0);
+      if wg_fresh(n, p) && wpw(n, p, WGP_CONF) == 1 {
+        wg_next_set(&mut n, p, keys, idx, ridx);      // sending goes on under the old keys until a packet arrives under these
+      } else {
+        wg_session(&mut n, p, keys, idx, ridx, ticks, 0);
+      }
       if blen(full) == MSG_RESP {
         wg_ring_put(&mut n, p, idx, full);
         wg_send_peer(&mut n, i, p, full, MSG_RESP);
@@ -940,6 +969,85 @@ fn wg_prev_set(n: &mut Net, p: u64, ctr: u64)
   }
 }
 
+/// The peer of device i whose next session has our index idx.
+fn wg_peer_next(n: &Net, i: u64, idx: u64) -> u64
+  requires net_ok(n) && i < IFN
+  ensures result <= WGPN
+{
+  let mut p = 0;
+  while p < WGPN
+    invariant p <= WGPN && net_ok(n)
+  {
+    if wpw(n, p, WGP_OWNER) == i + 1 && wnw(n, p, WGN_VALID) == 1 && wnw(n, p, WGN_LIDX) == idx {
+      return p;
+    }
+    p = p + 1;
+  }
+  return WGPN;
+}
+
+/// A transport message under the next session of peer p. If it
+/// authenticates, the next session becomes the current one (the old current
+/// one becomes the previous one) and the message is delivered; nothing else
+/// changes the current session.
+fn wg_on_next(n: &mut Net, i: u64, p: u64, buf: &Bytes, len: u64, src_ip: u64, src_port: u64, wall: u64)
+  requires net_ok(n) && i < IFN && p < WGPN && len <= blen(buf) && len >= 32 && len <= WG_MTU + 48
+  ensures net_ok(n)
+{
+  let born = wnw(n, p, WGN_BORN);
+  let ctr = load_le64(buf, 8);
+  if n.now < born || n.now - born >= REJECT_AFTER {
+    wg_next_wipe(&mut n, p);            // too old to take a packet
+    return;
+  }
+  if ctr >= SESSION_MAX {
+    return;
+  }
+  let mut key = balloc(32);
+  let mut k = 0;
+  while k < 4
+    invariant k <= 4 && blen(key) == 32 && net_ok(n)
+  {
+    store_le64(&mut key, k * 8, wnw(n, p, WGN_RK + k));
+    k = k + 1;
+  }
+  let mut nonce = balloc(12);
+  store_le64(&mut nonce, 4, ctr);
+  let aad = balloc(0);
+  let sealed = bytes_slice(buf, 16, len);
+  match aead_open(key, nonce, aad, sealed) {
+    Option::None => {},
+    Option::Some(plain) => {
+      let mut keys = balloc(64);
+      let mut j = 0;
+      while j < 8
+        invariant j <= 8 && blen(keys) == 64 && net_ok(n)
+      {
+        store_le64(&mut keys, j * 8, wnw(n, p, WGN_SK + j));
+        j = j + 1;
+      }
+      wg_session(&mut n, p, keys, wnw(n, p, WGN_LIDX), wnw(n, p, WGN_RIDX), 0, 0);
+      wps(&mut n, p, WGP_SBORN, born);
+      wg_next_wipe(&mut n, p);
+      bfree(keys);
+      wg_win_set(&mut n, p, ctr);
+      wg_set_endpoint(&mut n, p, src_ip, src_port);
+      let rx = wpw(n, p, WGP_RX);
+      if rx <= 18446744073709551615 - len {
+        wps(&mut n, p, WGP_RX, rx + len);
+      }
+      wps(&mut n, p, WGP_CONF, 1);
+      wps(&mut n, p, WGP_LHS, wall);
+      wg_deliver(&mut n, i, p, plain);
+      bfree(plain);
+    },
+  }
+  bfree(sealed);
+  bfree(aad);
+  bfree(nonce);
+  bfree(key);
+}
+
 /// A transport message for the previous session of peer p, if that is
 /// still younger than REJECT_AFTER. It is delivered like any other; the
 /// session it is under stays receive-only and never confirms anything.
@@ -1019,6 +1127,11 @@ fn wg_on_data(n: &mut Net, i: u64, buf: &Bytes, len: u64, src_ip: u64, src_port:
   let idx = cast[u64](load_le32(buf, 4));
   let p = wg_peer_session(n, i, idx);
   if p >= WGPN {
+    let r = wg_peer_next(n, i, idx);
+    if r < WGPN {
+      wg_on_next(&mut n, i, r, buf, len, src_ip, src_port, wall);
+      return;
+    }
     let q = wg_peer_prev(n, i, idx);
     if q < WGPN {
       wg_on_prev(&mut n, i, q, buf, len, src_ip, src_port);
