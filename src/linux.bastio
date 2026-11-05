@@ -689,9 +689,14 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     // MAP_FIXED unmaps, and a mapping that is not plain read-write has its
     // pages protected after they are mapped (read_only): both wait until
     // no other thread of pid runs on a processor, as win_op needs. (Private
-    // anonymous PROT_NONE maps nothing.)
+    // anonymous PROT_NONE maps nothing.) So does an address hint: whether
+    // anything is mapped there is counted with win_op (mmap_hint), which
+    // answers "something" while another thread runs. A hint then went
+    // unheard: Firefox maps its shared memory again read-only at the same
+    // address, checks that it got it, and gives the mapping up if not.
     let protects = prot_arg(c) != 2 && !(c == 0 && flags & MAP_ANONYMOUS != 0 && flags & MAP_SHARED_VALIDATE == MAP_PRIVATE);
-    if (flags / MAP_FIXED % 2 == 1 || protects) && !win_quiet(&mut k, pid) {
+    let hinted = a != 0 && flags / MAP_FIXED % 2 == 0;      // (MAP_FIXED_NOREPLACE too)
+    if (flags / MAP_FIXED % 2 == 1 || protects || hinted) && !win_quiet(&mut k, pid) {
       return lx_retry(&mut k, pid, n);
     }
     let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
