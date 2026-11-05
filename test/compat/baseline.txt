@@ -1171,6 +1171,7 @@ t_mountprop: MS_SHARED shows shared:N
 t_mountprop: MS_SLAVE leaves the group of the last peer
 t_mountprop: MS_UNBINDABLE shows unbindable
 t_mountprop: a bind is private at first
+t_mountprop: propagation through /proc/self/fd/N reaches the mount
 t_mountprop: a bind of a shared mount is its peer
 t_mountprop: a mount below the master shows below the slave
 t_mountprop: a mount below the slave stays there

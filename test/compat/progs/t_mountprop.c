@@ -186,6 +186,16 @@ int main(void) {
     EXPECT("rbind of an unbindable mount below is left out", cmd("unbindable " D "/a/s") && cmd("umount " D "/c/s") && cmd("umount " D "/c") && cmd("rbind " D "/a " D "/c") && !cmd("exists " D "/c/s/r"));
     EXPECT("clean up the binds", cmd("umount " D "/c") && cmd("umount " D "/a/s") && cmd("umount " D "/a"));
 
+    /* crun sets it through /proc/self/fd/N of the mount point it opened */
+    EXPECT("propagation through /proc/self/fd/N reaches the mount", cmd("bind " D "/a " D "/a") && cmd("shared " D "/a") && ({
+        int fd = open(D "/a", O_PATH | O_DIRECTORY);
+        char pp[64];
+        snprintf(pp, sizeof pp, "/proc/self/fd/%d", fd);
+        int r = fd >= 0 && prop(pp, MS_SLAVE | MS_REC);
+        if (fd >= 0) close(fd);
+        r;
+    }) && has_field(D "/a", "master:") == 0 && !has_field(D "/a", "shared:") && cmd("umount " D "/a"));
+
     /* another mount namespace */
     int p1[2], p2[2];
     EXPECT("start a helper process", pipe(p1) == 0 && pipe(p2) == 0);
