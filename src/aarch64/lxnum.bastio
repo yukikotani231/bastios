@@ -280,6 +280,12 @@ fn lx_number(n: u64) -> u64
   if n == 438 { return LX_PIDFD_GETFD; }
   if n == 439 { return LX_FACCESSAT2; }
   if n == 441 { return LX_EPOLL_PWAIT2; }
+  if n == 442 { return LX_MOUNT_SETATTR; }
+  if n == 444 { return LX_LL_CREATE; }
+  if n == 445 { return LX_LL_ADD; }
+  if n == 446 { return LX_LL_RESTRICT; }
+  if n == 449 { return LX_FUTEX_WAITV; }
+  if n == 451 { return LX_CACHESTAT; }
   if n == 452 { return LX_FCHMODAT2; }
   return LX_NONE;
 }
