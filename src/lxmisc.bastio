@@ -228,7 +228,7 @@ fn lx_getrusage(k: &mut Kernel, pid: u64, children: bool, va: u64) -> u64
 /// memory (files live in memory), with names up to COMP_MAX bytes. Its
 /// type is tmpfs for a path in a tmpfs mount (src/lxmount.bastio), ramfs
 /// otherwise (`magic`).
-fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64, mflags: u64) -> u64
+fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64, mflags: u64, lim: u64, used: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -239,6 +239,16 @@ fn lx_statfs(k: &mut Kernel, pid: u64, va: u64, magic: u64, mflags: u64) -> u64
   xfer_u64(&mut k.fs.xfer, 16, pool_size(k.mem.pool));           // f_blocks
   xfer_u64(&mut k.fs.xfer, 24, nfree);            // f_bfree
   xfer_u64(&mut k.fs.xfer, 32, nfree);            // f_bavail
+  if lim > 0 {
+    // A tmpfs with a size limit (size=): its own blocks, as df shows them.
+    let mut left = 0;
+    if lim > used {
+      left = (lim - used) / 4096;
+    }
+    xfer_u64(&mut k.fs.xfer, 16, lim / 4096);
+    xfer_u64(&mut k.fs.xfer, 24, smaller(left, nfree));
+    xfer_u64(&mut k.fs.xfer, 32, smaller(left, nfree));
+  }
   xfer_u64(&mut k.fs.xfer, 40, NFILES + DSLOTS);  // f_files
   xfer_u64(&mut k.fs.xfer, 48, NFILES);           // f_ffree (a guess: the table is not counted)
   xfer_u64(&mut k.fs.xfer, 64, COMP_MAX);         // f_namelen
@@ -281,22 +291,23 @@ fn lx_fstatfs(k: &mut Kernel, pid: u64, d: Fd, va: u64) -> u64
   ensures kok(k)
 {
   if (d.kind == K_DEV && is_cg_file(d.x)) || (d.kind == K_DIR && d.x >= DIR_CG) {
-    return lx_statfs(&mut k, pid, va, CGROUP2_MAGIC, 0);
+    return lx_statfs(&mut k, pid, va, CGROUP2_MAGIC, 0, 0, 0);
   }
   if d.kind == K_DIR && d.x >= DIR_PROC && d.x < DIR_CG {
-    return lx_statfs(&mut k, pid, va, PROC_MAGIC, 0);
+    return lx_statfs(&mut k, pid, va, PROC_MAGIC, 0, 0, 0);
   }
   if d.kind == K_FILE && d.x < FD_ROWS {
     if vfs_file_in_mount(&mut k.fs, vfs_row_file(k.fs, d.x)) {
       let mf = vfs_file_mflags(&mut k.fs, vfs_row_file(k.fs, d.x));
-      return lx_statfs(&mut k, pid, va, TMPFS_MAGIC, mf);
+      let qt = vfs_file_quota(&mut k.fs, vfs_row_file(k.fs, d.x));
+      return lx_statfs(&mut k, pid, va, TMPFS_MAGIC, mf, qt.limit, qt.used);
     }
     let h = vfs_row_file(k.fs, d.x);
     if h >= NFILES && h < NFILES + DSLOTS {
       return lx_statfs_disk(&mut k, pid, va);
     }
   }
-  return lx_statfs(&mut k, pid, va, RAMFS_MAGIC, 0);
+  return lx_statfs(&mut k, pid, va, RAMFS_MAGIC, 0, 0, 0);
 }
 
 /// getrandom(buf, n, flags): the bytes /dev/urandom gives, from the kernel's
@@ -1027,16 +1038,17 @@ fn lx_statfs_path(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
   } else if !path_there(&mut k, pn) {
     r = ENOENT;
   } else if cg_under(k, pn) {
-    r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC, 0);
+    r = lx_statfs(&mut k, pid, b, CGROUP2_MAGIC, 0, 0, 0);
   } else if pn >= 4 && xfer_is(k.fs.xfer, 0, 4, "proc") && (pn == 4 || bget(k.fs.xfer, 4) == 47) {
-    r = lx_statfs(&mut k, pid, b, PROC_MAGIC, 0);
+    r = lx_statfs(&mut k, pid, b, PROC_MAGIC, 0, 0, 0);
   } else if vfs_in_mount(&mut k.fs, pn, false) {
     let mf = vfs_path_mflags(&mut k.fs, pn);
-    r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC, mf | lpath_stflags(k));
+    let qt = vfs_path_quota(&mut k.fs, pn);
+    r = lx_statfs(&mut k, pid, b, TMPFS_MAGIC, mf | lpath_stflags(k), qt.limit, qt.used);
   } else if on_disk(k.fs, pn) || (pn + 1 == DISK_PREFIX && xfer_is(k.fs.xfer, 0, pn, "disk")) {
     r = lx_statfs_disk(&mut k, pid, b);   // disk/ itself, or a name under it
   } else {
-    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC, lpath_stflags(k));
+    r = lx_statfs(&mut k, pid, b, RAMFS_MAGIC, lpath_stflags(k), 0, 0);
   }
   return r;
 }
