@@ -2181,6 +2181,7 @@ x11: x11: a Qt 5 transport stream muxer, tsMuxeR, draws its window on the X scre
 x11: x11: a Java media renamer, FileBot, draws its window on the X screen
 x11: x11: a GTK folder synchroniser, FreeFileSync, draws its window on the X screen
 x11: x11: a Qt file manager, Krusader, draws its window on the X screen
+x11: x11: a GTK PDF viewer, Evince, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program

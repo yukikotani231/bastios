@@ -190,3 +190,12 @@ fakebwm: window 800x600 X11 :18
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a GTK PDF viewer, Evince, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity|filebot|FreeFileSync|krusader/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/e/tmp; bb tar -xf /disk/evince.tar -C /disk/e && bb rm /disk/evince.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/e/tmp/.passwd; echo root:x:0: >/disk/e/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb20.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/e -d 19 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/evince >/disk/ev.out 2>&1 & n=0; while [ $n -lt 360 ] && ! bb grep -q typed /disk/fb20.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb20.out 2>/dev/null || { bb tail -n 12 /disk/ev.out | bb cut -c1-200; }; bb cat /disk/fb20.out; bb ps | bb grep -q 'evince' && echo alive || bb cat /disk/ev.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :19
+fakebwm: pixels drawn
+fakebwm: typed
+alive
