@@ -926,6 +926,9 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         # A wallpaper named in /etc/bwm.wallpaper while bwm runs replaces the desktop (a 2 x 2 red PPM).
         q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/wall.ppm\r"); q.stdin.flush()
         time.sleep(0.5)
+        # Two pictures for w in the System window to cycle through.
+        q.stdin.write(b"mkdir -p /usr/share/wallpapers; cp /tmp/wall.ppm /usr/share/wallpapers/a.ppm; cp /tmp/wall.ppm /usr/share/wallpapers/b.ppm\r"); q.stdin.flush()
+        time.sleep(0.5)
         q.stdin.write(b"(sleep 4; echo /tmp/wall.ppm > /etc/bwm.wallpaper) &\r"); q.stdin.flush()
         time.sleep(0.5)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
@@ -1150,6 +1153,14 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = until(b"bsys: keyboard " + lay, mark) and until(b"bwm: keyboard " + lay, mark)
             print(("ok  " if good else "FAIL"), f"({name}) k in the System window cycles the keyboard layout")
             fails += not good
+            # w puts the next picture of /usr/share/wallpapers in /etc/bwm.wallpaper (a.ppm, b.ppm, then none).
+            for want in (b"a.ppm", b"b.ppm", b"none"):
+                if not good:
+                    break
+                monitor("sendkey w")
+                good = until(b"bsys: wallpaper " + want, mark)
+            print(("ok  " if good else "FAIL"), f"({name}) w in the System window cycles the wallpaper")
+            fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
             monitor("sendkey p")
@@ -1274,7 +1285,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
         mark = len(out)
-        q.stdin.write(b"rm -f /etc/bwm.wallpaper /tmp/wall.ppm\r"); q.stdin.flush()      # the wallpaper the test above set
+        q.stdin.write(b"rm -rf /etc/bwm.wallpaper /tmp/wall.ppm /usr/share/wallpapers\r"); q.stdin.flush()      # the wallpaper the test above set
         until(b"# ", mark)
         mark = len(out)
         q.stdin.write(b"kill -0 %d 2>/dev/null || echo gone$((1+1))\r" % sleeper); q.stdin.flush()
