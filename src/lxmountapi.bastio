@@ -536,20 +536,18 @@ fn lx_mount_setattr(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64, u
       return 0;
     }
     // The directory the descriptor holds, looked up as a path.
-    let dl = base_len(k, pid, h);
-    if dl == 0 {
-      return EINVAL;
-    }
-    let mut c = 0;
-    while c < dl
-      invariant c <= dl && dl <= FNAME_MAX && kok(k) && pid < NPROC && h < OFD_N
-    {
-      bset(&mut k.fs.xfer, c, base_byte(k, pid, h, c));
-      c = c + 1;
-    }
-    let pn = lx_path_xfer(&mut k, pid, dl, OFD_N, true);
+    let pn = dir_resolved(&mut k, pid, h);
     if pn == NO_RESULT {
       return k.perr;
+    }
+    if prop != 0 {
+      let pr = ns_prop_apply(&mut k, pid, pn, prop, flags & 0x8000 != 0);   // util-linux's mount --make-shared: open_tree, then this on the descriptor
+      if pr != 0 {
+        return pr;
+      }
+    }
+    if setst == 0 && clrst == 0 {
+      return 0;
     }
     return ns_set_attrs(&mut k, pid, setst, clrst);
   }
@@ -595,9 +593,6 @@ fn lx_open_tree(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64) -> u6
   }
   if flags & OPEN_TREE_CLONE != 0 && dir_at(&mut k, n) == NO_FILE {
     return ENOSYS;                          // a copy of a file's mount: not supported
-  }
-  if flags & OPEN_TREE_CLONE != 0 && n <= XFER && proc_fd(k.procs, k.fs.xfer, n) != NO_RESULT {
-    return ENOSYS;                          // a name through /proc/self/fd/N shares the descriptor's description: no clone of it
   }
   let n2 = lx_path_at(&mut k, pid, dfd % 0x100000000, path);   // path_meta may have used the transfer buffer
   if n2 == NO_RESULT {

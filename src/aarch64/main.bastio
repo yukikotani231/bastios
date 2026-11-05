@@ -100,6 +100,8 @@ import "lxnum.bastio";
 const V_TIMER: u64 = 32;
 const V_LTIMER: u64 = 48;     // the tick of a processor other than the boot one
 const V_WAKE: u64 = 50;       // another processor's wake-up (an SGI): look for work
+const INFO_POLL: u64 = 13;    // not a query: while idle, wake every i microseconds (0: only at ticks), to find a finished I/O
+const POLL_US: u64 = 500;
 const INFO_KICK: u64 = 12;    // not a query: sends the wake-up to the other processors (the answer is 0)
 const V_SYSCALL: u64 = 128;
 const V_ABORT: u64 = 14;
@@ -134,7 +136,7 @@ spec fn sys_ok(s: &Sys) -> bool {
 // its FP/SIMD page.
 struct Task { pid: u64, lease: Lease, fpu: Frame }
 
-enum Job { Stop, Idle, Run(Task) }
+enum Job { Stop, Idle, Poll, Run(Task) }   // Poll: nothing to run, but a process waits for the disk or the network
 
 /// Writes the kernel's waiting output to the serial line.
 fn drain(ser: &Serial, c: &mut Con)
@@ -200,6 +202,25 @@ fn set_clock(s: &mut Sys, cpu: &Cpu)
   s.k.fs.now = sat_add(s.k.epoch, s.k.ns) / FS_TICK_NS * FS_TICK_NS;   // wall-clock nanoseconds, as stat reports them
 }
 
+/// Does a process wait for the disk or the network (so that a completion,
+/// which only polling notices, ends its wait)?
+fn io_waiting(k: &Kernel) -> bool
+  requires kok(k)
+{
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);
+  let mut p = 1;
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
+  {
+    let st = state(k.procs, p);
+    if st == DISKWAIT || st == NETWAIT || st == SOCKWAIT {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
 /// What the processor does next. Starting at `from` (round robin), takes
 /// the next READY process out, with its registers loaded into `cpu`, and
 /// marks it RUNNING.
@@ -226,6 +247,9 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64) -> Job
     if live_count(s.k.procs, s.k.pid_hi) == 0 {
       s.stop = true;
       return Job::Stop;
+    }
+    if io_waiting(s.k) {
+      return Job::Poll;
     }
     return Job::Idle;
   }
@@ -676,6 +700,15 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], ser: &Serial)
         locked(s, idled, cpu, v, ser);
         j = locked(s, next_job, &mut cpu, &mut mmu, cur);
       },
+      Job::Poll => {
+        // The same, but a finished disk or network request is noticed within
+        // POLL_US instead of at the next tick.
+        let a = boot_info(cpu, INFO_POLL, POLL_US);
+        let v = cpu_idle(&mut cpu);
+        let b = boot_info(cpu, INFO_POLL, 0);
+        locked(s, idled, cpu, v, ser);
+        j = locked(s, next_job, &mut cpu, &mut mmu, cur);
+      },
       Job::Run(t) => {
         cpu_fpu_load(&mut cpu, t.fpu);
         let v = cpu_run(&mut cpu, mmu);
@@ -695,6 +728,7 @@ fn sched(cpu: &mut Cpu, mmu: &mut Mmu, s: &Lock[Sys], ser: &Serial)
       let c = locked(s, finish_end, &mut cpu, mmu, t.pid, t.fpu, V_TIMER);
     },
     Job::Idle => {},
+    Job::Poll => {},
     Job::Stop => {},
   }
 }

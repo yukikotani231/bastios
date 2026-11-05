@@ -9,6 +9,8 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #ifndef MS_REC
 #define MS_REC 0x4000
@@ -21,6 +23,19 @@
 #endif
 
 #define D "/tmp/mp"
+#define OPEN_TREE 428
+#define MOUNT_SETATTR 442
+struct mattr { unsigned long long set, clr, prop, userns; };
+
+/* util-linux's mount --make-shared and friends: open_tree the mount point, then mount_setattr the descriptor. */
+static int setattr_prop(const char *path, unsigned long long prop) {
+    int fd = syscall(OPEN_TREE, AT_FDCWD, path, 0x80000);
+    if (fd < 0) return 0;
+    struct mattr a = { 0, 0, prop, 0 };
+    int r = syscall(MOUNT_SETATTR, fd, "", 0x1000, &a, sizeof a) == 0;
+    close(fd);
+    return r;
+}
 
 /* The optional fields (between the mount options and " - ") of the mountinfo
  * line of mount point mp, in a static buffer; NULL if there is no such line. */
@@ -97,6 +112,12 @@ static int cmd(const char *line) {
     if (!strcmp(op, "private")) return prop(a, MS_PRIVATE);
     if (!strcmp(op, "rprivate")) return prop(a, MS_PRIVATE | MS_REC);
     if (!strcmp(op, "unbindable")) return prop(a, MS_UNBINDABLE);
+    if (!strcmp(op, "proc")) return mount("proc", a, "proc", 0, NULL) == 0;
+    if (!strcmp(op, "remount")) return mount(NULL, a, NULL, MS_REMOUNT | MS_BIND, NULL) == 0;
+    if (!strcmp(op, "pivot")) {
+        if (chdir(a) != 0 || syscall(SYS_pivot_root, ".", ".") != 0) return 0;
+        return umount2(".", MNT_DETACH) == 0 && chdir("/") == 0;
+    }
     if (!strcmp(op, "mkdir")) return mkdir(a, 0755) == 0 || errno == EEXIST;
     if (!strcmp(op, "mkfile")) {
         int fd = open(a, O_CREAT | O_WRONLY, 0644);
@@ -196,6 +217,25 @@ int main(void) {
         r;
     }) && has_field(D "/a", "master:") == 0 && !has_field(D "/a", "shared:") && cmd("umount " D "/a"));
 
+    /* mount_setattr on an open_tree descriptor, as util-linux does it */
+    EXPECT("mount_setattr sets MS_SHARED through an open_tree descriptor", cmd("bind " D "/a " D "/a") && setattr_prop(D "/a", MS_SHARED) && has_field(D "/a", "shared:"));
+    EXPECT("and MS_PRIVATE", setattr_prop(D "/a", MS_PRIVATE) && !has_field(D "/a", "shared:"));
+    EXPECT("in a chroot too", ({
+        int st = 0;
+        mkdir(D "/proc", 0755);
+        mount("proc", D "/proc", "proc", 0, NULL);
+        pid_t c = fork();
+        if (c == 0) {
+            if (chroot(D) != 0 || chdir("/") != 0) _exit(1);
+            int ok = setattr_prop("/a", MS_SHARED) && has_field("/a", "shared:") && setattr_prop("/a", MS_PRIVATE) && !has_field("/a", "shared:");
+            _exit(ok ? 0 : 2);
+        }
+        waitpid(c, &st, 0);
+        umount(D "/proc");
+        WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    }));
+    EXPECT("clean up after mount_setattr", cmd("umount " D "/a"));
+
     /* crun binds onto /proc/self/fd/N of the mount point and then names it relative to its working directory */
     EXPECT("a relative name finds the mount a descriptor path made", ({
         int r = 0;
@@ -277,6 +317,20 @@ int main(void) {
     EXPECT("rshared on a slave keeps its master", F("rshared " D "/c") == 1 && F("has " D "/c shared:") == 1 && F("has " D "/c master:") == 1);
     EXPECT("its mounts reach its peers, not its master", F("tmpfs " D "/c/m") == 1 && F("mkfile " D "/c/m/k") == 1 && !cmd("exists " D "/v/m/k") && F("umount " D "/c/m") == 1);
     EXPECT("the container lets go of c", F("umount " D "/c") == 1);
+
+    /* the sequence an OCI runtime runs for a volume: bind it into the
+     * rootfs, remount for the options, set the propagation, pivot_root */
+    EXPECT("rootfs: the helper becomes a slave of everything", F("rslave /") == 1);
+    EXPECT("rootfs: bind it on itself and the volume below", F("mkdir " D "/r") == 1 && F("bind " D "/r " D "/r") == 1 && F("mkdir " D "/r/vol") == 1 && F("rbind " D "/v " D "/r/vol") == 1);
+    EXPECT("rootfs: remount for the options keeps the group", F("remount " D "/r/vol") == 1 && F("has " D "/r/vol master:") == 1);
+    EXPECT("rootfs: rshared on it", F("rshared " D "/r/vol") == 1 && F("has " D "/r/vol shared:") == 1);
+    EXPECT("rootfs: a mount on the host reaches it", cmd("mkdir " D "/v/h") && cmd("tmpfs " D "/v/h") && cmd("mkfile " D "/v/h/p") && F("exists " D "/r/vol/h/p") == 1 && cmd("umount " D "/v/h"));
+    EXPECT("rootfs: a proc below it", F("mkdir " D "/r/proc") == 1 && F("proc " D "/r/proc") == 1);
+    EXPECT("rootfs: pivot_root into it", F("pivot " D "/r") == 1);
+    EXPECT("rootfs: the volume is a mount after pivot_root", F("mounted /vol") == 1);
+    EXPECT("rootfs: the volume is shared after pivot_root", F("has /vol shared:") == 1);
+    EXPECT("rootfs: the volume is a slave after pivot_root", F("has /vol master:") == 1);
+    EXPECT("rootfs: a mount made in the container reaches its peers", F("mkdir /vol/m") == 1 && F("tmpfs /vol/m") == 1 && F("mkfile /vol/m/k") == 1);
 
     close(cw);
     waitpid(hp, NULL, 0);
