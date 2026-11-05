@@ -724,6 +724,7 @@ t_misc: tcgetattr
 t_misc: tcgetpgrp
 t_misc: tcsetattr
 t_misc: an EL0 read of ID_AA64ISAR0_EL1 is emulated
+t_misc: seccomp SECCOMP_RET_TRAP: the SIGSYS handler sees the call's registers as they were and answers it
 t_more: FIONREAD on a pipe
 t_more: O_NONBLOCK by fcntl on a listening socket
 t_more: a full nonblocking pipe is EAGAIN
