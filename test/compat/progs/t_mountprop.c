@@ -9,6 +9,8 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 
 #ifndef MS_REC
 #define MS_REC 0x4000
@@ -97,6 +99,12 @@ static int cmd(const char *line) {
     if (!strcmp(op, "private")) return prop(a, MS_PRIVATE);
     if (!strcmp(op, "rprivate")) return prop(a, MS_PRIVATE | MS_REC);
     if (!strcmp(op, "unbindable")) return prop(a, MS_UNBINDABLE);
+    if (!strcmp(op, "proc")) return mount("proc", a, "proc", 0, NULL) == 0;
+    if (!strcmp(op, "remount")) return mount(NULL, a, NULL, MS_REMOUNT | MS_BIND, NULL) == 0;
+    if (!strcmp(op, "pivot")) {
+        if (chdir(a) != 0 || syscall(SYS_pivot_root, ".", ".") != 0) return 0;
+        return umount2(".", MNT_DETACH) == 0 && chdir("/") == 0;
+    }
     if (!strcmp(op, "mkdir")) return mkdir(a, 0755) == 0 || errno == EEXIST;
     if (!strcmp(op, "mkfile")) {
         int fd = open(a, O_CREAT | O_WRONLY, 0644);
@@ -277,6 +285,20 @@ int main(void) {
     EXPECT("rshared on a slave keeps its master", F("rshared " D "/c") == 1 && F("has " D "/c shared:") == 1 && F("has " D "/c master:") == 1);
     EXPECT("its mounts reach its peers, not its master", F("tmpfs " D "/c/m") == 1 && F("mkfile " D "/c/m/k") == 1 && !cmd("exists " D "/v/m/k") && F("umount " D "/c/m") == 1);
     EXPECT("the container lets go of c", F("umount " D "/c") == 1);
+
+    /* the sequence an OCI runtime runs for a volume: bind it into the
+     * rootfs, remount for the options, set the propagation, pivot_root */
+    EXPECT("rootfs: the helper becomes a slave of everything", F("rslave /") == 1);
+    EXPECT("rootfs: bind it on itself and the volume below", F("mkdir " D "/r") == 1 && F("bind " D "/r " D "/r") == 1 && F("mkdir " D "/r/vol") == 1 && F("rbind " D "/v " D "/r/vol") == 1);
+    EXPECT("rootfs: remount for the options keeps the group", F("remount " D "/r/vol") == 1 && F("has " D "/r/vol master:") == 1);
+    EXPECT("rootfs: rshared on it", F("rshared " D "/r/vol") == 1 && F("has " D "/r/vol shared:") == 1);
+    EXPECT("rootfs: a mount on the host reaches it", cmd("mkdir " D "/v/h") && cmd("tmpfs " D "/v/h") && cmd("mkfile " D "/v/h/p") && F("exists " D "/r/vol/h/p") == 1 && cmd("umount " D "/v/h"));
+    EXPECT("rootfs: a proc below it", F("mkdir " D "/r/proc") == 1 && F("proc " D "/r/proc") == 1);
+    EXPECT("rootfs: pivot_root into it", F("pivot " D "/r") == 1);
+    EXPECT("rootfs: the volume is a mount after pivot_root", F("mounted /vol") == 1);
+    EXPECT("rootfs: the volume is shared after pivot_root", F("has /vol shared:") == 1);
+    EXPECT("rootfs: the volume is a slave after pivot_root", F("has /vol master:") == 1);
+    EXPECT("rootfs: a mount made in the container reaches its peers", F("mkdir /vol/m") == 1 && F("tmpfs /vol/m") == 1 && F("mkfile /vol/m/k") == 1);
 
     close(cw);
     waitpid(hp, NULL, 0);
