@@ -1172,6 +1172,7 @@ t_mountprop: MS_SHARED shows shared:N
 t_mountprop: MS_SLAVE leaves the group of the last peer
 t_mountprop: MS_UNBINDABLE shows unbindable
 t_mountprop: a bind is private at first
+t_mountprop: propagation through /proc/self/fd/N reaches the mount
 t_mountprop: a bind of a shared mount is its peer
 t_mountprop: a mount below the master shows below the slave
 t_mountprop: a mount below the slave stays there
@@ -1223,6 +1224,8 @@ t_mountprop: unmounting below b unmounts below a
 t_mountprop: unshare a mount namespace
 t_mountprop: v is a shared mount
 t_mountprop: v is shared with the copy: the same group
+t_mountprop: a relative name finds the mount a descriptor path made
+t_mountprop: a relative name finds the mount move_mount made onto a descriptor
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -1586,6 +1589,11 @@ t_proc: maps has a [heap] after brk grows
 t_proc: maps has [stack] and [vdso]
 t_proc: maps lines end at column 74 for names
 t_proc: readlink of /proc/self is the caller's id
+t_proc: auxv carries AT_HWCAP and AT_HWCAP2 (a C library's ifuncs read them before it has a thread pointer), AT_PAGESZ, and ends in AT_NULL
+t_proc: getauxval finds AT_HWCAP without setting errno
+t_proc: status has CapInh, CapPrm, CapEff, CapBnd and CapAmb
+t_proc: CapEff is what capget says
+t_proc: dropping a capability from the bounding set shows in CapBnd
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke
