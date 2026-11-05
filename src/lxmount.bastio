@@ -43,7 +43,6 @@ const FST_BSTDISK: u64 = 2;
 const FST_EXT4: u64 = 3;                // ext4, and ext2 and ext3 images without a journal to replay (src/ext4.bastio)
 const FST_NS: u64 = 16;                 // FST_NS + MK_*: mounted per namespace (src/lxns.bastio)
 const MS_BIND: u64 = 4096;
-const MS_PROPAGATION: u64 = 0x1E0000;   // MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED
 
 /// The mount flags a tmpfs or image mount keeps, as statfs reports them
 /// (ST_*): MS_KEPT's, and MS_NOSYMFOLLOW as ST_NOSYMFOLLOW.
@@ -253,13 +252,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   ns_reap(&mut k);
   let remount = flags & MS_REMOUNT != 0;
   if !remount && flags & MS_PROPAGATION != 0 {
-    // A change of propagation: there is none between namespaces here, so
-    // only the target is checked.
-    let n = lx_path_at(&mut k, pid, AT_FDCWD, target);
-    if n == NO_RESULT {
-      return k.perr;
-    }
-    return 0;
+    return ns_propagation(&mut k, pid, target, flags);   // src/lxns.bastio
   }
   if remount && flags & MS_BIND != 0 {
     return ns_remount(&mut k, pid, target, flags);
@@ -321,8 +314,8 @@ fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n:
   requires kok(k) && pid < NPROC && n <= FNAME_MAX && img <= NFILES
   ensures kok(k)
 {
-  if !full && t == FST_TMPFS && !remount && n != 0 {
-    return ns_tmpfs(&mut k, pid, n, flags & MS_RDONLY != 0);   // a user namespace's own mount
+  if (!full || ns_of(k, pid) != 0) && t == FST_TMPFS && !remount && n != 0 {
+    return ns_tmpfs(&mut k, pid, n, flags & MS_RDONLY != 0);   // a mount namespace's own mount: it propagates (src/lxprop.bastio) and goes with the namespace
   }
   let i = mount_dir(&mut k, n);
   if i >= NFILES {
