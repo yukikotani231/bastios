@@ -1167,6 +1167,7 @@ t_mountapi: then move_mount attaches it with them
 t_mountapi: with a bad flag is EINVAL
 t_mountapi: with an unknown attribute is EINVAL
 t_mountapi: with the flag from fsconfig
+t_mountapi: a clone through /proc/self/fd/N is a handle on the directory
 t_mountprop: MS_PRIVATE clears it
 t_mountprop: MS_SHARED again is a new group
 t_mountprop: MS_SHARED shows shared:N

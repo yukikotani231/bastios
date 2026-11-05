@@ -571,9 +571,6 @@ fn lx_open_tree(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64) -> u6
   if flags & OPEN_TREE_CLONE != 0 && dir_at(&mut k, n) == NO_FILE {
     return ENOSYS;                          // a copy of a file's mount: not supported
   }
-  if flags & OPEN_TREE_CLONE != 0 && n <= XFER && proc_fd(k.procs, k.fs.xfer, n) != NO_RESULT {
-    return ENOSYS;                          // a name through /proc/self/fd/N shares the descriptor's description: no clone of it
-  }
   let n2 = lx_path_at(&mut k, pid, dfd % 0x100000000, path);   // path_meta may have used the transfer buffer
   if n2 == NO_RESULT {
     return k.perr;
