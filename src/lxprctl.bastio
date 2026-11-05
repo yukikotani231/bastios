@@ -146,6 +146,9 @@ fn pr_exit(k: &mut Kernel, p: u64)
       if tr_opt(w) / 256 == 1 && st != ZOMBIE {
         post_from(&mut k, c, SIGKILL, p);
       }
+      if st == ZOMBIE && pget(k.procs, c, F_PARENT) == 0 {
+        pset(&mut k.procs, c, F_STATE, FREE);   // a thread kept for it (traced_end): nobody else will collect it
+      }
     }
     c = c + 1;
   }

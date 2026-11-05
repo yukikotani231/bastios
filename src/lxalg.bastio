@@ -26,11 +26,13 @@
 // it or none. A wrong tag is EBADMSG and no text comes out.
 //
 // Symmetric ciphers (type "skcipher": ctr(aes), cbc(aes), ecb(aes), keys of 16, 24
-// or 32 bytes) take ALG_SET_OP and a 16-byte ALG_SET_IV (none for ecb, which
+// or 32 bytes; xts(aes), two such keys in one of 32, 48 or 64) take ALG_SET_OP and a 16-byte ALG_SET_IV (none for ecb, which
 // takes a zero-length one and none at all) in the control messages and are
 // read as a whole. The operation and the IV stay on the socket and the IV
 // moves on with each operation, so successive messages continue one chain, as
-// in Linux; CBC and ECB need whole 16-byte blocks. The input is a copy made at send
+// in Linux; CBC, ECB and XTS need whole 16-byte blocks (XTS at least one, and no
+// ciphertext stealing), and an XTS socket keeps its IV as it was: Linux leaves a
+// working value there, so a program sends a fresh IV with each request. The input is a copy made at send
 // and the output a copy made at read: nothing is encrypted or decrypted in
 // place in a program's memory or in a page of a file.
 //
@@ -40,7 +42,7 @@
 // ever written to, whatever the cipher does.
 //
 // ALG_N sockets at most, each with ALG_BUF bytes of message. Not done: other
-// modes (ecb, xts). An hmac key may be ALG_KEYMAX bytes.
+// modes. An hmac key may be ALG_KEYMAX bytes.
 
 import "core/sha1.bastio";
 import "core/md5.bastio";
@@ -87,6 +89,7 @@ const ALG_CHACHA: u64 = 11;             // aead: rfc7539(chacha20,poly1305)
 const ALG_CTR: u64 = 12;                // skcipher: ctr(aes); the algorithms from here on are skciphers
 const ALG_CBC: u64 = 13;                // skcipher: cbc(aes)
 const ALG_ECB: u64 = 14;                // skcipher: ecb(aes), which takes no IV
+const ALG_XTS: u64 = 15;                // skcipher: xts(aes), whose key is two AES keys
 
 fn algr(s: u64, f: u64) -> u64
   requires s < ALG_N && f < ALG_W
@@ -275,6 +278,9 @@ fn alg_by_name(x: &Bytes) -> u64
   if xfer_is(x, 24, 24 + n, "ecb(aes)") {
     return ALG_ECB;
   }
+  if xfer_is(x, 24, 24 + n, "xts(aes)") {
+    return ALG_XTS;
+  }
   return 0;
 }
 
@@ -290,7 +296,7 @@ fn alg_skc_id(id: u64) -> bool {
 
 /// bind(fd, struct sockaddr_alg): the type "hash" with one of the hashes,
 /// "aead" with gcm(aes) or rfc7539(chacha20,poly1305), or "skcipher" with
-/// ctr(aes), cbc(aes) or ecb(aes).
+/// ctr(aes), cbc(aes), ecb(aes) or xts(aes).
 fn alg_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -337,6 +343,9 @@ fn alg_keylen_ok(id: u64, n: u64) -> bool {
   }
   if id == ALG_CHACHA {
     return n == 32;
+  }
+  if id == ALG_XTS {
+    return n == 32 || n == 48 || n == 64;   // two AES keys of 16, 24 or 32 bytes
   }
   if alg_skc_id(id) {
     return n == 16 || n == 24 || n == 32;   // AES-128, AES-192 and AES-256
@@ -753,9 +762,38 @@ fn alg_aes_key(key: &Bytes) -> Aes
   return gcm_key(key);
 }
 
+/// xts(aes): the key is the data key followed by the tweak key, of equal
+/// length (16, 24 or 32 bytes each); the message is whole blocks, at least one.
+fn alg_xts(enc: bool, key: &Bytes, iv: &Bytes, msg: &Bytes) -> Option[Bytes] {
+  let kl = blen(key);
+  if (kl != 32 && kl != 48 && kl != 64) || blen(iv) != 16 || blen(msg) < 16 || blen(msg) % 16 != 0 || blen(msg) >= 274877906944 {
+    return Option[Bytes]::None;
+  }
+  let half = kl / 2;
+  let ka = bytes_slice(key, 0, half);
+  let kb = bytes_slice(key, half, kl);
+  let a = alg_aes_key(ka);
+  let b = alg_aes_key(kb);
+  bfree(ka);
+  bfree(kb);
+  if enc {
+    let out = aes_xts_encrypt(a, b, iv, msg);
+    aes_free(b);
+    aes_free(a);
+    return Option[Bytes]::Some(out);
+  }
+  let out = aes_xts_decrypt(a, b, iv, msg);
+  aes_free(b);
+  aes_free(a);
+  return Option[Bytes]::Some(out);
+}
+
 /// Encrypts (enc) or decrypts msg under the skcipher id; None if the key or
 /// IV does not fit or a CBC message is not whole blocks.
 fn alg_skc(id: u64, enc: bool, key: &Bytes, iv: &Bytes, msg: &Bytes) -> Option[Bytes] {
+  if id == ALG_XTS {
+    return alg_xts(enc, key, iv, msg);
+  }
   if blen(iv) != 16 || blen(msg) >= 274877906944 || (blen(key) != 16 && blen(key) != 24 && blen(key) != 32) {
     return Option[Bytes]::None;
   }
@@ -799,7 +837,7 @@ fn alg_skc_next(id: u64, enc: bool, iv: &Bytes, msg: &Bytes, out: &Bytes) -> Byt
   if id == ALG_CTR {
     return alg_ctr_next(iv, (blen(msg) + 15) / 16);
   }
-  if id == ALG_ECB || blen(msg) < 16 {
+  if id == ALG_ECB || id == ALG_XTS || blen(msg) < 16 {
     return bytes_slice(iv, 0, 16);
   }
   if enc {
@@ -825,7 +863,7 @@ fn alg_skc_recv(k: &mut Kernel, pid: u64, s: u64, buf: u64, n: u64) -> u64
     return EINVAL;
   }
   let mlen = smaller(alg_get(k, s, ALG_MLEN), ALG_BUF);
-  if ((id == ALG_CBC || id == ALG_ECB) && mlen % 16 != 0) || n < mlen {
+  if ((id == ALG_CBC || id == ALG_ECB || id == ALG_XTS) && mlen % 16 != 0) || (id == ALG_XTS && mlen < 16) || n < mlen {
     return EINVAL;
   }
   if mlen == 0 {

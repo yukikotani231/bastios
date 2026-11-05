@@ -1,6 +1,6 @@
-/* AF_ALG symmetric ciphers: ctr(aes), cbc(aes) and ecb(aes) through socket, bind,
+/* AF_ALG symmetric ciphers: ctr(aes), cbc(aes), ecb(aes) and xts(aes) through socket, bind,
  * setsockopt(ALG_SET_KEY), accept, sendmsg with ALG_SET_OP and ALG_SET_IV,
- * and read, with the vectors of NIST SP 800-38A (F.1, F.2 and F.5, both key
+ * and read, with the vectors of NIST SP 800-38A (F.1, F.2 and F.5, IEEE 1619, both key
  * sizes, and AES-192). Also what the kernel keeps and what it refuses: the input is a
  * copy (changing the memory that was sent changes nothing), the result goes
  * only to the buffer read into, a CBC message that is not whole blocks, a
@@ -156,7 +156,7 @@ int main(void) {
         ok;
     }));
     EXPECT("an unknown skcipher is ENOENT, and so is a hash name of that type", ({
-        int a = bound("skcipher", "xts(aes)");
+        int a = bound("skcipher", "lrw(aes)");
         int e1 = errno;
         int b = bound("skcipher", "sha256");
         int e2 = errno;
@@ -262,6 +262,40 @@ int main(void) {
         ok = ok && e == -EINVAL && out[0] == 0x5a;
         if (op >= 0) close(op);
         ok;
+    }));
+    EXPECT("xts(aes) gives IEEE 1619 vector 1 and decrypts it", ({
+        unsigned char key[32] = {0}, in[32] = {0}, want[32];
+        unhex("917cf69ebd68b2ec9b9fe9a3eadda692cd43d2f59598ed858c02c2652fbf922e", want);
+        int op = skc_op("xts(aes)", key, 32);
+        long r = op >= 0 ? skc_run(op, 1, zero, 16, in, 32, out, sizeof out) : -1;
+        int ok = r == 32 && memcmp(out, want, 32) == 0;
+        long d = op >= 0 ? skc_run(op, 0, zero, 16, want, 32, out, sizeof out) : -1;
+        ok = ok && d == 32 && memcmp(out, in, 32) == 0;
+        if (op >= 0) close(op);
+        ok;
+    }));
+    EXPECT("xts(aes) with two different keys and a tweak gives vector 2", ({
+        unsigned char key[32], in[32], tw[16] = {0x33, 0x33, 0x33, 0x33, 0x33}, want[32];
+        memset(key, 0x11, 16);
+        memset(key + 16, 0x22, 16);
+        memset(in, 0x44, 32);
+        unhex("c454185e6a16936e39334038acef838bfb186fff7480adc4289382ecd6d394f0", want);
+        int op = skc_op("xts(aes)", key, 32);
+        long r = op >= 0 ? skc_run(op, 1, tw, 16, in, 32, out, sizeof out) : -1;
+        int ok = r == 32 && memcmp(out, want, 32) == 0;
+        if (op >= 0) close(op);
+        ok;
+    }));
+    EXPECT("xts(aes) takes 64-byte keys and refuses 16- and 33-byte ones and a partial block", ({
+        unsigned char key[64], in[32] = {0};
+        for (int i = 0; i < 64; i++) key[i] = i;
+        int op = skc_op("xts(aes)", key, 64);
+        long a = op >= 0 ? skc_run(op, 1, zero, 16, in, 32, out, sizeof out) : -1;
+        long b = op >= 0 ? skc_run(op, 1, zero, 16, in, 20, out, sizeof out) : 0;
+        if (op >= 0) close(op);
+        int e1 = skc_op("xts(aes)", key, 16);
+        int e2 = skc_op("xts(aes)", key, 33);
+        a == 32 && b == -EINVAL && e1 < 0 && e2 < 0;
     }));
     EXPECT("ctr(aes) takes any length: 20 bytes give the first 20 of the 32", ({
         int op = skc_op("ctr(aes)", k128, 16);

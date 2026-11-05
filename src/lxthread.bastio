@@ -261,11 +261,14 @@ fn group_take(k: &mut Kernel, mmu: &Mmu, p: u64)
 }
 
 /// Frees the row of thread q, which holds none of the group's shared
-/// state. Its children become the leader g's.
+/// state. Its children become the leader g's. A traced thread's row stays
+/// a zombie for its tracer (traced_end), whether the thread called exit or
+/// ended with its group or at another thread's execve.
 fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
   requires kok(k) && 1 <= q && q < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
+  let tw = tr_tracer(k, q);
   match take_space(&mut k.spaces, q) {
     Space::Empty => {},
     Space::Mapped(t) => { free_space(&mut k.mem, mmu, t); },
@@ -292,6 +295,7 @@ fn thread_free(k: &mut Kernel, mmu: &Mmu, q: u64, g: u64)
   rtq_clear(&mut k, q);
   pset(&mut k.procs, q, F_RESTART, 0);
   pset(&mut k.procs, q, F_STATE, FREE);
+  traced_end(&mut k, q, tw, 0);             // a traced thread waits for its tracer to hear of the end
 }
 
 /// For terminate (src/proc.bastio): process `p` ends. If it is one thread
@@ -703,8 +707,9 @@ fn lx_unshare(k: &mut Kernel, pid: u64, flags: u64) -> u64
 
 /// exit(code) from thread pid of a group, not its leader: clears and
 /// wakes its clear_child_tid word (how pthread_join learns of it), hands
-/// the shared state back to the leader and frees the row.
-fn lx_thread_exit(k: &mut Kernel, mmu: &Mmu, pid: u64)
+/// the shared state back to the leader and frees the row. A traced thread
+/// stays a zombie until its tracer's wait4 hears of its end (traced_end).
+fn lx_thread_exit(k: &mut Kernel, mmu: &Mmu, pid: u64, code: u64)
   requires kok(k) && 1 <= pid && pid < NPROC && mmu_root(mmu) == KERNEL_ROOT
   ensures kok(k)
 {
@@ -719,6 +724,39 @@ fn lx_thread_exit(k: &mut Kernel, mmu: &Mmu, pid: u64)
     return;
   }
   thread_free(&mut k, mmu, pid, g);
+  if state(k.procs, pid) == ZOMBIE {
+    pset(&mut k.procs, pid, F_CODE, code % 256);   // kept for its tracer (traced_end), which hears this code
+  }
+}
+
+/// Thread q of a group has ended and its row is freed; tw is its tracer
+/// word (tr_tracer: the tracer + 1, or 0). As on Linux, a tracer that waits
+/// with __WALL hears of the thread's end (WIFEXITED for its id): the row
+/// stays a zombie, with no parent, until the tracer's wait4 takes the report
+/// (tracer_reaped frees it) or the tracer ends (pr_exit). Before, the id
+/// went back to the pool unreported, and strace took a new thread that got
+/// it for the old one, in the middle of a call, from then on one stop off.
+fn traced_end(k: &mut Kernel, q: u64, tw: u64, code: u64)
+  requires kok(k) && 1 <= q && q < NPROC && code < 256
+  ensures kok(k)
+{
+  if tw == 0 || tw > NPROC {
+    return;
+  }
+  let tr = tw - 1;
+  if tr == 0 || tr == q || state(k.procs, tr) == FREE || state(k.procs, tr) == ZOMBIE {
+    return;
+  }
+  jc_set(&mut k, q, 0);                     // no stop left to report
+  pset(&mut k.procs, q, F_PARENT, 0);
+  pset(&mut k.procs, q, F_CODE, code);
+  pset(&mut k.procs, q, F_STATE, ZOMBIE);
+  if state(k.procs, tr) == LXWAITING {
+    pset(&mut k.procs, tr, F_STATE, READY);   // its wait4 runs again and collects it
+  }
+  if is_linux(k.procs, tr) {
+    post_raw(&mut k, tr, SIGCHLD, chld_word(q, 1, code), 0, false);   // CLD_EXITED
+  }
 }
 
 /// Whether thread pid's exit ends only that thread.
