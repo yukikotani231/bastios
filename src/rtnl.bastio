@@ -1332,6 +1332,7 @@ fn nl_open(n: &mut Net, ns: u64, port: u64) -> u64
       n.nls = set(n.nls, q * NL_W + NL_LEN, 0);
       n.nls = set(n.nls, q * NL_W + NL_RAW, 0);
       n.nls = set(n.nls, q * NL_W + NL_PROTO, 0);
+      n.nls = set(n.nls, q * NL_W + NL_GROUPS, 0);
       n.nls = set(n.nls, q * NL_W + NL_PORT, port);
       n.nls = set(n.nls, q * NL_W + NL_NS, ns);
       return q;
@@ -1473,6 +1474,37 @@ fn nic_nl_set_proto(c: &mut Nic, q: u64, proto: u64)
         n.nls = set(n.nls, q * NL_W + NL_PROTO, proto);
       }
       c = Nic::Up(n);
+    },
+  }
+}
+
+/// Sets the multicast groups socket q listens to.
+fn nic_nl_set_groups(c: &mut Nic, q: u64, groups: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if q < NLS {
+        n.nls = set(n.nls, q * NL_W + NL_GROUPS, groups % 4294967296);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
+/// The multicast groups socket q listens to.
+fn nic_nl_groups(c: &Nic, q: u64) -> u64
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if q < NLS {
+        return get(n.nls, q * NL_W + NL_GROUPS);
+      }
+      return 0;
     },
   }
 }

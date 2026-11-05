@@ -30,6 +30,11 @@
 // action (allow or block) and, for allow, at most one ESP template (reqid,
 // mode, tunnel ends). The lower the priority number the earlier it applies.
 //
+// A socket bound to (or joined to) multicast group 2, XFRMNLGRP_EXPIRE, hears
+// XFRM_MSG_EXPIRE when an association passes its soft limit (hard = 0) and
+// again when it is removed at its hard limit (hard = 1). Joining needs
+// CAP_NET_ADMIN, as the message carries the key.
+//
 // Not done yet: the replay state's notifications.
 
 const NETLINK_XFRM: u64 = 6;
@@ -37,6 +42,8 @@ const XFRM_MSG_NEWSA: u64 = 16;
 const XFRM_MSG_DELSA: u64 = 17;
 const XFRM_MSG_GETSA: u64 = 18;
 const XFRM_MSG_FLUSHSA: u64 = 28;
+const XFRM_MSG_EXPIRE: u64 = 24;
+const XFRMNLGRP_EXPIRE_BIT: u64 = 2;      // group 2 (XFRMNLGRP_EXPIRE) in the sockets' group masks: bit 1
 const XFRM_MSG_NEWPOLICY: u64 = 19;
 const XFRM_MSG_DELPOLICY: u64 = 20;
 const XFRM_MSG_GETPOLICY: u64 = 21;
@@ -50,6 +57,7 @@ const XFRMA_ALG_AUTH_TRUNC: u64 = 20;
 const XFRMA_ALG_AEAD: u64 = 18;
 const XFRMA_REPLAY_ESN_VAL: u64 = 23;
 const XFRM_STATE_ESN: u64 = 128;          // in the state flags: 64-bit sequence numbers
+const XS_F_SOFT: u64 = 512;              // in XS_FLAGS: the soft limit has been reported to the listeners
 const XS_F_ESNATTR: u64 = 256;            // in XS_FLAGS: the state was made with an ESN replay state
 const XFRMA_ENCAP: u64 = 4;
 const XFRM_ENCAP_LEN: u64 = 24;           // struct xfrm_encap_tmpl
@@ -196,9 +204,72 @@ fn xs_expired(n: &Net, i: u64) -> bool
   return false;
 }
 
+/// Has association i passed a soft limit? The same limits as xs_expired.
+fn xs_soft_hit(n: &Net, i: u64) -> bool
+  requires net_ok(n) && i < XSA_N
+{
+  let ps = xl_get(n, i, XL_PSOFT);
+  if ps != 0 && xs_get(n, i, XS_PKTS) >= ps {
+    return true;
+  }
+  let bs = xl_get(n, i, XL_BSOFT);
+  if bs != 0 && xs_get(n, i, XS_BYTES) >= bs {
+    return true;
+  }
+  let now = n.now / 100;
+  let as_ = xl_get(n, i, XL_ASOFT);
+  let add = xl_get(n, i, XL_ADD);
+  if as_ != 0 && now >= add && now - add >= as_ {
+    return true;
+  }
+  let us = xl_get(n, i, XL_USOFT);
+  let used = xl_get(n, i, XL_USE);
+  if us != 0 && used > 0 && now + 1 >= used && now + 1 - used >= us {
+    return true;
+  }
+  return false;
+}
+
+/// Tells the listeners of the namespace of association i (the sockets that
+/// joined the expire group, which only CAP_NET_ADMIN may) that it has
+/// passed a limit: hard 1 for the hard one, 0 for the soft one. A queue that
+/// is full loses the message.
+fn xs_notify(n: &mut Net, i: u64, hard: u64)
+  requires net_ok(n) && i < XSA_N && hard <= 1
+  ensures net_ok(n)
+{
+  let ns = xs_get(n, i, XS_NS);
+  let mut q = 0;
+  while q < NLS
+    invariant q <= NLS && net_ok(n)
+  {
+    if get(n.nls, q * NL_W + NL_USED) == 1 && get(n.nls, q * NL_W + NL_PROTO) == NETLINK_XFRM
+      && get(n.nls, q * NL_W + NL_NS) == ns && get(n.nls, q * NL_W + NL_GROUPS) / XFRMNLGRP_EXPIRE_BIT % 2 == 1 {
+      nlw_open(&mut n, q);
+      xs_put_msg(&mut n, i, XFRM_MSG_EXPIRE, 0, 0, 0, hard);
+      nlw_close(&mut n, q);
+    }
+    q = q + 1;
+  }
+}
+
+/// Reports association i's soft limit to its listeners, once.
+fn xs_check_soft(n: &mut Net, i: u64)
+  requires net_ok(n) && i < XSA_N
+  ensures net_ok(n)
+{
+  let fl = xs_get(n, i, XS_FLAGS);
+  if xs_get(n, i, XS_USED) == 1 && fl / XS_F_SOFT % 2 == 0 && xs_soft_hit(n, i) {
+    xs_set(&mut n, i, XS_FLAGS, fl + XS_F_SOFT);
+    xs_notify(&mut n, i, 0);
+  }
+}
+
 /// Deletes every association that has passed a hard limit (its key erased
-/// with it). Run before an association is looked up for a packet or a
-/// request, so one past its limit is never used and never shown.
+/// with it, its listeners told first), and tells the listeners of one that
+/// has passed a soft limit. Run before an association is looked up for a
+/// packet or a request, and from the stack's timer, so one past its limit is
+/// never used and never shown.
 fn xs_reap(n: &mut Net)
   requires net_ok(n)
   ensures net_ok(n)
@@ -207,8 +278,13 @@ fn xs_reap(n: &mut Net)
   while i < XSA_N
     invariant i <= XSA_N && net_ok(n)
   {
-    if xs_get(n, i, XS_USED) == 1 && xs_expired(n, i) {
-      xs_clear(&mut n, i);
+    if xs_get(n, i, XS_USED) == 1 {
+      if xs_expired(n, i) {
+        xs_notify(&mut n, i, 1);
+        xs_clear(&mut n, i);
+      } else {
+        xs_check_soft(&mut n, i);
+      }
     }
     i = i + 1;
   }
@@ -493,7 +569,17 @@ fn xs_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
   requires net_ok(n) && i < XSA_N
   ensures net_ok(n)
 {
-  nl_begin(&mut n, XFRM_MSG_NEWSA, flags, seq, port);
+  xs_put_msg(&mut n, i, XFRM_MSG_NEWSA, seq, port, flags, 2);
+}
+
+/// Association i as message `kind`: XFRM_MSG_NEWSA (hard 2), or an
+/// XFRM_MSG_EXPIRE, which is the same struct followed by the byte hard (1:
+/// the hard limit, 0: the soft one) and padding.
+fn xs_put_msg(n: &mut Net, i: u64, kind: u64, seq: u64, port: u64, flags: u64, hard: u64)
+  requires net_ok(n) && i < XSA_N && hard <= 2
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, kind, flags, seq, port);
   // xfrm_selector: any address
   xs_put_addr(&mut n, 0);
   xs_put_addr(&mut n, 0);
@@ -538,6 +624,10 @@ fn xs_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
   nl_b(&mut n, xs_get(n, i, XS_RWIN) % 256);
   nl_b(&mut n, xs_get(n, i, XS_FLAGS) % 256);
   xs_zeros(&mut n, 7);
+  if hard < 2 {
+    nl_b(&mut n, hard);
+    xs_zeros(&mut n, 7);
+  }
   // XFRMA_ALG_AEAD: the name, the key length and tag length in bits, the key and salt
   let klen = xs_get(n, i, XS_KLEN);
   if klen == 16 || klen == 32 {
@@ -1301,6 +1391,7 @@ fn esp_count(n: &mut Net, sa: u64, bytes: u64)
   if by < 4294967295 * 65536 {
     xs_set(&mut n, sa, XS_BYTES, by + bytes);
   }
+  xs_check_soft(&mut n, sa);
 }
 
 /// The outgoing frame (flen bytes, Ethernet header included): 0 if no
