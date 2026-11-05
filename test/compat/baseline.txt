@@ -690,6 +690,7 @@ t_genl: the reply carries the name back
 t_genl: the reply is a NEWFAMILY of the controller
 t_genl: the reply names the version and the largest attribute
 t_genl: the socket still answers after bad requests
+t_hintdyn: after an mmap hint far below the mmap area, a large mapping still finds room
 t_hintdyn: an mmap hint far below the mmap area leaves libc's pages out of the space mmap hands out
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
