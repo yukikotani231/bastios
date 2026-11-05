@@ -11,18 +11,25 @@
 #   - keeps asking through T2 when nobody answers, gives the address up when
 #     the lease ends, and starts over with a DISCOVER,
 #   - takes a different address when that is what the server offers now,
-#   - starts over at once when the server refuses a renewal (NAK).
+#   - starts over at once when the server refuses a renewal (NAK),
+#   - tells a rtnetlink listener (test/dhcpnl.c, run in the guest) about the
+#     address and routes it takes (RTM_NEWADDR, RTM_NEWROUTE) and loses
+#     (RTM_DELADDR, RTM_DELROUTE).
 #
 #   NIC=name   the QEMU card (default: virtio-net-pci; e1000 also works)
 set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 NIC=${NIC:-virtio-net-pci}
+MUSLCC=${MUSLCC:-musl-gcc}
+mkdir -p build/dhcp
+$MUSLCC -O2 -fPIE -static-pie -o build/dhcp/dhcpnl test/dhcpnl.c || exit 1
+test/compat/mkdisk.py build/dhcp/disk.img build/dhcp/dhcpnl >/dev/null || exit 1
 
-python3 - "$KERNEL" "$NIC" <<'PY'
+python3 - "$KERNEL" "$NIC" build/dhcp/disk.img <<'PY'
 import os, select, socket, struct, subprocess, sys, time
 
-kernel, card = sys.argv[1:3]
+kernel, card, disk = sys.argv[1:4]
 GUEST_MAC = bytes.fromhex("525400123456")
 SERVER_MAC = bytes.fromhex("525500000202")
 SERVER = socket.inet_aton("10.9.0.1")
@@ -119,10 +126,11 @@ qemu = subprocess.Popen(
     [qemu_bin, "-kernel", kernel, "-m", "128M", "-smp", "2",
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-serial", "stdio", "-monitor", "none",
+     "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={wire.guest_port},"
                 f"remote.type=inet,remote.host=127.0.0.1,remote.port={wire.port}",
      "-device", f"{card},netdev=n0,mac=52:54:00:12:34:56"],
-    stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
 out = b""
 fails = 0
 
@@ -236,6 +244,39 @@ if naked and since(mark, 1):
     check(t < 1.5, f"at once ({t:.1f} s after the NAK)")
 wire.answer = None
 check(not answers_for(SECOND, 1), "no longer answers ARP for the refused address")
+
+# 6. A rtnetlink listener hears the lease come and go. The search for a lease
+# is running (step 5 ended with a NAK); the listener starts, the script offers
+# the first address again, and later refuses its renewal.
+def type_line(line):
+    qemu.stdin.write(line.encode() + b"\r")
+    qemu.stdin.flush()
+check(until(lambda: b"bastios> " in out, 20), "the shell is up")
+mark = len(out)
+type_line("ash")
+until(lambda: b"# " in out[mark:], 20)
+mark = len(out)
+type_line("/disk/dhcpnl &")
+check(until(lambda: b"ready" in out[mark:], 30), "the rtnetlink listener is up")
+wire.answer = first
+until(lambda: False, 1)
+mark2 = len(wire.dhcp)
+def nak_first(kind, xid, ciaddr, opts):
+    if kind == 1:
+        return (2, FIRST)
+    if kind == 3 and opts.get(50) == FIRST:
+        return (5, FIRST)
+    if kind == 3 and ciaddr == FIRST:
+        return (6, b"\0" * 4)
+wire.answer = nak_first
+done = until(lambda: b"done " in out[mark:], 40)
+text = out[mark:].decode(errors="replace").replace("\r", "")
+for line in text.split("\n"):
+    if line.startswith("ok ") or line.startswith("FAIL "):
+        check(line.startswith("ok "), "guest: " + line.split(" ", 1)[1])
+check(done and "done 0" in text, "the rtnetlink listener finished with every check passing")
+if not done:
+    print(text[-1500:])
 
 qemu.kill()
 qemu.wait()
