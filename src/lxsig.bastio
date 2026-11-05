@@ -13,6 +13,7 @@
 // direction bits, and the MXCSR keeps only bits fxrstor accepts.
 
 import "linux.bastio";
+import "scfmt.bastio";
 
 const LX_RT_SIGRETURN: u64 = 15;
 const LX_KILL: u64 = 62;
@@ -572,7 +573,7 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
 {
   if word >= FAULT_MARK + SYS_MARK {
     // A system call a seccomp filter refused with SECCOMP_RET_TRAP: si_code
-    // SYS_SECCOMP, then si_call_addr, si_syscall and si_arch (AUDIT_ARCH_X86_64).
+    // SYS_SECCOMP, then si_call_addr, si_syscall and si_arch (SC_ARCH: AUDIT_ARCH_X86_64 or AUDIT_ARCH_AARCH64).
     // si_errno is the data of the filter's return value (value).
     let v = word - FAULT_MARK - SYS_MARK;
     bset(&mut b, at + 4, cast[u8](value % 256));
@@ -582,10 +583,10 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
     let nr = v / FAULT_CODE % 16384;
     bset(&mut b, at + 24, cast[u8](nr % 256));
     bset(&mut b, at + 25, cast[u8](nr / 256));
-    bset(&mut b, at + 28, 0x3e);
-    bset(&mut b, at + 29, 0);
-    bset(&mut b, at + 30, 0);
-    bset(&mut b, at + 31, 0xc0);
+    bset(&mut b, at + 28, cast[u8](SC_ARCH % 256));
+    bset(&mut b, at + 29, cast[u8](SC_ARCH / 256 % 256));
+    bset(&mut b, at + 30, cast[u8](SC_ARCH / 65536 % 256));
+    bset(&mut b, at + 31, cast[u8](SC_ARCH / 16777216 % 256));
     return;
   }
   if word >= FAULT_MARK {

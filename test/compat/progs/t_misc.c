@@ -45,11 +45,13 @@ static void trap_answer(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
     (void)sig;
 #ifdef __x86_64__
+    if (si->si_arch != 0xC000003Eu) return;
     if (si->si_syscall == SYS_getppid && uc->uc_mcontext.gregs[REG_RAX] == SYS_getppid) {
         uc->uc_mcontext.gregs[REG_RAX] = 4242;
         trap_seen = 1;
     }
 #else
+    if (si->si_arch != 0xC00000B7u) return;
     if (si->si_syscall == SYS_getppid && uc->uc_mcontext.regs[8] == SYS_getppid && uc->uc_mcontext.regs[0] == 77) {
         uc->uc_mcontext.regs[0] = 4242;
         trap_seen = 1;
