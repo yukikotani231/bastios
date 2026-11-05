@@ -2669,6 +2669,11 @@ int main(int argc, char **argv)
                         desk_click_ms = now;
                     }
                 } else if (!down) {
+                    if (drag && drag->resizable && !drag->maxed) {   /* a window let go at the left or right edge of the screen fills that half of it, at the top all of it */
+                        if (mx <= 0) snap_win(drag, -1);
+                        else if (mx >= (int)W - 1) snap_win(drag, 1);
+                        else if (my <= 0) snap_win(drag, 0);
+                    }
                     drag = NULL;
                     if (sizing && !sizing->pend)
                         sizing->keep_r_on = sizing->keep_b_on = 0;     /* else the answer lets go of them */
