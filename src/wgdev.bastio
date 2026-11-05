@@ -101,6 +101,12 @@ const WGV_BORN: u64 = 6;
 const WGV_RMAX: u64 = 7;                  // the replay window, as in WGP_RMAX
 const WGV_RHEAD: u64 = 24;                //   the ring of the last four responses we sent: the next slot,
 const WGV_RING: u64 = 25;                 //   then 3 words per slot: our index + 1 (0: none) and the 16-byte mac1
+const WGN_VALID: u64 = 0;                // a responder's session that no packet of the peer has confirmed yet
+const WGN_LIDX: u64 = 1;
+const WGN_RIDX: u64 = 2;
+const WGN_BORN: u64 = 3;
+const WGN_SK: u64 = 4;                    // the sending key (four words)
+const WGN_RK: u64 = 8;                    // the receiving key (four words)
 const WGV_RWIN: u64 = 8;                  //   and WGP_RWIN (16 words)
 // Cookie state words (Net.wgp after the policies): per device
 const WGC_CSEC: u64 = 0;                  // the cookie secret (four words), made from fresh random bytes
@@ -180,6 +186,33 @@ fn wvs(n: &mut Net, p: u64, f: u64, v: u64)
   n.wgp = set(n.wgp, WGV_BASE + p * WGV_W + f, v);
 }
 
+fn wnw(n: &Net, p: u64, f: u64) -> u64
+  requires net_ok(n) && p < WGPN && f < WGN_W
+{
+  return get(n.wgp, WGN_BASE + p * WGN_W + f);
+}
+
+fn wns(n: &mut Net, p: u64, f: u64, v: u64)
+  requires net_ok(n) && p < WGPN && f < WGN_W
+  ensures net_ok(n)
+{
+  n.wgp = set(n.wgp, WGN_BASE + p * WGN_W + f, v);
+}
+
+/// Erases peer p's next session, keys included.
+fn wg_next_wipe(n: &mut Net, p: u64)
+  requires net_ok(n) && p < WGPN
+  ensures net_ok(n)
+{
+  let mut f = 0;
+  while f < WGN_W
+    invariant f <= WGN_W && net_ok(n)
+  {
+    wns(&mut n, p, f, 0);
+    f = f + 1;
+  }
+}
+
 /// Erases peer p's previous session, keys included.
 fn wg_prev_wipe(n: &mut Net, p: u64)
   requires net_ok(n) && p < WGPN
@@ -200,6 +233,7 @@ fn wg_peer_wipe(n: &mut Net, p: u64)
   ensures net_ok(n)
 {
   wg_prev_wipe(&mut n, p);
+  wg_next_wipe(&mut n, p);
   let mut c = 0;
   while c < WGC_PW
     invariant c <= WGC_PW && net_ok(n)
@@ -748,6 +782,7 @@ fn wg_peer_set(n: &mut Net, i: u64, b: &Bytes, from: u64, to: u64) -> u64
       f = f + 1;
     }
     wg_prev_wipe(&mut n, p);
+    wg_next_wipe(&mut n, p);
     let mut c = 0;
     while c < WGC_PW
       invariant c <= WGC_PW && net_ok(n)
