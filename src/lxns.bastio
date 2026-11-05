@@ -2610,6 +2610,14 @@ fn ns_prop_apply(k: &mut Kernel, pid: u64, n: u64, mode: u64, rec: bool) -> u64
       return ENOMEM;
     }
   }
+  if e >= MT_N && tl > 0 && tl == root_len(k, pid) {
+    // The process's own root (a container runtime sets the propagation of "/"
+    // inside a root that is not a mount of its own): the mount it is in.
+    e = mp_cover(k, ns, k.mstr, tl, MT_N);
+    if e >= MT_N {
+      return 0;
+    }
+  }
   if e >= MT_N {
     // The file layer's own mount points (/proc, a tmpfs) are the machine's:
     // nothing passes between them.
