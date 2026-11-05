@@ -494,11 +494,31 @@ static void gic_cpu_init(void) {
     __asm__ volatile ("msr icc_igrpen1_el1, %0; isb" : : "r"(1ull));
 }
 
-/* The calling processor's timer, ticking TICK_HZ times a second, or off. */
+/* The calling processor's timer, ticking TICK_HZ times a second, or off.
+ * While the kernel waits for I/O (bst_platform_info(13)) it also expires
+ * every poll_cycles, and that expiry is reported as a wake-up (V_WAKE), not
+ * as a tick, so the kernel's time does not run fast. */
+static uint64_t next_tick[MAX_CPUS];        /* the counter value of the processor's next tick */
+static uint64_t poll_cycles[MAX_CPUS];      /* 0: no polling */
+static inline uint64_t counter_now(void) {
+    uint64_t c;
+    __asm__ volatile ("isb; mrs %0, cntpct_el0" : "=r"(c));
+    return c;
+}
+static void timer_rearm(void) {
+    unsigned id = this_cpu()->id;
+    uint64_t now = counter_now();
+    uint64_t t = next_tick[id] > now ? next_tick[id] - now : 1;
+    if (poll_cycles[id] && poll_cycles[id] < t) t = poll_cycles[id];
+    __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(t));
+}
 static void timer_start(void) {
     uint64_t f;
     __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
     tick_cycles = f / TICK_HZ;
+    unsigned id = this_cpu()->id;
+    poll_cycles[id] = 0;
+    next_tick[id] = counter_now() + tick_cycles;
     __asm__ volatile ("msr cntp_tval_el0, %0; msr cntp_ctl_el0, %1; isb" : : "r"(tick_cycles), "r"(1ull));
 }
 static void timer_stop(void) {
@@ -526,8 +546,14 @@ uint64_t bst_irq_ack(void) {
     if (id >= 1020) return 0;
     uint64_t v = 6;
     if (id == TIMER_INTID) {
-        __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(tick_cycles));
-        v = this_cpu()->id == 0 ? V_TIMER : V_LTIMER;
+        unsigned me = this_cpu()->id;
+        if (counter_now() >= next_tick[me]) {
+            next_tick[me] = counter_now() + tick_cycles;
+            v = me == 0 ? V_TIMER : V_LTIMER;
+        } else {
+            v = V_WAKE;                                      /* a poll interval ran out, not a tick */
+        }
+        timer_rearm();
     } else if (id == WAKE_INTID) {
         v = V_WAKE;
     }
@@ -631,9 +657,19 @@ uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; r
  * (or when there is none); query 11 is the generic timer's rate in Hz
  * (CNTFRQ_EL0); query 12 is not a query: it sends the wake-up interrupt to
  * every other processor (the answer is 0), so those waiting in
- * bst_cpu_wait look for work now instead of at their next tick; every
+ * bst_cpu_wait look for work now instead of at their next tick; query 13 is
+ * not a query either: it makes this processor's timer expire every i
+ * microseconds (0: back to ticks only) while it waits for I/O, so a
+ * completion is noticed within i microseconds, not at the next tick; every
  * other query is 0. */
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    if (what == 13) {
+        uint64_t f;
+        __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
+        poll_cycles[this_cpu()->id] = i > 100000 ? 0 : i * f / 1000000;
+        timer_rearm();
+        return 0;
+    }
     if (what == 12) {
         if (gic_ver == 2) {
             w32(GICD + 0x0F00, (1u << 24) | WAKE_INTID);     /* GICD_SGIR: all but this processor */

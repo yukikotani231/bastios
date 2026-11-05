@@ -505,6 +505,9 @@ fn lx_fallocate(k: &mut Kernel, pid: u64, fd: u64, mode: u64, off: u64, len: u64
   if size == NO_FILE {
     return EBADF;
   }
+  if off + len <= 0x1000000000000000 && !vfs_quota_fits(&mut k.fs, vfs_row_file(k.fs, d.x), off, len) {
+    return ENOSPC;                          // the pages would not fit under a tmpfs size=
+  }
   if off + len <= size {
     return 0;
   }
