@@ -22,11 +22,11 @@ cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 NIC=${NIC:-virtio-net-pci}
 MUSLCC=${MUSLCC:-musl-gcc}
-mkdir -p build/dhcp
-$MUSLCC -O2 -fPIE -static-pie -o build/dhcp/dhcpnl test/dhcpnl.c || exit 1
-test/compat/mkdisk.py build/dhcp/disk.img build/dhcp/dhcpnl >/dev/null || exit 1
+mkdir -p build/dhcp-$NIC
+$MUSLCC -O2 -fPIE -static-pie -o build/dhcp-$NIC/dhcpnl test/dhcpnl.c || exit 1
+test/compat/mkdisk.py build/dhcp-$NIC/disk.img build/dhcp-$NIC/dhcpnl >/dev/null || exit 1
 
-python3 - "$KERNEL" "$NIC" build/dhcp/disk.img <<'PY'
+python3 - "$KERNEL" "$NIC" build/dhcp-$NIC/disk.img <<'PY'
 import os, select, socket, struct, subprocess, sys, time
 
 kernel, card, disk = sys.argv[1:4]
