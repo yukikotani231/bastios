@@ -31,6 +31,16 @@ static int around(uintptr_t a, uintptr_t *lo, uintptr_t *hi, uintptr_t *next) {
 
 int main(void) {
     setup();
+    /* The space above libc stays free: the JVM reserves its metaspace and
+       code cache after its heap, with gigabytes more. */
+    if (begin("after an mmap hint far below the mmap area, a large mapping still finds room")) {
+        void *at = (void *)((((uintptr_t)sbrk(0) + 0x3fffffff) & ~(uintptr_t)0x3fffffff) + 0xc0000000);
+        void *p = mmap(at, 1 << 20, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        size_t n = 64UL << 30;
+        void *r = p == MAP_FAILED ? MAP_FAILED : mmap(NULL, n, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        if (p == MAP_FAILED || r == MAP_FAILED) fail("mmap: errno %d", errno);
+        else { munmap(r, n); pass(); }
+    }
     if (begin("an mmap hint far below the mmap area leaves libc's pages out of the space mmap hands out")) {
         uintptr_t lo, hi, next;
         /* 1 GiB above the break, far under the interpreter. */
