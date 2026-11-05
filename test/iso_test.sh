@@ -709,6 +709,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             print(("ok  " if good else "FAIL"), f"({name}) Alt and the right button resize a window from inside it")
             fails += not good
             time.sleep(5)
+            # Dragging a window to the left edge of the screen and letting go fills the left half of it.
+            mark_rs = len(out)
+            monitor("mouse_move -100 -60")                           # off the corner grip, into the window
+            monitor("sendkey alt 6000")
+            time.sleep(0.5)
+            monitor("mouse_button 1", *(["mouse_move -255 0"] * 5), "mouse_button 0")
+            good = until(b"bhello: resized 508 722", mark_rs)
+            print(("ok  " if good else "FAIL"), f"({name}) a window dragged to the left edge fills the left half of the screen")
+            fails += not good
+            time.sleep(6)
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
@@ -1388,6 +1398,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("mouse_button 1")
             movep(-300, -200)
             movep(-300, -200)
+            movep(3, 3)                                            # off the screen edge, where letting go would snap the window
             monitor("mouse_button 0")
             time.sleep(0.5)
             w, h, px = screendump()
