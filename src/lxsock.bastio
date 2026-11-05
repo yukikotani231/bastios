@@ -18,6 +18,7 @@ const LX_GETSOCKOPT: u64 = 55;
 const LX_SOCKETPAIR: u64 = 53;
 const SOL_SOCKET: u64 = 1;
 const SOL_TCP: u64 = 6;                 // IPPROTO_TCP, as a level
+const SOL_NETLINK: u64 = 270;          // setsockopt level of a netlink socket's membership options
 const SO_TYPE: u64 = 3;
 const SO_ERROR: u64 = 4;
 const ENOPROTOOPT: u64 = 18446744073709551524;      // 2^64 - 92
@@ -406,7 +407,7 @@ fn lx_bind(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     return ux_bind(&mut k, pid, fd, addr, alen);
   }
   if is_nl(k, pid, fd) {
-    return nl_bind(&mut k, pid, fd, addr, alen);
+    return nl_bind(&mut k, pid, fd, addr, alen, true);
   }
   if is_alg(k, pid, fd) {
     return alg_bind(&mut k, pid, fd, addr, alen);
@@ -453,7 +454,7 @@ fn lx_connect(k: &mut Kernel, pid: u64, fd: u64, addr: u64, alen: u64) -> u64
     return ux_connect(&mut k, pid, fd, addr, alen);
   }
   if is_nl(k, pid, fd) {
-    return nl_bind(&mut k, pid, fd, addr, alen);
+    return nl_bind(&mut k, pid, fd, addr, alen, false);
   }
   let sk = sk_look(k, pid, fd);
   if sk.err != 0 {
@@ -979,6 +980,9 @@ fn lx_setsockopt(k: &mut Kernel, pid: u64, fd: u64, level: u64, name: u64, va: u
   }
   let lv = level % 0x100000000;
   let ln = len % 0x100000000;
+  if lv == SOL_NETLINK && is_nl(k, pid, fd) {
+    return nl_membership(&mut k, pid, fd, name % 0x100000000, va, ln);
+  }
   if lv == SOL_SOCKET {
     if ln < 4 || ln >= 0x80000000 {
       return EINVAL;
