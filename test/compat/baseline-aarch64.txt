@@ -2641,3 +2641,4 @@ t_xfrmlife: they did not use up the limit: three real datagrams pass
 t_xfrmlife: two more datagrams: the counters add up
 t_xfrmlife: unused for four seconds, it still carries a datagram
 t_xfrmlife: without IPsec the datagram is echoed
+t_ltp2: a signal reaches a thread running on another processor without waiting for its tick
