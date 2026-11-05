@@ -66,6 +66,10 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if pts != DEV_NONE {
     return pts;
   }
+  let sd = sd_at(x, n);                     // src/lxsd.bastio
+  if sd != DEV_NONE {
+    return sd;
+  }
   return loop_at(x, n);                     // src/lxloop.bastio
 }
 
@@ -91,6 +95,9 @@ fn dev_rdev(d: u64) -> u64 {
   }
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return 0x700 + d - DEV_LOOP;            // block major 7
+  }
+  if is_sd(d) {
+    return 0x800 + d - DEV_SD;              // block major 8, minor 0 for sda
   }
   if d == DEV_LOOPCTL {
     return 0xAED;                           // 10:237
@@ -133,6 +140,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   if rdev >= 0x700 && rdev < 0x700 + LOOP_N {
     return DEV_LOOP + rdev - 0x700;
   }
+  if rdev >= 0x800 && rdev < 0x800 + SD_N {
+    return DEV_SD + rdev - 0x800;
+  }
   if rdev == 0xAED {
     return DEV_LOOPCTL;
   }
@@ -167,6 +177,9 @@ fn dev_meta(d: u64) -> Meta {
   // it at open); /dev/loop-control is a character device.
   if is_loop(d) {
     return Meta { ok: true, mode: S_IFBLK, size: dev_rdev(d), ino: 128 + d - DEV_LOOP, mtime: 0, own: DISK_GID * 0x100000000 };
+  }
+  if is_sd(d) {
+    return Meta { ok: true, mode: S_IFBLK, size: dev_rdev(d), ino: 160 + d - DEV_SD, mtime: 0, own: DISK_GID * 0x100000000 };
   }
   if d == DEV_LOOPCTL {
     return Meta { ok: true, mode: 0x21B0, size: dev_rdev(d), ino: 30 + d % 16, mtime: 0, own: DISK_GID * 0x100000000 };

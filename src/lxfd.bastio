@@ -1493,6 +1493,19 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
       return EACCES;
     }
   }
+  if is_sd(dev) && flags & LO_PATH == 0 {
+    // The disk BastiOS left alone: read-only, for root and group disk
+    // (src/lxsd.bastio).
+    if sd_get(k.sdp, dev - DEV_SD, 1) == 0 {
+      return ENXIO;
+    }
+    if !may_meta(k.procs, pid, S_IFBLK, DISK_GID * 0x100000000, MAY_R) {
+      return EACCES;
+    }
+    if flags % 4 != 0 {
+      return EROFS;
+    }
+  }
   if dev != DEV_NONE && dev != DEV_DIR {
     return lx_open_dev(&mut k, pid, dev, flags);
   }
@@ -1781,9 +1794,10 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if m / O_APPEND % 2 == 1 {
       fl = fl + LO_APPEND;
     }
-    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC + of_get(k.ofd, h, OF_ASYNC) / 2 % 2 * LO_DIRECT;
+    return oflags_out(fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC + of_get(k.ofd, h, OF_ASYNC) / 2 % 2 * LO_DIRECT);
   }
   if cmd == F_SETFL && row < FD_ROWS {
+    let fl_in = oflags_in(arg);             // the caller's numbering of O_DIRECT
     // O_APPEND takes effect; O_NONBLOCK is only reported back (a file never blocks).
     let m = fget(k.fs.ftab, row, FD_MODE);
     let mut nm = m % O_APPEND;              // O_TRUNC and O_CREATE only matter at open
@@ -1792,7 +1806,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     fset(&mut k.fs.ftab, row, FD_MODE, nm);
     of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
-    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2 + arg / LO_DIRECT % 2 * 2);
+    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2 + fl_in / LO_DIRECT % 2 * 2);
     return 0;
   }
   if cmd == F_GETFL {
