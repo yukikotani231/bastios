@@ -2573,6 +2573,22 @@ fn vfs_mount_ext(v: &Vfs, s: u64) -> bool
   return get(v.mnt, 2 * s + 1) % 4 == 2;
 }
 
+/// Is mount slot s a FAT image (src/fat.bastio)? Also only read.
+fn vfs_mount_vfat(v: &Vfs, s: u64) -> bool
+  requires vfs_ok(v) && s < MNT_N
+{
+  return get(v.mnt, 2 * s + 1) % 4 == 3;
+}
+
+/// Marks mount slot s as a read-only FAT image.
+fn vfs_set_vfat(v: &mut Vfs, s: u64)
+  requires vfs_ok(v) && s < MNT_N
+  ensures vfs_ok(v)
+{
+  let w = get(v.mnt, 2 * s + 1);
+  v.mnt = set(v.mnt, 2 * s + 1, w - w % 4 + 3);
+}
+
 /// Marks mount slot s as a read-only ext4 image.
 fn vfs_set_ext(v: &mut Vfs, s: u64)
   requires vfs_ok(v) && s < MNT_N

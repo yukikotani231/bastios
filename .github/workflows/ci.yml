@@ -212,7 +212,7 @@ jobs:
       - if: steps.want.outputs.run == 'true'
         uses: ./.github/actions/apt-install
         with:
-          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs dosfstools mtools
       - if: steps.want.outputs.run == 'true'
         run: cd bastiolang/stage0 && cargo build --release --locked
       - if: steps.want.outputs.run == 'true'
@@ -321,7 +321,7 @@ jobs:
       - if: steps.want.outputs.run == 'true'
         uses: ./.github/actions/apt-install
         with:
-          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs dosfstools mtools
       - if: steps.want.outputs.run == 'true'
         run: cd bastiolang/stage0 && cargo build --release --locked
       - if: steps.want.outputs.run == 'true'
@@ -398,7 +398,7 @@ jobs:
           path: bastiolang
       - uses: ./.github/actions/apt-install
         with:
-          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs
+          packages: z3 qemu-system-x86 musl-tools busybox-static cpio e2fsprogs dosfstools mtools
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
