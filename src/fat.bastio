@@ -1,0 +1,693 @@
+// Reading FAT16 and FAT32 (the same design as src/ext4.bastio, see
+// docs/design/ext4-readonly.md). A FAT image in an in-memory file is read
+// once, at mount: its directories and files become ordinary in-memory nodes
+// below the mount point (fat_import), and the mount is read-only. Nothing
+// is written back and the image is not kept open.
+//
+// What is shown: long names (VFAT, UTF-16 turned into UTF-8; a long name
+// whose checksum does not match its short entry is dropped and the short
+// name used), short names (lower case where the entry's case bits say so),
+// the read-only attribute (modes 0444 and 0555 rather than 0644 and
+// 0755), the time of last write (as UTC), and the owner root. Hidden and
+// system files are shown, the volume label is not, a name seen twice is
+// shown once. FAT12 (floppies, and volumes under 4085 clusters) is refused
+// with EX_UNSUP.
+//
+// What is proved: every read from the image goes through the bounds of
+// `Bytes` and of the file (fat_rd), every offset is bounded before it is
+// multiplied (a cluster number is below 2^28, a cluster at most 64 KiB),
+// and every loop over a count the image holds (directory entries, the
+// depth of directories, a file's clusters) has a bound that the code
+// checks. What is not: that the tree shown is the one Windows or Linux
+// would show.
+import "ext4.bastio";
+
+const FT_FR: u64 = 4;                  // words of a directory frame: cluster (0: FAT16's root, 1: ended), position, path length, clusters passed
+const FT_END: u64 = 1;                 // a frame's cluster once the directory has ended
+const FT_BAD: u64 = 1;                 // fat_next's answer for a broken chain
+const FT_CL_MAX: u64 = 268435445;      // the most clusters a FAT32 volume has
+const FT_UNITS: u64 = 20;              // long-name entries at most, 13 UTF-16 units each
+const FT_UB: u64 = 520;                // their bytes: FT_UNITS * 26
+
+/// What the boot sector says, once checked.
+struct Fat {
+  err: u64,       // EX_OK, or why the image is refused
+  f: u64,         // the in-memory file holding the image
+  size: u64,      // its size
+  cb: u64,        // bytes in a cluster
+  fat_at: u64,    // byte of the first FAT
+  wide: bool,     // FAT32 (32-bit entries), else FAT16
+  root_at: u64,   // FAT16: byte and length of the root directory
+  root_len: u64,
+  root_cl: u64,   // FAT32: the root directory's first cluster
+  data_at: u64,   // byte of cluster 2
+  clusters: u64,  // data clusters, numbered 2 .. clusters + 1
+}
+
+spec fn fat_ok(t: Fat) -> bool {
+  t.err == 0 ==> (t.size <= FILE_MAX && t.cb >= 512 && t.cb <= 65536 && t.fat_at <= t.size && t.root_at <= t.size && t.root_len <= t.size
+    && t.data_at <= t.size && t.clusters >= 1 && t.clusters <= FT_CL_MAX && t.root_cl <= 4294967295)
+}
+
+fn fat_none(err: u64) -> Fat
+  requires err != 0
+  ensures fat_ok(result) && result.err == err
+{
+  return Fat { err: err, f: 0, size: 0, cb: 0, fat_at: 0, wide: false, root_at: 0, root_len: 0, root_cl: 0, data_at: 0, clusters: 0 };
+}
+
+/// Copies n bytes of the image at byte `off` to the start of the transfer
+/// buffer. False if they are not all in the image.
+fn fat_rd(v: &mut Vfs, t: Fat, off: u64, n: u64) -> bool
+  requires vfs_ok(v) && n <= XFER
+  ensures vfs_ok(v)
+{
+  if off > t.size || n > t.size - off {
+    return false;
+  }
+  return vfs_read_at(&mut v, t.f, off, n) == n;
+}
+
+/// Reads and checks the boot sector of the image in file f.
+fn fat_open(v: &mut Vfs, f: u64) -> Fat
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && fat_ok(result)
+{
+  let size = vfs_size(&mut v, f);
+  if size == NO_FILE || size < 4096 || size > FILE_MAX {
+    return fat_none(EX_BAD);
+  }
+  if vfs_read_at(&mut v, f, 0, 512) != 512 {
+    return fat_none(EX_BAD);
+  }
+  if rd16(v.xfer, 510) != 43605 {                   // 0xAA55
+    return fat_none(EX_BAD);
+  }
+  let bps = rd16(v.xfer, 11);
+  let spc = cast[u64](bget(v.xfer, 13));
+  let res = rd16(v.xfer, 14);
+  let nf = cast[u64](bget(v.xfer, 16));
+  let rootent = rd16(v.xfer, 17);
+  let ts16 = rd16(v.xfer, 19);
+  let fsz16 = rd16(v.xfer, 22);
+  let ts32 = rd32(v.xfer, 32);
+  let fsz32 = rd32(v.xfer, 36);
+  let rc = rd32(v.xfer, 44);
+  if (bps != 512 && bps != 1024 && bps != 2048 && bps != 4096) || spc == 0 || spc > 128 || (spc & (spc - 1)) != 0 {
+    return fat_none(EX_BAD);
+  }
+  if res == 0 || nf == 0 || nf > 4 || bps * spc > 65536 {
+    return fat_none(EX_BAD);
+  }
+  let mut total = ts16;
+  if total == 0 {
+    total = ts32;
+  }
+  let mut fatsz = fsz16;
+  if fatsz == 0 {
+    fatsz = fsz32;
+  }
+  if total == 0 || fatsz == 0 {
+    return fat_none(EX_BAD);
+  }
+  let rootsec = (rootent * 32 + bps - 1) / bps;
+  let dstart = res + nf * fatsz + rootsec;
+  if dstart >= total {
+    return fat_none(EX_BAD);
+  }
+  let nclus = (total - dstart) / spc;
+  let wide = fsz16 == 0;                            // as Linux tells them apart: FAT32 has no 16-bit FAT size
+  if !wide && nclus < 4085 {
+    return fat_none(EX_UNSUP);                      // FAT12
+  }
+  if wide && nclus < 1 {
+    return fat_none(EX_BAD);
+  }
+  if (wide && rootent != 0) || (!wide && rootent == 0) {
+    return fat_none(EX_BAD);
+  }
+  let mut clusters = nclus;
+  if clusters > FT_CL_MAX {
+    clusters = FT_CL_MAX;
+  }
+  let mut w = 2;
+  if wide {
+    w = 4;
+  }
+  let cb = bps * spc;
+  let fat_at = res * bps;
+  let data_at = dstart * bps;
+  let root_at = (res + nf * fatsz) * bps;
+  let root_len = rootsec * bps;
+  // The FAT must have an entry for every cluster, and everything the boot
+  // sector names must lie in the file.
+  if (clusters + 2) * w > fatsz * bps || fat_at + (clusters + 2) * w > size || root_at + root_len > size
+    || data_at > size || clusters * cb > size - data_at {
+    return fat_none(EX_BAD);
+  }
+  if wide && (rc < 2 || rc > clusters + 1) {
+    return fat_none(EX_BAD);
+  }
+  return Fat { err: EX_OK, f: f, size: size, cb: cb, fat_at: fat_at, wide: wide, root_at: root_at, root_len: root_len, root_cl: rc, data_at: data_at, clusters: clusters };
+}
+
+/// What follows cluster c (2 .. clusters + 1) in its chain: 0 at the end
+/// of the chain, FT_BAD if the entry is free, reserved, bad or off the
+/// volume, else the next cluster.
+fn fat_next(v: &mut Vfs, t: Fat, c: u64) -> u64
+  requires vfs_ok(v) && fat_ok(t) && t.err == 0 && c >= 2 && c <= t.clusters + 1
+  ensures vfs_ok(v) && (result == 0 || result == FT_BAD || (result >= 2 && result <= t.clusters + 1))
+{
+  let mut val = 0;
+  if t.wide {
+    if !fat_rd(&mut v, t, t.fat_at + c * 4, 4) {
+      return FT_BAD;
+    }
+    val = rd32(v.xfer, 0) % 268435456;
+    if val >= 268435448 {                           // 0x0FFFFFF8
+      return 0;
+    }
+  } else {
+    if !fat_rd(&mut v, t, t.fat_at + c * 2, 2) {
+      return FT_BAD;
+    }
+    val = rd16(v.xfer, 0);
+    if val >= 65528 {                               // 0xFFF8
+      return 0;
+    }
+  }
+  if val < 2 || val > t.clusters + 1 {
+    return FT_BAD;
+  }
+  return val;
+}
+
+/// The time of a directory entry (a DOS date and time, read as UTC) in
+/// nanoseconds since the epoch; 0 for no date.
+fn fat_ns(date: u64, tm: u64) -> u64
+  requires date < 65536 && tm < 65536
+  ensures result < 4611686018427387904
+{
+  if date == 0 {
+    return 0;
+  }
+  let d = smaller(date % 32, 31);
+  let mut m = date / 32 % 16;
+  if m == 0 || m > 12 {
+    m = 1;
+  }
+  let mut y = 1980 + date / 512;
+  if m <= 2 {
+    y = y - 1;
+  }
+  let era = y / 400;
+  let yoe = y - era * 400;
+  let mut mp = m + 9;
+  if m > 2 {
+    mp = m - 3;
+  }
+  let doy = (153 * mp + 2) / 5 + d;
+  let doe = yoe * 365 + yoe / 4 + doy;
+  let base = era * 146097 + doe;
+  if base < 719468 || base > 1000000 {
+    return 0;
+  }
+  let days = base - 719468;
+  let secs = days * 86400 + (tm / 2048) * 3600 + (tm / 32 % 64) * 60 + (tm % 32) * 2;
+  return secs * 1000000000;
+}
+
+/// The checksum a long name's entries carry of the 11 bytes of the short
+/// name in eb[0..11].
+fn fat_sum(eb: &Bytes) -> u64
+  requires blen(eb) == 32
+  ensures result < 256
+{
+  let mut s = 0;
+  let mut i = 0;
+  while i < 11
+    invariant i <= 11 && s < 256 && blen(eb) == 32
+  {
+    s = (((s % 2) * 128) + s / 2 + cast[u64](bget(eb, i))) % 256;
+    i = i + 1;
+  }
+  return s;
+}
+
+/// A name for the path being built: its bytes follow `plen` + 1 in pb, and
+/// `len` is the length of the whole path (0 for an empty name).
+struct NameR { err: u64, len: u64 }
+
+/// Writes the code point cp as UTF-8 at pb[at ..]; returns the new end, or 0
+/// if it does not fit below FNAME_MAX.
+fn fat_utf8(pb: &mut Bytes, at: u64, cp: u64) -> u64
+  requires blen(pb) == 4096 && at <= FNAME_MAX
+  ensures blen(pb) == 4096 && result <= FNAME_MAX
+{
+  if at + 4 > FNAME_MAX {
+    return 0;
+  }
+  if cp < 128 {
+    bset(&mut pb, at, cast[u8](cp));
+    return at + 1;
+  }
+  if cp < 2048 {
+    bset(&mut pb, at, cast[u8](192 + cp / 64));
+    bset(&mut pb, at + 1, cast[u8](128 + cp % 64));
+    return at + 2;
+  }
+  if cp < 65536 {
+    bset(&mut pb, at, cast[u8](224 + cp / 4096));
+    bset(&mut pb, at + 1, cast[u8](128 + cp / 64 % 64));
+    bset(&mut pb, at + 2, cast[u8](128 + cp % 64));
+    return at + 3;
+  }
+  if cp >= 1114112 {
+    return 0;
+  }
+  bset(&mut pb, at, cast[u8](240 + cp / 262144));
+  bset(&mut pb, at + 1, cast[u8](128 + cp / 4096 % 64));
+  bset(&mut pb, at + 2, cast[u8](128 + cp / 64 % 64));
+  bset(&mut pb, at + 3, cast[u8](128 + cp % 64));
+  return at + 4;
+}
+
+/// The long name in the first `units` UTF-16 units of ub, written to pb at
+/// `from`. The name ends at a 0 or 0xFFFF unit. A '/' becomes '_', and an
+/// unpaired surrogate '?'.
+fn fat_long(pb: &mut Bytes, from: u64, ub: &Bytes, units: u64) -> NameR
+  requires blen(pb) == 4096 && from <= FNAME_MAX && blen(ub) == FT_UB && units <= FT_UNITS * 13
+  ensures blen(pb) == 4096 && result.len <= FNAME_MAX
+{
+  let mut at = from;
+  let mut i = 0;
+  let mut done = false;
+  while i < units && !done
+    invariant i <= units && units <= FT_UNITS * 13 && at <= FNAME_MAX && blen(pb) == 4096 && blen(ub) == FT_UB
+  {
+    let u = rd16(ub, 2 * i);
+    if u == 0 || u == 65535 {
+      done = true;
+    } else {
+      let mut cp = u;
+      let mut step = 1;
+      if u == 47 {
+        cp = 95;
+      } else if u >= 55296 && u < 56320 {
+        // A high surrogate: with the low one after it, one code point.
+        cp = 63;
+        if i + 1 < units {
+          let lo = rd16(ub, 2 * (i + 1));
+          if lo >= 56320 && lo < 57344 {
+            cp = 65536 + (u - 55296) * 1024 + (lo - 56320);
+            step = 2;
+          }
+        }
+      } else if u >= 56320 && u < 57344 {
+        cp = 63;
+      }
+      let e = fat_utf8(&mut pb, at, cp);
+      if e == 0 {
+        return NameR { err: EX_LONG, len: from };
+      }
+      at = e;
+      i = i + step;
+    }
+  }
+  return NameR { err: EX_OK, len: at };
+}
+
+/// The short name of the entry in eb, written to pb at `from`: the base,
+/// then a dot and the extension if there is one, in lower case where the
+/// entry's case bits (byte 12: 8 for the base, 16 for the extension) say
+/// so.
+fn fat_short(pb: &mut Bytes, from: u64, eb: &Bytes) -> NameR
+  requires blen(pb) == 4096 && from <= FNAME_MAX - 16 && blen(eb) == 32
+  ensures blen(pb) == 4096 && result.len <= FNAME_MAX && result.len >= from
+{
+  let flags = cast[u64](bget(eb, 12));
+  let mut at = from;
+  let mut j = 0;
+  while j < 2
+    invariant j <= 2 && (j == 0 ==> at == from) && (j == 1 ==> at <= from + 8) && at >= from && at <= from + 12 && blen(pb) == 4096 && blen(eb) == 32 && from <= FNAME_MAX - 16
+  {
+    // Part 0 is the base (bytes 0..8), part 1 the extension (8..11).
+    let mut first = 0;
+    let mut n = 8;
+    let mut lower = flags & 8 != 0;
+    if j == 1 {
+      first = 8;
+      n = 3;
+      lower = flags & 16 != 0;
+    }
+    let mut last = 0;
+    let mut i = 0;
+    while i < n
+      invariant i <= n && n <= 8 && last <= n && first + n <= 11 && j < 2 && (j == 0 ==> n == 8 && at == from) && (j == 1 ==> n == 3 && at <= from + 8) && blen(eb) == 32
+    {
+      if bget(eb, first + i) != 32 {
+        last = i + 1;
+      }
+      i = i + 1;
+    }
+    if j == 1 && last > 0 {
+      bset(&mut pb, at, 46);
+      at = at + 1;
+    }
+    i = 0;
+    while i < last
+      invariant i <= last && last <= n && n <= 8 && first + n <= 11 && j < 2 && (j == 0 ==> n == 8 && at == from + i) && (j == 1 ==> n == 3 && at <= from + 9 + i) && at >= from && at + (last - i) <= from + 12 && blen(pb) == 4096 && blen(eb) == 32
+    {
+      let mut c = cast[u64](bget(eb, first + i));
+      if j == 0 && i == 0 && c == 5 {
+        c = 229;
+      }
+      if c >= 65 && c <= 90 && lower {
+        c = c + 32;
+      }
+      if c < 32 || c >= 127 || c == 47 {
+        c = 63;
+      }
+      bset(&mut pb, at, cast[u8](c));
+      at = at + 1;
+      i = i + 1;
+    }
+    j = j + 1;
+  }
+  return NameR { err: EX_OK, len: at };
+}
+
+/// Gives the in-memory node named by the path in the transfer buffer its
+/// permission bits and time.
+fn fat_stamp(v: &mut Vfs, n: u64, perm: u64, mtime: u64)
+  requires vfs_ok(v) && n <= XFER && perm < 65536 && mtime < 4611686018427387904
+  ensures vfs_ok(v)
+{
+  let i = ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, n);
+  if i < NFILES {
+    ram_set_meta(&mut v.ram, i, perm, mtime);
+  }
+}
+
+/// Copies the file of `size` bytes that starts at cluster c0 into in-memory
+/// node i, which is empty.
+fn fat_fill(v: &mut Vfs, mem: &mut Mem, t: Fat, c0: u64, size: u64, i: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && fat_ok(t) && t.err == 0 && i < NFILES
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if size == 0 {
+    return EX_OK;
+  }
+  if size > FILE_MAX || !ex_size(&mut v, &mut mem, i, size) {
+    return EX_BIG;
+  }
+  if c0 < 2 || c0 > t.clusters + 1 {
+    return EX_BAD;
+  }
+  let mut c = c0;
+  let mut pos = 0;
+  let mut err = EX_OK;
+  while err == EX_OK && pos < size
+    invariant pos <= size && size <= FILE_MAX && vfs_ok(v) && mem_ok(mem) && fat_ok(t) && t.err == 0 && i < NFILES && c >= 2 && c <= t.clusters + 1
+  {
+    let mut end = size;
+    if pos + t.cb < size {
+      end = pos + t.cb;
+    }
+    let base = t.data_at + (c - 2) * t.cb;
+    assert base <= 20000000000000;
+    let mut at = pos;
+    while err == EX_OK && at < end
+      invariant pos <= at && at <= end && end <= size && size <= FILE_MAX && vfs_ok(v) && mem_ok(mem) && fat_ok(t) && t.err == 0 && i < NFILES
+        && base <= 20000000000000 && end - pos <= t.cb
+    {
+      let m = smaller(end - at, 4096);
+      if !fat_rd(&mut v, t, base + (at - pos), m) {
+        err = EX_BAD;
+      } else {
+        if !ex_put(&mut v, &mut mem, i, at, m) {
+          err = EX_MEM;
+        }
+        at = at + m;
+      }
+    }
+    pos = end;
+    if err == EX_OK && pos < size {
+      let n = fat_next(&mut v, t, c);
+      if n < 2 {
+        err = EX_BAD;                               // the chain ends or breaks before the size does
+      } else {
+        c = n;
+      }
+    }
+  }
+  return err;
+}
+
+/// Where the walk stands: how it went and how many directories are open.
+struct FStep { err: u64, sp: u64 }
+
+/// The short entry in eb of the directory whose path is pb[0..plen], the
+/// sp-th open one: makes its node (name taken from the long-name entries
+/// before it, if they match), and for a directory opens it.
+fn fat_child(v: &mut Vfs, mem: &mut Mem, t: Fat, pb: &mut Bytes, plen: u64, sp: u64, st: &mut Buf, ub: &Bytes, eb: &Bytes, ls: &mut Buf) -> FStep
+  requires vfs_ok(v) && mem_ok(mem) && fat_ok(t) && t.err == 0 && blen(pb) == 4096 && plen <= FNAME_MAX - 17 && sp >= 1 && sp <= EX_DEPTH
+    && len(st) == FT_FR * EX_DEPTH && blen(ub) == FT_UB && blen(eb) == 32 && len(ls) == 3
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == FT_FR * EX_DEPTH && len(ls) == 3 && result.sp >= 1 && result.sp <= EX_DEPTH
+{
+  bset(&mut pb, plen, 47);
+  let cnt = get(ls, 0);
+  let mut r = NameR { err: EX_OK, len: 0 };
+  let mut have = false;
+  if cnt >= 1 && cnt <= FT_UNITS && get(ls, 2) == 0 && get(ls, 1) == fat_sum(eb) {
+    r = fat_long(&mut pb, plen + 1, ub, cnt * 13);
+    have = r.err == EX_OK && r.len > plen + 1;
+    if r.err != EX_OK {
+      return FStep { err: r.err, sp: sp };
+    }
+  }
+  if !have {
+    r = fat_short(&mut pb, plen + 1, eb);
+  }
+  ls = set(ls, 0, 0);
+  let clen = r.len;
+  if clen <= plen + 1 || clen > FNAME_MAX {
+    return FStep { err: EX_OK, sp: sp };            // no name
+  }
+  ex_load(&mut v, pb, clen);
+  if ram_find(&mut v.ram, v.rix, v.rhi, v.xfer, clen) < NFILES {
+    return FStep { err: EX_OK, sp: sp };            // a name twice: the first is shown
+  }
+  let attr = cast[u64](bget(eb, 11));
+  let mtime = fat_ns(rd16(eb, 24), rd16(eb, 22));
+  let mut c0 = rd16(eb, 26);
+  if t.wide {
+    c0 = c0 + rd16(eb, 20) * 65536;
+  }
+  if attr & 16 == 0 {
+    let size = rd32(eb, 28);
+    let i = vfs_ram_create(&mut v, clen, false);
+    if i >= NFILES {
+      return FStep { err: EX_FULL, sp: sp };
+    }
+    let mut perm = 420;                             // 0644
+    if attr & 1 != 0 {
+      perm = 292;                                   // 0444
+    }
+    fat_stamp(&mut v, clen, perm, mtime);
+    return FStep { err: fat_fill(&mut v, &mut mem, t, c0, size, i), sp: sp };
+  }
+  if sp >= EX_DEPTH {
+    return FStep { err: EX_LONG, sp: sp };
+  }
+  if !vfs_mkdir(&mut v, clen) {
+    return FStep { err: EX_FULL, sp: sp };
+  }
+  let mut perm = 493;                               // 0755
+  if attr & 1 != 0 {
+    perm = 365;                                     // 0555
+  }
+  ex_load(&mut v, pb, clen);
+  fat_stamp(&mut v, clen, perm, mtime);
+  if c0 < 2 || c0 > t.clusters + 1 {
+    return FStep { err: EX_OK, sp: sp };            // an empty directory with no clusters
+  }
+  let nf = sp * FT_FR;
+  st = set(st, nf, c0);
+  st = set(st, nf + 1, 0);
+  st = set(st, nf + 2, clen);
+  st = set(st, nf + 3, 0);
+  return FStep { err: EX_OK, sp: sp + 1 };
+}
+
+/// One step of the walk: reads the next entry of the innermost open
+/// directory (the sp-th) and handles it, or closes the directory at its end.
+fn fat_step(v: &mut Vfs, mem: &mut Mem, t: Fat, sp: u64, st: &mut Buf, pb: &mut Bytes, ub: &mut Bytes, eb: &mut Bytes, ls: &mut Buf) -> FStep
+  requires vfs_ok(v) && mem_ok(mem) && fat_ok(t) && t.err == 0 && blen(pb) == 4096 && sp >= 1 && sp <= EX_DEPTH
+    && len(st) == FT_FR * EX_DEPTH && blen(ub) == FT_UB && blen(eb) == 32 && len(ls) == 3
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == FT_FR * EX_DEPTH && blen(ub) == FT_UB && blen(eb) == 32
+    && len(ls) == 3 && result.sp <= EX_DEPTH
+{
+  let fr = (sp - 1) * FT_FR;
+  let cur = get(st, fr);
+  let pos = get(st, fr + 1);
+  let plen = get(st, fr + 2);
+  let hops = get(st, fr + 3);
+  if cur == FT_END || plen > FNAME_MAX - 17 || pos > 4294967296 || hops > 4294967296 || cur > 4294967296 {
+    ls = set(ls, 0, 0);
+    if cur == FT_END {
+      return FStep { err: EX_OK, sp: sp - 1 };
+    }
+    return FStep { err: EX_BAD, sp: sp };
+  }
+  // The entry's address: in FAT16's root directory, a position in the
+  // fixed region; elsewhere, a position in the cluster.
+  let mut addr = 0;
+  if cur == 0 {
+    if pos >= t.root_len {
+      ls = set(ls, 0, 0);
+      return FStep { err: EX_OK, sp: sp - 1 };
+    }
+    addr = t.root_at + pos;
+  } else {
+    if cur < 2 || cur > t.clusters + 1 || pos + 32 > t.cb {
+      return FStep { err: EX_BAD, sp: sp };
+    }
+    addr = t.data_at + (cur - 2) * t.cb + pos;
+  }
+  if !fat_rd(&mut v, t, addr, 32) {
+    return FStep { err: EX_BAD, sp: sp };
+  }
+  bcopy(&mut eb, 0, v.xfer, 0, 32);
+  // The next position: the next entry, or the next cluster of the chain.
+  let mut ncur = cur;
+  let mut npos = pos + 32;
+  let mut nhops = hops;
+  if cur != 0 && npos >= t.cb {
+    let n = fat_next(&mut v, t, cur);
+    nhops = hops + 1;
+    if n == FT_BAD || nhops > t.clusters {
+      return FStep { err: EX_BAD, sp: sp };
+    }
+    npos = 0;
+    ncur = n;
+    if n == 0 {
+      ncur = FT_END;
+    }
+  }
+  st = set(st, fr, ncur);
+  st = set(st, fr + 1, npos);
+  st = set(st, fr + 3, nhops);
+  let b0 = cast[u64](bget(eb, 0));
+  let attr = cast[u64](bget(eb, 11));
+  if b0 == 0 {
+    st = set(st, fr, FT_END);                       // no more entries in this directory
+    ls = set(ls, 0, 0);
+    return FStep { err: EX_OK, sp: sp };
+  }
+  if b0 == 229 {
+    ls = set(ls, 0, 0);                             // deleted
+    return FStep { err: EX_OK, sp: sp };
+  }
+  if attr % 64 == 15 {
+    // A long-name entry: 13 UTF-16 units; they arrive last first.
+    let seq = b0 % 32;
+    let ck = cast[u64](bget(eb, 13));
+    let mut take = false;
+    if b0 & 64 != 0 {
+      if seq >= 1 && seq <= FT_UNITS {
+        ls = set(ls, 0, seq);
+        ls = set(ls, 1, ck);
+        take = true;
+      } else {
+        ls = set(ls, 0, 0);
+      }
+    } else if get(ls, 0) >= 1 && seq >= 1 && seq <= FT_UNITS && seq == get(ls, 2) && ck == get(ls, 1) {
+      take = true;
+    } else {
+      ls = set(ls, 0, 0);
+    }
+    if take {
+      let at = (seq - 1) * 26;
+      bcopy(&mut ub, at, eb, 1, 10);
+      bcopy(&mut ub, at + 10, eb, 14, 12);
+      bcopy(&mut ub, at + 22, eb, 28, 4);
+      ls = set(ls, 2, seq - 1);
+    }
+    return FStep { err: EX_OK, sp: sp };
+  }
+  if attr & 8 != 0 {
+    ls = set(ls, 0, 0);                             // the volume label
+    return FStep { err: EX_OK, sp: sp };
+  }
+  if bget(eb, 0) == 46 && (bget(eb, 1) == 32 || (bget(eb, 1) == 46 && bget(eb, 2) == 32)) {
+    ls = set(ls, 0, 0);                             // "." and ".."
+    return FStep { err: EX_OK, sp: sp };
+  }
+  return fat_child(&mut v, &mut mem, t, &mut pb, plen, sp, &mut st, ub, eb, &mut ls);
+}
+
+/// Walks the tree below the mount directory (path pb[0..rl]) and makes a
+/// node for everything in it. st, ub, eb, ls are scratch.
+fn fat_walk(v: &mut Vfs, mem: &mut Mem, t: Fat, pb: &mut Bytes, rl: u64, st: &mut Buf, ub: &mut Bytes, eb: &mut Bytes, ls: &mut Buf) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && fat_ok(t) && t.err == 0 && rl >= 1 && rl <= FNAME_MAX - 17 && blen(pb) == 4096
+    && len(st) == FT_FR * EX_DEPTH && blen(ub) == FT_UB && blen(eb) == 32 && len(ls) == 3
+  ensures vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == FT_FR * EX_DEPTH && blen(ub) == FT_UB && blen(eb) == 32 && len(ls) == 3
+{
+  let mut root = 0;
+  if t.wide {
+    root = t.root_cl;
+  }
+  st = set(st, 0, root);
+  st = set(st, 1, 0);
+  st = set(st, 2, rl);
+  st = set(st, 3, 0);
+  ls = set(ls, 0, 0);
+  let mut sp = 1;
+  let mut iter = 0;
+  let mut err = EX_OK;
+  while err == EX_OK && sp > 0 && iter <= EX_ITER
+    invariant sp <= EX_DEPTH && iter <= EX_ITER + 1 && vfs_ok(v) && mem_ok(mem) && blen(pb) == 4096 && len(st) == FT_FR * EX_DEPTH
+      && blen(ub) == FT_UB && blen(eb) == 32 && len(ls) == 3
+  {
+    iter = iter + 1;
+    let r = fat_step(&mut v, &mut mem, t, sp, &mut st, &mut pb, &mut ub, &mut eb, &mut ls);
+    err = r.err;
+    sp = r.sp;
+  }
+  if err == EX_OK && sp > 0 {
+    return EX_BAD;                                  // too many entries
+  }
+  return err;
+}
+
+/// Mounts the FAT image in in-memory file f below the in-memory directory
+/// named by the first n bytes of the transfer buffer, which must be empty:
+/// everything in the image is copied there. Returns EX_OK, or why not; on
+/// an error what was made stays (the caller unmounts to remove it).
+fn fat_import(v: &mut Vfs, mem: &mut Mem, f: u64, n: u64) -> u64
+  requires vfs_ok(v) && mem_ok(mem) && n >= 1 && n <= FNAME_MAX
+  ensures vfs_ok(v) && mem_ok(mem)
+{
+  if n > FNAME_MAX - 17 {
+    return EX_LONG;
+  }
+  let mut pb = balloc(4096);
+  bcopy(&mut pb, 0, v.xfer, 0, n);                   // the open below uses the transfer buffer
+  let t = fat_open(&mut v, f);
+  if t.err != EX_OK {
+    bfree(pb);
+    return t.err;
+  }
+  let mut st = alloc(FT_FR * EX_DEPTH);
+  let mut ub = balloc(FT_UB);
+  let mut eb = balloc(32);
+  let mut ls = alloc(3);
+  let err = fat_walk(&mut v, &mut mem, t, &mut pb, n, &mut st, &mut ub, &mut eb, &mut ls);
+  bfree(pb);
+  free(st);
+  bfree(ub);
+  bfree(eb);
+  free(ls);
+  return err;
+}
