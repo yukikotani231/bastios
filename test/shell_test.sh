@@ -2154,6 +2154,29 @@ if subprocess.run([sys.executable, "test/ext4img.py", img_dir], stdout=subproces
     ], halt=True)
 else:
     print("SKIP ext4: mke2fs is missing")
+# Mounting FAT16 and FAT32 images (src/fat.bastio), made with mkfs.fat and
+# mcopy (test/fatimg.py): files and directories with short and long names,
+# a file over many clusters, read-only, and a damaged image refused.
+fat_dir = os.path.join(disk_dir.name, "fat")
+if subprocess.run([sys.executable, "test/fatimg.py", fat_dir], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+    subprocess.run([sys.executable, "test/compat/mkdisk.py", disk]
+                   + [f"{n}={fat_dir}/{f}.img" for n, f in (("f16", "f16"), ("f32", "f32"), ("bf", "bad-fat"))], check=True)
+    qemu = boot(2, with_disk=True)
+    fat_big = sum(len(f"L{i}\n") for i in range(1, 12001))
+    fat_steps = [("ash", b"", b"\n# ")]
+    for t, im in (("vfat", "f16"), ("msdos", "f32")):
+        fat_steps += [
+            (f"mkdir m{im}; mount -t {t} /disk/{im} m{im} && cat m{im}/hello.txt && cat 'm{im}/A Longer File Name.txt' && cat m{im}/dir/sub/deep.txt && wc -c < m{im}/big.txt && wc -c < m{im}/empty; echo fat$((1+1))",
+             b"hello fat\r\nlong name\r\ndeep file\r\n%d\r\n0\r\nfat2\r\n" % fat_big, b"\n# "),
+            (f"ls m{im} m{im}/dir; n=0; while read l; do n=$((n+1)); [ \"$l\" = L$n ] || {{ echo bad$n; break; }}; done < m{im}/big.txt; echo seq$n; echo x > m{im}/new || echo refused; cat /proc/mounts",
+             [b"hello.txt", b"A Longer File Name.txt", b"sub", b"seq12000", b"refused", b"vfat /"], b"\n# "),
+            (f"umount m{im} && echo gone", b"gone", b"\n# "),
+        ]
+    fat_steps += [("mkdir mb; mount -t vfat /disk/bf mb || echo refused-bad", b"refused-bad", b"\n# "),
+                  ("exit", b"", b"bastios> ")]
+    session("vfat", False, fat_steps, halt=True)
+else:
+    print("SKIP vfat: mkfs.fat or mtools is missing")
 # What a power cut inside disk_take_name leaves: a file under the name its
 # hard link still has (disk/b), and a link naming a free entry (disk/c).
 # The mount drops both links; the file stays, and the image is clean. The

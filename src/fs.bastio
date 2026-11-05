@@ -2573,6 +2573,22 @@ fn vfs_mount_ext(v: &Vfs, s: u64) -> bool
   return get(v.mnt, 2 * s + 1) % 4 == 2;
 }
 
+/// Is mount slot s a FAT image (src/fat.bastio)? Also only read.
+fn vfs_mount_vfat(v: &Vfs, s: u64) -> bool
+  requires vfs_ok(v) && s < MNT_N
+{
+  return get(v.mnt, 2 * s + 1) % 4 == 3;
+}
+
+/// Marks mount slot s as a read-only FAT image.
+fn vfs_set_vfat(v: &mut Vfs, s: u64)
+  requires vfs_ok(v) && s < MNT_N
+  ensures vfs_ok(v)
+{
+  let w = get(v.mnt, 2 * s + 1);
+  v.mnt = set(v.mnt, 2 * s + 1, w - w % 4 + 3);
+}
+
 /// Marks mount slot s as a read-only ext4 image.
 fn vfs_set_ext(v: &mut Vfs, s: u64)
   requires vfs_ok(v) && s < MNT_N
@@ -3094,6 +3110,40 @@ fn vfs_quota_clip(v: &mut Vfs, i: u64, at: u64, end: u64) -> u64
     q = q + 1;
   }
   return e;
+}
+
+/// Whether the pages of the file in node f that lie in off..off+len and
+/// hold no frame yet (fallocate would give each one) fit in the room left
+/// under the file's directory limit. Files with no limit always fit.
+/// Uses the transfer buffer. The pages stay unallocated: a file is sparse
+/// until written, so this is a check, not a reservation.
+fn vfs_quota_fits(v: &mut Vfs, f: u64, off: u64, len: u64) -> bool
+  requires vfs_ok(v) && off <= 0x1000000000000000 && len <= 0x1000000000000000
+  ensures vfs_ok(v)
+{
+  if f >= NFILES || len == 0 || get(v.mnt, QBASE) == 0 {
+    return true;
+  }
+  let qt = vfs_file_quota(&mut v, f);
+  if qt.limit == 0 {
+    return true;
+  }
+  let mut room = 0;
+  if qt.limit > qt.used {
+    room = (qt.limit - qt.used) / 4096;
+  }
+  let last = (off + len - 1) / 4096;
+  let mut p = off / 4096;
+  let mut holes = 0;
+  while p <= last && holes <= room
+    invariant vfs_ok(v) && p <= last + 1 && holes <= p
+  {
+    if !ram_has_page(&mut v.ram, f, p) {
+      holes = holes + 1;
+    }
+    p = p + 1;
+  }
+  return holes <= room;
 }
 
 /// Whether a write or resize was cut short by a limit since the last call;

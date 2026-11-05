@@ -158,6 +158,10 @@ debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: the dynamic linker through its links, by hand
 debian: debian: unpack the root, chroot into it
 debian: debian: users and the machine
+debian: debian: a bind of a shared mount made a slave
+debian: debian: mount --make-shared, findmnt shows the propagation
+debian: debian: unshare gives a mount namespace of its own
+debian: debian: util-linux mount tools see the mount table
 dev: make: a project of two files
 dev: make: parallel jobs
 dev: make: rebuilds only what changed
@@ -1168,6 +1172,7 @@ t_mountapi: then move_mount attaches it with them
 t_mountapi: with a bad flag is EINVAL
 t_mountapi: with an unknown attribute is EINVAL
 t_mountapi: with the flag from fsconfig
+t_mountapi: a clone through /proc/self/fd/N is a handle on the directory
 t_mountprop: MS_PRIVATE clears it
 t_mountprop: MS_SHARED again is a new group
 t_mountprop: MS_SHARED shows shared:N
@@ -1228,6 +1233,21 @@ t_mountprop: v is a shared mount
 t_mountprop: v is shared with the copy: the same group
 t_mountprop: a relative name finds the mount a descriptor path made
 t_mountprop: a relative name finds the mount move_mount made onto a descriptor
+t_mountprop: rootfs: a mount made in the container reaches its peers
+t_mountprop: rootfs: a mount on the host reaches it
+t_mountprop: rootfs: a proc below it
+t_mountprop: rootfs: bind it on itself and the volume below
+t_mountprop: rootfs: pivot_root into it
+t_mountprop: rootfs: remount for the options keeps the group
+t_mountprop: rootfs: rshared on it
+t_mountprop: rootfs: the helper becomes a slave of everything
+t_mountprop: rootfs: the volume is a mount after pivot_root
+t_mountprop: rootfs: the volume is a slave after pivot_root
+t_mountprop: rootfs: the volume is shared after pivot_root
+t_mountprop: and MS_PRIVATE
+t_mountprop: clean up after mount_setattr
+t_mountprop: in a chroot too
+t_mountprop: mount_setattr sets MS_SHARED through an open_tree descriptor
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -1414,6 +1434,9 @@ t_nsioctl: the first user namespace has no owner and no parent
 t_nsioctl: the first user namespace is owned by uid 0
 t_nsioctl: the first user namespace owns the first UTS namespace
 t_nsioctl: the owner of a user namespace its creator has no map for is 65534
+t_nsioctl: NS_GET_NSTYPE works on a ns link opened in a chroot
+t_nsioctl: NS_GET_NSTYPE works on an O_PATH descriptor of a ns link
+t_nsioctl: NS_GET_NSTYPE works on the descriptor NS_GET_USERNS returns
 t_nx: a fork child's copy-on-write stack stays no-execute
 t_nx: a mapping moved by mremap and made executable runs
 t_nx: code in a data array does not run
@@ -1758,6 +1781,26 @@ t_ropivot: stat of the descriptor's path is the root directory
 t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
+t_rtnlev: sockets in the link group, the address group, both and none
+t_rtnlev: a veth pair is made
+t_rtnlev: the link group hears both ends
+t_rtnlev: a socket in both groups hears them too
+t_rtnlev: the address group and no group hear nothing of it
+t_rtnlev: the link has an index
+t_rtnlev: an address is added
+t_rtnlev: the address group hears RTM_NEWADDR with it
+t_rtnlev: the link group does not
+t_rtnlev: the link is set up
+t_rtnlev: the link group hears RTM_NEWLINK for it
+t_rtnlev: the address group does not
+t_rtnlev: the address is removed
+t_rtnlev: the address group hears RTM_DELADDR
+t_rtnlev: the link is removed
+t_rtnlev: the link group hears RTM_DELLINK for both ends
+t_rtnlev: the socket in both groups heard the rest
+t_rtnlev: a socket in no group heard nothing at all
+t_rtnlev: another namespace makes a pair
+t_rtnlev: it is not reported here
 t_sig2: 24 processes at once
 t_sig2: sigqueue carries a 64-bit sigval whole
 t_sig2: SA_ONSTACK runs on the alternate stack

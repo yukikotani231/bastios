@@ -1336,7 +1336,13 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
 {
   let d = fd_look(k, pid, fd);
   let mut m = dev_meta(DEV_TTY);           // the console is /dev/tty
-  if d.kind == K_BAD {
+  let mh = fd_ofd(k, pid, fd);
+  if d.kind == K_BAD && mh < OFD_N && of_get(k.ofd, mh, 0) == 22 {
+    // A file system context or a mount object of the new mount API
+    // (OF_MNT, src/lxmountapi.bastio): libmount looks at the mount object
+    // before it attaches it, and sees the root directory of a new file system.
+    m = Meta { ok: true, mode: S_IFDIR, size: 0, ino: 2, mtime: 0, own: 0 };
+  } else if d.kind == K_BAD {
     return EBADF;
   } else if d.kind == K_PIPE_R || d.kind == K_PIPE_W {
     m = Meta { ok: true, mode: S_IFIFO, size: 0, ino: 4, mtime: 0, own: 0 };
