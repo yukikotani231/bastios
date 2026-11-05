@@ -661,7 +661,7 @@ fn sc_decide(k: &mut Kernel, pid: u64, nr: u64) -> ScVerdict
     // context and leaves the result there. The low 16 bits of the
     // filter's return value go to si_errno, as on Linux: those sandboxes
     // number their handlers that way and pick one by it.
-    post_wv(&mut k, pid, 31, FAULT_MARK + SYS_MARK + (nr % 16384) * FAULT_CODE + pget(k.procs, pid, F_REGS + R_RIP) % FAULT_CODE, act % 0x10000);
+    post_wv(&mut k, pid, 31, FAULT_MARK + SYS_MARK + (sc_number(k, pid, nr) % 16384) * FAULT_CODE + pget(k.procs, pid, F_REGS + R_RIP) % FAULT_CODE, act % 0x10000);
     return ScVerdict { run: false, ret: SC_ROLLBACK, wait: false, stop: false };
   }
   if hi == SCA_USER_NOTIF / 0x10000 {
