@@ -2620,6 +2620,30 @@ t_wghs: wgb knows wga
 t_wghs: wgc starts a handshake with wgd
 t_wghs: wgd knows wgc
 t_wghs: wge, unknown to wgd, gets nowhere
+t_wgnext: a child in a new network namespace
+t_wgnext: a client socket
+t_wgnext: a device with an address
+t_wgnext: a last handshake time
+t_wgnext: a new handshake is asked for
+t_wgnext: a veth pair, one end in the child's namespace
+t_wgnext: and again
+t_wgnext: go
+t_wgnext: keys are traded
+t_wgnext: sockets
+t_wgnext: the child is ready
+t_wgnext: the child is set up
+t_wgnext: the child stops
+t_wgnext: the first response is to be dropped
+t_wgnext: the initiator has not completed the handshake
+t_wgnext: the parent's end has an address
+t_wgnext: the peer is set up with the relay as its endpoint
+t_wgnext: the relay's control socket
+t_wgnext: the responder answered and the relay dropped the response
+t_wgnext: the responder still sends under the old keys, which the initiator takes
+t_wgnext: the responder's last handshake is set
+t_wgnext: the session is renewed
+t_wgnext: the tunnel carries traffic on the new session
+t_wgnext: the tunnel comes up
 t_wgprev: a child in a new network namespace
 t_wgprev: a client socket
 t_wgprev: a device with an address
