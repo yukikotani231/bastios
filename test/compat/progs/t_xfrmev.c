@@ -220,6 +220,11 @@ int main(void) {
     int x = socket(AF_NETLINK, SOCK_RAW, NETLINK_XFRM);
     EXPECT("a socket to configure with", x >= 0);
     if (x < 0) return done();
+    /* start from an empty table: other programs may have left associations behind */
+    start(XFRM_MSG_FLUSHSA, NLM_F_ACK);
+    uint8_t proto0[4] = {IPPROTO_ESP, 0, 0, 0};
+    body(proto0, 4);
+    EXPECT("the table is flushed first", talk(x) == 0);
     int sub = xsock(1u << (XFRMNLGRP_SA - 1));
     EXPECT("root can join the SA group", sub >= 0);
     int quiet = xsock(0);

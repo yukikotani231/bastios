@@ -2770,6 +2770,7 @@ t_xfrm: the same SPI to another destination is another association
 t_xfrm: the same one again is EEXIST
 t_xfrm: the same selector in the other direction is another policy
 t_xfrm: two templates are EOPNOTSUPP
+t_xfrmev: the table is flushed first
 t_xfrmev: a socket to configure with
 t_xfrmev: root can join the SA group
 t_xfrmev: sockets in no group and in the expire group
