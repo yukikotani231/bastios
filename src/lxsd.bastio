@@ -12,11 +12,14 @@
 // k.sdp, two words per device: its first sector on the disk and its
 // sectors (0: there is no such device).
 //
+// /proc/partitions and the attribute files of /sys/block/sda and
+// /sys/block/sda/sdaN are in src/lxprocfs.bastio.
+//
 // Mounting: `dd if=/dev/sda2 of=img` and a loop device make the image
 // available to the file system readers (src/lxmount.bastio).
 //
 // Not done: writing, a second disk (a USB stick that is not the boot disk),
-// logical MBR partitions, /sys/block/sda and /proc/partitions.
+// logical MBR partitions, listing the /sys/block/sda directories.
 
 /// Word f of device n, at most PLO_MAX (sd_scan stores nothing larger).
 fn sd_get(t: &Buf, n: u64, f: u64) -> u64
