@@ -167,6 +167,7 @@ llistxattr02
 llistxattr03
 lremovexattr01
 mount_setattr01
+mount_setattr02
 move_mount01
 move_mount02
 msgget03

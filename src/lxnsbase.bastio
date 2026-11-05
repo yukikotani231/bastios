@@ -34,6 +34,10 @@ const ME_FLAGS: u64 = 1;
 const ME_KLEN: u64 = 2;
 const ME_SLEN: u64 = 3;
 const ME_SEQ: u64 = 4;
+const ME_PEER: u64 = 5;                   // the peer group the mount is shared in (0: not shared), src/lxprop.bastio
+const ME_MASTER: u64 = 6;                 // the peer group it is a slave of (0: none)
+const ME_UNB: u64 = 7;                    // 1 if it is unbindable
+const ME_MARK: u64 = 8;                   // scratch: 1 for a mount that receives the event being propagated
 
 const MT_RO: u64 = 16;                    // flags: read-only
 const MT_OWN: u64 = 32;                   // flags: the source is an in-memory directory made for the mount
@@ -51,6 +55,7 @@ const MK_SYS: u64 = 5;
 const MK_MQUEUE: u64 = 6;
 const MK_OLDROOT: u64 = 7;
 const MK_CGROUP: u64 = 8;                 // cgroup2 (src/lxcgroup.bastio)
+const MK_ROOT: u64 = 11;                  // the root of a namespace, once its propagation was set: no key, no source, not listed
 const MK_NSF: u64 = 10;                   // a bind of a /proc/PID/ns file onto a file (src/lxns.bastio); 9 is MK_OVERLAY
 
 fn me_get(k: &Kernel, e: u64, f: u64) -> u64

@@ -826,7 +826,7 @@ fn swap_spill(tx: &mut Buf, a: u64, b: u64)
 }
 
 const MT_N: u64 = 256;                // mounts of mount namespaces, in all (src/lxns.bastio)
-const ME_W: u64 = 5;                  // words per mount
+const ME_W: u64 = 9;                  // words per mount
 // After the mounts, k.mns keeps the other namespaces (src/lxns.bastio):
 // each process's UTS, IPC and PID namespace, the next id of each kind, the
 // host and domain names of UTS namespaces other than the first (whose
@@ -898,7 +898,8 @@ const PN_W: u64 = 5;                  // id + 1 (0: free), the next id to give, 
 const UTS_N: u64 = 32;                // UTS namespaces besides the first
 const UTS_W: u64 = 133;               // id + 1 (0: free), then the names as k.sys keeps them, then the id of the user namespace that owns it
 const UTS_OWN: u64 = UTS_W - 1;       // its word of the owner
-const MNS_KID: u64 = NPROC + 16 + MT_N * ME_W;   // [MNS_KID + kind * NPROC + pid]
+const MNS_PG: u64 = NPROC + 16 + MT_N * ME_W;    // the last peer group id given (src/lxprop.bastio)
+const MNS_KID: u64 = MNS_PG + 1;                 // [MNS_KID + kind * NPROC + pid]
 const MNS_KNEXT: u64 = MNS_KID + NSK_N * NPROC;
 const MNS_UTS: u64 = MNS_KNEXT + NSK_N;
 const MNS_PN: u64 = MNS_UTS + UTS_N * UTS_W;

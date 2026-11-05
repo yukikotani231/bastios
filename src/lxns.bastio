@@ -32,9 +32,9 @@
 // src/lxmount.bastio) are not per namespace: a tmpfs mounted in a new
 // namespace marks its directory for everyone. A namespace's mounts go
 // when the last process in it has ended (ns_gc, when the table fills up or
-// a namespace is made). There is no propagation between namespaces:
-// MS_SHARED, MS_SLAVE, MS_PRIVATE and MS_UNBINDABLE are accepted and
-// change nothing, which is MS_PRIVATE's behaviour.
+// a namespace is made). Mounts are private until MS_SHARED, MS_SLAVE or
+// MS_UNBINDABLE says otherwise; mounts and unmounts below a shared mount
+// reach its peers and their slaves, in every namespace (src/lxprop.bastio).
 //
 // Permission checks on the way (perm_walk) look at the file layer's path,
 // not the logical one: a directory a bind mount hides is not checked.
@@ -44,6 +44,7 @@ import "lxfd.bastio";
 import "lxcap.bastio";
 import "lxprocfs.bastio";
 import "lxnsbase.bastio";
+import "lxprop.bastio";
 
 const LX_PIVOT_ROOT: u64 = 155;
 
@@ -96,7 +97,7 @@ fn ns_find(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
   while e < hi
     invariant e <= hi && hi <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
   {
-    if me_in(k, e, ns) && me_covers(k, e, p, c) && me_get(k, e, ME_FLAGS) % MT_RO != MK_NSF {
+    if me_in(k, e, ns) && me_covers(k, e, p, c) && me_get(k, e, ME_FLAGS) % MT_RO != MK_NSF && me_get(k, e, ME_FLAGS) % MT_RO != MK_ROOT {
       if best == MT_N {
         best = e;
       } else if me_klen(k, e) > me_klen(k, best) || (me_klen(k, e) == me_klen(k, best) && me_get(k, e, ME_SEQ) > me_get(k, best, ME_SEQ)) {
@@ -1085,6 +1086,8 @@ fn me_release(k: &mut Kernel, e: u64)
   requires kok(k) && e < MT_N
   ensures kok(k)
 {
+  mp_leave(&mut k, e, false);               // its slaves go on under what it was a slave of
+  me_set(&mut k, e, ME_UNB, 0);
   if me_get(k, e, ME_FLAGS) / MT_OWN % 2 == 1 {
     me_set(&mut k, e, ME_NS, MNS_MAX);
   } else {
@@ -1247,14 +1250,22 @@ fn ns_add(k: &mut Kernel, ns: u64, flags: u64, src: &Bytes, sl: u64) -> bool
   requires kok(k) && ns < MNS_MAX && sl <= FNAME_MAX && sl <= blen(src)
   ensures kok(k)
 {
+  return ns_add_e(&mut k, ns, flags, src, sl) < MT_N;
+}
+
+/// ns_add, returning the new mount (private), or MT_N if the table is full.
+fn ns_add_e(k: &mut Kernel, ns: u64, flags: u64, src: &Bytes, sl: u64) -> u64
+  requires kok(k) && ns < MNS_MAX && sl <= FNAME_MAX && sl <= blen(src)
+  ensures kok(k) && result <= MT_N
+{
   let kl = lpath_len(k);
   if kl > MNT_MAX || sl > MNT_MAX {
     k.perr = ENAMETOOLONG;            // a mount's key and source are kept in MS_ROW bytes
-    return false;
+    return MT_N;
   }
   let e = me_alloc(&mut k);
   if e >= MT_N {
-    return false;
+    return MT_N;
   }
   let at = me_key(e);
   let mut i = 0;
@@ -1277,8 +1288,12 @@ fn ns_add(k: &mut Kernel, ns: u64, flags: u64, src: &Bytes, sl: u64) -> bool
   me_set(&mut k, e, ME_KLEN, kl);
   me_set(&mut k, e, ME_SLEN, sl);
   me_set(&mut k, e, ME_SEQ, seq);
+  me_set(&mut k, e, ME_PEER, 0);
+  me_set(&mut k, e, ME_MASTER, 0);
+  me_set(&mut k, e, ME_UNB, 0);
+  me_set(&mut k, e, ME_MARK, 0);
   me_set(&mut k, e, ME_NS, ns + 1);
-  return true;
+  return e;
 }
 
 /// The latest mount of namespace ns whose key is exactly the last
@@ -1293,7 +1308,7 @@ fn ns_at(k: &Kernel, ns: u64) -> u64
   while e < MT_N
     invariant e <= MT_N && best <= MT_N && kok(k) && n <= FNAME_MAX
   {
-    if me_in(k, e, ns) && me_klen(k, e) == n && me_covers(k, e, k.mstr, n) {
+    if me_in(k, e, ns) && me_klen(k, e) == n && me_covers(k, e, k.mstr, n) && me_get(k, e, ME_FLAGS) % MT_RO != MK_ROOT {
       if best == MT_N || me_get(k, e, ME_SEQ) > me_get(k, best, ME_SEQ) {
         best = e;
       }
@@ -1996,6 +2011,9 @@ fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, ta
   let mut sdir = true;
   let mut ovf = 0;
   let mut nsfm = false;
+  let mut sll = 0;
+  let mut spg = 0;
+  let mut smt = 0;
   if kind == MK_BIND {
     let mut n = presrc;
     if presrc == NO_RESULT {
@@ -2004,6 +2022,23 @@ fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, ta
     if n == NO_RESULT {
       bfree(src);
       return k.perr;
+    }
+    if presrc == NO_RESULT {
+      // The mount the source is in: the bind takes its propagation (a peer of a
+      // shared mount, a slave of the same master), and none binds an unbindable one.
+      sll = lpath_len(k);
+      let sm = mp_cover(k, ns, k.mstr, sll, MT_N);
+      if sm < MT_N {
+        spg = me_get(k, sm, ME_PEER);
+        smt = me_get(k, sm, ME_MASTER);
+        if me_get(k, sm, ME_UNB) == 1 {
+          bfree(src);
+          return EINVAL;
+        }
+      }
+      if sll <= MNT_MAX {
+        bytes_copy_span(&mut src, MP_SKB, k.mstr, 0, sll);
+      }
     }
     let pn = proc_node(k, n);
     if n <= XFER && is_ns_file(pn) {
@@ -2137,11 +2172,36 @@ fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, ta
   if presrc != NO_RESULT && flags % 2 == 1 && mf & MT_RO == 0 {
     mf = mf + MT_RO;                        // a clone attached by move_mount takes read-only from its attributes (mount(2)'s MS_BIND needs a remount)
   }
-  let ok = ns_add(&mut k, ns, mf, src, sl);
-  bfree(src);
-  if !ok {
+  let tl = lpath_len(k);
+  if tl <= MNT_MAX {
+    bytes_copy_span(&mut src, MP_TKB, k.mstr, 0, tl);
+  }
+  let x = ns_add_e(&mut k, ns, mf, src, sl);
+  if x >= MT_N {
+    bfree(src);
     return ENOMEM;
   }
+  if !nsfm {
+    me_set(&mut k, x, ME_PEER, spg);
+    me_set(&mut k, x, ME_MASTER, smt);
+  }
+  // The mount, and with MS_REC the mounts below the source (as copies of
+  // them), are attached: below a shared mount they are shared and reach its peers.
+  let mut nw = alloc(MT_N + 1);
+  wset(&mut nw, 0, x);
+  let mut cnt = 1;
+  if flags & MS_REC != 0 && kind == MK_BIND && !nsfm && presrc == NO_RESULT && sdir && tl <= MNT_MAX && sll <= MNT_MAX {
+    cnt = ns_rbind(&mut k, ns, src, tl, sll, x, &mut nw);
+  }
+  let mut ai = 0;
+  while ai < cnt && ai < MT_N
+    invariant ai <= MT_N && len(nw) == MT_N + 1 && kok(k)
+  {
+    mp_attach(&mut k, ns, smaller(wget(nw, ai), MT_N - 1));
+    ai = ai + 1;
+  }
+  free(nw);
+  bfree(src);
   return 0;
 }
 
@@ -2223,11 +2283,13 @@ fn ns_tmpfs(k: &mut Kernel, pid: u64, n: u64, ro: bool) -> u64
   if ro {
     mf = mf + MT_RO;
   }
-  let ok = ns_add(&mut k, ns_of(k, pid), mf, src, sl);
+  let ns = ns_of(k, pid);
+  let x = ns_add_e(&mut k, ns, mf, src, sl);
   bfree(src);
-  if !ok {
+  if x >= MT_N {
     return ENOMEM;
   }
+  mp_attach(&mut k, ns, x);
   return 0;
 }
 
@@ -2273,6 +2335,311 @@ fn ns_set_attrs(k: &mut Kernel, pid: u64, set: u64, clr: u64) -> u64
   return 0;
 }
 
+// ---------------------------------------------------------------- propagation
+
+/// A mount was added to namespace ns (x). If the mount it is in is shared,
+/// x is shared too, and every peer of that mount and every slave of its
+/// group gets a copy of x where the same directory is: peers' copies are
+/// peers of x, slaves' copies are slaves of x's group. A copy that cannot
+/// be made (the table is full, the name is too long) is not made.
+fn mp_attach(k: &mut Kernel, ns: u64, x: u64)
+  requires kok(k) && ns < MNS_MAX && x < MT_N
+  ensures kok(k)
+{
+  let xkl = me_klen(k, x);
+  let xsl = me_slen(k, x);
+  let mut lb = balloc(PBUF);
+  let mut sb = balloc(PBUF);
+  let mut ph = balloc(PBUF);
+  let mut kb = balloc(PBUF);
+  let xat = me_key(x);
+  bytes_copy_span(&mut lb, 0, k.mstr, xat, xat + xkl);
+  bytes_copy_span(&mut sb, 0, k.mstr, xat + MS_ROW, xat + MS_ROW + xsl);
+  let m = mp_cover(k, ns, lb, xkl, x);
+  let mut go = m < MT_N;
+  if go {
+    go = mp_plain(k, m) && me_get(k, m, ME_PEER) != 0;
+  }
+  if go {
+    let mg = me_get(k, m, ME_PEER);
+    if me_get(k, x, ME_PEER) == 0 {
+      let g = mp_new_group(&mut k);
+      me_set(&mut k, x, ME_PEER, g);
+    }
+    me_set(&mut k, x, ME_UNB, 0);
+    let xg = me_get(k, x, ME_PEER);
+    let xm = me_get(k, x, ME_MASTER);
+    let xf = me_get(k, x, ME_FLAGS);
+    let pl = mp_phys(k, m, lb, xkl, &mut ph);
+    if pl != NO_RESULT {
+      mp_receivers(&mut k, m);
+      let mut q = 0;
+      while q < MT_N
+        invariant q <= MT_N && pl <= FNAME_MAX && blen(ph) == PBUF && blen(kb) == PBUF && blen(sb) == PBUF && xsl <= MNT_MAX && kok(k)
+      {
+        if me_get(k, q, ME_MARK) == 1 && me_live(k, q) {
+          let r = mp_src_rest(k, q, ph, pl);
+          if r != NO_RESULT {
+            let kl2 = mp_key_for(k, q, ph, pl, r, &mut kb);
+            if kl2 != NO_RESULT {
+              let qns = me_nsid(k, q);
+              ns_keep(&mut k, kb, kl2);
+              let c = ns_add_e(&mut k, qns, xf, sb, xsl);
+              if c < MT_N {
+                if me_get(k, q, ME_PEER) == mg {
+                  me_set(&mut k, c, ME_PEER, xg);
+                  me_set(&mut k, c, ME_MASTER, xm);
+                } else {
+                  me_set(&mut k, c, ME_MASTER, xg);
+                  let h = me_get(k, q, ME_PEER);
+                  if h != 0 {
+                    let g2 = mp_copy_group(&mut k, h);
+                    me_set(&mut k, c, ME_PEER, g2);
+                    me_set(&mut k, c, ME_MARK, MP_BIG + smaller(h, MNS_MAX));
+                  }
+                }
+              }
+            }
+          }
+        }
+        q = q + 1;
+      }
+    }
+  }
+  bfree(lb);
+  bfree(sb);
+  bfree(ph);
+  bfree(kb);
+}
+
+/// Mount x is about to be unmounted from namespace ns. If the mount it is
+/// in is shared, the copies of x at the places its peers and their slaves
+/// have the same directory (mounts with x's source, kind and, below those
+/// mount points, nothing mounted) are unmounted too.
+fn mp_detach(k: &mut Kernel, ns: u64, x: u64)
+  requires kok(k) && ns < MNS_MAX && x < MT_N
+  ensures kok(k)
+{
+  let xkl = me_klen(k, x);
+  let mut lb = balloc(PBUF);
+  let mut ph = balloc(PBUF);
+  let mut kb = balloc(PBUF);
+  let xat = me_key(x);
+  bytes_copy_span(&mut lb, 0, k.mstr, xat, xat + xkl);
+  let m = mp_cover(k, ns, lb, xkl, x);
+  let mut go = m < MT_N;
+  if go {
+    go = mp_plain(k, m) && me_get(k, m, ME_PEER) != 0;
+  }
+  if go {
+    let pl = mp_phys(k, m, lb, xkl, &mut ph);
+    if pl != NO_RESULT {
+      mp_receivers(&mut k, m);
+      let kind = me_get(k, x, ME_FLAGS) % MT_RO;
+      let mut q = 0;
+      while q < MT_N
+        invariant q <= MT_N && pl <= FNAME_MAX && blen(ph) == PBUF && blen(kb) == PBUF && kok(k)
+      {
+        if me_get(k, q, ME_MARK) == 1 && me_live(k, q) {
+          let r = mp_src_rest(k, q, ph, pl);
+          if r != NO_RESULT {
+            let kl2 = mp_key_for(k, q, ph, pl, r, &mut kb);
+            if kl2 != NO_RESULT {
+              let qns = me_nsid(k, q);
+              let y = mp_exact(k, qns, kb, kl2);
+              if y < MT_N && y != x && me_get(k, y, ME_FLAGS) % MT_RO == kind && me_same_src(k, y, x) {
+                // Not one with something mounted below it.
+                let mut busy = false;
+                let mut z = 0;
+                while z < MT_N
+                  invariant z <= MT_N && kl2 <= MNT_MAX && blen(kb) == PBUF && kok(k)
+                {
+                  if z != y && me_in(k, z, qns) && mp_below(k, z, kb, kl2) {
+                    busy = true;
+                  }
+                  z = z + 1;
+                }
+                if !busy {
+                  me_release(&mut k, y);
+                }
+              }
+            }
+          }
+        }
+        q = q + 1;
+      }
+    }
+  }
+  bfree(lb);
+  bfree(ph);
+  bfree(kb);
+}
+
+
+/// The mounts below the source of a recursive bind, copied below its
+/// target in namespace ns. b holds the target's key (tl bytes) at MP_TKB
+/// and the source's (sll bytes) at MP_SKB. The new mounts are marked (2),
+/// and added to nw from index 1 (nw[0] is the mount of the target itself),
+/// least deep first; unbindable mounts and everything below them stay
+/// behind. Returns how many there are in nw.
+fn ns_rbind(k: &mut Kernel, ns: u64, b: &Bytes, tl: u64, sll: u64, x: u64, nw: &mut Buf) -> u64
+  requires kok(k) && ns < MNS_MAX && x < MT_N && tl <= MNT_MAX && sll <= MNT_MAX && blen(b) == PBUF && len(nw) == MT_N + 1
+  ensures kok(k) && len(nw) == MT_N + 1 && result >= 1 && result <= MT_N
+{
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k)
+  {
+    me_set(&mut k, e, ME_MARK, 0);
+    e = e + 1;
+  }
+  me_set(&mut k, x, ME_MARK, 2);
+  wset(&mut nw, 0, x);
+  let mut cnt = 1;
+  let mut sk = balloc(PBUF);
+  let mut ys = balloc(PBUF);
+  let mut nk = balloc(PBUF);
+  bytes_copy_span(&mut sk, 0, b, MP_SKB, MP_SKB + sll);
+  let hi = smaller(k.mt_hi, MT_N);
+  let mut y = 0;
+  while y < hi
+    invariant y <= hi && hi <= MT_N && cnt >= 1 && cnt <= MT_N && len(nw) == MT_N + 1 && sll <= MNT_MAX && tl <= MNT_MAX && blen(b) == PBUF && blen(sk) == PBUF && blen(ys) == PBUF && blen(nk) == PBUF && kok(k)
+  {
+    if me_in(k, y, ns) && me_get(k, y, ME_MARK) != 2 && me_get(k, y, ME_FLAGS) % MT_RO != MK_NSF && me_get(k, y, ME_FLAGS) % MT_RO != MK_OLDROOT && mp_below(k, y, sk, sll) {
+      // Left behind: an unbindable mount, and what is mounted below one that is below the source.
+      let mut skip = me_get(k, y, ME_UNB) == 1;
+      let mut z = 0;
+      while z < MT_N
+        invariant z <= MT_N && kok(k)
+      {
+        if z != y && me_in(k, z, ns) && me_get(k, z, ME_UNB) == 1 && me_klen(k, z) > sll && mp_under(k, z, y) {
+          skip = true;
+        }
+        z = z + 1;
+      }
+      let yl = me_klen(k, y);
+      let ysl = me_slen(k, y);
+      let mut rs = sll;
+      if sll > 0 {
+        rs = sll + 1;
+      }
+      let mut sep = 0;
+      if tl > 0 {
+        sep = 1;
+      }
+      if !skip && rs <= yl && tl + sep + (yl - rs) <= MNT_MAX && cnt < MT_N {
+        let yat = me_key(y);
+        bytes_copy_span(&mut ys, 0, k.mstr, yat + MS_ROW, yat + MS_ROW + ysl);
+        bytes_copy_span(&mut nk, 0, b, MP_TKB, MP_TKB + tl);
+        if sep == 1 {
+          bset(&mut nk, tl, 47);
+        }
+        bytes_copy_span(&mut nk, tl + sep, k.mstr, yat + rs, yat + yl);
+        let yf = me_get(k, y, ME_FLAGS);
+        let yp = me_get(k, y, ME_PEER);
+        let ym = me_get(k, y, ME_MASTER);
+        ns_keep(&mut k, nk, tl + sep + (yl - rs));
+        let c = ns_add_e(&mut k, ns, yf, ys, ysl);
+        if c < MT_N {
+          me_set(&mut k, c, ME_PEER, yp);
+          me_set(&mut k, c, ME_MASTER, ym);
+          me_set(&mut k, c, ME_MARK, 2);
+          wset(&mut nw, cnt, c);
+          cnt = cnt + 1;
+        }
+      }
+    }
+    y = y + 1;
+  }
+  bfree(sk);
+  bfree(ys);
+  bfree(nk);
+  // Least deep first, so that a mount is shared before what is on it is attached.
+  let mut i = 1;
+  while i < cnt
+    invariant 1 <= i && i <= cnt && cnt <= MT_N && len(nw) == MT_N + 1 && kok(k)
+  {
+    let v = wget(nw, i);
+    let mut j = i;
+    while j > 1 && smaller(wget(nw, j - 1), MT_N - 1) < MT_N && me_klen(k, smaller(wget(nw, j - 1), MT_N - 1)) > me_klen(k, smaller(v, MT_N - 1))
+      invariant 1 <= j && j <= i && i < cnt && cnt <= MT_N && len(nw) == MT_N + 1 && kok(k)
+    {
+      wset(&mut nw, j, wget(nw, j - 1));
+      j = j - 1;
+    }
+    wset(&mut nw, j, v);
+    i = i + 1;
+  }
+  return cnt;
+}
+
+/// mount(2) with MS_SHARED, MS_PRIVATE, MS_SLAVE or MS_UNBINDABLE: the
+/// mount at the target (with MS_REC, and the mounts below it) is given
+/// that propagation. The root of a namespace is a mount from the first
+/// time its propagation is set.
+fn ns_propagation(k: &mut Kernel, pid: u64, target: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mode = flags & MS_PROPAGATION;
+  if mode != MS_SHARED && mode != MS_PRIVATE && mode != MS_SLAVE && mode != MS_UNBINDABLE {
+    return EINVAL;                          // only one at a time
+  }
+  let n = lx_path_at(&mut k, pid, AT_FDCWD, target);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  return ns_prop_apply(&mut k, pid, n, mode, flags & MS_REC != 0);
+}
+
+/// Sets the propagation (mode: MS_SHARED, ...) of the mount at the path the
+/// last lookup found, n bytes in the transfer buffer; with rec, of the
+/// mounts below it too.
+fn ns_prop_apply(k: &mut Kernel, pid: u64, n: u64, mode: u64, rec: bool) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+  ensures kok(k)
+{
+  let ns = ns_of(k, pid);
+  let tl = lpath_len(k);
+  let mut e = mp_exact(k, ns, k.mstr, tl);
+  if e >= MT_N && tl == 0 {
+    let src = balloc(PBUF);
+    e = ns_add_e(&mut k, ns, MK_ROOT, src, 0);
+    bfree(src);
+    if e >= MT_N {
+      return ENOMEM;
+    }
+  }
+  if e >= MT_N {
+    // The file layer's own mount points (/proc, a tmpfs) are the machine's:
+    // nothing passes between them.
+    if dir_at(&mut k, n) == NO_FILE && vfs_lookup(&mut k.fs, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
+      return ENOENT;
+    }
+    if xfer_is(k.fs.xfer, 0, n, "proc") || xfer_is(k.fs.xfer, 0, n, "dev") || xfer_is(k.fs.xfer, 0, n, "sys") || xfer_is(k.fs.xfer, 0, n, "disk") {
+      return 0;
+    }
+    let i = ram_find(&mut k.fs.ram, k.fs.rix, k.fs.rhi, k.fs.xfer, n);
+    if i < NFILES && (vfs_mount_slot(k.fs, i) < MNT_N || i + 1 == k.fs.lo_at) {
+      return 0;
+    }
+    return EINVAL;                          // not a mount point
+  }
+  mp_set(&mut k, e, mode);
+  if rec {
+    let mut x = 0;
+    while x < MT_N
+      invariant x <= MT_N && tl <= FNAME_MAX && kok(k)
+    {
+      if x != e && me_in(k, x, ns) && mp_below(k, x, k.mstr, tl) {
+        mp_set(&mut k, x, mode);
+      }
+      x = x + 1;
+    }
+  }
+  return 0;
+}
+
 /// umount2 of a namespace's own mount: removes the latest mount at the
 /// last lookup's logical path. False if there is none (the file layer's
 /// mounts are tried next).
@@ -2292,6 +2659,7 @@ fn ns_umount(k: &mut Kernel, pid: u64) -> bool
   if me_get(k, e, ME_FLAGS) % MT_RO != MK_OLDROOT && (pid + 1) * CWD_STRIDE <= len(k.croot) && row_is(k.croot, k.crootx, pid, k.mstr, 0, n) {
     return false;
   }
+  mp_detach(&mut k, ns_of(k, pid), e);     // the copies at the mount's peers go with it
   me_release(&mut k, e);
   return true;
 }
@@ -2478,9 +2846,10 @@ fn is_ns_call(n: u64) -> bool {
 // ---------------------------------------------------------------- /proc/PID/mounts
 
 /// Appends the mounts of process p's namespace that lie in its root to
-/// o[a..], one "SOURCE /PATH TYPE rw 0 0" line each. Returns where the
-/// text ends.
-fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
+/// o[a..], one "SOURCE /PATH TYPE rw 0 0" line each (with mi, " shared:N
+/// master:M unbindable" follow the "0 0": the optional fields of
+/// /proc/PID/mountinfo). Returns where the text ends.
+fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64, mi: bool) -> u64
   requires kok(k) && p < NPROC && a <= PROC_OUT && blen(o) == PROC_OUT
   ensures result <= PROC_OUT && blen(o) == PROC_OUT
 {
@@ -2491,7 +2860,7 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
   while e < MT_N
     invariant e <= MT_N && w <= PROC_OUT && blen(o) == PROC_OUT && kok(k) && p < NPROC && rl <= FNAME_MAX
   {
-    if me_in(k, e, ns) {
+    if me_in(k, e, ns) && me_get(k, e, ME_FLAGS) % MT_RO != MK_ROOT {
       let kl = me_klen(k, e);
       let at = me_key(e);
       // In the root: the key starts with it, at a "/".
@@ -2511,7 +2880,10 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
         let kind = me_get(k, e, ME_FLAGS) % MT_RO;
         let mut src = "none";
         let mut ty = "none";
-        if kind == MK_PROC {
+        if kind == MK_BIND && me_get(k, e, ME_FLAGS) / MT_OWN % 2 == 1 {
+          src = "tmpfs";
+          ty = "tmpfs";                     // a tmpfs of the namespace (ns_tmpfs)
+        } else if kind == MK_PROC {
           src = "proc";
           ty = "proc";
         } else if kind == MK_DEV {
@@ -2574,10 +2946,37 @@ fn ns_mounts_text(k: &Kernel, p: u64, o: &mut Bytes, a: u64) -> u64
         if st / 8192 % 2 == 1 {
           w = put_s(&mut o, w, ",nosymfollow");
         }
-        w = put_s(&mut o, w, " 0 0\n");
+        w = put_s(&mut o, w, " 0 0");
+        if mi {
+          w = mp_fields(k, e, &mut o, w);
+        }
+        w = put_c(&mut o, w, 10);
       }
     }
     e = e + 1;
+  }
+  return w;
+}
+
+/// The optional fields of mountinfo for mount e: " shared:N", " master:M",
+/// " unbindable".
+fn mp_fields(k: &Kernel, e: u64, o: &mut Bytes, a: u64) -> u64
+  requires kok(k) && e < MT_N && a <= PROC_OUT && blen(o) == PROC_OUT
+  ensures result <= PROC_OUT && blen(o) == PROC_OUT
+{
+  let mut w = a;
+  let g = me_get(k, e, ME_PEER);
+  if g != 0 {
+    w = put_s(&mut o, w, " shared:");
+    w = put_n(&mut o, w, g);
+  }
+  let m = me_get(k, e, ME_MASTER);
+  if m != 0 {
+    w = put_s(&mut o, w, " master:");
+    w = put_n(&mut o, w, m);
+  }
+  if me_get(k, e, ME_UNB) == 1 {
+    w = put_s(&mut o, w, " unbindable");
   }
   return w;
 }
