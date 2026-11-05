@@ -119,6 +119,7 @@ static struct win *z[MAXWIN];            /* z[nz - 1] is on top */
 static int nz;
 static int next_id = 1;
 static void touch_bar(void);
+static void touch_all(void);
 static long long now_ms(void);
 static char notice[40];                  /* a short message in the task bar (no room for a window, say) */
 static long long notice_due;             /* when it goes; 0 when none shows */
@@ -676,6 +677,7 @@ static void draw_icons(void)
     }
 }
 
+static int wall_fixed;                   /* the wallpaper came from -w: /etc/bwm.wallpaper is not watched */
 static uint32_t *wall;                   /* the wallpaper (bwm -w FILE), W x H, or NULL for the gradient */
 
 static unsigned wall_le(const unsigned char *p, int n)
@@ -730,17 +732,20 @@ static int wall_load(const char *path)
         free(d);
         return 0;
     }
-    wall = malloc((size_t)W * H * 4);
-    if (!wall) { free(d); return 0; }
+    uint32_t *nw = malloc((size_t)W * H * 4);
+    if (!nw) { free(d); return 0; }
+                                                         /* the old wallpaper stays until the new one is whole */
     for (unsigned y = 0; y < H; y++) {
         long sy = (long)y * ih / H;
         const unsigned char *row = px + (flip ? ih - 1 - sy : sy) * stride;
         for (unsigned x = 0; x < W; x++) {
             const unsigned char *q = row + ((long)x * iw / W) * (bpp / 8);
-            wall[y * W + x] = bmp ? rgb(q[2], q[1], q[0]) : rgb(q[0], q[1], q[2]);
+            nw[y * W + x] = bmp ? rgb(q[2], q[1], q[0]) : rgb(q[0], q[1], q[2]);
         }
     }
     free(d);
+    free(wall);
+    wall = nw;
     return 1;
 }
 
@@ -767,6 +772,46 @@ static void screenshot(void)
     fclose(f);
     puts("bwm: screenshot /tmp/screenshot.ppm");
     fflush(stdout);
+}
+
+/* /etc/bwm.wallpaper is read again when it changes: its first line names the file (a PPM or BMP), an empty file or line takes the wallpaper off. */
+static void wall_watch(void)
+{
+    static time_t seen_m = (time_t)-1;
+    static long seen_ns;
+    struct stat st;
+    time_t m = 0;
+    long ns = 0;
+    if (stat("/etc/bwm.wallpaper", &st) == 0) {
+        m = st.st_mtim.tv_sec;
+        ns = st.st_mtim.tv_nsec;
+    }
+    if (seen_m == (time_t)-1) {                          /* the first look is the one bwm began with */
+        seen_m = m;
+        seen_ns = ns;
+        return;
+    }
+    if (m == seen_m && ns == seen_ns)
+        return;
+    seen_m = m;
+    seen_ns = ns;
+    char line[200] = "";
+    FILE *f = fopen("/etc/bwm.wallpaper", "r");
+    if (f) {
+        if (fgets(line, sizeof line, f))
+            line[strcspn(line, "\r\n")] = 0;
+        fclose(f);
+    }
+    if (!line[0]) {
+        free(wall);
+        wall = NULL;
+    } else if (!wall_load(line)) {
+        snprintf(notice, sizeof notice, "Cannot use %.24s", line);
+        notice_due = now_ms() + NOTICE_MS;
+        touch_bar();
+        return;
+    }
+    touch_all();
 }
 
 /* Paints the rectangle of the screen that changed. */
@@ -2035,6 +2080,7 @@ int main(int argc, char **argv)
     const char *wall_path = NULL;
     if (a + 1 < argc && strcmp(argv[a], "-w") == 0) {                    /* -w FILE: a PPM or BMP over the whole desktop */
         wall_path = argv[a + 1];
+        wall_fixed = 1;
         a += 2;
     }
     char **child = a + 1 < argc && strcmp(argv[a], "-c") == 0 ? &argv[a + 1] : NULL;
@@ -2226,6 +2272,8 @@ int main(int argc, char **argv)
             long long now = now_ms();
             if (now >= notice_chk + 500) {
                 notice_chk = now;
+                if (!wall_fixed)
+                    wall_watch();
                 FILE *nf = fopen(NOTICE_FILE, "r");
                 if (nf) {
                     char line[sizeof notice];

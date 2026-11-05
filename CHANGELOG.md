@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` reads `/etc/bwm.wallpaper` again when it changes (about once a second): `echo /root/photo.ppm > /etc/bwm.wallpaper` puts a new wallpaper on the running desktop, an empty file takes it off, and a file bwm cannot use leaves the old one and says so in the task bar. `bwm -w FILE` is not replaced.
 - `bwm`: a line written to `/tmp/bwm.notice` (`echo Build done > /tmp/bwm.notice`) shows in the task bar for three seconds, then the file is removed; the bar checks for it every second or so.
 - Netlink sockets can join multicast groups (`NETLINK_ADD_MEMBERSHIP`, `NETLINK_DROP_MEMBERSHIP`), and `XFRM_MSG_EXPIRE` is sent to group `XFRMNLGRP_EXPIRE` when a security association passes its soft limit and when it is removed at its hard limit (`test/compat/progs/t_xfrmexp.c`).
 - `bwm`: a window dragged by its title bar (or with Alt) and let go at the left or right edge of the screen fills that half of it, and at the top edge fills all of it; the maximize button or Alt-Down puts it back.
