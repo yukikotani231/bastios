@@ -617,7 +617,8 @@ const SYS_CSW: u64 = SYS_AFF + NPROC;      // two words per thread: times it gav
 const SYS_CSWT: u64 = SYS_CSW + NPROC * 2;      // one word: all the switches counted, exited threads' too (/proc/stat ctxt)
 const SYS_IO: u64 = SYS_CSWT + 1;      // four words per thread: characters read, characters written, read calls, write calls (/proc/PID/io, src/lxprio.bastio)
 const SYS_MNTEV: u64 = SYS_IO + NPROC * 4;      // one word: mount table changes so far (the event /proc/mounts polls report, src/lxmount.bastio)
-const SYS_URING: u64 = SYS_MNTEV + 1;      // io_uring rings (src/lxuring.bastio): URING_N rows of URING_W words
+const SYS_MNTSZ: u64 = SYS_MNTEV + 1;           // one word: the size= of the tmpfs mount being made, in bytes (0: none; src/lxmount.bastio)
+const SYS_URING: u64 = SYS_MNTSZ + 1;      // io_uring rings (src/lxuring.bastio): URING_N rows of URING_W words
 const URING_N: u64 = 8;
 const URING_W: u64 = 10;
 const SYS_ALG: u64 = SYS_URING + URING_N * URING_W;   // AF_ALG sockets (src/lxalg.bastio): ALG_N rows of ALG_W words

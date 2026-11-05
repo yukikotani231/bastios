@@ -1878,6 +1878,12 @@ fn mounts_text(k: &mut Kernel, p: u64, o: &mut Bytes, mi: bool) -> u64
           if mf / 2048 % 2 == 1 {
             a = put_s(&mut o, a, ",nodiratime");
           }
+          let lim = vfs_quota_limit(k.fs, i);
+          if lim > 0 {
+            a = put_s(&mut o, a, ",size=");
+            a = put_n(&mut o, a, lim / 1024);
+            a = put_c(&mut o, a, 107);              // k
+          }
           a = put_s(&mut o, a, " 0 0\n");
         }
       }

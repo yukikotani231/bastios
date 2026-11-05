@@ -214,6 +214,43 @@ static void body_thread_left(void)
     _exit(4);                               /* exit_group with the thread still there */
 }
 static void body_segv(void) { *(volatile char *)0x10 = 1; }
+
+#ifdef __x86_64__
+/* A tracer single-steps a tracee over a fork system call: the child, not
+ * traced, must not inherit the trap flag and die of SIGTRAP. Under gdb a
+ * new thread stopped with a SIGTRAP of its own when the thread that made
+ * it was being stepped. */
+static int step_over_fork(void) {
+    pid_t t = fork();
+    if (t == 0) {
+        ptrace(PTRACE_TRACEME, 0, 0, 0);
+        raise(SIGSTOP);
+        long r = syscall(SYS_fork);
+        if (r == 0) _exit(7);
+        int cs;
+        waitpid(r, &cs, 0);
+        _exit(WIFEXITED(cs) && WEXITSTATUS(cs) == 7 ? 0 : WIFSIGNALED(cs) ? 100 + WTERMSIG(cs) : 99);
+    }
+    int st;
+    if (waitpid(t, &st, 0) != t || !WIFSTOPPED(st)) return 0;
+    int stepped = 0;
+    for (int n = 0; n < 100000 && !stepped; n++) {
+        struct user_regs_struct r;
+        if (ptrace(PTRACE_GETREGS, t, 0, &r) != 0) return 0;
+        long w = ptrace(PTRACE_PEEKTEXT, t, (void *)r.rip, 0);
+        stepped = (w & 0xffff) == 0x050f && r.rax == SYS_fork;
+        if (ptrace(PTRACE_SINGLESTEP, t, 0, 0) != 0 || waitpid(t, &st, 0) != t || !WIFSTOPPED(st)) return 0;
+    }
+    int sig = 0;
+    for (;;) {
+        ptrace(PTRACE_CONT, t, 0, (void *)(long)sig);
+        if (waitpid(t, &st, 0) != t) return 0;
+        if (!WIFSTOPPED(st)) break;
+        sig = WSTOPSIG(st) == SIGTRAP ? 0 : WSTOPSIG(st);
+    }
+    return stepped && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+}
+#endif
 static void body_stopcont(void) { for (int i = 0; i < 2000; i++) usleep(1000); _exit(33); }
 
 int main(void)
@@ -378,6 +415,9 @@ int main(void)
            int ok = stopped_with(c, SIGSTOP); regs_t r;
            ok = ok && to_call(c, SYS_getpgid, &r); REG_ARG0(r) = 0; ok = ok && set_regs(c, &r);
            ptrace(PTRACE_CONT, c, 0, 0); int cx = wst(c); ok && WIFEXITED(cx) && WEXITSTATUS(cx) == 69; }));
+#ifdef __x86_64__
+    EXPECT("the child of a fork that a tracer single-steps over does not inherit the trap flag", step_over_fork());
+#endif
     EXPECT("PTRACE_GETREGSET NT_PRSTATUS gives the program counter and the stack pointer", ({
            c = traced_child(body_exit5); int ok = stopped_with(c, SIGSTOP); unsigned long pc = 0, sp = 0;
            ok = ok && pc_sp(c, &pc, &sp) && pc > 0x1000 && sp > 0x1000;

@@ -94,7 +94,14 @@ const VDIR_DISK: u64 = NFILES + 2 * DSLOTS + 1;  // "disk"
 const VDIR_LO: u64 = NFILES + 2 * DSLOTS + 2;    // the loop mount's top directory
 const NAMEBUF: u64 = 4096;            // holds any in-memory node's name
 const MNT_N: u64 = 64;                // tmpfs mounts at once
-const MNT_LEN: u64 = 128;             // MNT_N * 2: per mount, its directory node + 1 (0: free) and 1 if read-only
+const MNT_LEN: u64 = 386;             // MNT_N * 2: per mount, its directory node + 1 (0: free) and 1 if read-only; then QBASE: the size limits (below)
+const QBASE: u64 = 128;               // word QBASE: how many limits; QBASE + 1: set when a write or resize was cut short; then QN entries of 4 words
+const QN: u64 = 64;                   // size limits at once (tmpfs size=)
+
+struct Quota {
+  limit: u64,
+  used: u64,
+}
 
 struct Vfs {
   ram: Vec[Node],       // the in-memory file system
@@ -913,6 +920,18 @@ fn write_row(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
     return NO_FD;
   }
   let mut put = NO_FD;
+  let mut room = n;
+  if get(v.mnt, QBASE) != 0 {
+    let cur = ram_size(&mut v.ram, i);
+    let mut at = fget(v.ftab, row, FD_OFF);
+    if fget(v.ftab, row, FD_MODE) / O_APPEND % 2 == 1 && cur != NO_FILE {
+      at = cur;
+    }
+    if at <= 0x0800000000000000 && n <= XFER {
+      let end = vfs_quota_clip(&mut v, i, at, at + n);
+      room = end - at;
+    }
+  }
   match take_node(&mut v.ram, i) {
     Node::Free => {},
     Node::File(f) => {
@@ -921,7 +940,7 @@ fn write_row(v: &mut Vfs, mem: &mut Mem, row: u64, n: u64) -> u64
       if fget(v.ftab, row, FD_MODE) / O_APPEND % 2 == 1 {
         off = g.size;
       }
-      put = file_write(&mut g, &mut mem, off, v.xfer, n);
+      put = file_write(&mut g, &mut mem, off, v.xfer, smaller(room, n));
       if put > 0 {
         g.mtime = v.now;
       }
@@ -2803,6 +2822,307 @@ fn vfs_is_mount(v: &mut Vfs, n: u64) -> bool
   return i < NFILES && (vfs_mount_slot(v, i) < MNT_N || i + 1 == v.lo_at);
 }
 
+// A tmpfs size limit (mount option size=) is an entry on a directory node:
+// that node + 1, the limit in bytes (a multiple of 4096), the bytes in use
+// as last counted, and a signature of the directory's name. A file takes the
+// pages that hold a frame (holes, as in a file grown with ftruncate, cost
+// nothing, as on Linux). The count is kept as an upper bound: a write that
+// fills holes adds to it, and only when it says the write would not fit is
+// it replaced by a recount of every file under the directory. The
+// signature tells a limit whose directory was removed (and its node reused)
+// from a live one.
+
+/// Word f of limit q.
+fn szq_word(v: &Vfs, q: u64, f: u64) -> u64
+  requires vfs_ok(v) && q < QN && f < 4
+{
+  return get(v.mnt, QBASE + 2 + 4 * q + f);
+}
+
+fn szq_put(v: &mut Vfs, q: u64, f: u64, x: u64)
+  requires vfs_ok(v) && q < QN && f < 4
+  ensures vfs_ok(v)
+{
+  v.mnt = set(v.mnt, QBASE + 2 + 4 * q + f, x);
+}
+
+/// A number that tells the first l bytes of b from other names.
+fn name_sig(b: &Bytes, l: u64) -> u64
+  requires l <= blen(b)
+  ensures result < 4294967296
+{
+  let mut h = 5381;
+  let mut j = 0;
+  while j < l
+    invariant j <= l && h < 4294967296
+  {
+    h = (h * 33 + cast[u64](bget(b, j))) % 4294967296;
+    j = j + 1;
+  }
+  return h;
+}
+
+/// The limit on directory node d, or QN if it has none.
+fn vfs_quota_find(v: &Vfs, d: u64) -> u64
+  requires vfs_ok(v) && d < NFILES
+  ensures result <= QN
+{
+  if get(v.mnt, QBASE) == 0 {
+    return QN;
+  }
+  let mut q = 0;
+  while q < QN
+    invariant q <= QN && vfs_ok(v)
+  {
+    if szq_word(v, q, 0) == d + 1 {
+      return q;
+    }
+    q = q + 1;
+  }
+  return QN;
+}
+
+/// Frees limit q.
+fn szq_free(v: &mut Vfs, q: u64)
+  requires vfs_ok(v) && q < QN
+  ensures vfs_ok(v)
+{
+  if szq_word(v, q, 0) != 0 {
+    szq_put(&mut v, q, 0, 0);
+    szq_put(&mut v, q, 1, 0);
+    szq_put(&mut v, q, 2, 0);
+    szq_put(&mut v, q, 3, 0);
+    let n = get(v.mnt, QBASE);
+    if n > 0 {
+      v.mnt = set(v.mnt, QBASE, n - 1);
+    }
+  }
+}
+
+/// Drops the limit on directory node d, if it has one.
+fn vfs_quota_clear(v: &mut Vfs, d: u64)
+  requires vfs_ok(v) && d < NFILES
+  ensures vfs_ok(v)
+{
+  let q = vfs_quota_find(v, d);
+  if q < QN {
+    szq_free(&mut v, q);
+  }
+}
+
+/// The size limit of directory node d in bytes, or 0 if it has none.
+fn vfs_quota_limit(v: &Vfs, d: u64) -> u64
+  requires vfs_ok(v) && d < NFILES
+{
+  let q = vfs_quota_find(v, d);
+  if q >= QN {
+    return 0;
+  }
+  return szq_word(v, q, 1);
+}
+
+/// The bytes the files under limit q's directory take, counted afresh.
+/// Leaves the directory's name in v.name.
+fn vfs_quota_used(v: &mut Vfs, q: u64) -> u64
+  requires vfs_ok(v) && q < QN
+  ensures vfs_ok(v) && result <= 0x1000000000000000
+{
+  let w = szq_word(v, q, 0);
+  if w == 0 || w > NFILES {
+    return 0;
+  }
+  let l = ram_name(&mut v.ram, w - 1, &mut v.name);
+  if l == NO_FILE || !ram_has_under(v.rix, v.name, l) {
+    return 0;
+  }
+  let mut used = 0;
+  let mut j = 0;
+  while j < NFILES
+    invariant j <= NFILES && vfs_ok(v) && l <= NAMEBUF && used <= 0x1000000000000000
+  {
+    if ram_under(&mut v.ram, j, v.name, l) {
+      used = smaller(used + 4096 * ram_alloc(&mut v.ram, j), 0x1000000000000000);
+    }
+    j = j + 1;
+  }
+  return used;
+}
+
+/// Limits directory node d to `limit` bytes (rounded down to whole pages),
+/// replacing a limit it has. False if QN directories have limits already.
+fn vfs_quota_set(v: &mut Vfs, d: u64, limit: u64) -> bool
+  requires vfs_ok(v) && d < NFILES
+  ensures vfs_ok(v)
+{
+  let mut q = vfs_quota_find(v, d);
+  if q >= QN {
+    q = 0;
+    while q < QN && szq_word(v, q, 0) != 0
+      invariant q <= QN && vfs_ok(v)
+    {
+      q = q + 1;
+    }
+    if q >= QN {
+      return false;
+    }
+    v.mnt = set(v.mnt, QBASE, sat_add(get(v.mnt, QBASE), 1));
+    szq_put(&mut v, q, 0, d + 1);
+  }
+  let l = ram_name(&mut v.ram, d, &mut v.name);
+  if l == NO_FILE {
+    szq_free(&mut v, q);
+    return false;
+  }
+  szq_put(&mut v, q, 1, smaller(limit, 0x1000000000000000) / 4096 * 4096);
+  szq_put(&mut v, q, 3, name_sig(v.name, l));
+  szq_put(&mut v, q, 2, 0);
+  let used = vfs_quota_used(&mut v, q);
+  szq_put(&mut v, q, 2, used);
+  return true;
+}
+
+/// The limit in bytes and the bytes in use under the directory the name in
+/// the first n bytes of the transfer buffer is in (the innermost one with a
+/// limit), or 0 and 0. Uses v.name.
+fn vfs_path_quota(v: &mut Vfs, n: u64) -> Quota
+  requires vfs_ok(v) && n <= XBUF
+  ensures vfs_ok(v)
+{
+  let mut best = QN;
+  let mut best_l = 0;
+  if get(v.mnt, QBASE) != 0 && !on_disk(v, n) {
+    let mut q = 0;
+    while q < QN
+      invariant q <= QN && vfs_ok(v) && n <= XBUF && best <= QN && best_l <= XBUF
+    {
+      let w = szq_word(v, q, 0);
+      if w != 0 && w <= NFILES {
+        let l = ram_name(&mut v.ram, w - 1, &mut v.name);
+        if l != NO_FILE && l <= n && (l == n || bget(v.xfer, l) == 47) && same_start(v.xfer, v.name, l) && name_sig(v.name, l) == szq_word(v, q, 3) && (best >= QN || l > best_l) {
+          best = q;
+          best_l = l;
+        }
+      }
+      q = q + 1;
+    }
+  }
+  if best >= QN {
+    return Quota { limit: 0, used: 0 };
+  }
+  let lim = szq_word(v, best, 1);
+  let used = vfs_quota_used(&mut v, best);
+  szq_put(&mut v, best, 2, used);
+  return Quota { limit: lim, used: used };
+}
+
+/// vfs_path_quota of file f (a vfs_lookup handle). Uses the transfer buffer.
+fn vfs_file_quota(v: &mut Vfs, f: u64) -> Quota
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  if f >= NFILES {
+    return Quota { limit: 0, used: 0 };
+  }
+  let l = ram_name(&mut v.ram, f, &mut v.xfer);
+  if l == NO_FILE || l > XBUF {
+    return Quota { limit: 0, used: 0 };
+  }
+  return vfs_path_quota(&mut v, l);
+}
+
+/// How far a write of the bytes at..end (at most XFER of them) to the file
+/// in node i may go without taking its directory (and any directory above
+/// it) past a limit: end if it may, else the end of the last byte whose
+/// page fits, with the denial noted for vfs_take_denied.
+fn vfs_quota_clip(v: &mut Vfs, i: u64, at: u64, end: u64) -> u64
+  requires vfs_ok(v) && i < NFILES && at <= end && end - at <= XFER && end <= 0x1000000000000000
+  ensures vfs_ok(v) && result <= end && result >= at
+{
+  if get(v.mnt, QBASE) == 0 || end == at {
+    return end;
+  }
+  // The pages the write would give a frame to: those of at..end that are holes.
+  let first = at / 4096;
+  let last = (end - 1) / 4096;
+  let mut e = end;
+  let mut q = 0;
+  while q < QN
+    invariant q <= QN && vfs_ok(v) && e <= end && e >= at
+  {
+    let w = szq_word(v, q, 0);
+    if w != 0 && w <= NFILES {
+      let l = ram_name(&mut v.ram, w - 1, &mut v.name);
+      if l == NO_FILE || name_sig(v.name, l) != szq_word(v, q, 3) {
+        szq_free(&mut v, q);                   // its directory is gone
+      } else if ram_under(&mut v.ram, i, v.name, l) {
+        let lim = szq_word(v, q, 1);
+        let mut need = 0;
+        let mut p = first;
+        while p <= last && p - first < 4
+          invariant p >= first && p - first <= 4 && vfs_ok(v) && last - first <= 2 && need <= p - first
+        {
+          if 4096 * p < e && !ram_has_page(&mut v.ram, i, p) {
+            need = need + 1;
+          }
+          p = p + 1;
+        }
+        let mut used = szq_word(v, q, 2);
+        if used > 0x1000000000000000 || used + 4096 * need > lim {
+          used = vfs_quota_used(&mut v, q);
+          szq_put(&mut v, q, 2, used);
+        }
+        if used + 4096 * need <= lim {
+          szq_put(&mut v, q, 2, used + 4096 * need);
+        } else {
+          // Fill the holes in order until the room is gone.
+          let mut room = 0;
+          if lim > used {
+            room = (lim - used) / 4096;
+          }
+          let mut taken = 0;
+          let mut cut = e;
+          let mut done = false;
+          p = first;
+          while p <= last && p - first < 4 && !done
+            invariant p >= first && p - first <= 4 && vfs_ok(v) && last - first <= 2 && taken <= p - first && cut >= at && cut <= e
+          {
+            if 4096 * p < e && !ram_has_page(&mut v.ram, i, p) {
+              if taken >= room {
+                done = true;
+                cut = at;
+                if 4096 * p > at {
+                  cut = 4096 * p;
+                }
+              } else {
+                taken = taken + 1;
+              }
+            }
+            p = p + 1;
+          }
+          if cut < e {
+            e = cut;
+            v.mnt = set(v.mnt, QBASE + 1, 1);
+          }
+          szq_put(&mut v, q, 2, used + 4096 * taken);
+        }
+      }
+    }
+    q = q + 1;
+  }
+  return e;
+}
+
+/// Whether a write or resize was cut short by a limit since the last call;
+/// the flag is cleared.
+fn vfs_take_denied(v: &mut Vfs) -> bool
+  requires vfs_ok(v)
+  ensures vfs_ok(v)
+{
+  let d = get(v.mnt, QBASE + 1) != 0;
+  v.mnt = set(v.mnt, QBASE + 1, 0);
+  return d;
+}
+
 /// Unmounts slot s: removes every node under its directory (which stays,
 /// as on Linux, where it shows again once uncovered). False, changing
 /// nothing, if a file under it is open.
@@ -2812,6 +3132,7 @@ fn vfs_umount(v: &mut Vfs, mem: &mut Mem, s: u64) -> bool
 {
   let i = vfs_mount_node(v, s);
   if i < NFILES {
+    vfs_quota_clear(&mut v, i);
     let l = ram_name(&mut v.ram, i, &mut v.name);
     if l != NO_FILE {
       let mut j = 0;
@@ -2887,6 +3208,7 @@ fn vfs_drop_tree(v: &mut Vfs, mem: &mut Mem, n: u64) -> bool
     }
     j = j + 1;
   }
+  vfs_quota_clear(&mut v, d);
   ram_remove(&mut v.ram, &mut v.rix, &mut mem, d);
   return true;
 }

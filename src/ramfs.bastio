@@ -605,6 +605,48 @@ fn node_size(nd: &Node) -> u64 {
   }
 }
 
+/// Whether the slot holds a page (not a hole).
+fn slot_has_page(sl: &Slot) -> bool {
+  match sl {
+    Slot::Hole => { return false; },
+    Slot::Page(_x) => { return true; },
+  }
+}
+
+/// How many pages of the node's file hold a frame (holes cost none).
+fn node_alloc(nd: &Node) -> u64 {
+  match nd {
+    Node::Free => { return 0; },
+    Node::File(f) => {
+      let n = vec_len(f.pages);
+      let mut c = 0;
+      let mut j = 0;
+      while j < n
+        invariant j <= n && c <= j && vlen(f.pages) == n
+      {
+        if vec_with(f.pages, j, slot_has_page) {
+          c = c + 1;
+        }
+        j = j + 1;
+      }
+      return c;
+    },
+  }
+}
+
+/// Whether page p of the node's file holds a frame.
+fn node_page_at(nd: &Node, p: u64) -> bool {
+  match nd {
+    Node::Free => { return false; },
+    Node::File(f) => {
+      if p >= vec_len(f.pages) {
+        return false;
+      }
+      return vec_with(f.pages, p, slot_has_page);
+    },
+  }
+}
+
 fn node_is_dir(nd: &Node) -> bool {
   match nd {
     Node::Free => { return false; },
@@ -782,6 +824,32 @@ fn ram_size(v: &mut Vec[Node], i: u64) -> u64
     return NO_FILE;
   }
   return vec_with(v, i, node_size);
+}
+
+/// The pages of node i's file that hold a frame.
+fn ram_alloc(v: &mut Vec[Node], i: u64) -> u64
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v) && result <= FILE_PAGES
+{
+  if i >= vec_len(v) {
+    return 0;
+  }
+  let mut r = vec_with(v, i, node_alloc);
+  if r > FILE_PAGES {
+    r = FILE_PAGES;
+  }
+  return r;
+}
+
+/// Whether page p of node i's file holds a frame.
+fn ram_has_page(v: &mut Vec[Node], i: u64, p: u64) -> bool
+  requires nodes_ok(v) && i < NFILES
+  ensures nodes_ok(v)
+{
+  if i >= vec_len(v) {
+    return false;
+  }
+  return vec_with(v, i, node_page_at, p);
 }
 
 /// Is node i a directory?

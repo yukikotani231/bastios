@@ -248,8 +248,78 @@ fn mount_dir(k: &mut Kernel, n: u64) -> u64
   return NFILES;
 }
 
-/// mount(source, target, fstype, flags, data): data is not used, and the
-/// source only by a bind and a bstdisk3 mount.
+/// The size= option of a tmpfs mount's data (system call argument r8), in
+/// bytes: a number with an optional k, m or g (powers of 1024), or a
+/// percentage of the memory the machine has. 0 if there is none (or it
+/// does not parse); then the mount has no limit. Uses the transfer buffer.
+fn mount_size(k: &mut Kernel, pid: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k) && result <= 0x1000000000000000
+{
+  let va = pget(k.procs, pid, F_REGS + R_R8);
+  if va < USER_BASE || va >= USER_BASE + USER_SIZE {
+    return 0;
+  }
+  let want = smaller(OVL_DATA, USER_SIZE - (va - USER_BASE));
+  let got = smaller(copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want), OVL_DATA);
+  if got == NO_RESULT {
+    return 0;
+  }
+  let mut d = balloc(OVL_DATA + 1);
+  let mut dl = 0;
+  while dl < got && bget(k.fs.xfer, dl) != 0
+    invariant dl <= got && got <= OVL_DATA && blen(d) == OVL_DATA + 1 && kok(k)
+  {
+    bset(&mut d, dl, bget(k.fs.xfer, dl));
+    dl = dl + 1;
+  }
+  let at = opt_value(d, dl, "size");
+  if at == NO_RESULT || dl >= got {
+    bfree(d);
+    return 0;
+  }
+  let r = size_value(k, d, at / 4096, at % 4096);
+  bfree(d);
+  return r;
+}
+
+/// The size in bytes that b[i..e] spells: a number with an optional k, m or
+/// g (powers of 1024), or a percentage of the memory the machine has.
+fn size_value(k: &Kernel, b: &Bytes, from: u64, e: u64) -> u64
+  requires kok(k) && from <= e && e <= blen(b)
+  ensures result <= 0x1000000000000000
+{
+  let mut i = from;
+  let mut num = 0;
+  while i < e && bget(b, i) >= 48 && bget(b, i) <= 57
+    invariant i <= e && e <= blen(b) && num <= 0x10000000
+  {
+    num = smaller(num * 10 + cast[u64](bget(b, i)) - 48, 0x10000000);
+    i = i + 1;
+  }
+  let mut unit = 1;
+  let mut pct = false;
+  if i < e {
+    let c = bget(b, i);
+    if c == 107 || c == 75 {
+      unit = 1024;
+    } else if c == 109 || c == 77 {
+      unit = 1048576;
+    } else if c == 103 || c == 71 {
+      unit = 1073741824;
+    } else if c == 37 {
+      pct = true;
+    }
+  }
+  if pct {
+    return smaller(num, 100) * smaller(pool_size(k.mem.pool), 0x100000000) * 4096 / 100;
+  }
+  return smaller(num * unit, 0x1000000000000000);
+}
+
+/// mount(source, target, fstype, flags, data): data is only read for a
+/// tmpfs's size= (and an overlay's directories), and the source only by a
+/// bind and a bstdisk3 mount.
 fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, flags: u64, full: bool) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -287,6 +357,10 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   }
   if !full && t != FST_TMPFS {
     return EPERM;                           // a disk image mounts for the machine, not for a user namespace
+  }
+  if t == FST_TMPFS {
+    let sz = mount_size(&mut k, pid);
+    k.sys = set(k.sys, SYS_MNTSZ, sz);      // mount_at and ns_tmpfs give the new directory this limit
   }
   let mut img = NFILES;
   let mut eimg = NO_FILE;
@@ -343,6 +417,16 @@ fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n:
     }
     if (vfs_mount_ext(k.fs, s) || vfs_mount_vfat(k.fs, s)) && flags & MS_RDONLY == 0 {
       return EROFS;                         // an ext4 image is only read
+    }
+    let sz = get(k.sys, SYS_MNTSZ);
+    if sz > 0 {
+      let q = vfs_quota_find(k.fs, i);
+      if q < QN && szq_word(k.fs, q, 2) > sz {
+        return EINVAL;                      // smaller than what it holds
+      }
+      if !vfs_quota_set(&mut k.fs, i, sz) {
+        return ENOMEM;
+      }
     }
     vfs_set_ro(&mut k.fs, s, flags & MS_RDONLY != 0);
     vfs_set_mflags(&mut k.fs, s, kept_flags(flags));
@@ -404,6 +488,11 @@ fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n:
   let ns = vfs_mount_slot(k.fs, i);
   if ns < MNT_N {
     vfs_set_mflags(&mut k.fs, ns, kept_flags(flags));
+  }
+  vfs_quota_clear(&mut k.fs, i);
+  let sz = get(k.sys, SYS_MNTSZ);
+  if sz > 0 && !vfs_quota_set(&mut k.fs, i, sz) {
+    return ENOMEM;
   }
   return 0;
 }
@@ -498,6 +587,7 @@ fn lx_mount_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
     xa_clear(&mut k);                      // what the unmounted file system held (src/lxxattr.bastio)
     r = lx_umount2(&mut k, pid, a, b, full);
   }
+  k.sys = set(k.sys, SYS_MNTSZ, 0);
   if r == 0 {
     k.sys = set(k.sys, SYS_MNTEV, sat_add(get(k.sys, SYS_MNTEV), 1));   // wakes pollers of /proc/mounts
   }
