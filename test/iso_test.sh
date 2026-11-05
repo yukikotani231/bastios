@@ -921,11 +921,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         # The launcher menu: the Menu button at the right end of the task bar
         # opens a list above it, Terminal starts a terminal window, Quit ends bwm.
         mark = len(out)
+        q.stdin.write(b"echo Build done > /tmp/bwm.notice\r"); q.stdin.flush()
+        time.sleep(0.5)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
         good = until(b"bwm: ready", mark)
         if good:
-            time.sleep(1)
+            time.sleep(2)                                            # bwm looks for the file within a second, and shows it for three
             w, h, px = screendump()
+            # A line in /tmp/bwm.notice shows in the task bar for a few seconds.
+            nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 10, 1)[0]      # the green channel: the notice is white on a red bar
+            good = nt == "Build done"
+            print(("ok  " if good else "FAIL"), f"({name}) a line in /tmp/bwm.notice shows in the task bar ({nt!r})")
+            fails += not good
             # The clock left of the Menu button: white digits on the task bar.
             clock = any(tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255) for y in range(746, 766) for x in range(915, 965))
             print(("ok  " if clock else "FAIL"), f"({name}) the task bar shows a clock")

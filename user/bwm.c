@@ -123,6 +123,7 @@ static long long now_ms(void);
 static char notice[40];                  /* a short message in the task bar (no room for a window, say) */
 static long long notice_due;             /* when it goes; 0 when none shows */
 #define NOTICE_MS 3000
+#define NOTICE_FILE "/tmp/bwm.notice"   /* a line written here is shown in the task bar for a few seconds */
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
@@ -2203,8 +2204,8 @@ int main(int argc, char **argv)
                 wait = d < 0 ? 0 : (int)d;
         }
         int until_min = (int)(60 - time(NULL) % 60) * 1000;      /* the clock changes at the next minute */
-        if (until_min > 3000)
-            until_min = 3000;                                    /* but a new time zone is noticed within 3 s */
+        if (until_min > 1000)
+            until_min = 1000;                                    /* but a new time zone, or a notice file, is noticed within a second */
         if (wait < 0 || until_min < wait)
             wait = until_min;
         if (poll(p, np, wait) < 0 && errno != EINTR)
@@ -2220,6 +2221,30 @@ int main(int argc, char **argv)
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
         kb_poll();
+        {                                                     /* a program posts a notice by writing a line to /tmp/bwm.notice (echo TEXT > /tmp/bwm.notice) */
+            static long long notice_chk;
+            long long now = now_ms();
+            if (now >= notice_chk + 500) {
+                notice_chk = now;
+                FILE *nf = fopen(NOTICE_FILE, "r");
+                if (nf) {
+                    char line[sizeof notice];
+                    int got = 0;
+                    if (fgets(line, sizeof line, nf)) {      /* an empty file is a writer that has not finished: look again */
+                        line[strcspn(line, "\r\n")] = 0;
+                        if (line[0]) {
+                            snprintf(notice, sizeof notice, "%s", line);
+                            notice_due = now + NOTICE_MS;
+                            touch_bar();
+                            got = 1;
+                        }
+                    }
+                    fclose(nf);
+                    if (got)
+                        unlink(NOTICE_FILE);
+                }
+            }
+        }
         int clock_h, clock_m;
         clock_hm(&clock_h, &clock_m);
         if (clock_h * 60 + clock_m != clock_shown) {

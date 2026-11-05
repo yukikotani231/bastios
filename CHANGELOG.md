@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm`: a line written to `/tmp/bwm.notice` (`echo Build done > /tmp/bwm.notice`) shows in the task bar for three seconds, then the file is removed; the bar checks for it every second or so.
 - `bwm`: a window dragged by its title bar (or with Alt) and let go at the left or right edge of the screen fills that half of it, and at the top edge fills all of it; the maximize button or Alt-Down puts it back.
 - `bview` keeps its pixels in memory shared with `bwm` too, so zooming and panning an image send a damage instead of the whole window.
 - `bfiles` and `bsys` keep their pixels in memory shared with `bwm`, as `bterm` does, and send a damage instead of the whole window for each repaint: a repaint of the file manager costs about 1 ms where it cost about 70 ms (QEMU without KVM; `BFILES_BENCH=N` in `test/iso_test.sh` measures it).
