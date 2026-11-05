@@ -2274,6 +2274,7 @@ t_proc: CapEff is what capget says
 t_proc: dropping a capability from the bounding set shows in CapBnd
 t_proc: sixteen forks after a process ended do not reuse its id
 t_proc: status has CapInh, CapPrm, CapEff, CapBnd and CapAmb
+t_proc: a memfd at a three- or four-digit descriptor opens read-only through /proc/self/fd/N
 t_ptrace2: PTRACE_DETACH right after PTRACE_INTERRUPT cut a traced read short: the process reads on and is not killed by SIGTRAP
 t_ptrace2: PTRACE_INTERRUPT of a tracee waiting in a traced read: the read ends, the event stop, then the read starts again
 t_ptrace2: PTRACE_SYSCALL after seizing a tracee that waits in read: the first stop is the read's entry, then its exit

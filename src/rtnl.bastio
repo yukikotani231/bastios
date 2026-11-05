@@ -27,6 +27,8 @@ const RTM_NEWLINK: u64 = 16;
 const RTM_DELLINK: u64 = 17;
 const RTM_GETLINK: u64 = 18;
 const RTM_SETLINK: u64 = 19;
+const RTNLGRP_LINK_BIT: u64 = 1;          // group 1 (RTNLGRP_LINK) in the sockets' group masks: bit 0
+const RTNLGRP_IPV4_IFADDR_BIT: u64 = 16;  // group 5: bit 4
 const RTM_NEWADDR: u64 = 20;
 const RTM_DELADDR: u64 = 21;
 const RTM_GETADDR: u64 = 22;
@@ -487,14 +489,14 @@ fn if_lxflags(n: &Net, i: u64) -> u64
   return f;
 }
 
-/// RTM_NEWLINK for interface i.
-fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
+/// RTM_NEWLINK (or `kind`, RTM_DELLINK) for interface i.
+fn nl_link(n: &mut Net, i: u64, kind: u64, flags: u64, seq: u64, port: u64)
   requires net_ok(n) && i < IFN
   ensures net_ok(n)
 {
   let k = iw(n, i, IF_KIND);
   let lo = k == IFK_LO;
-  nl_begin(&mut n, RTM_NEWLINK, flags, seq, port);
+  nl_begin(&mut n, kind, flags, seq, port);
   nl_b(&mut n, 0);                    // ifinfomsg: family, padding
   nl_b(&mut n, 0);
   if lo {
@@ -569,8 +571,8 @@ fn nl_link(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
   nl_end(&mut n);
 }
 
-/// RTM_NEWADDR for interface i's address, if it has one.
-fn nl_addr(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
+/// RTM_NEWADDR (or `kind`, RTM_DELADDR) for interface i's address, if it has one.
+fn nl_addr(n: &mut Net, i: u64, kind: u64, flags: u64, seq: u64, port: u64)
   requires net_ok(n) && i < IFN
   ensures net_ok(n)
 {
@@ -587,7 +589,7 @@ fn nl_addr(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
   if ip == 0 {
     return;
   }
-  nl_begin(&mut n, RTM_NEWADDR, flags, seq, port);
+  nl_begin(&mut n, kind, flags, seq, port);
   nl_b(&mut n, 2);                    // ifaddrmsg: AF_INET
   nl_b(&mut n, plen_of(span));
   nl_b(&mut n, 0x80);                 // IFA_F_PERMANENT
@@ -629,6 +631,49 @@ fn nla_in6(n: &mut Net, t: u64, hi: u64, lo: u64)
   nla_head(&mut n, t, 16);
   nl_be64(&mut n, hi);
   nl_be64(&mut n, lo);
+}
+
+/// Tells the NETLINK_ROUTE sockets of interface i's namespace that joined the
+/// group with mask bit `bit` (RTNLGRP_LINK: 1, RTNLGRP_IPV4_IFADDR: 16) that
+/// the interface or its address changed: `kind` is RTM_NEWLINK, RTM_DELLINK,
+/// RTM_NEWADDR or RTM_DELADDR. A queue that is full loses the message. The
+/// request being answered may be writing on a socket: its cursor is left as
+/// it was, and a socket with an answer half written gets the event in line.
+fn rt_event(n: &mut Net, i: u64, bit: u64, kind: u64)
+  requires net_ok(n) && i < IFN && bit > 0
+  ensures net_ok(n)
+{
+  let ns = iw(n, i, IF_NS);
+  let mut q = 0;
+  while q < NLS
+    invariant q <= NLS && net_ok(n)
+  {
+    if get(n.nls, q * NL_W + NL_USED) == 1 && get(n.nls, q * NL_W + NL_PROTO) == 0 && get(n.nls, q * NL_W + NL_RAW) == 0
+      && get(n.nls, q * NL_W + NL_NS) == ns && get(n.nls, q * NL_W + NL_GROUPS) / bit % 2 == 1 {
+      let at = n.nl_at;
+      let lim = n.nl_lim;
+      let full = n.nl_full;
+      let msg = n.nl_msg;
+      let base = q * NLQ;
+      let mid = at > base + smaller(get(n.nls, q * NL_W + NL_LEN), NLQ) && at <= base + NLQ && lim == base + NLQ;
+      if !mid {
+        nlw_open(&mut n, q);
+      }
+      if kind == RTM_NEWLINK || kind == RTM_DELLINK {
+        nl_link(&mut n, i, kind, 0, 0, 0);
+      } else {
+        nl_addr(&mut n, i, kind, 0, 0, 0);
+      }
+      nlw_close(&mut n, q);
+      if !mid {
+        n.nl_at = at;
+        n.nl_lim = lim;
+        n.nl_full = full;
+        n.nl_msg = msg;
+      }
+    }
+    q = q + 1;
+  }
 }
 
 /// RTM_NEWADDR for one IPv6 address hi:lo/plen of interface i.
@@ -956,8 +1001,14 @@ fn rt_newlink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, tgt: u64, ptgt
     }
   }
   if tgt != NS_UNSAID {
-    return rt_move(&mut n, i, tgt);
+    rt_event(&mut n, i, RTNLGRP_LINK_BIT, RTM_DELLINK);
+    let e = rt_move(&mut n, i, tgt);
+    if e == 0 {
+      rt_event(&mut n, i, RTNLGRP_LINK_BIT, RTM_NEWLINK);
+    }
+    return e;
   }
+  rt_event(&mut n, i, RTNLGRP_LINK_BIT, RTM_NEWLINK);
   return 0;
 }
 
@@ -985,6 +1036,7 @@ fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, na
     }
     wg_clear(&mut n, a);
     if_make(&mut n, a, IFK_WG, ns, name0, name1);
+    rt_event(&mut n, a, RTNLGRP_LINK_BIT, RTM_NEWLINK);
     return 0;
   }
   let mut w0 = name0;
@@ -1003,6 +1055,7 @@ fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, na
   }
   if kind == KIND_BRIDGE {
     if_make(&mut n, a, IFK_BRIDGE, ns, w0, w1);
+    rt_event(&mut n, a, RTNLGRP_LINK_BIT, RTM_NEWLINK);
     return 0;
   }
   // The peer's name: VETH_INFO_PEER holds an ifinfomsg and its attributes.
@@ -1041,6 +1094,8 @@ fn rt_make(n: &mut Net, b: &Bytes, ns: u64, kind: u64, data: u64, name0: u64, na
   if_make(&mut n, c, IFK_VETH, pns, p0, p1);
   iset(&mut n, a, IF_PEER, c);
   iset(&mut n, c, IF_PEER, a);
+  rt_event(&mut n, a, RTNLGRP_LINK_BIT, RTM_NEWLINK);
+  rt_event(&mut n, c, RTNLGRP_LINK_BIT, RTM_NEWLINK);
   return 0;
 }
 
@@ -1103,6 +1158,11 @@ fn rt_dellink(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64) -> u64
   if k != IFK_VETH && k != IFK_BRIDGE && k != IFK_WG {
     return NE_OPNOTSUPP;
   }
+  rt_event(&mut n, i, RTNLGRP_LINK_BIT, RTM_DELLINK);
+  let p = iw(n, i, IF_PEER);
+  if k == IFK_VETH && 2 <= p && p < IFN && iw(n, p, IF_KIND) == IFK_VETH {
+    rt_event(&mut n, p, RTNLGRP_LINK_BIT, RTM_DELLINK);
+  }
   if_drop(&mut n, i);
   return 0;
 }
@@ -1143,6 +1203,7 @@ fn rt_addr(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, del: bool) -> u64
     if have != ip {
       return 99;                      // EADDRNOTAVAIL
     }
+    rt_event(&mut n, i, RTNLGRP_IPV4_IFADDR_BIT, RTM_DELADDR);
     iset(&mut n, i, IF_IP, 0);
     iset(&mut n, i, IF_SPAN, 0);
     return 0;
@@ -1155,6 +1216,7 @@ fn rt_addr(n: &mut Net, b: &Bytes, at: u64, end: u64, ns: u64, del: bool) -> u64
   }
   iset(&mut n, i, IF_IP, ip);
   iset(&mut n, i, IF_SPAN, span_of(plen));
+  rt_event(&mut n, i, RTNLGRP_IPV4_IFADDR_BIT, RTM_NEWADDR);
   return 0;
 }
 
@@ -1232,7 +1294,7 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, ptgt: u64, adm
           invariant i <= IFN && net_ok(n)
         {
           if iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_NS) == ns {
-            nl_link(&mut n, i, NLM_F_MULTI, seq, port);
+            nl_link(&mut n, i, RTM_NEWLINK, NLM_F_MULTI, seq, port);
           }
           i = i + 1;
         }
@@ -1249,7 +1311,7 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, ptgt: u64, adm
           }
         }
         if i < IFN {
-          nl_link(&mut n, i, 0, seq, port);
+          nl_link(&mut n, i, RTM_NEWLINK, 0, seq, port);
         } else {
           e = NE_NODEV;
         }
@@ -1264,7 +1326,7 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, ptgt: u64, adm
             invariant i <= IFN && net_ok(n)
           {
             if iw(n, i, IF_KIND) != IFK_FREE && iw(n, i, IF_NS) == ns {
-              nl_addr(&mut n, i, NLM_F_MULTI, seq, port);
+              nl_addr(&mut n, i, RTM_NEWADDR, NLM_F_MULTI, seq, port);
             }
             i = i + 1;
           }

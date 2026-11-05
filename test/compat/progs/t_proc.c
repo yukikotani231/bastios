@@ -320,5 +320,23 @@ int main(int argc, char **argv) {
     }
     EXPECT("readlink of /proc/self is the caller's id", ({ char lb[32], want[32]; ssize_t r = readlink("/proc/self", lb, sizeof lb - 1);
            snprintf(want, sizeof want, "%d", (int)getpid()); r > 0 && (lb[r] = 0, strcmp(lb, want) == 0); }));
+    EXPECT("a memfd at a three- or four-digit descriptor opens read-only through /proc/self/fd/N", ({
+           /* Firefox's parent makes its frozen shared memory this way; past
+              descriptor 99 the open used to fail with ENOENT */
+           int m = syscall(SYS_memfd_create, "t", 1U), ok = m >= 0 && write(m, "xy", 2) == 2;
+           struct rlimit rl; int at[2] = { 137, 1003 };
+           if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 1004) { rl.rlim_cur = rl.rlim_max; setrlimit(RLIMIT_NOFILE, &rl); }
+           if (getrlimit(RLIMIT_NOFILE, &rl) == 0 && rl.rlim_cur < 1004) at[1] = (int)rl.rlim_cur - 1;
+           for (int i = 0; i < 2 && ok; i++) {
+               char p[40], c = 0; int r;
+               ok = dup2(m, at[i]) == at[i];
+               snprintf(p, sizeof p, "/proc/self/fd/%d", at[i]);
+               r = ok ? open(p, O_RDONLY | O_CLOEXEC) : -1;
+               ok = r >= 0 && pread(r, &c, 1, 1) == 1 && c == 'y' && write(r, "z", 1) < 0;
+               if (r >= 0) close(r);
+               close(at[i]);
+           }
+           if (m >= 0) close(m);
+           ok; }));
     return done();
 }
