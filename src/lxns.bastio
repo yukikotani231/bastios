@@ -2278,6 +2278,9 @@ fn ns_tmpfs(k: &mut Kernel, pid: u64, n: u64, ro: bool) -> u64
   let tf = vfs_lookup(&mut k.fs, sl);
   if tf != NO_FILE {
     vfs_set_owner(&mut k.fs, tf, fs_id(k.procs, pid, false), fs_id(k.procs, pid, true));
+    if tf < NFILES && get(k.sys, SYS_MNTSZ) > 0 {
+      vfs_quota_set(&mut k.fs, tf, get(k.sys, SYS_MNTSZ));
+    }
   }
   let mut mf = MK_BIND + MT_OWN;
   if ro {

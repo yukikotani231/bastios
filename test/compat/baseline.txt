@@ -2309,6 +2309,7 @@ t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a 
 t_ltp2: a tmpfs mounted nosymfollow reports it, refuses to follow a link under it (ELOOP) but reads the link, and remount clears it
 t_ltp2: poll, select and epoll report POLLPRI|POLLERR once on /proc/self/mounts and mountinfo after a mount or umount, and reading does not take it back
 t_ltp2: an edge-triggered epoll entry on mountinfo is reported once when added and once after each change of the mount table
+t_ltp2: a tmpfs mounted with size=64k holds 64 KiB: the write that crosses it is short, then ENOSPC, statfs and /proc/mounts show the size, a sparse ftruncate costs nothing, and room comes back when a file goes
 t_ltp2: an edge-triggered epoll entry on an eventfd left unread is reported once per write, not again and again
 t_ltp2: an edge-triggered epoll entry on a pipe is reported once per write and when the writer closes
 alpine: nvim: the LSP client talks to the YAML language server under node and gets a diagnostic and the file's symbols
