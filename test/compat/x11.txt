@@ -172,3 +172,12 @@ fakebwm: window 800x600 X11 :16
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a GTK folder synchroniser, FreeFileSync, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity|filebot/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/s/tmp; bb tar -xf /disk/ffs.tar -C /disk/s && bb rm /disk/ffs.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/s/tmp/.passwd; echo root:x:0: >/disk/s/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb18.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/s -d 17 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /opt/FreeFileSync/Bin/FreeFileSync >/disk/ffs.out 2>&1 & until bb grep -q typed /disk/fb18.out; do bb sleep 1; done; bb cat /disk/fb18.out; bb ps | bb grep -q 'FreeFileSync' && echo alive || bb cat /disk/ffs.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :17
+fakebwm: pixels drawn
+fakebwm: typed
+alive
