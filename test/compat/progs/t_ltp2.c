@@ -1248,6 +1248,8 @@ int main(void) {
            ok = ok && strstr(mt, "/tmp/msz tmpfs") && strstr(mt, ",size=64k");
            close(fd);
            ok = ok && unlink("/tmp/msz/a") == 0;
+           ok = ok && fallocate(fb, 0, 0, 1 << 20) < 0 && errno == ENOSPC;
+           ok = ok && fallocate(fb, 0, 0, 32768) == 0;
            ok = ok && write(fb, blk, 4096) == 4096;
            close(fb);
            unlink("/tmp/msz/b");
