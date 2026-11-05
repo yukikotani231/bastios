@@ -167,13 +167,14 @@ const CAP_NET_ADMIN: u64 = 12;          // configuring interfaces, addresses, ro
 const CAP_NET_RAW: u64 = 13;            // raw sockets (ping)
 const NLS: u64 = 32;                   // netlink sockets (src/rtnl.bastio)
 const NLQ: u64 = 16384;                // the answers each can queue, in bytes
-const NL_W: u64 = 6;                   // words per socket:
+const NL_W: u64 = 7;                   // words per socket:
 const NL_USED: u64 = 0;
 const NL_LEN: u64 = 1;                 //   bytes queued
 const NL_PORT: u64 = 2;                //   its port id
 const NL_NS: u64 = 3;                  //   its namespace
 const NL_RAW: u64 = 4;                 //   1: what is queued is one raw mq_notify cookie (32 bytes), not rtnetlink messages
 const NL_PROTO: u64 = 5;               //   its netlink protocol (NETLINK_ROUTE or NETLINK_NETFILTER)
+const NL_GROUPS: u64 = 6;              //   the multicast groups it listens to, group g in bit g - 1
 const NFS: u64 = 9;                    // the packet filter's rulesets and the spare one a batch is copied to (src/nft.bastio)
 const NFP: u64 = 16384;                // bytes of rule text in each
 const NFSB: u64 = 21504;               // bytes in all in each (rule text, set elements' keys, sets' user data)
@@ -2540,6 +2541,7 @@ fn nic_tick(c: &mut Nic, now: u64)
       arp_age(&mut n, now);
       dhcp_tick(&mut n, now);
       v6_tick(&mut n, now);
+      xs_reap(&mut n);                // an IPsec association past a limit is deleted, and its listeners told
       tcp_tick(&mut n, now);
       c = Nic::Up(n);
     },
