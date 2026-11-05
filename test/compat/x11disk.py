@@ -92,12 +92,12 @@ def main():
     # more stays taken, case after case. With 900 MB, a fixed figure, the
     # disk filled partway through the puddletag root, and BusyBox tar said
     # "short read". So: what the kept roots take, what every root takes past
-    # its tar, the largest root once more (the case unpacking it), and 128 MiB
-    # for what the programs write.
+    # its tar, the largest root once more (the case unpacking it), and 768 MiB
+    # for what the programs write (FileBot and JDownloader keep caches and logs in theirs).
     size = lambda tar: os.path.getsize(os.path.join(work, tar))
     kept = ("server.tar", "client.tar")
     past = sum(max(0, unpacked[t] - size(t)) for t in unpacked if t not in kept)
-    free = sum(unpacked[t] for t in kept) + past + max(unpacked[t] for t in unpacked if t not in kept) + (128 << 20)
+    free = sum(unpacked[t] for t in kept) + past + max(unpacked[t] for t in unpacked if t not in kept) + (768 << 20)
     env = dict(os.environ, MKDISK_FREE_MB=str((free >> 20) + 1))
     print(f"x11disk: {free >> 20} MiB free for the cases", file=sys.stderr)
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
