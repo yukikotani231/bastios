@@ -2023,8 +2023,8 @@ fn ns_mount_at(k: &mut Kernel, pid: u64, source: u64, presrc: u64, tdfd: u64, ta
       bfree(src);
       return k.perr;
     }
-    if presrc == NO_RESULT {
-      // The mount the source is in: the bind takes its propagation (a peer of a
+    if presrc == NO_RESULT || presrc <= FNAME_MAX {
+      // The mount the source is in (for a clone open_tree made, the lookup that just named it): the bind takes its propagation (a peer of a
       // shared mount, a slave of the same master), and none binds an unbindable one.
       sll = lpath_len(k);
       let sm = mp_cover(k, ns, k.mstr, sll, MT_N);

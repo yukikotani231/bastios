@@ -158,6 +158,10 @@ debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: the dynamic linker through its links, by hand
 debian: debian: unpack the root, chroot into it
 debian: debian: users and the machine
+debian: debian: a bind of a shared mount made a slave
+debian: debian: mount --make-shared, findmnt shows the propagation
+debian: debian: unshare gives a mount namespace of its own
+debian: debian: util-linux mount tools see the mount table
 dev: make: a project of two files
 dev: make: parallel jobs
 dev: make: rebuilds only what changed
@@ -1239,6 +1243,10 @@ t_mountprop: rootfs: the helper becomes a slave of everything
 t_mountprop: rootfs: the volume is a mount after pivot_root
 t_mountprop: rootfs: the volume is a slave after pivot_root
 t_mountprop: rootfs: the volume is shared after pivot_root
+t_mountprop: and MS_PRIVATE
+t_mountprop: clean up after mount_setattr
+t_mountprop: in a chroot too
+t_mountprop: mount_setattr sets MS_SHARED through an open_tree descriptor
 t_net: AF_INET6 TCP over ::1
 t_net: AF_INET6 UDP over ::1
 t_net: AF_INET6 socket
@@ -1425,6 +1433,9 @@ t_nsioctl: the first user namespace has no owner and no parent
 t_nsioctl: the first user namespace is owned by uid 0
 t_nsioctl: the first user namespace owns the first UTS namespace
 t_nsioctl: the owner of a user namespace its creator has no map for is 65534
+t_nsioctl: NS_GET_NSTYPE works on a ns link opened in a chroot
+t_nsioctl: NS_GET_NSTYPE works on an O_PATH descriptor of a ns link
+t_nsioctl: NS_GET_NSTYPE works on the descriptor NS_GET_USERNS returns
 t_nx: a fork child's copy-on-write stack stays no-execute
 t_nx: a mapping moved by mremap and made executable runs
 t_nx: code in a data array does not run

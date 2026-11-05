@@ -23,6 +23,19 @@
 #endif
 
 #define D "/tmp/mp"
+#define OPEN_TREE 428
+#define MOUNT_SETATTR 442
+struct mattr { unsigned long long set, clr, prop, userns; };
+
+/* util-linux's mount --make-shared and friends: open_tree the mount point, then mount_setattr the descriptor. */
+static int setattr_prop(const char *path, unsigned long long prop) {
+    int fd = syscall(OPEN_TREE, AT_FDCWD, path, 0x80000);
+    if (fd < 0) return 0;
+    struct mattr a = { 0, 0, prop, 0 };
+    int r = syscall(MOUNT_SETATTR, fd, "", 0x1000, &a, sizeof a) == 0;
+    close(fd);
+    return r;
+}
 
 /* The optional fields (between the mount options and " - ") of the mountinfo
  * line of mount point mp, in a static buffer; NULL if there is no such line. */
@@ -203,6 +216,25 @@ int main(void) {
         if (fd >= 0) close(fd);
         r;
     }) && has_field(D "/a", "master:") == 0 && !has_field(D "/a", "shared:") && cmd("umount " D "/a"));
+
+    /* mount_setattr on an open_tree descriptor, as util-linux does it */
+    EXPECT("mount_setattr sets MS_SHARED through an open_tree descriptor", cmd("bind " D "/a " D "/a") && setattr_prop(D "/a", MS_SHARED) && has_field(D "/a", "shared:"));
+    EXPECT("and MS_PRIVATE", setattr_prop(D "/a", MS_PRIVATE) && !has_field(D "/a", "shared:"));
+    EXPECT("in a chroot too", ({
+        int st = 0;
+        mkdir(D "/proc", 0755);
+        mount("proc", D "/proc", "proc", 0, NULL);
+        pid_t c = fork();
+        if (c == 0) {
+            if (chroot(D) != 0 || chdir("/") != 0) _exit(1);
+            int ok = setattr_prop("/a", MS_SHARED) && has_field("/a", "shared:") && setattr_prop("/a", MS_PRIVATE) && !has_field("/a", "shared:");
+            _exit(ok ? 0 : 2);
+        }
+        waitpid(c, &st, 0);
+        umount(D "/proc");
+        WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    }));
+    EXPECT("clean up after mount_setattr", cmd("umount " D "/a"));
 
     /* crun binds onto /proc/self/fd/N of the mount point and then names it relative to its working directory */
     EXPECT("a relative name finds the mount a descriptor path made", ({

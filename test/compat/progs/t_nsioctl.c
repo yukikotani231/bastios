@@ -126,6 +126,18 @@ int main(void) {
     int usr = open("/proc/self/ns/user", O_RDONLY);
     int pid = open("/proc/self/ns/pid", O_RDONLY);
     int dir = open(".", O_RDONLY);
+    EXPECT("NS_GET_NSTYPE works on the descriptor NS_GET_USERNS returns", ({ int o = ioctl(uts, NS_GET_USERNS); o >= 0 && ioctl(o, NS_GET_NSTYPE) == CLONE_NEWUSER; }));
+    EXPECT("NS_GET_NSTYPE works on an O_PATH descriptor of a ns link", ({ int o = open("/proc/self/ns/mnt", O_PATH); o >= 0 && ioctl(o, NS_GET_NSTYPE) == CLONE_NEWNS; }));
+    EXPECT("NS_GET_NSTYPE works on a ns link opened in a chroot", ({
+        int st = 0;
+        pid_t c = fork();
+        if (c == 0) {
+            int o = open("/proc/self/ns/mnt", O_RDONLY);
+            _exit(o >= 0 && ioctl(o, NS_GET_NSTYPE) == CLONE_NEWNS ? 0 : 3);
+        }
+        waitpid(c, &st, 0);
+        WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    }));
     EXPECT("NS_GET_NSTYPE gives the CLONE_NEW* flag of the namespace",
            ioctl(uts, NS_GET_NSTYPE) == CLONE_NEWUTS && ioctl(usr, NS_GET_NSTYPE) == CLONE_NEWUSER
            && ioctl(pid, NS_GET_NSTYPE) == CLONE_NEWPID);

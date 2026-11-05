@@ -79,3 +79,25 @@ $ bb chroot /disk/d /usr/bin/dpkg-query -W -f '${Package}\n' bash coreutils libc
 bash
 coreutils
 libc6
+
+== debian: util-linux mount tools see the mount table
+$ bb mkdir -p /disk/d/proc && bb mount -t proc proc /disk/d/proc && bb chroot /disk/d /usr/bin/findmnt -n -o TARGET,FSTYPE /proc; bb chroot /disk/d /usr/bin/mountpoint /proc; bb chroot /disk/d /usr/bin/mountpoint /tmp
+/proc proc
+/proc is a mountpoint
+/tmp is not a mountpoint
+
+== debian: mount --make-shared, findmnt shows the propagation
+$ bb chroot /disk/d /bin/bash -c 'mkdir -p /mnt/a /mnt/b && mount --bind /mnt/a /mnt/b && mount --make-shared /mnt/b && findmnt -n -o TARGET,PROPAGATION /mnt/b; mount --make-private /mnt/b; findmnt -n -o TARGET,PROPAGATION /mnt/b; umount /mnt/b; findmnt /mnt/b; echo rc $?'
+/mnt/b shared
+/mnt/b private
+rc 1
+
+== debian: unshare gives a mount namespace of its own
+$ bb chroot /disk/d /bin/bash -c 'mkdir -p /mnt/c && unshare -m /bin/bash -c "mount -t tmpfs tmpfs /mnt/c && findmnt -n -o TARGET /mnt/c"; findmnt /mnt/c; echo rc $?'
+/mnt/c
+rc 1
+
+== debian: a bind of a shared mount made a slave
+$ bb chroot /disk/d /bin/bash -c 'mkdir -p /mnt/a /mnt/b /mnt/e && mount --bind /mnt/a /mnt/b && mount --make-shared /mnt/b && mount --bind /mnt/b /mnt/e && findmnt -n -o PROPAGATION /mnt/e; mount --make-slave /mnt/e; findmnt -n -o PROPAGATION /mnt/e; umount /mnt/e; umount /mnt/b'
+shared
+private,slave
