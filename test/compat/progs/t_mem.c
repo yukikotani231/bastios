@@ -663,6 +663,44 @@ int main(void) {
            if (c > 0 && waitpid(c, &ws, 0) == c) ok = WIFEXITED(ws) && WEXITSTATUS(ws) == 0;
            if (!ok && c > 0) printf("  (child status %d)\n", WIFEXITED(ws) ? WEXITSTATUS(ws) : -1);
            ok; }));
+    /* Firefox places its read-only shared memory as follows: it reserves
+       16 GiB, unmaps it, maps the memfd read-write in the middle of that
+       range, unmaps it again and maps it read-only at the same address,
+       which it checks. The hints must be heard while another thread of the
+       process runs on the other processor. */
+    EXPECT("a shared file mapping takes an address hint in a range just unmapped, and again read-only, while another thread runs on the other processor", ({
+           int ok = 0;
+           pid_t c = fork();
+           if (c == 0) {
+               int sf = open("mem_hint", O_RDWR | O_CREAT | O_TRUNC, 0600);
+               if (sf < 0 || ftruncate(sf, 112 * 4096) != 0) _exit(2);
+               pthread_t t; spin_stop = 0;
+               if (pthread_create(&t, 0, spin_thread, 0)) _exit(3);
+               int bad = 0;
+               for (int i = 0; i < 20; i++) {
+                   char *g = mmap(0, 1UL << 30, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+                   if (g == MAP_FAILED) _exit(4);
+                   munmap(g, 1UL << 30);
+                   usleep(5000);                    /* the other thread runs again */
+                   char *want = g + (512 << 20);
+                   char *w = mmap(want, 112 * 4096, PROT_READ | PROT_WRITE, MAP_SHARED, sf, 0);
+                   if (w == MAP_FAILED) _exit(5);
+                   if (w != want) bad |= 1;
+                   w[5] = (char)i;
+                   munmap(w, 112 * 4096);
+                   usleep(5000);
+                   char *r = mmap(w, 112 * 4096, PROT_READ, MAP_SHARED, sf, 0);
+                   if (r != w || r[5] != (char)i) bad |= 2;
+                   if (r != MAP_FAILED) munmap(r, 112 * 4096);
+               }
+               spin_stop = 1; pthread_join(t, 0);
+               close(sf); unlink("mem_hint");
+               _exit(bad ? 8 + bad : 0);
+           }
+           int ws;
+           if (c > 0 && waitpid(c, &ws, 0) == c) ok = WIFEXITED(ws) && WEXITSTATUS(ws) == 0;
+           if (!ok && c > 0) printf("  (child status %d)\n", WIFEXITED(ws) ? WEXITSTATUS(ws) : -1);
+           ok; }));
     /* Twelve MAP_SHARED mappings of one file at once: each is written back. */
     EXPECT("twelve shared file mappings are all written back", ({
            int sf = open("mem_shared", O_RDWR | O_CREAT | O_TRUNC, 0600);

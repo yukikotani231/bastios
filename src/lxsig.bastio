@@ -574,7 +574,10 @@ fn info_from(b: &mut Bytes, at: u64, word: u64, value: u64)
   if word >= FAULT_MARK + SYS_MARK {
     // A system call a seccomp filter refused with SECCOMP_RET_TRAP: si_code
     // SYS_SECCOMP, then si_call_addr, si_syscall and si_arch (SC_ARCH: AUDIT_ARCH_X86_64 or AUDIT_ARCH_AARCH64).
+    // si_errno is the data of the filter's return value (value).
     let v = word - FAULT_MARK - SYS_MARK;
+    bset(&mut b, at + 4, cast[u8](value % 256));
+    bset(&mut b, at + 5, cast[u8](value / 256 % 256));
     bset(&mut b, at + 8, 1);
     xfer_u64(&mut b, at + 16, v % FAULT_CODE);
     let nr = v / FAULT_CODE % 16384;

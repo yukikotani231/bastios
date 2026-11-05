@@ -59,6 +59,15 @@ static void trap_answer(int sig, siginfo_t *si, void *ctx) {
 #endif
 }
 
+/* The si_errno of the last SIGSYS: the data of SECCOMP_RET_TRAP, which the
+ * sandboxes of Firefox and Chromium use to pick the handler of the call. */
+static volatile int trap_errno = -1, trap_code;
+static void trap_note(int sig, siginfo_t *si, void *ctx) {
+    (void)sig; (void)ctx;
+    trap_errno = si->si_errno;
+    trap_code = si->si_code;
+}
+
 /* The number after `key` in the file at path, or -1. */
 static long file_num(const char *path, const char *key) {
     char b[4096];
@@ -295,6 +304,31 @@ int main(void) {
             if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(11);
             long r = syscall(SYS_getppid, 77);
             _exit(r == 4242 && trap_seen ? 0 : 12);
+        }
+        int st = 0;
+        if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();
+        else fail("status %#x", st);
+    }
+    /* The data in the low 16 bits of SECCOMP_RET_TRAP comes to the handler
+     * in si_errno. */
+    if (begin("seccomp SECCOMP_RET_TRAP: the SIGSYS handler finds the data of the filter's return value in si_errno")) {
+        pid_t c = fork();
+        if (c == 0) {
+            struct sigaction sa = {0};
+            sa.sa_sigaction = trap_note;
+            sa.sa_flags = SA_SIGINFO;
+            if (sigaction(SIGSYS, &sa, 0) != 0) _exit(9);
+            struct sock_filter f[] = {
+                BPF_STMT(BPF_LD_W_ABS, 0),
+                BPF_JUMP(BPF_JEQ_K, SYS_getppid, 0, 1),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_TRAP | 0x1234),
+                BPF_STMT(BPF_RET_K, SECCOMP_RET_ALLOW),
+            };
+            struct sock_fprog prog = { sizeof f / sizeof f[0], f };
+            if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) _exit(10);
+            if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) _exit(11);
+            syscall(SYS_getppid);
+            _exit(trap_errno == 0x1234 && trap_code == 1 /* SYS_SECCOMP */ ? 0 : 12);
         }
         int st = 0;
         if (c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0) pass();

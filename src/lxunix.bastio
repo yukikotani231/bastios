@@ -1284,6 +1284,19 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  let mut none = balloc(0);
+  let r = ux_recv_to(&mut k, pid, fd, va, n, dontwait, peek, trunc, addr, lenp, &mut none, false);
+  bfree(none);
+  return r;
+}
+
+/// ux_recv, the bytes going to the start of `into` (XFER long) rather than
+/// to user address va when `kb` is set: recvmsg spreads a datagram over
+/// its list of buffers from there.
+fn ux_recv_to(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, peek: bool, trunc: bool, addr: u64, lenp: u64, into: &mut Bytes, kb: bool) -> u64
+  requires kok(k) && pid < NPROC && (!kb || blen(into) == XFER)
+  ensures kok(k) && blen(into) == old(blen(into))
+{
   let u = ux_look(k, pid, fd);
   if u.err != 0 {
     return u.err;
@@ -1336,10 +1349,15 @@ fn ux_recv(k: &mut Kernel, pid: u64, fd: u64, va: u64, n: u64, dontwait: bool, p
   if !peek && !u.dg && uc_fly(k, c) > 0 && ahead > 0 {
     want = smaller(want, ahead);            // bytes sent before the descriptions come out alone
   }
-  ring_out(&mut k.fs.xfer, 0, k.uxb, c * UX_CAP, UX_CAP, ring_slot(r, lead), want);
-  let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
-  if put == NO_RESULT || put != want {
-    return EFAULT;
+  let mut put = want;
+  if kb {
+    ring_out(&mut into, 0, k.uxb, c * UX_CAP, UX_CAP, ring_slot(r, lead), want);
+  } else {
+    ring_out(&mut k.fs.xfer, 0, k.uxb, c * UX_CAP, UX_CAP, ring_slot(r, lead), want);
+    put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, want);
+    if put == NO_RESULT || put != want {
+      return EFAULT;
+    }
   }
   if !peek {
     // A description sent with these bytes goes with them: read and recv
