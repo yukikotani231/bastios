@@ -99,6 +99,8 @@ import "lxnum.bastio";
 
 const V_TIMER: u64 = 32;
 const V_LTIMER: u64 = 48;     // the tick of a processor other than the boot one
+const V_WAKE: u64 = 50;       // another processor's wake-up (an SGI): look for work
+const INFO_KICK: u64 = 12;    // not a query: sends the wake-up to the other processors (the answer is 0)
 const V_SYSCALL: u64 = 128;
 const V_ABORT: u64 = 14;
 
@@ -300,6 +302,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     terminate(&mut s.k, mmu, p, 137);
     return (p + 1) % NPROC;
   }
+  if v == V_WAKE {
+    return (p + 1) % NPROC;                 // it only had to leave the processor, to look for work
+  }
   if v != V_TIMER && v != V_LTIMER && pget(s.k.procs, p, F_TGID) != 0 && !has_space(&mut s.k.spaces, p) {
     // A thread whose group has lent its address space to a vfork child
     // (lx_vfork_vm) trapped on another processor, and group_take found
@@ -370,6 +375,10 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       s.stop = true;
     }
     sock_wake(&mut s.k);
+    if get(s.k.sys, SYS_KICK) != 0 {
+      s.k.sys = set(s.k.sys, SYS_KICK, 0);
+      let woke = boot_info(cpu, INFO_KICK, 0);   // a signal for a process running on another processor
+    }
     if what == SWITCH {
       csw_count(&mut s.k, p, false);        // the call blocked or yielded
       sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
