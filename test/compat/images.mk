@@ -30,7 +30,8 @@ JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c
 # (jlesage/handbrake) and MKVToolNix, a Qt 5 Matroska tool
 # (jlesage/mkvtoolnix) and Czkawka, a GTK 4 duplicate finder in Rust
 # (jlesage/czkawka) and tsMuxeR, a Qt 5 transport stream muxer
-# (jlesage/tsmuxer), for x11.txt.
+# (jlesage/tsmuxer) and FileBot, a Java media renamer
+# (jlesage/filebot), for x11.txt.
 X11_SERVER_IMAGE := slieb/xvfb-run@sha256:295c246aa1da131a977d23eb20d6bfe58fed6728edc3a8c0cee13c6570547982
 X11_CLIENT_IMAGE := jbonds/xterm@sha256:bac17f91159dffccecd9d3c73bea2c16c6b2de0f98cb81803e157dabb401c2ec
 X11_GTK_IMAGE := jlesage/putty@sha256:ecd5868c45a512fef25a6219f6559a3966136ca3f1652998e30584a91f901034
@@ -47,6 +48,7 @@ X11_HANDBRAKE_IMAGE := jlesage/handbrake@sha256:6f3a121e235d34e7299080e8cbac5284
 X11_MKV_IMAGE := jlesage/mkvtoolnix@sha256:768768cd651071d4a64a8e51583268aaac57f24a0483ae04022b3cc23d356036
 X11_CZKAWKA_IMAGE := jlesage/czkawka@sha256:228d47eb7edac003bb54082eaa96cb41613b08f9fbee310c775714c90dd79628
 X11_TSMUXER_IMAGE := jlesage/tsmuxer@sha256:44c691ee32244ac8b68da5185efa034dbbd68122c0177c0d7efd6e968f83fb56
+X11_FILEBOT_IMAGE := jlesage/filebot@sha256:dd542a03218fe84b99876eae47ed1bffc1deab756a599b9f0fd87fabbeb76b0b
 RUBY_IMAGE ?= library/ruby@sha256:730b265fc537e93f4ad335031ba95f8a9df88dc75bd9462968b92f368a115f6d
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191
