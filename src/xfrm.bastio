@@ -33,7 +33,9 @@
 // A socket bound to (or joined to) multicast group 2, XFRMNLGRP_EXPIRE, hears
 // XFRM_MSG_EXPIRE when an association passes its soft limit (hard = 0) and
 // again when it is removed at its hard limit (hard = 1). Joining needs
-// CAP_NET_ADMIN, as the message carries the key.
+// CAP_NET_ADMIN, as the message carries the key. Group 4, XFRMNLGRP_SA, hears
+// XFRM_MSG_NEWSA for an association added or replaced and XFRM_MSG_DELSA (its
+// id) for one deleted, flushed or expired.
 //
 // Not done yet: the replay state's notifications.
 
@@ -43,6 +45,7 @@ const XFRM_MSG_DELSA: u64 = 17;
 const XFRM_MSG_GETSA: u64 = 18;
 const XFRM_MSG_FLUSHSA: u64 = 28;
 const XFRM_MSG_EXPIRE: u64 = 24;
+const XFRMNLGRP_SA_BIT: u64 = 8;          // group 4 (XFRMNLGRP_SA): bit 3
 const XFRMNLGRP_EXPIRE_BIT: u64 = 2;      // group 2 (XFRMNLGRP_EXPIRE) in the sockets' group masks: bit 1
 const XFRM_MSG_NEWPOLICY: u64 = 19;
 const XFRM_MSG_DELPOLICY: u64 = 20;
@@ -238,16 +241,47 @@ fn xs_notify(n: &mut Net, i: u64, hard: u64)
   requires net_ok(n) && i < XSA_N && hard <= 1
   ensures net_ok(n)
 {
+  xs_event(&mut n, i, XFRMNLGRP_EXPIRE_BIT, XFRM_MSG_EXPIRE, hard);
+}
+
+/// Tells the sockets of the namespace of association i that joined the group
+/// with mask bit `bit` about it, as message `kind`: an association added or
+/// replaced (NEWSA), or one removed (DELSA, which names it by its id only).
+fn xs_event(n: &mut Net, i: u64, bit: u64, kind: u64, hard: u64)
+  requires net_ok(n) && i < XSA_N && hard <= 2 && bit > 0
+  ensures net_ok(n)
+{
   let ns = xs_get(n, i, XS_NS);
   let mut q = 0;
   while q < NLS
     invariant q <= NLS && net_ok(n)
   {
     if get(n.nls, q * NL_W + NL_USED) == 1 && get(n.nls, q * NL_W + NL_PROTO) == NETLINK_XFRM
-      && get(n.nls, q * NL_W + NL_NS) == ns && get(n.nls, q * NL_W + NL_GROUPS) / XFRMNLGRP_EXPIRE_BIT % 2 == 1 {
-      nlw_open(&mut n, q);
-      xs_put_msg(&mut n, i, XFRM_MSG_EXPIRE, 0, 0, 0, hard);
+      && get(n.nls, q * NL_W + NL_NS) == ns && get(n.nls, q * NL_W + NL_GROUPS) / bit % 2 == 1 {
+      // The request being answered may be writing on this very socket (or on
+      // another one): leave its cursor as it was. A socket with an answer half
+      // written gets the event written in line, before the rest.
+      let at = n.nl_at;
+      let lim = n.nl_lim;
+      let full = n.nl_full;
+      let msg = n.nl_msg;
+      let base = q * NLQ;
+      let mid = at > base + smaller(get(n.nls, q * NL_W + NL_LEN), NLQ) && at <= base + NLQ && lim == base + NLQ;
+      if !mid {
+        nlw_open(&mut n, q);
+      }
+      if kind == XFRM_MSG_DELSA {
+        xs_put_id(&mut n, i);
+      } else {
+        xs_put_msg(&mut n, i, kind, 0, 0, 0, hard);
+      }
       nlw_close(&mut n, q);
+      if !mid {
+        n.nl_at = at;
+        n.nl_lim = lim;
+        n.nl_full = full;
+        n.nl_msg = msg;
+      }
     }
     q = q + 1;
   }
@@ -281,6 +315,7 @@ fn xs_reap(n: &mut Net)
     if xs_get(n, i, XS_USED) == 1 {
       if xs_expired(n, i) {
         xs_notify(&mut n, i, 1);
+        xs_event(&mut n, i, XFRMNLGRP_SA_BIT, XFRM_MSG_DELSA, 0);
         xs_clear(&mut n, i);
       } else {
         xs_check_soft(&mut n, i);
@@ -561,7 +596,26 @@ fn xs_new(n: &mut Net, b: &Bytes, at: u64, end: u64, fl: u64, admin: bool) -> u6
     l = l + 1;
   }
   xl_set(&mut n, row, XL_ADD, n.now / 100);
+  xs_event(&mut n, row, XFRMNLGRP_SA_BIT, XFRM_MSG_NEWSA, 2);
   return 0;
+}
+
+/// Writes association i's id as an XFRM_MSG_DELSA message: a struct
+/// xfrm_usersa_id (destination, SPI, family, protocol).
+fn xs_put_id(n: &mut Net, i: u64)
+  requires net_ok(n) && i < XSA_N
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, XFRM_MSG_DELSA, 0, 0, 0);
+  xs_put_addr(&mut n, xs_get(n, i, XS_DST));
+  nl_b(&mut n, xs_get(n, i, XS_SPI) / 16777216 % 256);
+  nl_b(&mut n, xs_get(n, i, XS_SPI) / 65536 % 256);
+  nl_b(&mut n, xs_get(n, i, XS_SPI) / 256 % 256);
+  nl_b(&mut n, xs_get(n, i, XS_SPI) % 256);
+  nl_16(&mut n, 2);                       // family
+  nl_b(&mut n, IPPROTO_ESP);
+  xs_zeros(&mut n, 1);
+  nl_end(&mut n);
 }
 
 /// Writes association i as an XFRM_MSG_NEWSA message (for a read or a dump).
@@ -1071,6 +1125,7 @@ fn xfrm_message(n: &mut Net, b: &Bytes, at: u64, end: u64, kind: u64, fl: u64, s
       invariant i <= XSA_N && net_ok(n)
     {
       if xs_get(n, i, XS_USED) == 1 && xs_get(n, i, XS_NS) == n.ns {
+        xs_event(&mut n, i, XFRMNLGRP_SA_BIT, XFRM_MSG_DELSA, 0);
         xs_clear(&mut n, i);
       }
       i = i + 1;
@@ -1082,6 +1137,7 @@ fn xfrm_message(n: &mut Net, b: &Bytes, at: u64, end: u64, kind: u64, fl: u64, s
     if i >= XSA_N {
       return NE_SRCH;
     }
+    xs_event(&mut n, i, XFRMNLGRP_SA_BIT, XFRM_MSG_DELSA, 0);
     xs_clear(&mut n, i);
     return 0;
   }

@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- The `XFRMNLGRP_SA` netlink group of `NETLINK_XFRM` hears `XFRM_MSG_NEWSA` and `XFRM_MSG_DELSA` as security associations are added, replaced, deleted, flushed or expire (`test/compat/progs/t_xfrmev.c`).
 - Netlink sockets can join multicast groups (`NETLINK_ADD_MEMBERSHIP`, `NETLINK_DROP_MEMBERSHIP`), and `XFRM_MSG_EXPIRE` is sent to group `XFRMNLGRP_EXPIRE` when a security association passes its soft limit and when it is removed at its hard limit (`test/compat/progs/t_xfrmexp.c`).
 - `bwm`: a window dragged by its title bar (or with Alt) and let go at the left or right edge of the screen fills that half of it, and at the top edge fills all of it; the maximize button or Alt-Down puts it back.
 - `bview` keeps its pixels in memory shared with `bwm` too, so zooming and panning an image send a damage instead of the whole window.
