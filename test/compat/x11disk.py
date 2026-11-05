@@ -9,7 +9,7 @@ and x11start (the script that starts them all).
 The checks unpack the roots under /disk/x, /disk/t, /disk/g and /disk/q, start Xvfb in the first
 and xterm in the second (which share the X socket through a bind mount).
 
-    x11disk.py OUT.img SERVER_IMAGE CLIENT_IMAGE GTK_IMAGE QT_IMAGE ... PY_IMAGE TAG_IMAGE DIRSTAT_IMAGE FILEZILLA_IMAGE AVIDEMUX_IMAGE HANDBRAKE_IMAGE MKV_IMAGE CZKAWKA_IMAGE TSMUXER_IMAGE FILEBOT_IMAGE FFS_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR
+    x11disk.py OUT.img SERVER_IMAGE CLIENT_IMAGE GTK_IMAGE QT_IMAGE ... PY_IMAGE TAG_IMAGE DIRSTAT_IMAGE FILEZILLA_IMAGE AVIDEMUX_IMAGE HANDBRAKE_IMAGE MKV_IMAGE CZKAWKA_IMAGE TSMUXER_IMAGE FILEBOT_IMAGE FFS_IMAGE KRUSADER_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR
 
 The images are Docker Hub images, NAME@sha256:DIGEST (images.mk pins them),
 fetched and cached as alpinedisk.py does it.
@@ -67,16 +67,23 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
-    out, server, client, gtk, qt, qt2, java, wx, py, tag, dirstat, filezilla, avidemux, handbrake, mkv, czkawka, tsmuxer, filebot, ffs, busybox, bx11, fakebwm, x11start = args
+    out, server, client, gtk, qt, qt2, java, wx, py, tag, dirstat, filezilla, avidemux, handbrake, mkv, czkawka, tsmuxer, filebot, ffs, krusader, busybox, bx11, fakebwm, x11start = args
     work = os.path.join(os.path.dirname(os.path.abspath(out)), "x11")
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
     os.makedirs(work, exist_ok=True)
     unpacked = {}                  # tar -> the bytes its files take on the disk once unpacked
-    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru"), (tag, "tag.tar", "usr/bin/puddletag"), (dirstat, "dirstat.tar", "usr/bin/qdirstat"), (filezilla, "filezilla.tar", "usr/bin/filezilla"), (avidemux, "avidemux.tar", "usr/bin/avidemux3_qt5"), (handbrake, "handbrake.tar", "usr/bin/ghb"), (mkv, "mkv.tar", "usr/bin/mkvtoolnix-gui"), (czkawka, "czkawka.tar", "usr/bin/czkawka_gui"), (tsmuxer, "tsmuxer.tar", "usr/bin/tsMuxerGUI"), (filebot, "filebot.tar", "opt/filebot/filebot"), (ffs, "ffs.tar", "opt/FreeFileSync/Bin/FreeFileSync")):
+    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru"), (tag, "tag.tar", "usr/bin/puddletag"), (dirstat, "dirstat.tar", "usr/bin/qdirstat"), (filezilla, "filezilla.tar", "usr/bin/filezilla"), (avidemux, "avidemux.tar", "usr/bin/avidemux3_qt5"), (handbrake, "handbrake.tar", "usr/bin/ghb"), (mkv, "mkv.tar", "usr/bin/mkvtoolnix-gui"), (czkawka, "czkawka.tar", "usr/bin/czkawka_gui"), (tsmuxer, "tsmuxer.tar", "usr/bin/tsMuxerGUI"), (filebot, "filebot.tar", "opt/filebot/filebot"), (ffs, "ffs.tar", "opt/FreeFileSync/Bin/FreeFileSync"), (krusader, "krusader.tar", "usr/bin/krusader")):
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
+        if tar == "krusader.tar":
+            # A BastiOS disk holds at most 262144 entries (files, directories
+            # and links; DSLOTS in src/diskfs.bastio) and the lane's roots
+            # use most of them. Krusader's icon themes and message catalogues
+            # are tens of thousands of small files it can start without.
+            unpacked[tar] = write_tar(files, os.path.join(work, tar), lambda n: not n.startswith(("usr/share/icons/breeze", "usr/share/locale/")))
+            continue
         if tar == "tag.tar":
             # puddletag's root is 640 MB: its biggest libraries are a file of
             # their own (tag2.tar), unpacked after tag.tar is removed, so the
@@ -92,12 +99,12 @@ def main():
     # more stays taken, case after case. With 900 MB, a fixed figure, the
     # disk filled partway through the puddletag root, and BusyBox tar said
     # "short read". So: what the kept roots take, what every root takes past
-    # its tar, the largest root once more (the case unpacking it), and 128 MiB
-    # for what the programs write.
+    # its tar, the largest root once more (the case unpacking it), and 768 MiB
+    # for what the programs write (FileBot and JDownloader keep caches and logs in theirs).
     size = lambda tar: os.path.getsize(os.path.join(work, tar))
     kept = ("server.tar", "client.tar")
     past = sum(max(0, unpacked[t] - size(t)) for t in unpacked if t not in kept)
-    free = sum(unpacked[t] for t in kept) + past + max(unpacked[t] for t in unpacked if t not in kept) + (128 << 20)
+    free = sum(unpacked[t] for t in kept) + past + max(unpacked[t] for t in unpacked if t not in kept) + (768 << 20)
     env = dict(os.environ, MKDISK_FREE_MB=str((free >> 20) + 1))
     print(f"x11disk: {free >> 20} MiB free for the cases", file=sys.stderr)
     os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
@@ -120,6 +127,7 @@ def main():
                                f"czkawka.tar={os.path.join(work, 'czkawka.tar')}",
                                f"tsmuxer.tar={os.path.join(work, 'tsmuxer.tar')}",
                                f"filebot.tar={os.path.join(work, 'filebot.tar')}",
-                               f"ffs.tar={os.path.join(work, 'ffs.tar')}"], env)
+                               f"ffs.tar={os.path.join(work, 'ffs.tar')}",
+                               f"krusader.tar={os.path.join(work, 'krusader.tar')}"], env)
 
 main()
