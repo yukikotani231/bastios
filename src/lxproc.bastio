@@ -899,6 +899,8 @@ fn tracer_reaped(k: &mut Kernel, c: u64)
     let pg = tgid(k.procs, par);
     wake_waiters(&mut k, pg);
     child_ended(&mut k, par, c);
+  } else if par == 0 && state(k.procs, c) == ZOMBIE {
+    pset(&mut k.procs, c, F_STATE, FREE);   // a thread kept for its tracer (traced_end)
   }
 }
 

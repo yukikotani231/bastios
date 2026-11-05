@@ -265,6 +265,9 @@ t_algskc: the file changed after the sendfile does not change the result
 t_algskc: the input is a copy: changing the memory after the send changes nothing
 t_algskc: the key is a copy: a socket accepted before a new key keeps the old one
 t_algskc: the result goes only to the buffer read into: the sent memory is not changed
+t_algskc: xts(aes) gives IEEE 1619 vector 1 and decrypts it
+t_algskc: xts(aes) takes 64-byte keys and refuses 16- and 33-byte ones and a partial block
+t_algskc: xts(aes) with two different keys and a tweak gives vector 2
 t_cloned: /proc/self/exe opens and is not sealed
 t_cloned: /proc/sys/kernel/cap_last_cap is readable and numeric
 t_cloned: F_ADD_SEALS seals it
@@ -1625,6 +1628,8 @@ t_ptrace: PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only
 t_ptrace: a buffer that is too small gets what fits, and the full size is the result
 t_ptrace: and at its exit the result, as an error
 t_ptrace: the tracee goes on to its end
+t_ptrace: strace -f style tracing of posix_spawn: the clone ends with a stop after the vfork event, and stops pair up
+t_ptrace: the same with PTRACE_O_TRACEVFORKDONE: the stop after the clone follows the vfork-done stop
 t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH
 t_ptrace2: PTRACE_DETACH with a signal delivers it
 t_ptrace2: PTRACE_DETACH right after PTRACE_INTERRUPT cut a traced read short: the process reads on and is not killed by SIGTRAP
@@ -1637,6 +1642,9 @@ t_ptrace2: PTRACE_LISTEN keeps a group-stopped tracee stopped; SIGCONT then wake
 t_ptrace2: PTRACE_O_EXITKILL kills the tracee when the tracer dies
 t_ptrace2: PTRACE_O_TRACECLONE reports a new thread, which is traced
 t_ptrace2: PTRACE_O_TRACEEXIT stops the tracee at exit with the status as the event message
+t_ptrace2: after the exit event stop, PTRACE_SYSCALL lets the tracee end with no more system call stops
+t_ptrace2: strace -f style tracing of a thread that exits: the tracer hears of its end, and the process finishes
+t_ptrace2: a traced thread that ends with its process is reported to the tracer too
 t_ptrace2: PTRACE_O_TRACEEXIT also reports a death by signal, after the signal stop
 t_ptrace2: PTRACE_O_TRACEFORK: the event message is the new child's pid
 t_ptrace2: PTRACE_O_TRACESYSGOOD marks a system call stop with SIGTRAP | 0x80
