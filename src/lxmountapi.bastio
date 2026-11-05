@@ -449,9 +449,9 @@ fn st_to_ms(s: u64) -> u64 {
 /// mount_setattr(dfd, path, flags, attr, size): changes the attributes of a
 /// mount. On the clone of a directory open_tree made, they are kept for
 /// move_mount; otherwise they are those of the mount the path is in, when
-/// it is one of the namespace's own (a bind mount, proc, ...). Propagation
-/// is accepted and changes nothing, as for mount(2); an ID-mapped mount is
-/// ENOSYS.
+/// it is one of the namespace's own (a bind mount, proc, ...). A propagation
+/// type is set as mount(2) sets it (AT_RECURSIVE: for the mounts below too);
+/// an ID-mapped mount is ENOSYS.
 fn lx_mount_setattr(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64, uattr: u64, usize: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -532,8 +532,14 @@ fn lx_mount_setattr(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64, u
   if n == NO_RESULT {
     return k.perr;
   }
+  if prop != 0 {
+    let pr = ns_prop_apply(&mut k, pid, n, prop, flags & 0x8000 != 0);
+    if pr != 0 {
+      return pr;
+    }
+  }
   if setst == 0 && clrst == 0 {
-    return 0;                               // propagation only: there is none between namespaces here
+    return 0;
   }
   return ns_set_attrs(&mut k, pid, setst, clrst);
 }
