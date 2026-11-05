@@ -521,7 +521,8 @@ uint64_t bst_irq_ack(void) {
     uint64_t id;
     if (gic_ver == 2) id = r32(GICR + 0x000C);               /* GICC_IAR */
     else __asm__ volatile ("mrs %0, icc_iar1_el1" : "=r"(id));
-    id &= 0xFFFFFF;
+    uint64_t raw = id;                                       /* GICv2 SGIs carry the sender in bits 12:10, which EOIR must return */
+    id &= gic_ver == 2 ? 0x3FF : 0xFFFFFF;
     if (id >= 1020) return 0;
     uint64_t v = 6;
     if (id == TIMER_INTID) {
@@ -530,7 +531,7 @@ uint64_t bst_irq_ack(void) {
     } else if (id == WAKE_INTID) {
         v = V_WAKE;
     }
-    if (gic_ver == 2) w32(GICR + 0x0010, (uint32_t)id);      /* GICC_EOIR */
+    if (gic_ver == 2) w32(GICR + 0x0010, (uint32_t)raw);     /* GICC_EOIR */
     else __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
     return v;
 }
