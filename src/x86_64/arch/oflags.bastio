@@ -5,3 +5,8 @@
 fn oflags_in(f: u64) -> u64 {
   return f;
 }
+
+/// The flags of an F_GETFL answer, in the caller's numbering.
+fn oflags_out(f: u64) -> u64 {
+  return f;
+}
