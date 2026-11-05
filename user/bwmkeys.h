@@ -1,5 +1,5 @@
 /* The keyboard layouts bwm can type with, and the file that says which one is in use: the first line of
- * /etc/keymap, "us", "jp106" or "dvorak" (anything else is "us"). bwm reads it again every few seconds, and
+ * /etc/keymap, "us", "jp106", "dvorak", "uk" or "de" (anything else is "us"). bwm reads it again every few seconds, and
  * the System window (bsys) writes it. The keys are evdev codes; only the characters differ between layouts. */
 #ifndef BWMKEYS_H
 #define BWMKEYS_H
@@ -10,8 +10,8 @@
 
 #define KB_FILE "/etc/keymap"
 #define KB_CODES 58                       /* the codes up to the space bar have a character */
-#define KB_N 3
-static const char *const kb_names[KB_N] = { "us", "jp106", "dvorak" };
+#define KB_N 5
+static const char *const kb_names[KB_N] = { "us", "jp106", "dvorak", "uk", "de" };
 
 static char kb_lo[KB_N][KB_CODES + 1], kb_hi[KB_N][KB_CODES + 1];
 static int kb_ready, kb_cur;
@@ -38,6 +38,19 @@ static void kb_build(void)
     memcpy(kb_lo[2] + 44, ";qjkxbmwvz", 10);
     memcpy(kb_hi[2] + 44, ":QJKXBMWVZ", 10);
     kb_lo[2][12] = '['; kb_hi[2][12] = '{'; kb_lo[2][13] = ']'; kb_hi[2][13] = '}';
+    /* UK: the quote and at sign swap, # and ~ get their own key; the pound sign and the not sign are not ASCII (no character). */
+    kb_hi[3][3] = '"'; kb_hi[3][4] = 0;
+    kb_lo[3][40] = '\''; kb_hi[3][40] = '@'; kb_lo[3][41] = '`'; kb_hi[3][41] = 0;
+    kb_lo[3][43] = '#'; kb_hi[3][43] = '~';
+    /* German (QWERTZ): y and z swap and the symbols move. The umlauts, the sharp s, the dead keys and the AltGr
+     * characters (@ \ { } [ ] | ~ and so on) need more than one byte or the AltGr key, which bwm does not have. */
+    kb_lo[4][21] = 'z'; kb_hi[4][21] = 'Z'; kb_lo[4][44] = 'y'; kb_hi[4][44] = 'Y';
+    kb_hi[4][3] = '"'; kb_hi[4][4] = 0; kb_hi[4][7] = '&'; kb_hi[4][8] = '/'; kb_hi[4][9] = '('; kb_hi[4][10] = ')';
+    kb_hi[4][11] = '='; kb_lo[4][12] = 0; kb_hi[4][12] = '?'; kb_lo[4][13] = 0; kb_hi[4][13] = '`';
+    kb_lo[4][26] = 0; kb_hi[4][26] = 0; kb_lo[4][27] = '+'; kb_hi[4][27] = '*';
+    kb_lo[4][39] = 0; kb_hi[4][39] = 0; kb_lo[4][40] = 0; kb_hi[4][40] = 0; kb_lo[4][41] = 0; kb_hi[4][41] = 0;
+    kb_lo[4][43] = '#'; kb_hi[4][43] = '\'';
+    kb_hi[4][51] = ';'; kb_hi[4][52] = ':'; kb_lo[4][53] = '-'; kb_hi[4][53] = '_';
     kb_ready = 1;
 }
 

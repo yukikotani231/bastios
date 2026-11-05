@@ -1141,9 +1141,9 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = until(b"bsys: timezone ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) t in the System window picks a time zone")
             fails += not good
-            # k picks the next keyboard layout (us, jp106, dvorak) and bwm reads the file again within seconds;
-            # three presses are back at the first one.
-            for lay, key in ((b"jp106", "k"), (b"dvorak", "k"), (b"us", "v")):    # in dvorak the key that types k is the one that types v on a US keyboard
+            # k picks the next keyboard layout (us, jp106, dvorak, uk, de) and bwm reads the file again within seconds;
+            # five presses are back at the first one.
+            for lay, key in ((b"jp106", "k"), (b"dvorak", "k"), (b"uk", "v"), (b"de", "k"), (b"us", "k")):    # in dvorak the key that types k is the one that types v on a US keyboard
                 if not good:
                     break
                 monitor("sendkey " + key)

@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Two more keyboard layouts for `bwm`: `uk` and `de` (QWERTZ), picked with `k` in the System window or by writing `/etc/keymap`. Characters that need more than one byte or the AltGr key (the pound sign, umlauts, `@` on `de`) are not typed.
 - `bwm` reads `/etc/bwm.wallpaper` again when it changes (about once a second): `echo /root/photo.ppm > /etc/bwm.wallpaper` puts a new wallpaper on the running desktop, an empty file takes it off, and a file bwm cannot use leaves the old one and says so in the task bar. `bwm -w FILE` is not replaced.
 - `bwm`: a line written to `/tmp/bwm.notice` (`echo Build done > /tmp/bwm.notice`) shows in the task bar for three seconds, then the file is removed; the bar checks for it every second or so.
 - Netlink sockets can join multicast groups (`NETLINK_ADD_MEMBERSHIP`, `NETLINK_DROP_MEMBERSHIP`), and `XFRM_MSG_EXPIRE` is sent to group `XFRMNLGRP_EXPIRE` when a security association passes its soft limit and when it is removed at its hard limit (`test/compat/progs/t_xfrmexp.c`).
