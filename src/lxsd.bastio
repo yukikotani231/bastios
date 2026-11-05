@@ -1,0 +1,314 @@
+// The disk BastiOS leaves alone, readable: when the machine's disk holds
+// someone else's data (a partition table, another file system's
+// superblock: `foreign` in src/diskfs.bastio), it is not mounted and not
+// written, but root and group disk can read it. /dev/sda is the whole
+// device and /dev/sda1 .. /dev/sda15 its partitions, found once at boot
+// in a GPT (entry order) or an MBR (the four primary slots; logical
+// partitions in an extended one are not read). The devices are read-only:
+// open for writing is EROFS, so a stray `dd of=` cannot damage the
+// owner's operating system. Reading goes through the disk driver one
+// sector or one 4 KiB block at a time, with no cache.
+//
+// k.sdp, two words per device: its first sector on the disk and its
+// sectors (0: there is no such device).
+//
+// Mounting: `dd if=/dev/sda2 of=img` and a loop device make the image
+// available to the file system readers (src/lxmount.bastio).
+//
+// Not done: writing, a second disk (a USB stick that is not the boot disk),
+// logical MBR partitions, /sys/block/sda and /proc/partitions.
+
+/// Word f of device n, at most PLO_MAX (sd_scan stores nothing larger).
+fn sd_get(t: &Buf, n: u64, f: u64) -> u64
+  requires len(t) == SD_LEN && n < SD_N && f < 2
+  ensures result <= PLO_MAX
+{
+  return smaller(get(t, n * 2 + f), PLO_MAX);
+}
+
+fn sd_set(t: &mut Buf, n: u64, f: u64, v: u64)
+  requires len(t) == SD_LEN && n < SD_N && f < 2
+  ensures len(t) == SD_LEN
+{
+  t = set(t, n * 2 + f, v);
+}
+
+fn is_sd(d: u64) -> bool
+  ensures result == (d >= DEV_SD && d < DEV_SD + SD_N)
+{
+  return d >= DEV_SD && d < DEV_SD + SD_N;
+}
+
+/// The disk device the n-byte path in the transfer buffer names
+/// ("dev/sda", "dev/sda12"), or DEV_NONE.
+fn sd_at(x: &Bytes, n: u64) -> u64
+  requires blen(x) == XBUF && n <= FNAME_MAX
+{
+  if xfer_is(x, 0, n, "dev/sda") {
+    return DEV_SD;
+  }
+  if n >= 8 && n <= 9 && xfer_is(x, 0, 7, "dev/sda") {
+    let c = cast[u64](bget(x, 7));
+    if c >= 49 && c < 58 {
+      let mut v = c - 48;
+      if n == 9 {
+        let e = cast[u64](bget(x, 8));
+        if e < 48 || e >= 58 {
+          return DEV_NONE;
+        }
+        v = v * 10 + e - 48;
+      }
+      if v <= SD_PARTS {
+        return DEV_SD + v;
+      }
+    }
+  }
+  return DEV_NONE;
+}
+
+/// Records partition i (1 ..= SD_PARTS) at first, count sectors, if it lies
+/// whole on a disk of total sectors.
+fn sd_part(k: &mut Kernel, i: u64, first: u64, count: u64, total: u64)
+  requires kok(k) && i >= 1 && i <= SD_PARTS && total <= PLO_MAX
+  ensures kok(k)
+{
+  if count == 0 || first >= total || count > total - first {
+    return;
+  }
+  sd_set(&mut k.sdp, i, 0, first);
+  sd_set(&mut k.sdp, i, 1, count);
+}
+
+/// Finds the devices of a disk that BastiOS did not take (see above). Does
+/// nothing unless the disk is foreign.
+fn sd_scan(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  if !k.fs.disk.foreign || k.fs.disk.raw {
+    return;
+  }
+  let total = blk_sectors(k.fs.disk.dev);
+  if total < 2 || total > PLO_MAX {
+    return;
+  }
+  sd_set(&mut k.sdp, 0, 0, 0);
+  sd_set(&mut k.sdp, 0, 1, total);
+  if !blk_read(&mut k.fs.disk.dev, 1, &mut k.fs.xfer) {
+    return;
+  }
+  if get_u64(k.fs.xfer, 0) == GPT_SIG {
+    let elba = get_u64(k.fs.xfer, 72);
+    let w = get_u64(k.fs.xfer, 80);
+    let count = w % 4294967296;
+    if w / 4294967296 != 128 || elba < 2 || elba > total || total - elba < 4 {
+      return;
+    }
+    let mut i = 0;
+    while i < count && i < SD_PARTS
+      invariant kok(k) && i % 4 == 0 && i <= SD_PARTS + 3 && elba >= 2 && total - elba >= 4 && total <= PLO_MAX
+    {
+      if !blk_read(&mut k.fs.disk.dev, elba + i / 4, &mut k.fs.xfer) {
+        return;
+      }
+      let mut j = 0;
+      while j < 4
+        invariant j <= 4 && kok(k) && i % 4 == 0 && total <= PLO_MAX
+      {
+        let o = j * 128;
+        let n = i + j + 1;
+        if n <= SD_PARTS && n <= count && (get_u64(k.fs.xfer, o) != 0 || get_u64(k.fs.xfer, o + 8) != 0) {
+          let first = get_u64(k.fs.xfer, o + 32);
+          let last = get_u64(k.fs.xfer, o + 40);
+          if first <= last && last < total {
+            sd_part(&mut k, n, first, last - first + 1, total);
+          }
+        }
+        j = j + 1;
+      }
+      i = i + 4;
+    }
+    return;
+  }
+  if !blk_read(&mut k.fs.disk.dev, 0, &mut k.fs.xfer) {
+    return;
+  }
+  if bget(k.fs.xfer, 510) != 0x55 || bget(k.fs.xfer, 511) != 0xAA {
+    return;
+  }
+  let mut e = 0;
+  while e < 4
+    invariant e <= 4 && kok(k) && total <= PLO_MAX
+  {
+    let o = 446 + e * 16;
+    let ty = cast[u64](bget(k.fs.xfer, o + 4));
+    // Type 0 is an empty slot, 5, 0xF and 0x85 extended partitions, 0xEE
+    // a GPT's protective entry (read above if the header was there).
+    if ty != 0 && ty != 5 && ty != 0xF && ty != 0x85 && ty != 0xEE {
+      let first = cast[u64](load_le32(k.fs.xfer, o + 8));
+      let count = cast[u64](load_le32(k.fs.xfer, o + 12));
+      sd_part(&mut k, e + 1, first, count, total);
+    }
+    e = e + 1;
+  }
+}
+
+/// The bytes of device n.
+fn sd_size(k: &Kernel, n: u64) -> u64
+  requires kok(k) && n < SD_N
+  ensures result <= PLO_MAX * SECTOR
+{
+  return sd_get(k.sdp, n, 1) * SECTOR;
+}
+
+/// read on descriptor fd of disk device d: n bytes at the descriptor's
+/// position (at most XFER, and never past the device's end). Returns the
+/// count or -errno.
+fn sd_read(k: &mut Kernel, pid: u64, fd: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  if !is_sd(d) {
+    return EINVAL;
+  }
+  let idx = d - DEV_SD;
+  let size = sd_size(k, idx);
+  let pos = of_get(k.ofd, h, 3);
+  if pos >= size || n == 0 {
+    return 0;
+  }
+  let want = smaller(smaller(n, size - pos), XFER);
+  let base = sd_get(k.sdp, idx, 0);
+  let count = sd_get(k.sdp, idx, 1);
+  let sec0 = pos / SECTOR;
+  assert sec0 <= PLO_MAX;
+  let mut skip = pos % SECTOR;
+  let mut got = 0;
+  if skip == 0 && want == XFER && (base + sec0) % 8 == 0 && sec0 + 8 <= count {
+    if blk_read_block(&mut k.fs.disk.dev, base + sec0, &mut k.fs.xfer, 0) {
+      got = XFER;
+    }
+  } else {
+    let mut lba = base + sec0;
+    let mut live = true;
+    while got < want && live
+      invariant got <= want && want <= XFER && skip < SECTOR && lba <= 4 * PLO_MAX && base + count <= 2 * PLO_MAX && kok(k)
+    {
+      if lba >= base + count || !blk_read(&mut k.fs.disk.dev, lba, &mut k.fs.disk.sec) {
+        live = false;
+      } else {
+        let take = smaller(SECTOR - skip, want - got);
+        bcopy(&mut k.fs.xfer, got, k.fs.disk.sec, skip, take);
+        got = got + take;
+        skip = 0;
+        lba = lba + 1;
+      }
+    }
+  }
+  if got == 0 {
+    return EIO;
+  }
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, got) != got {
+    return EFAULT;
+  }
+  of_set(&mut k.ofd, h, 3, pos + got);
+  return got;
+}
+
+/// read of n bytes: sd_read repeated until n are read, the device ends or
+/// an error, which then shows as a short count.
+fn sd_io(k: &mut Kernel, pid: u64, fd: u64, d: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let first = sd_read(&mut k, pid, fd, d, va, n);
+  if first == 0 || first > n || va > 0xFFFFFFFFFFFFFFFF - n {
+    return first;
+  }
+  let mut done = first;
+  while done < n
+    invariant done <= n && va <= 0xFFFFFFFFFFFFFFFF - n && kok(k) && pid < NPROC
+  {
+    let r = sd_read(&mut k, pid, fd, d, va + done, n - done);
+    if r == 0 || r > n - done {
+      return done;
+    }
+    done = done + r;
+  }
+  return done;
+}
+
+/// lseek on descriptor fd of disk device d: as on a file, the device's
+/// size being the end.
+fn sd_seek(k: &mut Kernel, pid: u64, fd: u64, d: u64, off: u64, whence: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  if !is_sd(d) {
+    return 0;
+  }
+  let mut base = 0;
+  if whence == 1 {
+    base = of_get(k.ofd, h, 3);
+  } else if whence == 2 {
+    base = sd_size(k, d - DEV_SD);
+  } else if whence != 0 {
+    return EINVAL;
+  }
+  if base >= 0x8000000000000000 {
+    return EINVAL;
+  }
+  let mut to = 0;
+  if off < 0x8000000000000000 {
+    if base > 0x7FFFFFFFFFFFFFFF - off {
+      return EINVAL;
+    }
+    to = base + off;
+  } else {
+    let back = 0xFFFFFFFFFFFFFFFF - off + 1;
+    if back > base {
+      return EINVAL;
+    }
+    to = base - back;
+  }
+  of_set(&mut k.ofd, h, 3, to);
+  return to;
+}
+
+/// ioctl on disk device d.
+fn sd_ioctl(k: &mut Kernel, pid: u64, d: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !is_sd(d) {
+    return ENOTTY;
+  }
+  let n = d - DEV_SD;
+  if req == BLKGETSIZE64 {
+    return loop_put(&mut k, pid, arg, sd_size(k, n), 8);
+  }
+  if req == BLKGETSIZE {
+    return loop_put(&mut k, pid, arg, sd_get(k.sdp, n, 1), 8);
+  }
+  if req == BLKSSZGET {
+    return loop_put(&mut k, pid, arg, SECTOR, 4);
+  }
+  if req == BLKBSZGET {
+    return loop_put(&mut k, pid, arg, 4096, 4);
+  }
+  if req == BLKROGET {
+    return loop_put(&mut k, pid, arg, 1, 4);
+  }
+  if req == BLKFLSBUF {
+    return 0;                               // nothing is cached
+  }
+  return ENOTTY;
+}
