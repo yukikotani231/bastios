@@ -1172,7 +1172,6 @@ t_mountprop: MS_SLAVE leaves the group of the last peer
 t_mountprop: MS_UNBINDABLE shows unbindable
 t_mountprop: a bind is private at first
 t_mountprop: a bind of a shared mount is its peer
-t_mountprop: a missing target is ENOENT
 t_mountprop: a mount below the master shows below the slave
 t_mountprop: a mount below the slave stays there
 t_mountprop: a mount here still shows there

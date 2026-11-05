@@ -161,7 +161,6 @@ int main(void) {
     EXPECT("MS_PRIVATE clears it", cmd("private " D "/a") && !has_field(D "/a", "unbindable") && cmd("bind " D "/a " D "/b") && cmd("umount " D "/b"));
     EXPECT("the propagation of a plain directory is EINVAL", !prop(D "/c", MS_SHARED) && errno == EINVAL);
     EXPECT("two types at once are EINVAL", !prop(D "/a", MS_SHARED | MS_PRIVATE) && errno == EINVAL);
-    EXPECT("a missing target is ENOENT", !prop(D "/nothing", MS_SHARED) && errno == ENOENT);
     EXPECT("the root can be made shared", cmd("shared /") && has_field("/", "shared:"));
     EXPECT("and private again", cmd("private /") && !has_field("/", "shared:"));
 

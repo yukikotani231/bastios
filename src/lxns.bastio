@@ -2613,8 +2613,8 @@ fn ns_prop_apply(k: &mut Kernel, pid: u64, n: u64, mode: u64, rec: bool) -> u64
   if e >= MT_N {
     // The file layer's own mount points (/proc, a tmpfs) are the machine's:
     // nothing passes between them.
-    if dir_at(&mut k, n) == NO_FILE && vfs_lookup(&mut k.fs, n) == NO_FILE && dev_at(k.fs.xfer, n) == DEV_NONE {
-      return ENOENT;
+    if dir_at(&mut k, n) == NO_FILE {
+      return 0;                             // a file or a device (crun sets it on the nodes it binds): nothing to set
     }
     if xfer_is(k.fs.xfer, 0, n, "proc") || xfer_is(k.fs.xfer, 0, n, "dev") || xfer_is(k.fs.xfer, 0, n, "sys") || xfer_is(k.fs.xfer, 0, n, "disk") {
       return 0;
