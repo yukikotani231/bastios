@@ -236,6 +236,22 @@ fn pt_resume(k: &mut Kernel, c: u64, sig: u64, detach: bool, sys: bool, step: bo
   }
 }
 
+/// Process p, which its tracer single-steps, made process or thread c with
+/// a copy of its registers: the trap flag the tracer set is not c's, as on
+/// Linux. Without this, c took a debug trap after its first instruction and
+/// died of SIGTRAP, or, traced too, stopped with one its tracer never asked
+/// for (gdb reports such a SIGTRAP in a new thread).
+fn pt_child_unstep(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let t = smaller(tr2_get(k, p), 0xFFFFFFFFFFFFFF);   // the word is far below this
+  if t / TS_STEP % 2 == 1 {
+    let fl = pget(k.procs, c, F_REGS + R_RFLAGS);
+    pset(&mut k.procs, c, F_REGS + R_RFLAGS, step_flags(fl, false));
+  }
+}
+
 /// Process p took a debug trap (vector 1): a single step its tracer asked
 /// for ends, and the trap flag goes.
 fn pt_stepped(k: &mut Kernel, p: u64)
