@@ -18,6 +18,39 @@ ALPINE_X86_PKGS ?= dxloc/alpine-cmake@sha256:fe609ae835a3b195c302adb966464b378d5
 ALPINE_DISK_PKGS ?= git,curl,less,openssh-keygen,bash,make,jq,rsync,openssl,file,libxml2-utils
 DEBIAN_IMAGE ?= library/debian@sha256:eb593cf2c358cacef45ca0a424bbc7d30cfa3466265fc2662b9466a0ca6ba1c5
 JDK_IMAGE ?= library/eclipse-temurin@sha256:9ececb44042a7cc91e4e6bca525c678e811c1602330a80b5f2d2fcfa0aa97c4e
+# Xvfb (slieb/xvfb-run, Alpine 3.5), xterm (jbonds/xterm, Alpine 3.6) and PuTTY, a GTK 3
+# program (jlesage/putty, Alpine 3.20) MediaInfo, a Qt 5 program (jlesage/mediainfo), and KeePassXC, a larger
+# Qt 5 one (jlesage/keepassxc) and the installer of JDownloader, a Java 8 Swing
+# program (jlesage/jdownloader-2, Alpine's OpenJDK) and Audacity, a wxWidgets (GTK 3)
+# program (jlesage/audacity) and dupeGuru, a Python program with PyQt 5
+# (jlesage/dupeguru) and puddletag, a tag editor in Python with PyQt 5
+# (jlesage/puddletag) and QDirStat, a Qt 5 disk usage viewer
+# (jlesage/qdirstat) and FileZilla, a GTK 3 FTP client (jlesage/filezilla) and Avidemux, a Qt 5 video editor
+# (jlesage/avidemux) and HandBrake, a GTK 3 video transcoder
+# (jlesage/handbrake) and MKVToolNix, a Qt 5 Matroska tool
+# (jlesage/mkvtoolnix) and Czkawka, a GTK 4 duplicate finder in Rust
+# (jlesage/czkawka) and tsMuxeR, a Qt 5 transport stream muxer
+# (jlesage/tsmuxer) and FileBot, a Java media renamer
+# (jlesage/filebot) and FreeFileSync, a GTK folder synchroniser
+# (jlesage/freefilesync), for x11.txt.
+X11_SERVER_IMAGE := slieb/xvfb-run@sha256:295c246aa1da131a977d23eb20d6bfe58fed6728edc3a8c0cee13c6570547982
+X11_CLIENT_IMAGE := jbonds/xterm@sha256:bac17f91159dffccecd9d3c73bea2c16c6b2de0f98cb81803e157dabb401c2ec
+X11_GTK_IMAGE := jlesage/putty@sha256:ecd5868c45a512fef25a6219f6559a3966136ca3f1652998e30584a91f901034
+X11_QT_IMAGE := jlesage/mediainfo@sha256:b9d0388107f44cbe9c3d36f1d43371cb7bfb261ff8b3ffa2ba3d1f3b6f3ae9bf
+X11_QT2_IMAGE := jlesage/keepassxc@sha256:f48315f5c8452a6cdc4838262111a9639d8d9b09480a33263e00dfd2e71f9241
+X11_JAVA_IMAGE := jlesage/jdownloader-2@sha256:b5e40d7e313f43db2a02124949703c45c4e28d45db601236010f3db71ac2d39f
+X11_WX_IMAGE := jlesage/audacity@sha256:5ff22fadf705ddc828ae480671f61056288394ad7629eead4a628e16a29196a9
+X11_PY_IMAGE := jlesage/dupeguru@sha256:b88814675c5bd5d7202c8bbef2d17f783388d0c1990c41a4395275436804b4d3
+X11_TAG_IMAGE := jlesage/puddletag@sha256:19fc365f82a62da588c682ee724bc6f3f2c98aedc98a8bc2a710e9b56872bf37
+X11_DIRSTAT_IMAGE := jlesage/qdirstat@sha256:e7daf42e334e9bb29d516a468b2280055f4657cdd74d9dc7410cd941397e5c3a
+X11_FILEZILLA_IMAGE := jlesage/filezilla@sha256:123fc4d7aac55b482b9936ece2c8208e56530875e75624c53cd674739ecba121
+X11_AVIDEMUX_IMAGE := jlesage/avidemux@sha256:1031e94ad4b27f9dc9e50a4c5c48608574248a2045b772ecb5417ac5d70464f0
+X11_HANDBRAKE_IMAGE := jlesage/handbrake@sha256:6f3a121e235d34e7299080e8cbac5284060e942fb2b137f777e2521fb7af65ae
+X11_MKV_IMAGE := jlesage/mkvtoolnix@sha256:768768cd651071d4a64a8e51583268aaac57f24a0483ae04022b3cc23d356036
+X11_CZKAWKA_IMAGE := jlesage/czkawka@sha256:228d47eb7edac003bb54082eaa96cb41613b08f9fbee310c775714c90dd79628
+X11_TSMUXER_IMAGE := jlesage/tsmuxer@sha256:44c691ee32244ac8b68da5185efa034dbbd68122c0177c0d7efd6e968f83fb56
+X11_FILEBOT_IMAGE := jlesage/filebot@sha256:dd542a03218fe84b99876eae47ed1bffc1deab756a599b9f0fd87fabbeb76b0b
+X11_FFS_IMAGE := jlesage/freefilesync@sha256:64df12be899a29de4d4eba46e2648857a8fc1e5878fbce9eaae8696d004d0330
 RUBY_IMAGE ?= library/ruby@sha256:730b265fc537e93f4ad335031ba95f8a9df88dc75bd9462968b92f368a115f6d
 RUST_IMAGE ?= library/rust@sha256:ddcfc394ea1f26b4363936ff59ee69c8eedb7b72146477c844d73b85031880ea
 GO_IMAGE ?= library/golang@sha256:8bee1901f1e530bfb4a7850aa7a479d17ae3a18beb6e09064ed54cfd245b7191

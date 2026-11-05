@@ -122,6 +122,55 @@ fn core_note(x: &mut Bytes, at: u64, ty: u64, dlen: u64)
   bset(&mut x, at + 16, 0);
 }
 
+/// Byte c at `at` of the transfer buffer (not past its first 4000 bytes);
+/// the next position.
+fn core_lit(x: &mut Bytes, at: u64, c: u64) -> u64
+  requires blen(x) == XBUF && at <= 4096
+  ensures blen(x) == XBUF && result <= 4096
+{
+  if at >= 4000 {
+    return at;
+  }
+  bset(&mut x, at, cast[u8](c % 256));
+  return at + 1;
+}
+
+/// v in decimal at `at` of the transfer buffer; the next position.
+fn core_num(x: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(x) == XBUF && at <= 4096
+  ensures blen(x) == XBUF && result <= 4096
+{
+  let mut d = 1;
+  while d <= v / 10 && d < 1000000000000000000
+    invariant d >= 1
+  {
+    d = d * 10;
+  }
+  let mut a = at;
+  let mut r = v;
+  while d >= 1
+    invariant a <= 4096 && blen(x) == XBUF
+  {
+    a = core_lit(&mut x, a, 48 + r / d % 10);
+    if d == 1 {
+      return a;
+    }
+    d = d / 10;
+  }
+  return a;
+}
+
+/// Resolves the n-byte path in the transfer buffer, or NO_RESULT if it is empty.
+fn if_path(k: &mut Kernel, p: u64, n: u64) -> u64
+  requires kok(k) && 1 <= p && p < NPROC
+  ensures kok(k)
+{
+  if n == 0 || n >= 4096 {
+    return NO_RESULT;
+  }
+  return lx_path_xfer(&mut k, p, n, OFD_N, true);
+}
+
 /// Writes the core file of process p, dying of signal s (taking the
 /// registers of p and the pages of its thread group). True if it wrote one,
 /// which the wait status then says (WCOREDUMP).
@@ -151,12 +200,54 @@ fn core_dump(k: &mut Kernel, p: u64, s: u64) -> bool
     bset(&mut cm, i, bget(k.fs.xfer, i));
     i = i + 1;
   }
-  // The file: "core" in the working directory.
-  bset(&mut k.fs.xfer, 0, 99);
-  bset(&mut k.fs.xfer, 1, 111);
-  bset(&mut k.fs.xfer, 2, 114);
-  bset(&mut k.fs.xfer, 3, 101);
-  let n = lx_path_xfer(&mut k, p, 4, OFD_N, true);
+  // The file: the core pattern (default "core"), in the working directory
+  // if it is relative.
+  let cl = evg(k, CP_AT);
+  let mut pa = 0;
+  if cl == 0 {
+    pa = core_lit(&mut k.fs.xfer, 0, 99);
+    pa = core_lit(&mut k.fs.xfer, pa, 111);
+    pa = core_lit(&mut k.fs.xfer, pa, 114);
+    pa = core_lit(&mut k.fs.xfer, pa, 101);
+  } else if cp_byte(k, 0) == 124 {
+    bfree(runs);                                    // a pipe to a helper program: not supported
+    bfree(aux);
+    bfree(cm);
+    return false;
+  } else {
+    let uid = pget(k.procs, p, F_UID);
+    let mut pi = 0;
+    while pi + 1 < cl && pi < CP_MAX
+      invariant pi <= CP_MAX && pa <= 4096 && blen(k.fs.xfer) == XBUF && blen(cm) == 16 && kok(k)
+    {
+      let ch = cp_byte(k, pi);
+      if ch == 37 && pi + 2 < cl && pi + 2 <= CP_MAX {
+        pi = pi + 1;
+        let sp = cp_byte(k, pi);
+        if sp == 112 || sp == 80 {
+          pa = core_num(&mut k.fs.xfer, pa, g);
+        } else if sp == 117 || sp == 103 {
+          pa = core_num(&mut k.fs.xfer, pa, uid);
+        } else if sp == 115 {
+          pa = core_num(&mut k.fs.xfer, pa, s);
+        } else if sp == 101 {
+          let mut j = 0;
+          while j < 15 && bget(cm, j) != 0
+            invariant j <= 15 && pa <= 4096 && blen(k.fs.xfer) == XBUF && blen(cm) == 16
+          {
+            pa = core_lit(&mut k.fs.xfer, pa, cast[u64](bget(cm, j)));
+            j = j + 1;
+          }
+        } else if sp == 37 {
+          pa = core_lit(&mut k.fs.xfer, pa, 37);
+        }
+      } else {
+        pa = core_lit(&mut k.fs.xfer, pa, ch);
+      }
+      pi = pi + 1;
+    }
+  }
+  let n = if_path(&mut k, p, pa);
   if n == NO_RESULT || n > FNAME_MAX {
     bfree(runs);
     bfree(aux);

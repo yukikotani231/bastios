@@ -113,7 +113,7 @@ fn take_extras(m: &mut Mem, want: u64) -> Extras
 /// everything it claimed or took is back). Unless `msi` is 0, and if the
 /// controller has MSI-X with its table in the claimed registers, its
 /// completions raise V_DISK by a message to address `msi`.
-fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64) -> Drive
+fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, why: &mut u64) -> Drive
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) ==> mmio_free(win, a)
   ensures mem_ok(m) && (result is Drive::Nvme ==> nvme_ok(result.Nvme)) && !(result is Drive::Ahci)
@@ -161,6 +161,7 @@ fn nvme_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, 
   }
   let mut n = nvme_new(mmio_claim(&mut win, bar, size), f0, f1, f2, f3, f4, cap != 0);
   if n.sectors == 0 {
+    why = n.why;
     mmio_release(&mut win, nvme_free(n, &mut m));
     return Drive::None;
   }
@@ -341,7 +342,7 @@ fn virtio_blk_mmio(m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64,
 /// request and page 31 for block data, else a SATA disk on AHCI (see `ahci_find`), or else the ATA
 /// drive. `msi` is where a device's interrupt messages go (0 for none).
 fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64,
-  plo: u64, phi: u64, reset: bool, vm: VmWhere) -> Blk
+  plo: u64, phi: u64, reset: bool, vm: VmWhere, why: &mut u64) -> Blk
   requires vmw_ok(vm)
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
@@ -352,7 +353,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
   ensures forall k: u64 :: VIRTIO_PORTS_LO <= k && k < 65536 && !(plo <= k && k < phi) && !blk_holds(result, k) ==> port_free(ports, k)
   ensures forall a: u64 :: bar_space(a) && !(lo <= a && a < hi) && !(lo2 <= a && a < hi2) && !blk_claims(result, a) ==> mmio_free(win, a)
 {
-  let nv = nvme_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi);
+  let nv = nvme_find(&mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, &mut why);
   match nv {
     Drive::Nvme(n) => { return Blk::Nvme(n); },
     Drive::Ahci(h) => { unreachable; },
@@ -391,7 +392,7 @@ fn blk_new(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, l
 /// A stick booted from is the one the user chose, so it goes before the
 /// machine's own disks, which are then left untouched.
 fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, lo: u64, hi: u64, lo2: u64, hi2: u64, msi: u64, u: &mut Usb,
-  plo: u64, phi: u64, reset: bool, vm: VmWhere) -> Blk
+  plo: u64, phi: u64, reset: bool, vm: VmWhere, why: &mut u64) -> Blk
   requires vmw_ok(vm)
   requires pci_ok(pci) && mem_ok(m) && msi <= 4294967295 && usb_ok(u)
   requires forall k: u64 :: ATA_IO <= k && k < ATA_IO + 8 ==> port_free(ports, k)
@@ -412,7 +413,7 @@ fn blk_find(ports: &mut Ports, pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, 
     },
     Usb::None => { u = Usb::None; },
   }
-  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi, reset, vm);
+  return blk_new(&mut ports, &mut pci, &mut m, &mut win, lo, hi, lo2, hi2, msi, plo, phi, reset, vm, &mut why);
 }
 
 /// Does the disk raise V_DISK when a command started by blk_begin ends?

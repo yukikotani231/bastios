@@ -429,6 +429,28 @@ int main(void) {
         long watched = churn_ms(1);
         watched - bare < 3000; }));
 
+    EXPECT("a write to an unlinked open file still reaches the watch on its directory, unless it asked for IN_EXCL_UNLINK", ({
+        mkdir("in_ul", 0755);
+        int ifd = inotify_init1(IN_NONBLOCK);
+        int ifx = inotify_init1(IN_NONBLOCK);
+        inotify_add_watch(ifd, "in_ul", IN_MODIFY);
+        inotify_add_watch(ifx, "in_ul", IN_MODIFY | IN_EXCL_UNLINK);
+        int ffd = open("in_ul/f", O_CREAT | O_RDWR, 0644);
+        unlink("in_ul/f");
+        char buf[512];
+        while (read(ifd, buf, sizeof buf) > 0) {}
+        while (read(ifx, buf, sizeof buf) > 0) {}
+        write(ffd, "x", 1);
+        ssize_t a = read(ifd, buf, sizeof buf);
+        struct inotify_event *ev = (struct inotify_event *)buf;
+        int named = a > 0 && (ev->mask & IN_MODIFY) && ev->len > 0 && strcmp(ev->name, "f") == 0;
+        int none = read(ifx, buf, sizeof buf) < 0;
+        close(ffd);
+        close(ifd);
+        close(ifx);
+        rmdir("in_ul");
+        named && none; }));
+
     unlink("in_late");
     unlink("in_f");
     rmdir("in_d");

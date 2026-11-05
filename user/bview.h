@@ -211,14 +211,22 @@ static int bview_main(int argc, char **argv)
     long ww = w < 128 ? 128 : w, wh = h < 64 ? 64 : h;       /* a window never smaller than this */
     int ze = 0;                                              /* + and - double and halve it, up to 4 times each way */
     long panx = 0, pany = 0;                                 /* where the window's corner is in the scaled image, when that is bigger */
-    bv_draw(&m, bn, bd, ze, ww, wh, &panx, &pany, 0, 0);
     int fd = bwm_connect();
     if (fd < 0) {
         puts("bview: no window server");
         return 2;
     }
-    int id = bwm_create(fd, ww, wh, "Image");
-    if (id < 0 || bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh) != 0) {
+    int id = bwm_create_shm(fd, ww, wh, "Image", &bf_pix);      /* the pixels in memory shared with bwm when it can */
+    if (id >= 0) {
+        bf_shared = 1;
+    } else {
+        bf_pix = bf_pixbuf;
+        close(fd);                                               /* a failed try may have cost the connection */
+        fd = bwm_connect();
+        id = fd < 0 ? -1 : bwm_create(fd, ww, wh, "Image");
+    }
+    bv_draw(&m, bn, bd, ze, ww, wh, &panx, &pany, 0, 0);
+    if (id < 0 || (bf_shared ? bwm_damage(fd, id, 0, 0, ww, wh) : bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh)) != 0) {
         puts("bview: cannot open a window");
         return 1;
     }
@@ -262,7 +270,7 @@ static int bview_main(int argc, char **argv)
                     ze = 0;
                     panx = pany = 0;
                     bv_draw(&m, bn, bd, ze, ww, wh, &panx, &pany, 0, 0);
-                    bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh);
+                    bf_shared ? bwm_damage(fd, id, 0, 0, ww, wh) : bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh);
                     printf("bview: show %s\n", path);
                     fflush(stdout);
                     break;
@@ -296,7 +304,7 @@ static int bview_main(int argc, char **argv)
             continue;
         bv_draw(&m, bn, bd, nz, ww, wh, &panx, &pany, dx, dy);
         ze = (int)nz;
-        bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh);
+        bf_shared ? bwm_damage(fd, id, 0, 0, ww, wh) : bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh);
     }
     return 0;
 }

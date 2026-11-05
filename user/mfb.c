@@ -1,6 +1,6 @@
 /* /dev/fb0, against musl: the screen as a Linux framebuffer. It reads the
  * geometry (FBIOGET_VSCREENINFO, FBIOGET_FSCREENINFO), checks the mode is
- * 32 bits a pixel, and draws with lseek and write: the top half of the
+ * 32 bits a pixel, and draws with lseek and write (and checks that pwrite leaves the position alone): the top half of the
  * screen red, the bottom half blue, a 64x64 green square at (100, 100).
  * Then it says "mfb: drawn WxH" and waits for a line on its input, after
  * which it checks that a write at the end of the screen fails with
@@ -77,6 +77,13 @@ int main(void)
             printf("mfb: write at line %u: errno %d\n", y, errno);
             return 1;
         }
+    }
+    /* pwrite stores at the offset it is given and leaves the position (the end of the screen now) where it was. */
+    uint32_t red = pixel(&v, 255, 0, 0);
+    off_t at = lseek(fd, 0, SEEK_CUR);
+    if (pwrite(fd, &red, 4, 0) != 4 || lseek(fd, 0, SEEK_CUR) != at) {
+        printf("mfb: pwrite: errno %d\n", errno);
+        return 1;
     }
     printf("mfb: drawn %ux%u\n", v.xres, v.yres);
     fflush(stdout);

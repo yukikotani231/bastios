@@ -82,10 +82,15 @@ static int top, bot = 23;           /* the scroll region, inclusive */
 static int saved_cx, saved_cy;
 static struct cell main_grid[MAXR][MAXC];
 static int main_cx, main_cy, alt;
-#define HIST 200                          /* lines that scrolled off the top, kept for the wheel */
+#define HIST 2000                         /* lines that scrolled off the top, kept for the wheel */
 static struct cell hist[HIST][MAXC];
 static int hist_n, hist_head;             /* how many are kept; where the next one goes */
 static int back;                          /* how many lines the view is scrolled back (0 is the live screen) */
+static int finding;                       /* Ctrl-Shift-F: the find prompt takes the keys; what is typed shows in the title */
+static char find_q[24];
+static int find_idx = -1;                 /* the line of the match, counted from the oldest kept */
+static int find_r = -1, find_c, find_len; /* the match on the view: row, first column, length (find_r is -1 when none shows) */
+static char cur_title[24] = "Terminal";    /* the title bwm has been given */
 static int clicks, click_r, click_c;       /* clicks in a row on one cell (a double click selects a word, a triple one the line) */
 static long click_ms;
 static int sel_on, selecting;             /* a selection is lit; the button is still down */
@@ -225,7 +230,8 @@ static int draw_cell(int r, int c, int cursor)
     const struct cell *e = &view_row(r)[c];
     int fg = e->fg, bg = e->bg;
     uint32_t f = pal256(fg), b = pal256(bg);
-    if (!back && (cursor || selected(r, c))) {
+    int hl = finding && r == find_r && c >= find_c && c < find_c + find_len;
+    if ((!back && (cursor || selected(r, c))) || hl) {
         uint32_t t = f;
         f = b;
         b = t;
@@ -243,6 +249,22 @@ static int draw_cell(int r, int c, int cursor)
         return 0;
     shown[r][c] = now;
     shown_ok[r][c] = 1;
+    if (!e->attr && fz == 1 && cp < 128) {              /* plain ASCII at normal size: no italic, underline or wide cases to test per pixel */
+        uint32_t *d = &pix[(size_t)(r * CH) * WIDTH + c * CW];
+        const unsigned char *fp = &font8x8[cp * 8];
+        for (int y = 0; y < CH; y++, d += WIDTH) {
+            unsigned bits = fp[y / 2];
+            d[0] = bits & 1 ? f : b;
+            d[1] = bits & 2 ? f : b;
+            d[2] = bits & 4 ? f : b;
+            d[3] = bits & 8 ? f : b;
+            d[4] = bits & 16 ? f : b;
+            d[5] = bits & 32 ? f : b;
+            d[6] = bits & 64 ? f : b;
+            d[7] = bits & 128 ? f : b;
+        }
+        return 1;
+    }
     const unsigned char *g = cp >= 128 ? glyph16(cp, &wide) : 0;
     int ch = cp < 128 ? cp : ' ';
     for (int y = 0; y < CH; y++) {
@@ -668,6 +690,7 @@ static int repaint(int fd, int id, int *old_cx, int *old_cy)
     dirty[*old_cy] = 1;
     int ccx = cx >= cols ? cols - 1 : cx;
     dirty[cy] = 1;
+    int ux0 = cols, ux1 = -1, uy0 = rows, uy1 = -1;       /* shared memory: one damage for everything that changed, not one message a row */
     for (int r = 0; r < rows; r++) {
         if (!dirty[r])
             continue;
@@ -680,13 +703,84 @@ static int repaint(int fd, int id, int *old_cx, int *old_cy)
         dirty[r] = 0;
         if (c1 < 0)
             continue;
+        if (shared) {
+            if (c0 < ux0) ux0 = c0;
+            if (c1 > ux1) ux1 = c1;
+            if (r < uy0) uy0 = r;
+            uy1 = r;
+            continue;
+        }
         int x = c0 * CW, w = (c1 + 1) * CW - x;
-        if ((shared ? bwm_damage(fd, id, x, r * CH, w, CH) : bwm_draw(fd, id, pix, WIDTH, x, r * CH, w, CH)) != 0)
+        if (bwm_draw(fd, id, pix, WIDTH, x, r * CH, w, CH) != 0)
             return -1;
     }
+    if (ux1 >= 0 && bwm_damage(fd, id, ux0 * CW, uy0 * CH, (ux1 + 1 - ux0) * CW, (uy1 + 1 - uy0) * CH) != 0)
+        return -1;
     *old_cx = ccx;
     *old_cy = cy;
     return 0;
+}
+
+/* Line i of the history and the screen together, counted from the oldest line kept. */
+static const struct cell *vline(int i)
+{
+    return i < hist_n ? hist[(hist_head + HIST - hist_n + i) % HIST] : grid[i - hist_n];
+}
+
+static int send_title(int fd, int id, const char *t)
+{
+    struct bwm_settitle st = { (uint32_t)id, "" };
+    snprintf(st.title, sizeof st.title, "%.23s", t);
+    return bwm_send(fd, BWM_SETTITLE, &st, sizeof st);
+}
+
+/* Looks for find_q (ASCII, any case) from line start, in direction dir (-1 older, +1 newer), wrapping round;
+ * scrolls the view so that the match is in the middle and lights it. Returns 0 when the line is not found or on a send error. */
+static int find_go(int fd, int id, int *ocx, int *ocy, int start, int dir)
+{
+    int total = hist_n + rows, ql = (int)strlen(find_q), hit = 0;
+    char q[sizeof find_q];
+    for (int i = 0; i <= ql; i++)
+        q[i] = find_q[i] >= 'A' && find_q[i] <= 'Z' ? (char)(find_q[i] + 32) : find_q[i];
+    find_r = -1;
+    for (int k = 0; ql > 0 && k < total && !hit; k++) {
+        int i = ((start + dir * k) % total + total) % total;
+        const struct cell *l = vline(i);
+        char s[MAXC + 1];
+        for (int c = 0; c < cols; c++) {
+            unsigned ch = l[c].ch;
+            s[c] = ch >= 'A' && ch <= 'Z' ? (char)(ch + 32) : ch >= 32 && ch < 127 ? (char)ch : ' ';
+        }
+        s[cols] = 0;
+        char *p = strstr(s, q);
+        if (p) {
+            hit = 1;
+            find_idx = i;
+            find_c = (int)(p - s);
+            find_len = ql;
+            int nb = rows / 2 - (i - hist_n);
+            back = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
+            find_r = i - hist_n + back;
+        }
+    }
+    char t[sizeof find_q + 8];
+    snprintf(t, sizeof t, "Find%s %s", hit || ql == 0 ? ":" : "?", find_q);
+    memset(dirty, 1, sizeof dirty);
+    printf("bterm: find %s %d\n", find_q, hit ? find_r : -1);
+    fflush(stdout);
+    if (send_title(fd, id, t) != 0)
+        return 0;
+    return repaint(fd, id, ocx, ocy) == 0;
+}
+
+static int find_end(int fd, int id, int *ocx, int *ocy)
+{
+    finding = 0;
+    find_r = -1;
+    memset(dirty, 1, sizeof dirty);
+    if (send_title(fd, id, cur_title) != 0)
+        return 0;
+    return repaint(fd, id, ocx, ocy) == 0;
 }
 
 /* Writes the selected text to CLIP_FILE, a line to a row with the trailing
@@ -891,19 +985,59 @@ int main(int argc, char **argv)
     if (fz != 1)
         printf("bterm: text size %d (%d x %d)\n", fz, cols, rows);
     fflush(stdout);
+    if (getenv("BTERM_BENCH")) {                  /* BTERM_BENCH=N: time N screens of scrolling text (fed straight in, then drawn), then stop */
+        int n = atoi(getenv("BTERM_BENCH"));
+        long long tf = 0, tp = 0, t0, t1;
+        struct timespec ts;
+        for (int i = 0; i < n; i++) {
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            t0 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+            for (int l = 0; l < rows; l++) {
+                char line[96];
+                int k = snprintf(line, sizeof line, "%d the quick brown fox jumps over the lazy dog 0123456789\r\n", i * rows + l);
+                for (int j = 0; j < k; j++)
+                    feed((unsigned char)line[j]);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+            tf += t1 - t0;
+            repaint(fd, id, &ocx, &ocy);
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            tp += ts.tv_sec * 1000000LL + ts.tv_nsec / 1000 - t1;
+        }
+        printf("bterm: bench feed %lld us, draw %lld us a screen\n", tf / (n ? n : 1), tp / (n ? n : 1));
+        printf("bterm: bench done\n");
+        fflush(stdout);
+        return 0;
+    }
     for (;;) {
         struct pollfd p[2] = { { fd, POLLIN, 0 }, { m, POLLIN, 0 } };
         if (poll(p, 2, -1) < 0)
             continue;
         if (p[1].revents & (POLLIN | POLLHUP)) {
-            unsigned char b[512];
+            unsigned char b[4096];
             ssize_t n = read(m, b, sizeof b);
             if (n <= 0) {
                 puts("bterm: shell exited");
                 break;
             }
-            for (ssize_t i = 0; i < n; i++)
-                feed(b[i]);
+            int again = 0;
+            for (;;) {                            /* more output already waiting: take it before drawing, up to 32 KiB */
+                for (ssize_t i = 0; i < n; i++)
+                    feed(b[i]);
+                again += (int)n;
+                struct pollfd more = { m, POLLIN, 0 };
+                if (again >= 32768 || poll(&more, 1, 0) <= 0 || !(more.revents & POLLIN))
+                    break;
+                n = read(m, b, sizeof b);
+                if (n <= 0)
+                    break;
+            }
+            if (finding) {
+                find_r = -1;                      /* new output moved the lines under the match */
+                find_idx = hist_n + rows - 1;
+                memset(dirty, 1, sizeof dirty);
+            }
             if (sel_on && !selecting) {
                 sel_on = 0;                       /* new output: the lit text may be gone */
                 memset(dirty, 1, sizeof dirty);
@@ -911,6 +1045,7 @@ int main(int argc, char **argv)
             if (title_set) {
                 struct bwm_settitle st = { (uint32_t)id, "" };
                 snprintf(st.title, sizeof st.title, "%s", new_title);
+                snprintf(cur_title, sizeof cur_title, "%s", new_title);
                 title_set = 0;
                 if (bwm_send(fd, BWM_SETTITLE, &st, sizeof st) != 0)
                     break;
@@ -924,6 +1059,41 @@ int main(int argc, char **argv)
             if (t == BWM_KEY) {
                 struct bwm_key *k = (struct bwm_key *)buf;
                 unsigned char c = k->ch;
+                if (k->ch == BWM_KEY_FIND && !alt) {
+                    if (!finding) {
+                        finding = 1;
+                        find_q[0] = 0;
+                        find_idx = hist_n + rows - 1;
+                        if (!find_go(fd, id, &ocx, &ocy, find_idx, -1))
+                            break;
+                    } else if (!find_go(fd, id, &ocx, &ocy, find_idx - 1, -1)) {
+                        break;
+                    }
+                    continue;
+                }
+                if (finding && k->ch < 0x100) {   /* the prompt: text narrows the search, Enter goes to an older match, Tab to a newer one, Esc ends */
+                    size_t n = strlen(find_q);
+                    if (k->ch == 27) {
+                        if (!find_end(fd, id, &ocx, &ocy))
+                            break;
+                    } else if (c == 13 || c == 10) {
+                        if (!find_go(fd, id, &ocx, &ocy, find_idx - 1, -1))
+                            break;
+                    } else if (c == 9) {
+                        if (!find_go(fd, id, &ocx, &ocy, find_idx + 1, 1))
+                            break;
+                    } else if ((c == 127 || c == 8) && n > 0) {
+                        find_q[n - 1] = 0;
+                        if (!find_go(fd, id, &ocx, &ocy, find_idx, -1))
+                            break;
+                    } else if (c >= 32 && c < 127 && n < 17) {
+                        find_q[n] = (char)c;
+                        find_q[n + 1] = 0;
+                        if (!find_go(fd, id, &ocx, &ocy, find_idx, -1))
+                            break;
+                    }
+                    continue;
+                }
                 if (k->ch >= BWM_KEY_SCROLL_UP && k->ch <= BWM_KEY_SCROLL_END) {
                     if (!alt) {
                         int nb = k->ch == BWM_KEY_SCROLL_TOP ? hist_n : k->ch == BWM_KEY_SCROLL_END ? 0
@@ -931,6 +1101,7 @@ int main(int argc, char **argv)
                         nb = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
                         if (nb != back) {
                             back = nb;
+                            find_r = -1;
                             memset(dirty, 1, sizeof dirty);
                             printf("bterm: back %d\n", back);
                             fflush(stdout);
@@ -979,6 +1150,7 @@ int main(int argc, char **argv)
                     nb = nb < 0 ? 0 : nb > hist_n ? hist_n : nb;
                     if (nb != back) {
                         back = nb;
+                        find_r = -1;
                         memset(dirty, 1, sizeof dirty);
                         printf("bterm: back %d\n", back);
                         fflush(stdout);

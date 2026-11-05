@@ -27,6 +27,7 @@ const INFO_FB: u64 = 9;          // the boot loader's framebuffer, at any addres
 const INFO_ACPI: u64 = 8;        // 0 where the RSDP came from, 1 its revision, 2 + 2k / 3 + 2k table k's signature / address
 const MEM_REGIONS: u64 = 128;    // boot/multiboot.c keeps at most this many
 const ACPI_TABLES: u64 = 64;     // the most tables listed
+const INFO_GSBASE: u64 = 13;     // not a query: sets the GS base the processor runs the user with (0 is the answer), when it differs from the one it holds
 const INFO_BYTE: u64 = 256;      // INFO_CMDLINE past the end
 
 /// Does the boot command line have the word `w` (between spaces, or at
@@ -531,6 +532,13 @@ fn hw_pci(con: &mut Con, pci: &mut Pci)
       puts(&mut con, " class ");
       put_hexw(&mut con, cls, 6);
       put_driver(&mut con, vendor, device, cls);
+      if cls == NVME_CLASS {
+        puts(&mut con, " (BAR0 ");
+        put_hexn(&mut con, pci_read(&mut pci, d, PCI_BAR0));
+        puts(&mut con, ", BAR1 ");
+        put_hexn(&mut con, pci_read(&mut pci, d, PCI_BAR0 + 4));
+        puts(&mut con, ")");
+      }
       puts(&mut con, "\r\n");
       n = n + 1;
     }
@@ -556,6 +564,8 @@ fn put_driver(con: &mut Con, vendor: u64, device: u64, cls: u64)
     puts(&mut con, " virtio disk");
   } else if vendor == VIRTIO_VENDOR && device == VIRTIO_NET {
     puts(&mut con, " virtio network");
+  } else if ena_model(vendor, device) {
+    puts(&mut con, " ena network");
   } else if e1k_model(vendor, device) == E1K_8254X {
     puts(&mut con, " e1000 network");
   } else if e1k_model(vendor, device) == E1K_82574 {

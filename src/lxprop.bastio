@@ -1,0 +1,465 @@
+// Mount propagation: which mounts of the mount namespaces (src/lxns.bastio)
+// see each other's mounts and unmounts.
+//
+// Every mount is in at most one peer group (ME_PEER, an id from MNS_PG;
+// 0: not shared) and may be a slave of another group (ME_MASTER): a
+// mount that is shared and a slave is in a group of its own that receives
+// from its master. An event at a shared mount (a mount or an unmount below
+// it) reaches the other mounts of its group and the slaves of the group,
+// and theirs in turn; a slave's and a private mount's own events reach
+// nobody. A mount that is unbindable (ME_UNB) is private and cannot be
+// bound.
+//
+// The mounts of a namespace are a flat table of (key, source) pairs, so a
+// mount is found in another peer by the file layer's path of the event:
+// the peer's mount point is the peer's key and whatever of that path is
+// below the peer's source. Only mounts of kind MK_BIND (the tmpfs of a
+// namespace, and the binds of directories) and the namespace's root
+// (MK_ROOT, which exists once the root's propagation was set) pass events
+// on and receive them.
+
+import "lxnsbase.bastio";
+
+const MS_REC: u64 = 0x4000;
+const MS_UNBINDABLE: u64 = 0x20000;
+const MS_PRIVATE: u64 = 0x40000;
+const MS_SLAVE: u64 = 0x80000;
+const MS_SHARED: u64 = 0x100000;
+const MS_PROPAGATION: u64 = 0x1E0000;     // MS_UNBINDABLE | MS_PRIVATE | MS_SLAVE | MS_SHARED
+const MP_TKB: u64 = 3584;                 // in the source buffer of ns_mount_at: the target's key,
+const MP_SKB: u64 = 3840;                 // and then the source's, 256 bytes each
+const MP_BIG: u64 = 0x100000000000;       // ME_MARK of a copy whose destination was in group h: MP_BIG + h
+
+/// Is mount e in use by a namespace (not free, not one that is going)?
+fn me_live(k: &Kernel, e: u64) -> bool
+  requires kok(k) && e < MT_N
+{
+  let v = me_get(k, e, ME_NS);
+  return v != 0 && v != MNS_MAX;
+}
+
+/// The namespace mount e is in (0 if it is in none).
+fn me_nsid(k: &Kernel, e: u64) -> u64
+  requires kok(k) && e < MT_N
+  ensures result < MNS_MAX
+{
+  let v = me_get(k, e, ME_NS);
+  if v == 0 {
+    return 0;
+  }
+  return smaller(v - 1, MNS_MAX - 1);
+}
+
+/// Is mount e a plain directory mount, the kind that takes part in
+/// propagation?
+fn mp_plain(k: &Kernel, e: u64) -> bool
+  requires kok(k) && e < MT_N
+{
+  let kind = me_get(k, e, ME_FLAGS) % MT_RO;
+  return kind == MK_BIND || kind == MK_ROOT;
+}
+
+/// A peer group id that was not given before.
+fn mp_new_group(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let g = smaller(get(k.mns, MNS_PG), MNS_MAX - 2) + 1;
+  k.mns = set(k.mns, MNS_PG, g);
+  return g;
+}
+
+/// Does a live mount other than skip have peer group g?
+fn mp_group_has(k: &Kernel, g: u64, skip: u64) -> bool
+  requires kok(k)
+{
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k)
+  {
+    if e != skip && me_live(k, e) && me_get(k, e, ME_PEER) == g {
+      return true;
+    }
+    e = e + 1;
+  }
+  return false;
+}
+
+/// Mount e leaves its peer group. With slave, it stays behind it as a
+/// slave if the group goes on; otherwise it is a slave of what its group
+/// was a slave of, or private. If e was the last of its group, the slaves
+/// of the group are slaves of what the group was a slave of.
+fn mp_leave(k: &mut Kernel, e: u64, slave: bool)
+  requires kok(k) && e < MT_N
+  ensures kok(k)
+{
+  let g = me_get(k, e, ME_PEER);
+  let om = me_get(k, e, ME_MASTER);
+  me_set(&mut k, e, ME_PEER, 0);
+  if g == 0 {
+    if !slave {
+      me_set(&mut k, e, ME_MASTER, 0);
+    }
+    return;
+  }
+  if mp_group_has(k, g, e) {
+    if slave {
+      me_set(&mut k, e, ME_MASTER, g);
+    } else {
+      me_set(&mut k, e, ME_MASTER, 0);
+    }
+    return;
+  }
+  let mut x = 0;
+  while x < MT_N
+    invariant x <= MT_N && kok(k)
+  {
+    if x != e && me_get(k, x, ME_MASTER) == g {
+      me_set(&mut k, x, ME_MASTER, om);
+    }
+    x = x + 1;
+  }
+  if slave {
+    me_set(&mut k, e, ME_MASTER, om);
+  } else {
+    me_set(&mut k, e, ME_MASTER, 0);
+  }
+}
+
+/// mount --make-shared (MS_SHARED), --make-private, --make-slave and
+/// --make-unbindable on mount e.
+fn mp_set(k: &mut Kernel, e: u64, mode: u64)
+  requires kok(k) && e < MT_N
+  ensures kok(k)
+{
+  if mode == MS_SHARED {
+    if me_get(k, e, ME_PEER) == 0 {
+      let g = mp_new_group(&mut k);
+      me_set(&mut k, e, ME_PEER, g);
+    }
+    me_set(&mut k, e, ME_UNB, 0);
+  } else if mode == MS_SLAVE {
+    mp_leave(&mut k, e, true);
+  } else if mode == MS_UNBINDABLE {
+    mp_leave(&mut k, e, false);
+    me_set(&mut k, e, ME_UNB, 1);
+  } else {
+    mp_leave(&mut k, e, false);
+    me_set(&mut k, e, ME_UNB, 0);
+  }
+}
+
+/// Is group x one that events from group g reach: g itself, or the group
+/// of a mount already marked as a receiver (not m)?
+fn mp_reached(k: &Kernel, x: u64, g: u64, m: u64) -> bool
+  requires kok(k)
+{
+  if x == g {
+    return true;
+  }
+  let mut q = 0;
+  while q < MT_N
+    invariant q <= MT_N && kok(k)
+  {
+    if q != m && me_get(k, q, ME_MARK) == 1 && me_get(k, q, ME_PEER) == x {
+      return true;
+    }
+    q = q + 1;
+  }
+  return false;
+}
+
+/// Marks (ME_MARK 1) the mounts that events at mount m reach: the other
+/// peers of m's group, the slaves of the group, and their peers and
+/// slaves. Every other mount's mark is cleared. Nothing is marked if m is
+/// not shared.
+fn mp_receivers(k: &mut Kernel, m: u64)
+  requires kok(k) && m < MT_N
+  ensures kok(k)
+{
+  let mut q = 0;
+  while q < MT_N
+    invariant q <= MT_N && kok(k)
+  {
+    me_set(&mut k, q, ME_MARK, 0);
+    q = q + 1;
+  }
+  let g = me_get(k, m, ME_PEER);
+  if g == 0 {
+    return;
+  }
+  let mut pass = 0;
+  let mut changed = true;
+  while pass < 8 && changed
+    invariant pass <= 8 && kok(k)
+  {
+    changed = false;
+    q = 0;
+    while q < MT_N
+      invariant q <= MT_N && kok(k)
+    {
+      if q != m && me_live(k, q) && me_get(k, q, ME_MARK) == 0 && mp_plain(k, q) {
+        let mq = me_get(k, q, ME_MASTER);
+        if me_get(k, q, ME_PEER) == g || (mq != 0 && mp_reached(k, mq, g, m)) {
+          me_set(&mut k, q, ME_MARK, 1);
+          changed = true;
+        }
+      }
+      q = q + 1;
+    }
+    pass = pass + 1;
+  }
+}
+
+/// The mount of namespace ns that p[0..c] is in, other than skip: the
+/// longest key, the latest of equal ones, the namespace's root included.
+/// MT_N if none.
+fn mp_cover(k: &Kernel, ns: u64, p: &Bytes, c: u64, skip: u64) -> u64
+  requires kok(k) && c <= blen(p)
+  ensures result <= MT_N
+{
+  let mut best = MT_N;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
+  {
+    if e != skip && me_in(k, e, ns) && me_get(k, e, ME_FLAGS) % MT_RO != MK_NSF && me_covers(k, e, p, c) {
+      if best == MT_N {
+        best = e;
+      } else if me_klen(k, e) > me_klen(k, best) || (me_klen(k, e) == me_klen(k, best) && me_get(k, e, ME_SEQ) > me_get(k, best, ME_SEQ)) {
+        best = e;
+      }
+    }
+    e = e + 1;
+  }
+  return best;
+}
+
+/// The latest mount of namespace ns whose key is exactly p[0..c], the
+/// namespace's root included. MT_N if none.
+fn mp_exact(k: &Kernel, ns: u64, p: &Bytes, c: u64) -> u64
+  requires kok(k) && c <= blen(p)
+  ensures result <= MT_N
+{
+  let mut best = MT_N;
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && best <= MT_N && kok(k) && c <= blen(p)
+  {
+    if me_in(k, e, ns) && me_klen(k, e) == c && me_covers(k, e, p, c) {
+      if best == MT_N || me_get(k, e, ME_SEQ) > me_get(k, best, ME_SEQ) {
+        best = e;
+      }
+    }
+    e = e + 1;
+  }
+  return best;
+}
+
+/// Is p[0..c] strictly below the key of mount e (at a "/")? c == 0 is the
+/// root: everything with a longer key is below it.
+fn mp_below(k: &Kernel, e: u64, p: &Bytes, c: u64) -> bool
+  requires kok(k) && e < MT_N && c <= blen(p)
+{
+  let kl = me_klen(k, e);
+  if kl <= c {
+    return false;
+  }
+  let at = me_key(e);
+  if c > 0 && bget(k.mstr, at + c) != 47 {
+    return false;
+  }
+  let mut i = 0;
+  while i < c
+    invariant i <= c && c < kl && kl <= MNT_MAX && at + 2 * MS_ROW <= MSTR_LEN && c <= blen(p) && kok(k)
+  {
+    if bget(k.mstr, at + i) != bget(p, i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// Where in ph[0..pl) the part below mount q's source starts: pl if ph is
+/// the source itself, 0 for a mount with no source (the whole file layer).
+/// NO_RESULT if ph is not below q's source.
+fn mp_src_rest(k: &Kernel, q: u64, ph: &Bytes, pl: u64) -> u64
+  requires kok(k) && q < MT_N && pl <= blen(ph)
+  ensures result == NO_RESULT || result <= pl
+{
+  let sl = me_slen(k, q);
+  if sl == 0 {
+    return 0;
+  }
+  if sl > pl {
+    return NO_RESULT;
+  }
+  if sl < pl && bget(ph, sl) != 47 {
+    return NO_RESULT;
+  }
+  let at = me_key(q) + MS_ROW;
+  let mut i = 0;
+  while i < sl
+    invariant i <= sl && sl <= pl && pl <= blen(ph) && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && kok(k)
+  {
+    if bget(k.mstr, at + i) != bget(ph, i) {
+      return NO_RESULT;
+    }
+    i = i + 1;
+  }
+  if sl == pl {
+    return pl;
+  }
+  return sl + 1;
+}
+
+/// Writes to o the logical path of ph[r..pl) below mount q: q's key, then
+/// the rest. Returns its length, or NO_RESULT if it is longer than a key
+/// can be.
+fn mp_key_for(k: &Kernel, q: u64, ph: &Bytes, pl: u64, r: u64, o: &mut Bytes) -> u64
+  requires kok(k) && q < MT_N && r <= pl && pl <= blen(ph) && blen(o) >= MNT_MAX
+  ensures result == NO_RESULT || result <= MNT_MAX
+{
+  let kl = me_klen(k, q);
+  let mut sep = 0;
+  if kl > 0 && r < pl {
+    sep = 1;
+  }
+  if kl + sep + (pl - r) > MNT_MAX {
+    return NO_RESULT;
+  }
+  let at = me_key(q);
+  let mut w = 0;
+  while w < kl
+    invariant w <= kl && kl <= MNT_MAX && at + 2 * MS_ROW <= MSTR_LEN && blen(o) >= MNT_MAX && kok(k)
+  {
+    bset(&mut o, w, bget(k.mstr, at + w));
+    w = w + 1;
+  }
+  if sep == 1 {
+    bset(&mut o, w, 47);
+    w = w + 1;
+  }
+  let mut i = r;
+  while i < pl
+    invariant r <= i && i <= pl && w + (pl - i) <= MNT_MAX && pl <= blen(ph) && blen(o) >= MNT_MAX && kok(k)
+  {
+    bset(&mut o, w, bget(ph, i));
+    w = w + 1;
+    i = i + 1;
+  }
+  return w;
+}
+
+/// Writes to o the file layer's path of the logical path lb[0..tl), which
+/// is in mount m (m's key is a prefix of it): m's source, then the rest.
+/// Returns its length, or NO_RESULT if it is too long.
+fn mp_phys(k: &Kernel, m: u64, lb: &Bytes, tl: u64, o: &mut Bytes) -> u64
+  requires kok(k) && m < MT_N && tl <= blen(lb) && blen(o) >= FNAME_MAX
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  let kl = me_klen(k, m);
+  let sl = me_slen(k, m);
+  if kl > tl {
+    return NO_RESULT;
+  }
+  let mut r = 0;
+  if kl > 0 {
+    r = tl;
+    if tl > kl {
+      r = kl + 1;
+    }
+  }
+  let mut sep = 0;
+  if sl > 0 && r < tl {
+    sep = 1;
+  }
+  if sl + sep + (tl - r) > FNAME_MAX {
+    return NO_RESULT;
+  }
+  let at = me_key(m) + MS_ROW;
+  let mut w = 0;
+  while w < sl
+    invariant w <= sl && sl <= MNT_MAX && at + MS_ROW <= MSTR_LEN && blen(o) >= FNAME_MAX && sl + sep + (tl - r) <= FNAME_MAX && kok(k)
+  {
+    bset(&mut o, w, bget(k.mstr, at + w));
+    w = w + 1;
+  }
+  if sep == 1 {
+    bset(&mut o, w, 47);
+    w = w + 1;
+  }
+  let mut i = r;
+  while i < tl
+    invariant r <= i && i <= tl && w + (tl - i) <= FNAME_MAX && tl <= blen(lb) && blen(o) >= FNAME_MAX && kok(k)
+  {
+    bset(&mut o, w, bget(lb, i));
+    w = w + 1;
+    i = i + 1;
+  }
+  return w;
+}
+
+/// Is the key of mount y strictly below the key of mount z (at a "/")?
+fn mp_under(k: &Kernel, z: u64, y: u64) -> bool
+  requires kok(k) && z < MT_N && y < MT_N
+{
+  let zl = me_klen(k, z);
+  let yl = me_klen(k, y);
+  if zl >= yl {
+    return false;
+  }
+  let za = me_key(z);
+  let ya = me_key(y);
+  if zl > 0 && bget(k.mstr, ya + zl) != 47 {
+    return false;
+  }
+  let mut i = 0;
+  while i < zl
+    invariant i <= zl && zl < yl && yl <= MNT_MAX && za + 2 * MS_ROW <= MSTR_LEN && ya + 2 * MS_ROW <= MSTR_LEN && kok(k)
+  {
+    if bget(k.mstr, za + i) != bget(k.mstr, ya + i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return true;
+}
+
+/// The peer group of a copy made for a slave receiver whose own group is
+/// h: the group of an earlier copy for h, or a new one.
+fn mp_copy_group(k: &mut Kernel, h: u64) -> u64
+  requires kok(k)
+  ensures kok(k)
+{
+  let hh = smaller(h, MNS_MAX);
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k)
+  {
+    if me_live(k, e) && me_get(k, e, ME_MARK) == MP_BIG + hh && me_get(k, e, ME_PEER) != 0 {
+      return me_get(k, e, ME_PEER);
+    }
+    e = e + 1;
+  }
+  return mp_new_group(&mut k);
+}
+
+/// The root mount of namespace ns, once its propagation was set; MT_N if
+/// there is none.
+fn mp_root(k: &Kernel, ns: u64) -> u64
+  requires kok(k)
+  ensures result <= MT_N
+{
+  let mut e = 0;
+  while e < MT_N
+    invariant e <= MT_N && kok(k)
+  {
+    if me_in(k, e, ns) && me_get(k, e, ME_FLAGS) % MT_RO == MK_ROOT {
+      return e;
+    }
+    e = e + 1;
+  }
+  return MT_N;
+}

@@ -52,6 +52,7 @@ const AUX_WORDS: u64 = 36;            // the auxiliary vector: 18 pairs
 // The vDSO (user/vdso.c): one read-only page just below the stack, holding
 // the image and, from byte VDSO_DATA, the clock it reads (src/tsc.bastio).
 const VDSO_PAGE: u64 = 2147481599;      // STACK_FIRST - 1
+const STACK_GUARD_GAP: u64 = 1048576;   // nothing is mapped within this many bytes below the vDSO (Linux's stack_guard_gap): a stack frame cannot jump over it into a mapping
 const INTERP_TOP: u64 = 0x7FFF7FF000;   // the interpreter goes just below this, in the first segment
 const VDSO_DATA: u64 = 496;           // word of the page: mult, base, at, epoch, then 1 if the process is in a time namespace
 const AT_SYSINFO_EHDR: u64 = 33;

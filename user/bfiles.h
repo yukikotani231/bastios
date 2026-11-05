@@ -51,7 +51,29 @@ static int bf_rows = 24;
 
 struct bf_ent { char name[NAME_MAX + 1]; int dir; off_t size; time_t mtime; };
 
-static uint32_t bf_pix[BF_WIDTH * BF_MAXROWS * BF_CH];
+static uint32_t bf_pixbuf[BF_WIDTH * BF_MAXROWS * BF_CH];
+static uint32_t *bf_pix = bf_pixbuf;            /* bwm's shared memory when it gave some */
+static int bf_shared;
+
+/* Opens a window of BF_WIDTH x h pixels: in memory shared with bwm when it can (then only a damage is sent for a repaint), else by value. */
+static int bf_window(int *fd, unsigned h, const char *title)
+{
+    int id = bwm_create_shm(*fd, BF_WIDTH, h, title, &bf_pix);
+    if (id >= 0) {
+        bf_shared = 1;
+        return id;
+    }
+    bf_pix = bf_pixbuf;
+    close(*fd);                                   /* a failed try may have cost the connection */
+    *fd = bwm_connect();
+    return *fd < 0 ? -1 : bwm_create(*fd, BF_WIDTH, h, title);
+}
+
+/* Tells bwm that the top h pixel rows of the window were repainted. */
+static int bf_send(int fd, int id, unsigned h)
+{
+    return bf_shared ? bwm_damage(fd, id, 0, 0, BF_WIDTH, h) : bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, h);
+}
 static struct bf_ent bf_ents[BF_MAXENT];
 static int bf_nent, bf_top;                     /* the entries (".." is the first) and the first one shown */
 static char bf_cwd[PATH_MAX] = "/";
@@ -72,6 +94,7 @@ static char bf_vpath[PATH_MAX];
 static char bf_vtext[BF_VIEWMAX];
 static const char *bf_vline[BF_MAXLINES];       /* each line of the file, cut at COLS characters */
 static int bf_nvline, bf_vtop;
+static int bf_vlines;                           /* lines in it (a last line without a newline counts) */
 static size_t bf_vlen;                          /* bytes in bf_vtext */
 static int bf_editing, bf_modified;
 static size_t bf_cur;                           /* the cursor, as an offset in bf_vtext */
@@ -301,6 +324,12 @@ static void bf_load_file(const char *path)
     }
     bf_vtext[n] = 0;
     bf_vlen = n;
+    bf_vlines = 0;
+    for (size_t k = 0; k < n; k++)
+        if (bf_vtext[k] == '\n')
+            bf_vlines++;
+    if (n > 0 && bf_vtext[n - 1] != '\n')
+        bf_vlines++;
     bf_nvline = 0;
     bf_vtop = 0;
     size_t i = 0;
@@ -344,8 +373,13 @@ static void bf_paint(void)
             snprintf(h, sizeof h, "Rename to: %.40s_", bf_rname);
         else if (bf_confirm)
             snprintf(h, sizeof h, "Delete %s? D again to confirm", bf_tpath);
-        else
+        else {
             snprintf(h, sizeof h, "%s", bf_vpath);
+            char cnt[40];                               /* how big the file is, when there is room left of the edge */
+            int cl = snprintf(cnt, sizeof cnt, "  (%d line%s, %zu bytes)", bf_vlines, bf_vlines == 1 ? "" : "s", bf_vlen);
+            if (strlen(h) + (size_t)cl <= BF_COLS && strlen(h) + (size_t)cl < sizeof h)
+                strcat(h, cnt);
+        }
         bf_put_row(0, h, strlen(h), 0x00FFFFFF, bf_confirm || bf_renaming || bf_finding ? 0x00A03030 : hd);
         for (int r = 1; r < BF_ROWS; r++) {
             int i = bf_vtop + r - 1;
@@ -1724,7 +1758,7 @@ static int bfiles_main(int argc, char **argv)
         puts("bfiles: no window server");
         return 2;
     }
-    int id = bwm_create(fd, BF_WIDTH, BF_HEIGHT, "Files");
+    int id = bf_window(&fd, BF_HEIGHT, "Files");
     if (id < 0) {
         puts("bfiles: cannot open a window");
         return 1;
@@ -1733,10 +1767,25 @@ static int bfiles_main(int argc, char **argv)
     if (first[0])
         bf_load_file(first);
     bf_paint();
-    if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+    if (bf_send(fd, id, BF_HEIGHT) != 0)
         return 1;
     printf("bfiles: window %d\n", id);
     fflush(stdout);
+    if (getenv("BFILES_BENCH")) {                 /* BFILES_BENCH=N: time N repaints of the window, then stop */
+        int n = atoi(getenv("BFILES_BENCH"));
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        long long t0 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        for (int i = 0; i < n; i++) {
+            bf_paint();
+            bf_send(fd, id, BF_HEIGHT);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        printf("bfiles: bench %lld us a repaint\n", (ts.tv_sec * 1000000LL + ts.tv_nsec / 1000 - t0) / (n ? n : 1));
+        printf("bfiles: bench done\n");
+        fflush(stdout);
+        return 0;
+    }
     static unsigned char buf[BWM_MAX_PAYLOAD];
     unsigned prev = 0;
     int press_row = -1;
@@ -1749,14 +1798,14 @@ static int bfiles_main(int argc, char **argv)
             if (bf_renaming) {
                 bf_rename_key(c);
                 bf_paint();
-                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                if (bf_send(fd, id, BF_HEIGHT) != 0)
                     break;
                 continue;
             }
             if (bf_finding) {
                 bf_find_key(c);
                 bf_paint();
-                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                if (bf_send(fd, id, BF_HEIGHT) != 0)
                     break;
                 continue;
             }
@@ -1765,7 +1814,7 @@ static int bfiles_main(int argc, char **argv)
                 bf_flen = 0;
                 bf_fbuf[0] = 0;
                 bf_paint();
-                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                if (bf_send(fd, id, BF_HEIGHT) != 0)
                     break;
                 continue;
             }
@@ -1816,14 +1865,14 @@ static int bfiles_main(int argc, char **argv)
                     } else
                         continue;
                     bf_paint();
-                    if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    if (bf_send(fd, id, BF_HEIGHT) != 0)
                         break;
                     continue;
                 }
                 if (c == '\r' || c == '\n') {
                     bf_open(bf_sel);
                     bf_paint();
-                    if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                    if (bf_send(fd, id, BF_HEIGHT) != 0)
                         break;
                     continue;
                 }
@@ -1943,7 +1992,7 @@ dispatch:;
                     fflush(stdout);
                 }
                 bf_paint();
-                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+                if (bf_send(fd, id, BF_HEIGHT) != 0)
                     break;
                 continue;
             }
@@ -1974,7 +2023,7 @@ dispatch:;
             continue;
         }
         bf_paint();
-        if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BF_HEIGHT) != 0)
+        if (bf_send(fd, id, BF_HEIGHT) != 0)
             break;
     }
     return 0;

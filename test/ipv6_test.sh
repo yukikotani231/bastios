@@ -118,7 +118,7 @@ class Wire:
                 na = struct.pack("!BBHI", 136, 0, 0, 0x60000000) + target + bytes([2, 1]) + HOST_MAC
                 self.send(ip6(58, target, src, na, hops=255, at=2))
         elif kind == 136:
-            self.got.append(("na", p[8:24], p[26:32] if len(p) >= 32 else b"", hops))
+            self.got.append(("na", p[8:24], p[26:32] if len(p) >= 32 else b"", hops, p[4], dst))
         elif kind == 1:
             self.got.append(("unreach", src, dst, p[1], p[8:]))
         elif kind == 129:
@@ -228,11 +228,45 @@ snm = ipaddress.IPv6Address("ff02::1:ff12:3456").packed
 wire.send(ip6(58, ROUTER_LL, snm, ns, hops=255, at=2))
 check(until(lambda: any(g[0] == "na" and g[1] == GUEST_GL and g[2] == GUEST_MAC and g[3] == 255 for g in wire.got), 5),
       "answers a neighbor solicitation for its global address with its MAC")
+# Duplicate address detection by another node (RFC 4861 7.2.4): a solicitation
+# from :: for its address is answered to all nodes, Solicited flag clear. One
+# with a code other than 0 is ignored (RFC 4861 7.1.1).
+before = len(wire.got)
+dad = struct.pack("!BBHI", 135, 0, 0, 0) + GUEST_LL
+wire.send(ip6(58, bytes(16), snm, dad, hops=255, at=2))
+check(until(lambda: any(g[0] == "na" and g[1] == GUEST_LL and g[5] == ALL_NODES and g[4] & 0x40 == 0 and g[4] & 0x20
+                        for g in wire.got[before:]), 5),
+      "answers a duplicate address detection probe to all nodes, Solicited flag clear")
+before = len(wire.got)
+bad = struct.pack("!BBHI", 135, 1, 0, 0) + GUEST_GL + bytes([1, 1]) + HOST_MAC
+wire.send(ip6(58, ROUTER_LL, snm, bad, hops=255, at=2))
+until(lambda: False, 1)
+check(not any(g[0] == "na" for g in wire.got[before:]), "ignores a neighbor solicitation with a code other than 0")
 for name, src, dst in (("global", ON_LINK, GUEST_GL), ("link-local", ROUTER_LL, GUEST_LL)):
     echo = struct.pack("!BBHHH", 128, 0, 0, 0x6262, 1) + b"bastios ipv6 ping"
     wire.send(ip6(58, src, dst, echo, at=2))
     check(until(lambda: any(g[0] == "echo-reply" and g[1] == dst and g[2] == src and g[3] == b"\x62\x62\x00\x01bastios ipv6 ping"
                             for g in wire.got), 5), f"answers a ping to its {name} address")
+
+# Extension headers (RFC 8200 4): a ping that carries a hop-by-hop options
+# header is answered, and so is one behind a routing header with no segments
+# left; a routing header with segments left is not.
+def with_ext(frame, ext, nh):
+    """frame (from ip6) with the extension headers ext in front of its payload."""
+    hdr = bytearray(frame[14:54])
+    hdr[4:6] = struct.pack("!H", struct.unpack("!H", hdr[4:6])[0] + len(ext))
+    hdr[6] = nh
+    return frame[:14] + bytes(hdr) + ext + frame[54:]
+hbh = bytes([58, 0, 1, 4, 0, 0, 0, 0])
+rt0 = bytes([58, 0, 0, 0, 0, 0, 0, 0])
+rt1 = bytes([58, 0, 0, 1, 0, 0, 0, 0])
+for name, ext, nh, want in (("hop-by-hop options", hbh, 0, True), ("a routing header with no segments left", rt0, 43, True),
+                            ("a routing header with segments left", rt1, 43, False)):
+    echo = struct.pack("!BBHHH", 128, 0, 0, 0x7272 + nh, 1) + b"ext hdr ping"
+    before = len(wire.got)
+    wire.send(with_ext(ip6(58, ON_LINK, GUEST_GL, echo, at=2), ext, nh))
+    got = until(lambda: any(g[0] == "echo-reply" and g[3][:2] == struct.pack("!H", 0x7272 + nh) for g in wire.got[before:]), 3)
+    check(got == want, f"a ping behind {name} is {'answered' if want else 'ignored'}")
 
 mark = len(out)
 type_line("ash")

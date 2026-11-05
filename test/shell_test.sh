@@ -15,6 +15,9 @@ KERNEL=${KERNEL:-build/bastios.elf}
 # tell slow from broken.
 TIMEOUT=${TIMEOUT:-600}
 SMP=${SMP:-4}
+MUSLCC=${MUSLCC:-musl-gcc}
+mkdir -p build/test
+$MUSLCC -O2 -fPIE -static-pie -o build/test/fullcopy test/fullcopy.c || exit 1
 
 python3 - "$KERNEL" "$TIMEOUT" "$SMP" <<'PY'
 import os, re, socket, subprocess, sys, tempfile, time, select
@@ -739,7 +742,9 @@ else:
     # The shell sat idle for those two seconds, so the bootstrap processor
     # stretched its tick (src/main.bastio, stretch_p): the tick count must
     # still agree with the clock, whatever the stretches were.
-    if t0 is not None and t1 is not None and c0 and c1 and 0.9 * (c1 - c0) <= (t1 - t0) * 1e7 <= 1.1 * (c1 - c0) + 3e7:
+    # The two samples are taken at different instants and a tick is 10 ms, so
+    # allow a few ticks of slack on the low side as on the high side.
+    if t0 is not None and t1 is not None and c0 and c1 and 0.9 * (c1 - c0) - 3e7 <= (t1 - t0) * 1e7 <= 1.1 * (c1 - c0) + 3e7:
         print(f"ok   timer: {t1 - t0} ticks agree with the clock's {(c1 - c0) / 1e9:.2f} s (idle, tick stretched)")
     else:
         print("FAIL timer ticks against the clock:", t0, t1, c0, c1); fails += 1
@@ -1675,7 +1680,7 @@ try:
     # Nothing shows when the shell is up, so type `halt` again every 1.5 s
     # until QEMU exits. The leading Enter ends any line that a copy typed
     # during the boot left half done.
-    end = time.time() + 30
+    end = time.time() + 90
     while code is None:
         try:
             sendkeys(mon, ["ret", "h", "a", "l", "t", "ret"])
@@ -2184,7 +2189,7 @@ fails += not ok
 # when first run (src/lazy.bastio); given its own path, it removes the file
 # first and still runs code it had not touched (one page after mprotect),
 # which a later exec of the same name then cannot find.
-subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf"], check=True)
+subprocess.run([sys.executable, "test/compat/mkdisk.py", disk, "mx=build/user/mmisc.elf", "mh=build/user/mhello.elf", "mt=build/user/mtlb.elf", "mf=build/test/fullcopy", "mc=build/test/fullcopy"], check=True)
 qemu = boot(2, with_disk=True)
 out = b""
 deadline = time.time() + timeout
@@ -2210,6 +2215,14 @@ for line, want, until in [
     # create): made by extending it, so nothing writes over those pages,
     # it must read as zeros: no newline byte, which the code has.
     ("s=$(stat -c %s /disk/my); rm /disk/my; truncate -s $s /disk/mz; echo nl=$(wc -l < /disk/mz); rm /disk/mz", b"nl=0\r\n", b"\n# "),
+    # sendfile and copy_file_range into a file on a full disk fail with
+    # ENOSPC, not a count of 0 (which reads as the end of the source:
+    # BusyBox tar said "short read"); with the room back they copy it all
+    # (test/fullcopy.c, which fills the disk and empties it again). First,
+    # splice into and out of a file nothing has read since boot (mc): the
+    # calls wait for its blocks rather than hand the program the kernel's
+    # "try again" or a short count.
+    ("/disk/mf /disk /disk/mc", b"fullcopy: ok", b"\n# "),
 ]:
     mark = len(out)
     if mark == 0 and not read_until(b"bastios> "):

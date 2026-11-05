@@ -15,11 +15,15 @@ cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 SEED=${SEED:-1}
 NIC=${NIC:-virtio-net-pci}
+MUSLCC=${MUSLCC:-musl-gcc}
+mkdir -p build/tcp
+$MUSLCC -O2 -fPIE -static-pie -o build/tcp/udperr test/udperr.c || exit 1
+test/compat/mkdisk.py build/tcp/disk.img build/tcp/udperr >/dev/null || exit 1
 
-python3 - "$KERNEL" "$SEED" "$NIC" <<'PY'
+python3 - "$KERNEL" "$SEED" "$NIC" build/tcp/disk.img <<'PY'
 import os, random, select, socket, struct, subprocess, sys, time
 
-kernel, seed, card = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+kernel, seed, card, disk = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 
 GUEST_IP = (10 << 24) | (0 << 16) | (2 << 8) | 15
 HOST_IP = (10 << 24) | (0 << 16) | (2 << 8) | 2
@@ -36,8 +40,8 @@ def csum(data):
         s = (s & 0xFFFF) + (s >> 16)
     return 0xFFFF - s
 
-def ip_packet(proto, src, dst, payload):
-    h = struct.pack("!BBHHHBBHII", 0x45, 0, 20 + len(payload), 0, 0, 64, proto, 0, src, dst)
+def ip_packet(proto, src, dst, payload, frag=0):
+    h = struct.pack("!BBHHHBBHII", 0x45, 0, 20 + len(payload), 0, frag, 64, proto, 0, src, dst)
     h = h[:10] + struct.pack("!H", csum(h)) + h[12:]
     return h + payload
 
@@ -151,6 +155,7 @@ class Peer:
         self.rto = 0.25
         self.log = []                   # (time, segment) of every guest segment seen
         self.close_when = lambda p: False
+        self.ack_cap = None
         self.ws = None                  # the window scale we offer in our SYN, if any
         self.sack_ok = False            # whether our SYN says we take SACK blocks
         self.peer_ws = None             # the guest's, once both sides scale
@@ -163,12 +168,14 @@ class Peer:
     def rcv_abs(self):
         return (self.irs + 1 + len(self.got) + (1 if self.peer_fin else 0)) % M32
 
-    def emit(self, flags, seq, data=b"", window=None):
+    def emit(self, flags, seq, data=b"", window=None, noack=False):
         win = self.rwin if window is None else window
         if not flags & SYN and self.peer_ws is not None:
             win >>= self.ws                 # scaled, except in a SYN
         win = min(win, 65535)
         ack = self.rcv_abs() if self.irs is not None else 0
+        if self.ack_cap is not None:
+            ack = self.ack_cap              # acknowledges no more than the guest's SYN
         opts = b""
         if flags & SYN:
             opts = struct.pack("!BBH", 2, 4, self.mss)
@@ -178,7 +185,7 @@ class Peer:
                 opts += bytes([1, 1, 4, 2])
         hl = 20 + len(opts)
         seg = struct.pack("!HHIIBBHHH", self.lport, self.rport, seq, ack, hl // 4 << 4,
-                          flags | (ACK if self.irs is not None else 0), win, 0, 0)
+                          flags | (ACK if self.irs is not None and not noack else 0), win, 0, 0)
         seg += opts
         seg += data
         seg = seg[:16] + struct.pack("!H", l4_sum(6, HOST_IP, GUEST_IP, seg)) + seg[18:]
@@ -267,6 +274,14 @@ class Peer:
                 self.agree(s)
                 self.ack_now()
                 self.output()
+            elif s["flags"] & SYN and not s["flags"] & ACK:
+                # Simultaneous open: its SYN crossed ours.
+                self.irs = s["seq"]
+                self.peer_wnd = s["wnd"]
+                self.agree(s)
+                self.state = "SYN_RCVD"
+                self.emit(SYN, self.iss)
+                self.timer = time.time() + self.rto
             return
         if s["flags"] & SYN:
             self.ack_now()                  # our ACK of its SYN was lost
@@ -326,8 +341,11 @@ class Net:
     def __init__(self, link):
         self.link = link
         self.peer = None
+        self.echoes = []
         self.dhcp_done = False
         self.arp_asked = []
+        self.unreach = []               # the guest's ICMP destination unreachable messages
+        self.echoed = []                # (destination, flags and fragment field) of the guest's echo replies
 
     def send_ip(self, proto, payload):
         mac = self.link.guest_mac or BCAST
@@ -353,12 +371,28 @@ class Net:
         if f[12:14] != b"\x08\x00":
             return
         dst = struct.unpack("!I", f[30:34])[0]
+        if f[23] == 1 and f[34] == 3:
+            self.unreach.append(f)
+            return
+        if f[23] == 1 and f[34] == 0:
+            self.echoed.append((dst, f[18:22]))
+            return
         if f[23] == 1 and f[34] == 8 and HOST_IP < dst <= HOST_IP + 12:
             # An echo request for one of the twelve neighbors: answer as it.
             body = b"\0\0\0\0" + f[38:14 + struct.unpack("!H", f[16:18])[0]]
             body = b"\0\0" + struct.pack("!H", csum(body)) + body[4:]
             mac = bytes([2, 0, 0, 0, 1, dst - HOST_IP])
             self.link.send(f[6:12] + mac + b"\x08\x00" + ip_packet(1, dst, GUEST_IP, body))
+            return
+        if f[23] == 17 and len(f) >= 42 and struct.unpack("!H", f[36:38])[0] == 9999:
+            # Nobody listens: say so, quoting the datagram (RFC 792).
+            body = struct.pack("!BBHI", 3, 3, 0, 0) + f[14:14 + 28]
+            body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+            self.send_ip(1, body)
+            self.udp9999 = getattr(self, "udp9999", 0) + 1
+            return
+        if f[23] == 17 and len(f) >= 42 and struct.unpack("!H", f[34:36])[0] == 7:
+            self.echoes.append(bytes(f[42:]))      # the guest's echo service answering
             return
         if f[23] == 17 and len(f) >= 282 + 4 and struct.unpack("!H", f[36:38])[0] == 67:
             self.dhcp(f)
@@ -408,9 +442,10 @@ if card == "ena":
 link = Link()
 net = Net(link)
 qemu = subprocess.Popen(
-    [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", "2",
+    [qemu_bin, "-kernel", kernel, "-m", "128M", "-smp", "2",
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-serial", "stdio", "-monitor", "none",
+     "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
                 f"remote.type=inet,remote.host=127.0.0.1,remote.port={link.port}",
      "-device", f"{card},netdev=n0"],
@@ -624,6 +659,69 @@ def zero_window_scenario():
     net.peer = None
 zero_window_scenario()
 
+# 4b. A reset closes a connection only when it carries exactly the next
+#     sequence number the guest expects (RFC 5961). One far outside the
+#     window is dropped, one inside it draws an ACK and changes nothing, and
+#     the exact one resets the connection.
+def reset_scenario():
+    data = pattern(3000, 11)
+    mark = listen_7001()
+    q = Peer(net, 45001, 7001, b"", active=True)
+    q.close_when = lambda r: len(r.got) >= len(data)
+    net.peer = q
+    q.emit(SYN, q.iss)
+    q.timer = time.time() + q.rto
+    up = until(lambda: q.state == "ESTABLISHED", 10)
+    at = q.abs_seq(0)                   # the next byte the guest expects from us
+    seen = len(q.log)
+    q.emit(RST, (at + 0x40000000) % M32)
+    q.emit(RST, (at + 1) % M32)
+    answered = until(lambda: len(q.log) > seen, 5)
+    q.data = data
+    q.output()
+    finished = until(lambda: q.done() and b"bastios> " in out[mark:], 30)
+    check(up and answered, "forged reset: a reset inside the window draws a challenge ACK")
+    check(finished and q.state != "RESET" and bytes(q.got) == data,
+          "forged reset: resets with the wrong sequence number leave the connection alone")
+    net.peer = None
+    mark = listen_7001()
+    q = Peer(net, 45002, 7001, b"", active=True)
+    net.peer = q
+    q.emit(SYN, q.iss)
+    q.timer = time.time() + q.rto
+    up = until(lambda: q.state == "ESTABLISHED", 10)
+    q.emit(RST, q.abs_seq(0))
+    until(lambda: False, 0.3)
+    q.data = b"x"
+    q.output()
+    check(up and until(lambda: q.state == "RESET", 5),
+          "forged reset: a reset with the expected sequence number closes the connection")
+    until(lambda: b"bastios> " in out[mark:], 20)
+    net.peer = None
+reset_scenario()
+
+# 4c. The guest does not reassemble, so a fragment is not a datagram: a UDP
+#     datagram for the echo service is answered, the same with more-fragments
+#     set or a fragment offset is not.
+def fragment_scenario():
+    def probe(tag, frag):
+        udp = struct.pack("!HHHH", 40000, 7, 8 + len(tag), 0) + tag
+        udp = udp[:6] + struct.pack("!H", l4_sum(17, HOST_IP, GUEST_IP, udp)) + udp[8:]
+        mac = link.guest_mac or BCAST
+        link.send(mac + HOST_MAC + b"\x08\x00" + ip_packet(17, HOST_IP, GUEST_IP, udp, frag))
+    net.echoes = []
+    probe(b"more", 0x2000)
+    probe(b"offset", 0x0001)
+    probe(b"whole", 0)
+    def echoed(tag):
+        return any(e.startswith(tag) for e in net.echoes)   # a short frame comes back padded
+    got = until(lambda: echoed(b"whole"), 5)
+    until(lambda: False, 0.5)
+    check(got, "fragments: a whole datagram is echoed")
+    check(not echoed(b"more") and not echoed(b"offset"),
+          "fragments: a first fragment and an offset one are dropped, not taken for datagrams")
+fragment_scenario()
+
 # 5. Random loss, delay, reordering and duplication both ways, on a seed.
 rng = random.Random(seed)
 def chaos(f):
@@ -706,6 +804,140 @@ check(syns and all(k in syns[0]["opts"] for k in (2, 3, 4)),
       "connecting out: the SYN offers an MSS, window scaling and SACK (and nothing is scaled when we do not)")
 net.peer = None
 
+# 6b. Addresses that cannot be a source (RFC 1122 3.2.1.3): an echo request
+#     from a broadcast, multicast or class E address, or from loopback but
+#     over the wire, is dropped without an answer; one from a real address
+#     is answered, with the "don't fragment" bit clear and a new
+#     identification each time (a datagram that may be fragmented needs one,
+#     RFC 6864), while TCP segments carry DF and identification 0.
+def echo_from(src, seq):
+    body = struct.pack("!BBHHH", 8, 0, 0, 0x1234, seq) + b"abcdefgh"
+    body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+    mac = link.guest_mac or BCAST
+    link.send(mac + HOST_MAC + b"\x08\x00" + ip_packet(1, src, GUEST_IP, body))
+net.echoed = []
+for k, src in enumerate((0x7F000001, 0xFFFFFFFF, 0xE0000001, 0xF0000001, 0xFFFFFFFE)):
+    echo_from(src, k)
+until(lambda: False, 1.0)
+check(not net.echoed, f"bad sources: echo requests from loopback, broadcast, multicast and class E get no answer ({len(net.echoed)} seen)")
+echo_from(HOST_IP, 10)
+echo_from(HOST_IP, 11)
+until(lambda: len(net.echoed) >= 2, 5)
+check(len(net.echoed) >= 2, "bad sources: an echo request from a real address is answered")
+if len(net.echoed) >= 2:
+    check(all(not e[1][2] & 0x40 for e in net.echoed) and net.echoed[0][1][:2] != net.echoed[1][1][:2],
+          "ICMP: not marked don't-fragment, and a new identification for each reply")
+tcp_frames = [s["frame"] for _, s in link.seen]
+check(tcp_frames and all(f[20] & 0x40 and f[18:20] == b"\0\0" for f in tcp_frames),
+      f"TCP: segments carry DF and identification 0 ({len(tcp_frames)} seen)")
+
+# 6c. A segment without ACK is dropped once the connection is synchronized
+#     (RFC 9293 3.10.7.4): data sent that way is not echoed, the same data
+#     with ACK is.
+def no_ack_scenario():
+    mark = listen_7001()
+    q = Peer(net, 45003, 7001, b"", active=True)
+    net.peer = q
+    q.emit(SYN, q.iss)
+    q.timer = time.time() + q.rto
+    up = until(lambda: q.state == "ESTABLISHED", 10)
+    q.emit(PSH, q.abs_seq(0), b"hello", noack=True)
+    until(lambda: len(q.got) > 0, 1.5)
+    ignored = len(q.got) == 0
+    q.emit(PSH, q.abs_seq(0), b"hello")
+    taken = until(lambda: bytes(q.got) == b"hello", 5)
+    check(up and ignored, "no ACK: data in a segment without ACK is dropped")
+    check(taken, "no ACK: the same data with ACK is taken")
+    q.emit(RST, q.abs_seq(5))
+    until(lambda: b"bastios> " in out[mark:], 20)
+    net.peer = None
+no_ack_scenario()
+
+# 6d. A UDP datagram for a port nobody listens on draws an ICMP port
+#     unreachable that carries the start of the datagram (RFC 1122 4.1.3.4);
+#     an echo request with IP options is answered all the same (RFC 1122
+#     3.2.1.8).
+udp = struct.pack("!HHHH", 5555, 9999, 8 + 4, 0) + b"ping"
+udp = udp[:6] + struct.pack("!H", l4_sum(17, HOST_IP, GUEST_IP, udp)) + udp[8:]
+net.unreach = []
+net.send_ip(17, udp)
+until(lambda: net.unreach, 5)
+check(len(net.unreach) == 1, "UDP to a closed port: the guest answers with ICMP destination unreachable")
+if net.unreach:
+    u = net.unreach[0]
+    check(u[34] == 3 and u[35] == 3 and csum(u[34:70]) == 0 and u[62:66] == udp[:4],
+          "UDP to a closed port: port unreachable (code 3), right checksum, the datagram's ports quoted")
+net.echoed = []
+body = struct.pack("!BBHHH", 8, 0, 0, 0x4321, 1) + b"opts"
+body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+hdr = struct.pack("!BBHHHBBHII", 0x46, 0, 24 + len(body), 7, 0, 64, 1, 0, HOST_IP, GUEST_IP) + b"\x01\x01\x01\x01"
+hdr = hdr[:10] + struct.pack("!H", csum(hdr)) + hdr[12:]
+link.send((link.guest_mac or BCAST) + HOST_MAC + b"\x08\x00" + hdr + body)
+until(lambda: net.echoed, 5)
+check(len(net.echoed) == 1, "IP options: an echo request with options is answered")
+
+# 6e. Slow start (RFC 5681, RFC 6928): with our ACKs of its data withheld, the guest
+#     sends no more than its initial window of ten segments in the first
+#     round trip, though our window would take far more.
+def hold_acks(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    def cap(f):
+        x = tcp_of(f)
+        if x and x["flags"] & SYN:
+            p.ack_cap = (x["seq"] + 1) % M32
+        return 0
+    link.in_rule = cap
+    def mute(f):
+        # No ACK-only segments once the guest sends data: they would repeat
+        # and start a fast retransmit, which is not what is measured here.
+        x = tcp_of(f)
+        if x and not x["data"] and not x["flags"] & (SYN | FIN | RST) and any(y["data"] for _, y in p.log):
+            return None
+        return 0
+    link.out_rule = mute
+mark = listen_7001()
+p = Peer(net, 45004, 7001, pattern(60000, 9), active=True)
+hold_acks(p)
+net.peer = p
+p.emit(SYN, p.iss)
+p.timer = time.time() + p.rto
+until(lambda: len([1 for _, x in p.log if x["data"]]) > 0, 10)
+until(lambda: False, 0.8)
+sent = {}
+for t, x in p.log:
+    if x["data"]:
+        sent[x["seq"]] = max(sent.get(x["seq"], 0), len(x["data"]))
+first = min(t for t, x in p.log if x["data"]) if sent else 0
+byts = sum(sent.values())
+check(sent and byts <= 14600, f"slow start: {byts} bytes in the first round trip with nothing acknowledged (at most 14600)")
+p.ack_cap = None
+p.emit(RST, p.abs_seq(0))
+until(lambda: b"bastios> " in out[mark:], 20)
+net.peer = None
+link.in_rule = lambda f: 0
+link.out_rule = lambda f: 0
+
+# 6f. Fast retransmit (RFC 5681 3.2): the third segment the guest sends is
+#     lost; the ACKs for the ones after it repeat, and the guest sends the
+#     missing one again long before its one second timer would.
+lost_fr = {"n": 0, "seq": None, "at": None}
+def lose_guest_third(f):
+    x = tcp_of(f)
+    if x and x["data"]:
+        if lost_fr["seq"] is None:
+            lost_fr["n"] += 1
+            if lost_fr["n"] == 3:
+                lost_fr["seq"], lost_fr["at"] = x["seq"], time.time()
+                return None
+    return 0
+def fr_setup(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    link.in_rule = lose_guest_third
+p = echo_run("fast retransmit", pattern(60000, 10), fr_setup)
+again = [t for t, x in p.log if x["data"] and x["seq"] == lost_fr["seq"]]
+check(lost_fr["seq"] is not None and again and again[0] - lost_fr["at"] < 0.7,
+      f"fast retransmit: the lost segment came again {again[0] - lost_fr['at'] if again else -1:.2f}s after (under 0.7 s, not the 1 s timer)")
+
 # 7. The ARP cache holds more than four neighbors: the guest pings twelve
 #    hosts that this script answers for, then the same twelve again. The
 #    second round needs no ARP request.
@@ -725,6 +957,107 @@ second = ping_round()
 asked_second = len(net.arp_asked) - asked_first
 check(first and second, "ARP cache: twelve neighbors answer a ping, twice")
 check(asked_first >= 12 and asked_second == 0, f"ARP cache: {asked_first} requests for twelve neighbors, {asked_second} the second time")
+
+# 6g. ICMP destination unreachable about a connection that is opening
+#     (RFC 1122 4.2.3.9, RFC 5927 4.1): a port unreachable that quotes the
+#     wrong sequence number is ignored; one that quotes our SYN's aborts the
+#     connect at once.
+mark = len(out)
+net.peer = None
+syn_seen = []
+def catch_syn(f):
+    s = tcp_of(f)
+    if s and s["flags"] & SYN and not s["flags"] & ACK and s["dport"] == 8081:
+        syn_seen.append(f)
+    return 0
+link.in_rule = catch_syn
+type_line("tcpget 10.0.2.2 8081 hi")
+until(lambda: syn_seen, 10)
+def quote_icmp(f, seq_delta):
+    inner = bytearray(f[14:14 + 20 + 8])
+    inner[24:28] = struct.pack("!I", (struct.unpack("!I", bytes(inner[24:28]))[0] + seq_delta) % M32)
+    body = struct.pack("!BBHI", 3, 3, 0, 0) + bytes(inner)
+    body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+    net.send_ip(1, body)
+if syn_seen:
+    quote_icmp(syn_seen[0], 1)
+    time.sleep(0.5)
+    pump()
+    check(b"connection refused" not in out[mark:], "ICMP port unreachable with a wrong sequence number: the connect goes on")
+    quote_icmp(syn_seen[0], 0)
+    done = until(lambda: b"connection refused" in out[mark:], 5)
+    check(done, "ICMP port unreachable quoting our SYN: the connect is refused at once")
+else:
+    check(False, "ICMP port unreachable: no SYN seen")
+link.in_rule = lambda f: 0
+until(lambda: b"bastios> " in out[mark:], 10)
+
+# 6h. Simultaneous open (RFC 9293 3.5): our SYN crosses the guest's. The
+#     guest answers it with a SYN+ACK from its own initial sequence number and
+#     the connection comes up on both sides.
+mark = len(out)
+syn_seen.clear()
+def catch_syn2(f):
+    s = tcp_of(f)
+    if s and s["flags"] & SYN and not s["flags"] & ACK and s["dport"] == 8082:
+        syn_seen.append(s)
+    return 0
+link.in_rule = catch_syn2
+type_line("tcpget 10.0.2.2 8082 hi")
+until(lambda: syn_seen, 10)
+if syn_seen:
+    sim = Peer(net, 8082, syn_seen[0]["sport"], b"", active=True)
+    net.peer = sim
+    until(lambda: sim.state == "ESTABLISHED" and b"connected" in out[mark:], 10)
+    check(sim.state == "ESTABLISHED" and b"connected" in out[mark:],
+          f"simultaneous open: both sides establish (peer {sim.state})")
+    sim.closing = True
+else:
+    check(False, "simultaneous open: no SYN seen")
+link.in_rule = lambda f: 0
+net.peer = None
+until(lambda: b"bastios> " in out[mark:], 20)
+
+# 6i. Path MTU (RFC 1191, RFC 5927 4.2): our segments carry DF, so an ICMP
+#     "fragmentation needed" for one of them with a next hop MTU of 600 makes
+#     the guest send the rest in segments of at most 560 bytes of data.
+pm = {"cut": None, "sizes": []}
+def mtu_rule(f):
+    x = tcp_of(f)
+    if x and x["data"]:
+        if pm["cut"] is None and len(x["data"]) > 560:
+            pm["cut"] = x["seq"]
+            inner = f[14:14 + 28]
+            body = struct.pack("!BBHHH", 3, 4, 0, 0, 600) + inner
+            body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+            net.send_ip(1, body)
+            return None                 # the router drops it
+        if pm["cut"] is not None and x["seq"] == pm["cut"]:
+            pm["again"] = True          # the resend, after the guest heard of the MTU
+        if pm.get("again"):
+            pm["sizes"].append(len(x["data"]))
+    return 0
+def mtu_setup(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    link.in_rule = mtu_rule
+p = echo_run("path MTU", pattern(30000, 11), mtu_setup)
+check(pm["cut"] is not None and pm["sizes"] and max(pm["sizes"]) <= 560,
+      f"path MTU: from the resend on the guest's segments are at most {max(pm['sizes']) if pm['sizes'] else -1} bytes (560 allowed)")
+
+# 6j. ICMP errors reach UDP sockets (RFC 1122 4.1.3.3): see test/udperr.c.
+mark = len(out)
+type_line("ash")
+until(lambda: b"# " in out[mark:], 20)
+mark = len(out)
+type_line("/disk/udperr")
+done = until(lambda: b"done " in out[mark:], 60)
+text = out[mark:].decode(errors="replace").replace("\r", "")
+for line in text.split("\n"):
+    if line.startswith("ok ") or line.startswith("FAIL "):
+        check(line.startswith("ok "), "guest: " + line.split(" ", 1)[1])
+check(done and "done 0" in text, "ICMP errors for UDP: the guest program finished with every check passing")
+if not done or "FAIL" in text:
+    print(text[-1500:])
 
 qemu.kill(); qemu.wait()
 print("---- transcript ----")

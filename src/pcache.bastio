@@ -44,14 +44,17 @@
 // lookup) and takes one only when every slot holds one: a program text
 // page can be read again, but a shared page may be mapped and in use (a
 // semaphore), and a later mmap of that part of the file must get the same
-// page.
+// page. A page a read or a write cached (pc_fill) is program text to the
+// clock, so a MAP_SHARED mapping does not take it as it is: it gets a
+// MAP_SHARED page with the same bytes in that slot (lx_map_file_shared).
 //
 // Not done: the cache does not replace the file's own bytes, so a mapped
 // page is still written back at msync, munmap and exit (src/lxmem.bastio);
-// a slot the clock takes when every slot is a MAP_SHARED page, or that
-// pc_shrink empties when memory is short, may hold a page a process still
-// maps (a later mmap of that part of the file then gets a fresh copy,
-// which the next write-back reconciles).
+// a slot the clock takes when every slot is a MAP_SHARED page may hold a
+// page a process still maps (a later mmap of that part of the file then
+// gets a fresh copy, which the next write-back reconciles). pc_shrink
+// leaves the MAP_SHARED pages of files that some process's mapping record
+// names (a mapping past the MAP_N records is not seen).
 
 import "pages.bastio";
 
@@ -786,11 +789,34 @@ fn any_l1(t: &mut PageTable, m: &mut Mem, i: u64) -> bool
   return true;
 }
 
+/// Whether the first n words of keep (all of them if n is larger) hold h.
+fn pc_kept(keep: &Buf, n: u64, h: u64) -> bool
+{
+  if n > len(keep) {
+    return true;                            // more files than the list holds: keep every one
+  }
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= len(keep)
+  {
+    if get(keep, i) == h {
+      return true;
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 /// Memory is short: gives up the cache's hold on up to `want` pages,
 /// program text included (it is read again from the file when a program
 /// runs next). A page a process maps stays until the process lets go of it.
+/// A MAP_SHARED page of a file in the first nk words of keep (the files a
+/// process's shared mapping records name, mapped_files) stays in the cache:
+/// writes to it reach the file only at write-back, so a later mapping of
+/// that part of the file would get stale bytes (zeros, for a memfd) and no
+/// longer share memory with the processes that map it now.
 /// Returns how many slots it emptied.
-fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
+fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64, keep: &Buf, nk: u64) -> u64
   requires pc_ok(c) && mem_ok(m)
   ensures pc_ok(c) && mem_ok(m)
   ensures result <= want
@@ -805,7 +831,9 @@ fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
           invariant i <= PC_N && n <= want && pt_level(t) == 2 && mem_ok(m) && len(c.keys) == PCK_LEN && pt_leases(t) == 0
           invariant vlen(c.tab) == 1 && vget(c.tab, 0) is PcTab::Off && len(c.link) == PC_LK && blen(c.has) == PC_HN
         {
-          if get(c.keys, 3 * i) != 0 && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512) {
+          let k1 = get(c.keys, 3 * i);
+          let held = k1 != 0 && get(c.keys, 3 * i + 2) == 2 && pc_kept(keep, nk, k1 - 1);
+          if k1 != 0 && !held && pt_has(t, i / 512) && pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512) {
             pc_unkey(&mut c.keys, &mut c.link, i);
             n = n + 1;
           }
@@ -816,6 +844,34 @@ fn pc_shrink(c: &mut PCache, m: &mut Mem, want: u64) -> u64
     },
   }
   return n;
+}
+
+/// Drops the page in slot i, whatever its mark, so the next pc_add for
+/// that part of the file makes a new one. A process that maps the old page
+/// keeps it until it lets go.
+fn pc_drop_slot(c: &mut PCache, m: &mut Mem, i: u64)
+  requires pc_ok(c) && mem_ok(m) && i < PC_N
+  ensures pc_ok(c) && mem_ok(m)
+{
+  match pc_take(&mut c) {
+    PcTab::Off => {},
+    PcTab::On(mut t) => {
+      if pt_lease_count(&mut t) == 0 && pt_has(t, i / 512) {
+        pt_borrow(&mut t, i / 512, any_l1, &mut m, i % 512);
+      }
+      pc_put(&mut c, PcTab::On(t));
+    },
+  }
+  pc_unkey(&mut c.keys, &mut c.link, i);
+}
+
+/// Is slot i a MAP_SHARED mapping's page (mark 2)? Only those stay the one
+/// page of that part of the file while the cache is full: the clock takes a
+/// page of program text, or one a read cached, when it passes it unused.
+fn pc_slot_shared(c: &PCache, i: u64) -> bool
+  requires pc_ok(c) && i < PC_N
+{
+  return get(c.keys, 3 * i + 2) == 2;
 }
 
 /// File h went away (its handle will name another file): drops its pages.
@@ -963,6 +1019,8 @@ fn pc_map_run(l1: &mut PageTable, c: &mut PCache, h: u64, pg: u64, i: u64, n: u6
           go = false;
         } else if text && get(c.keys, 3 * s + 2) == 2 {
           go = false;                         // a MAP_SHARED mapping's page: the caller copies it
+        } else if !text && get(c.keys, 3 * s + 2) != 2 {
+          go = false;                         // program text or read bytes: the caller makes it a MAP_SHARED page first (pc_drop_slot)
         } else if pt_borrow(&mut t, s / 512, dup_l1, s % 512, &mut l1, i + done, w) {
           if get(c.keys, 3 * s + 2) == 0 {
             c.keys = set(c.keys, 3 * s + 2, 1);

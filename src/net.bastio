@@ -38,14 +38,18 @@ const DNS_SERVER: u64 = 0x0A000203;   // 10.0.2.3, QEMU's resolver, with the sta
 const IP_ICMP: u64 = 1;
 const IP_ICMP6: u64 = 58;               // ICMPv6, as the protocol of the IPv4 frame that stands for it
 const IP_UDP: u64 = 17;
+const IPPROTO_ESP: u64 = 50;            // IPsec ESP (src/xfrm.bastio)
 const IP_TCP: u64 = 6;
 const ICMP_ECHO_REPLY: u64 = 0;
 const ICMP_ECHO: u64 = 8;
+const ICMP_UNREACH: u64 = 3;
 const UDP_ECHO_PORT: u64 = 7;
+const ICMP_RATE: u64 = 50;            // ICMP errors sent in a second, at most
 const PING_ID: u64 = 0x4253;          // "BS"
 const PING_DATA: u64 = 32;
 
 const ARP_N: u64 = 64;
+const ARP_TTL: u64 = 6000;            // ticks (60 s) an address's MAC is kept after it was last learned (RFC 1122 2.3.2.1)
 const HELD_N: u64 = 8;                // frames held for ARP answers
 
 // DHCP (RFC 2131), as a client.
@@ -107,8 +111,10 @@ const S_CORK: u64 = 6;                // bytes held back by MSG_MORE, in cork
 const S_NS: u64 = 7;                  // its network namespace (src/netns.bastio)
 const RAW_ICMP: u64 = 65537;           // S_PORT of a raw ICMP socket (no port number is)
 const RAW_ICMP6: u64 = 65538;          // S_PORT of a raw ICMPv6 socket (src/net6.bastio)
+const RAW_ESP: u64 = 65539;            // S_PORT of a raw ESP socket: it only sends (src/xfrm.bastio)
 const S_FAM: u64 = 8;                 // FAM_*: which peers it takes datagrams from
-const SOCK_FIELDS: u64 = 9;           // S_FAM + 1
+const S_ERR: u64 = 9;                 // an ICMP error about a datagram it sent: 1 + 16 * (peer address * 65536 + port) + the ICMP code; 0: none
+const SOCK_FIELDS: u64 = 16;          // S_ERR + spare (a size the lx_msg_call and lx_read_call proofs still take)
 // Which address family a socket (UDP here, TCP listeners in tcp.bastio)
 // answers to. The IPv4 and IPv6 sides share one port space, as on Linux,
 // except that an IPv6-only socket and an IPv4 one may hold the same port.
@@ -146,6 +152,7 @@ const IFK_LO: u64 = 1;
 const IFK_ETH: u64 = 2;                // the network card (slot 1)
 const IFK_VETH: u64 = 3;
 const IFK_BRIDGE: u64 = 4;
+const IFK_WG: u64 = 5;                // a WireGuard device
 
 const IF_ETH: u64 = 1;                 // the card's slot
 const IFF_UP: u64 = 1;                 // Linux's interface flags
@@ -159,13 +166,48 @@ const NAME_ETH0: u64 = 0x30687465;     // "eth0"
 const CAP_NET_ADMIN: u64 = 12;          // configuring interfaces, addresses, routes
 const CAP_NET_RAW: u64 = 13;            // raw sockets (ping)
 const NLS: u64 = 32;                   // netlink sockets (src/rtnl.bastio)
-const NLQ: u64 = 8192;                 // the answers each can queue, in bytes
-const NL_W: u64 = 5;                   // words per socket:
+const NLQ: u64 = 16384;                // the answers each can queue, in bytes
+const NL_W: u64 = 7;                   // words per socket:
 const NL_USED: u64 = 0;
 const NL_LEN: u64 = 1;                 //   bytes queued
 const NL_PORT: u64 = 2;                //   its port id
 const NL_NS: u64 = 3;                  //   its namespace
 const NL_RAW: u64 = 4;                 //   1: what is queued is one raw mq_notify cookie (32 bytes), not rtnetlink messages
+const NL_PROTO: u64 = 5;               //   its netlink protocol (NETLINK_ROUTE or NETLINK_NETFILTER)
+const NL_GROUPS: u64 = 6;              //   the multicast groups it listens to, group g in bit g - 1
+const NFS: u64 = 9;                    // the packet filter's rulesets and the spare one a batch is copied to (src/nft.bastio)
+const NFP: u64 = 16384;                // bytes of rule text in each
+const NFSB: u64 = 21504;               // bytes in all in each (rule text, set elements' keys, sets' user data)
+const NF_WORDS: u64 = 17528;           // words of tables, chains, rules, sets and bookkeeping
+const NF_REGS: u64 = 64;               // bytes of registers
+const NCT_WORDS: u64 = 4096;           // words of tracked flows
+const NX_SKIP: u64 = 3;                // the packet filter's word that says the output hook is not to run
+const NF_PRE: u64 = 0;                 // the hooks
+const NF_IN: u64 = 1;
+const NF_FWD: u64 = 2;
+const NF_OUT: u64 = 3;
+const NF_POST: u64 = 4;
+const WG_W: u64 = 13;                  // WireGuard (src/wgdev.bastio): words per interface, kept by slot:
+const WGP_W: u64 = 74;                 //   and per peer
+const WGPN: u64 = 64;                  //   peers, all devices together
+const XSA_N: u64 = 64;                  // IPsec security associations (src/xfrm.bastio), all namespaces together
+const XSA_W: u64 = 24;
+const XSA_BASE: u64 = 4736;              // WGPN * WGP_W: where the associations start in Net.wgp
+const XP_N: u64 = 32;                   // IPsec policies, all namespaces together
+const XP_W: u64 = 16;
+const XP_BASE: u64 = 6272;              // XSA_BASE + XSA_N * XSA_W: where the policies start in Net.wgp
+const WGC_PW: u64 = 5;                  // WireGuard cookie state (src/wgproto.bastio): words per peer,
+const WGC_PBASE: u64 = 6784;            //   from here (XP_BASE + XP_N * XP_W) in Net.wgp,
+const WGC_DW: u64 = 8;                  //   and per interface slot, from
+const WGC_DBASE: u64 = 7104;            //   WGC_PBASE + WGPN * WGC_PW
+const XL_W: u64 = 12;                   // IPsec lifetime state (src/xfrm.bastio): words per association row, kept by row,
+const XL_BASE: u64 = 8128;              //   from here (WGC_DBASE + IFN * WGC_DW) in Net.wgp
+const WGV_W: u64 = 37;                  // the WireGuard previous session (src/wgproto.bastio): words per peer,
+const WGV_BASE: u64 = 8896;             //   from here (XL_BASE + XSA_N * XL_W) in Net.wgp
+const WGN_W: u64 = 12;                  // the WireGuard next session (src/wgproto.bastio): words per peer,
+const WGN_BASE: u64 = 11264;            //   from here (WGV_BASE + WGPN * WGV_W) in Net.wgp
+const WGPX_LEN: u64 = 12032;             // WGN_BASE + WGPN * WGN_W: the length of Net.wgp
+const WG_ALLOWED: u64 = 8;             //   allowed IPs a peer can hold
 const NATN: u64 = 256;                 // masqueraded flows (src/netns.bastio)
 const NAT_W: u64 = 5;                  // words per flow:
 const NAT_PROTO: u64 = 0;              //   IP_TCP, IP_UDP or IP_ICMP; 0: free
@@ -179,7 +221,7 @@ const NAT_NONE: u64 = 18446744073709551615;
 // The TCP table's size (src/tcp.bastio has the rest).
 const TCBS: u64 = 1024;               // connections (listeners and TIME_WAIT hold some)
 const TCB0: u64 = 64;                 // connections the table starts with (it doubles to TCBS)
-const TCB_W: u64 = 29;                // words per connection (TCP_RING, the size of
+const TCB_W: u64 = 35;                // words per connection (TCP_RING, the size of
                                       // its buffers, is in src/tcpbuf.bastio)
 
 struct Net {
@@ -189,8 +231,10 @@ struct Net {
   ip: u64,            // our address, the gateway, and the subnet's size
   gw: u64,            // (2^32 - netmask: addresses a and b share the
   span: u64,          // subnet when a / span == b / span)
-  arp: Buf,           // ARP_N entries of (address, MAC); MAC 0: empty
+  arp: Buf,           // ARP_N entries of (address, MAC, tick it was last learned at); MAC 0: empty
   arp_next: u64,      // the entry the next new address replaces
+  icmp_sec: u64,      // the second ICMP errors are being counted in, and how many went out in it (icmp_error)
+  icmp_n: u64,
   held: Bytes,        // frames waiting for their next hop's MAC, HELD_N slots
   held_len: Buf,      // of RX_BUF bytes, oldest first: their lengths ...
   held_hop: Buf,      // ... and the addresses they go to
@@ -224,6 +268,7 @@ struct Net {
   tcbs: Buf,          // TCP connections (src/tcp.bastio), TCB_W words each
   rb: Rings,          // their receive and send buffers (src/tcpbuf.bastio)
   iss: u64,           // the next initial sequence number
+  sec: u64,           // a secret from the kernel's generator (nic_seed): keys the initial sequence numbers and the ephemeral ports
   lo: Bytes,          // frames sent to ourselves, packed in a ring of LO_BYTES,
   lo_len: Buf,        // their lengths,
   lo_at: Buf,         // where each starts,
@@ -260,13 +305,24 @@ struct Net {
   nl_msg: u64,        // ... where its message starts,
   nl_full: bool,      // ... and whether something did not fit
   nat: Buf,           // masqueraded flows, NAT_W words each
+  wgd: Buf,           // WireGuard devices: WG_W words for each interface slot (src/wgdev.bastio)
+  wgp: Buf,           // WireGuard peers, WGP_W words each, then the IPsec security associations, XSA_W words each, then the policies, XP_W words each, then the WireGuard cookie state and the IPsec lifetimes (src/xfrm.bastio)
   nat_next: u64,      // the flow replaced when every one is in use
+  nfw: Buf,           // the packet filter's tables, chains and rules (src/nft.bastio)
+  nfb: Bytes,         // the text of its rules
+  nfr: Bytes,         // the registers rules compute in
+  ctw: Buf,           // tracked flows, CT_W words each
+}
+
+/// The packet filter's tables are all there (src/nft.bastio).
+spec fn nf_ok(n: &Net) -> bool {
+  len(n.nfw) == NF_WORDS && blen(n.nfb) == NFS * NFSB && blen(n.nfr) == NF_REGS && len(n.ctw) == NCT_WORDS
 }
 
 spec fn net_ok(n: &Net) -> bool {
   card_ok(n.dev) && blen(n.pkt) == NET_BUF && blen(n.out) == NET_BUF && blen(n.held) == HELD_N * RX_BUF
   && n.ip <= IP_MAX && n.gw <= IP_MAX && 1 <= n.span && n.span <= 4294967296
-  && len(n.arp) == ARP_N * 2 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
+  && len(n.arp) == ARP_N * 3 && len(n.held_len) == HELD_N && len(n.held_hop) == HELD_N && n.held_n <= HELD_N && n.seq <= 65535 && n.ping_pid < PID_LIMIT && n.ping_ip <= IP_MAX
   && n.dhcp_xid <= IP_MAX && n.dhcp_offer <= IP_MAX && n.dhcp_server <= IP_MAX && n.dns <= IP_MAX
   && len(n.socks) == SOCKS * SOCK_FIELDS && n.ucap <= SOCKS && blen(n.dq) == n.ucap * RXQ * UDP_MAX && len(n.dm) == n.ucap * RXQ * SLOT_W && blen(n.cork) == n.ucap * UDP_MAX
   && len(n.tcbs) <= TCBS * TCB_W && rings_ok(n.rb)
@@ -274,8 +330,10 @@ spec fn net_ok(n: &Net) -> bool {
   && len(n.v6) == V6N * V6W && n.rtr_mac < MAC_LIMIT
   && len(n.ifs) == IFN * IF_W && len(n.nss) == NNET * NS_W && n.ns < NNET && len(n.lo_if) == LOQ
   && blen(n.nlq) == NLS * NLQ && len(n.nls) == NLS * NL_W
-  && len(n.nat) == NATN * NAT_W
+  && len(n.nat) == NATN * NAT_W && len(n.wgd) == IFN * WG_W && len(n.wgp) == WGPX_LEN
+  && nf_ok(n)
 }
+
 
 // ---------------------------------------------------------------- bytes
 // Network byte order: most significant byte first.
@@ -389,8 +447,8 @@ fn arp_find(n: &Net, ip: u64) -> u64
   while i < ARP_N
     invariant i <= ARP_N
   {
-    let mac = get(n.arp, 2 * i + 1);
-    if get(n.arp, 2 * i) == ip && mac < MAC_LIMIT {
+    let mac = get(n.arp, 3 * i + 1);
+    if get(n.arp, 3 * i) == ip && mac < MAC_LIMIT {
       return mac;
     }
     i = i + 1;
@@ -407,13 +465,13 @@ fn nic_arp(c: &Nic, e: u64, f: u64) -> u64
   match c {
     Nic::None => { return 0; },
     Nic::Up(n) => {
-      if e >= ARP_N || get(n.arp, 2 * e + 1) >= MAC_LIMIT || get(n.arp, 2 * e) > IP_MAX || get(n.arp, 2 * e + 1) == 0 {
+      if e >= ARP_N || get(n.arp, 3 * e + 1) >= MAC_LIMIT || get(n.arp, 3 * e) > IP_MAX || get(n.arp, 3 * e + 1) == 0 {
         return 0;
       }
       if f == 0 {
-        return get(n.arp, 2 * e);
+        return get(n.arp, 3 * e);
       }
-      return get(n.arp, 2 * e + 1);
+      return get(n.arp, 3 * e + 1);
     },
   }
 }
@@ -428,16 +486,37 @@ fn arp_learn(n: &mut Net, ip: u64, mac: u64)
   while i < ARP_N
     invariant i <= ARP_N && net_ok(n)
   {
-    if get(n.arp, 2 * i) == ip {
-      n.arp = set(n.arp, 2 * i + 1, mac);
+    if get(n.arp, 3 * i) == ip {
+      n.arp = set(n.arp, 3 * i + 1, mac);
+      n.arp = set(n.arp, 3 * i + 2, n.now);
       return;
     }
     i = i + 1;
   }
   let e = n.arp_next % ARP_N;
-  n.arp = set(n.arp, 2 * e, ip);
-  n.arp = set(n.arp, 2 * e + 1, mac);
+  n.arp = set(n.arp, 3 * e, ip);
+  n.arp = set(n.arp, 3 * e + 1, mac);
+  n.arp = set(n.arp, 3 * e + 2, n.now);
   n.arp_next = (e + 1) % ARP_N;
+}
+
+/// Forgets the MAC address of every neighbour not heard from (by an ARP
+/// request or answer) for ARP_TTL ticks, so that one whose address moved (a
+/// router replaced behind the same IP) is asked for again.
+fn arp_age(n: &mut Net, now: u64)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let mut i = 0;
+  while i < ARP_N
+    invariant i <= ARP_N && net_ok(n)
+  {
+    let at = get(n.arp, 3 * i + 2);
+    if now >= at && now - at >= ARP_TTL {
+      n.arp = set(n.arp, 3 * i + 1, 0);
+    }
+    i = i + 1;
+  }
 }
 
 /// Is `ip` this machine, in namespace n.ns: 127.0.0.0/8, or one of its
@@ -637,6 +716,20 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
   requires net_ok(n) && flen <= FRAME_MAX
   ensures net_ok(n)
 {
+  if !nf_out(&mut n, ip, flen) {
+    return true;
+  }
+  let skip = nf_x(n, NX_SKIP);
+  nf_xset(&mut n, NX_SKIP, 1);
+  let r = reply_raw(&mut n, ip, flen);
+  nf_xset(&mut n, NX_SKIP, skip);
+  return r;
+}
+
+fn reply_raw(n: &mut Net, ip: u64, flen: u64) -> bool
+  requires net_ok(n) && flen <= FRAME_MAX
+  ensures net_ok(n)
+{
   if is_local(n, ip) {
     return lo_send(&mut n, flen);
   }
@@ -645,7 +738,7 @@ fn reply_send(n: &mut Net, ip: u64, flen: u64) -> bool
     if hop > IP_MAX || flen < 14 {
       return false;
     }
-    return send_via(&mut n, hop, flen);
+    return send_via_raw(&mut n, hop, flen);
   }
   if is_v6tok(ip) {
     return v6_out(&mut n, flen);
@@ -663,6 +756,38 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
   requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= NET_BUF
   ensures net_ok(n)
 {
+  if !nf_out(&mut n, hop, flen) {
+    return true;                      // dropped by a rule: as if lost on the way
+  }
+  return send_via_raw(&mut n, hop, flen);
+}
+
+/// send_via without the output hook (for a frame that has been through it, or
+/// that a reject rule makes: that one must not be able to reach the hook again).
+fn send_via_raw(n: &mut Net, hop: u64, flen: u64) -> bool
+  requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= NET_BUF
+  ensures net_ok(n)
+{
+  if esp_out(&mut n, flen) != 0 {
+    return true;                      // wrapped in ESP and sent, or dropped by a policy
+  }
+  if !is_local(n, hop) && flen <= FRAME_MAX {
+    let o = route_if(n, hop);
+    if o < IFN && iw(n, o, IF_KIND) == IFK_WG {
+      return wg_tx(&mut n, o, hop, flen);
+    }
+  }
+  return send_nowg(&mut n, hop, flen);
+}
+
+/// send_via_raw for a frame that must not enter a WireGuard device: the
+/// encrypted packet of a tunnel. One that routes to a WireGuard device is
+/// dropped (no tunnel inside a tunnel), which also keeps the stack free of
+/// recursion.
+fn send_nowg(n: &mut Net, hop: u64, flen: u64) -> bool
+  requires net_ok(n) && hop <= IP_MAX && 14 <= flen && flen <= NET_BUF
+  ensures net_ok(n)
+{
   if is_local(n, hop) {
     return lo_send(&mut n, flen);
   }
@@ -671,6 +796,9 @@ fn send_via(n: &mut Net, hop: u64, flen: u64) -> bool
   }
   let o = route_if(n, hop);
   if o < IFN {
+    if iw(n, o, IF_KIND) == IFK_WG {
+      return true;
+    }
     return virt_send(&mut n, o, hop, flen);
   }
   if n.ns != 0 {
@@ -775,7 +903,12 @@ fn ip_header(n: &mut Net, total: u64, proto: u64, dst: u64)
   bset(&mut n.out, 14, 0x45);         // version 4, 5 words of header
   bset(&mut n.out, 15, 0);
   put16(&mut n.out, 16, total);
-  put32(&mut n.out, 18, 0);           // id, no fragments
+  if proto == IP_TCP {
+    put32(&mut n.out, 18, 0x00004000);  // id 0 with DF set (RFC 6864): TCP keeps to the MSS
+  } else {
+    put16(&mut n.out, 18, n.tx % 65536);  // a datagram that may be fragmented on the way needs its own id
+    put16(&mut n.out, 20, 0);
+  }
   bset(&mut n.out, 22, 64);           // time to live
   bset(&mut n.out, 23, cast[u8](proto));
   put16(&mut n.out, 24, 0);
@@ -832,6 +965,59 @@ fn udp_echo(n: &mut Net, ulen: u64)
   reply_send(&mut n, src, 34 + ulen);
 }
 
+/// ICMP destination unreachable, port unreachable (RFC 1122 4.1.3.4) for
+/// the datagram in pkt: the start of it (its IP header and 8 bytes) goes
+/// back to its sender. At most ICMP_RATE a second are sent (RFC 1122
+/// 3.2.2), and none to an IPv6 peer's token (src/net6.bastio answers those).
+fn icmp_unreach(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  icmp_unreach_code(&mut n, 3);
+}
+
+/// icmp_unreach with another code (a reject rule asks for them).
+fn icmp_unreach_code(n: &mut Net, code: u64)
+  requires net_ok(n) && code <= 15
+  ensures net_ok(n)
+{
+  let src = icmp_unreach_frame(&mut n, code);
+  if src != 0 {
+    reply_send(&mut n, src, 70);
+  }
+}
+
+/// Builds the message in the outgoing frame and returns the address to send
+/// it to, or 0 if there is to be none (a packet filter's reject sends it
+/// without running the output hook again, so it cannot recurse).
+fn icmp_unreach_frame(n: &mut Net, code: u64) -> u64
+  requires net_ok(n) && code <= 15
+  ensures net_ok(n)
+{
+  let src = be32(n.pkt, 26);
+  if is_v6tok(src) || src == 0 {
+    return 0;
+  }
+  if n.now / 100 != n.icmp_sec {
+    n.icmp_sec = n.now / 100;
+    n.icmp_n = 0;
+  }
+  if n.icmp_n >= ICMP_RATE {
+    return 0;
+  }
+  n.icmp_n = n.icmp_n + 1;
+  let smac = be48(n.pkt, 6);
+  eth_header(&mut n, smac, ETH_IP);
+  ip_header(&mut n, 56, IP_ICMP, src);
+  bset(&mut n.out, 34, 3);            // destination unreachable ...
+  bset(&mut n.out, 35, cast[u8](code));   // ... port, normally
+  put16(&mut n.out, 36, 0);
+  put32(&mut n.out, 38, 0);
+  bcopy(&mut n.out, 42, n.pkt, 14, 28);
+  put16(&mut n.out, 36, csum(n.out, 34, 36));
+  return src;
+}
+
 /// A UDP datagram for us (total: the IP length, checked against the
 /// frame): its checksum is checked when it has one, then it goes to the
 /// socket bound to its port, or to the echo on port 7.
@@ -854,19 +1040,63 @@ fn udp_in(n: &mut Net, total: u64)
   if be32(n.pkt, 30) == IP_MAX {
     return;                           // other broadcasts: nobody listens
   }
+  if 14 + 20 + ulen <= FRAME_MAX && esp_encap_port(n, dport) && esp_in_udp(&mut n, ulen) {
+    return;                           // ESP in UDP (src/xfrm.bastio)
+  }
   let s = sock_find_in(n, dport, is_v6tok(be32(n.pkt, 26)));
   if s < SOCKS {
     udp_deliver(&mut n, s, ulen);
   } else if dport == UDP_ECHO_PORT {
     udp_echo(&mut n, ulen);
+  } else {
+    icmp_unreach(&mut n);
   }
 }
 
-fn ip_in(n: &mut Net, flen: u64)
-  requires net_ok(n) && flen <= NET_BUF
+fn ip_in(n: &mut Net, frame_len: u64)
+  requires net_ok(n) && frame_len <= NET_BUF
   ensures net_ok(n)
 {
-  if flen < 34 || bget(n.pkt, 14) != 0x45 || csum(n.pkt, 14, 20) != 0 {
+  let mut flen = frame_len;
+  if flen < 34 {
+    return;
+  }
+  let vihl = cast[u64](bget(n.pkt, 14));
+  let ihl = vihl % 16 * 4;
+  if vihl / 16 != 4 || ihl < 20 || 14 + ihl > flen || csum(n.pkt, 14, ihl) != 0 {
+    return;
+  }
+  if ihl > 20 {
+    // RFC 1122 3.2.1.8: options are accepted, and none of them is acted on:
+    // the packet is closed up over them, so that everything below sees the
+    // plain header.
+    let tot = be16(n.pkt, 16);
+    if n.lo_split || tot < ihl || 14 + tot > flen {
+      return;
+    }
+    let cut = ihl - 20;
+    let mut i = 34;
+    while i < 14 + tot - cut
+      invariant 34 <= i && i <= 14 + tot - cut && 14 + tot <= flen && flen <= NET_BUF && net_ok(n)
+    {
+      bset(&mut n.pkt, i, bget(n.pkt, i + cut));
+      i = i + 1;
+    }
+    bset(&mut n.pkt, 14, 0x45);
+    put16(&mut n.pkt, 16, tot - cut);
+    put16(&mut n.pkt, 24, 0);
+    put16(&mut n.pkt, 24, csum(n.pkt, 14, 20));
+    flen = flen - cut;
+  }
+  // RFC 1122 3.2.1.3: a source that is a broadcast, multicast or class E
+  // address, or a loopback address that came in from the wire, is silently
+  // dropped (an IPv6 peer's token stands in for a source, net6.bastio). The
+  // unspecified address is only a DHCP client's.
+  let src = be32(n.pkt, 26);
+  if !n.lo_in && !is_v6tok(src) && (src / 16777216 == LO_NET || src >= 3758096384) {
+    return;
+  }
+  if src == 0 && cast[u64](bget(n.pkt, 23)) != IP_UDP {
     return;
   }
   // For us: our address, or (UDP only) the broadcast address, or while a
@@ -877,6 +1107,9 @@ fn ip_in(n: &mut Net, flen: u64)
   // A frame longer than a card's is a TCP segment this machine sent to
   // itself (tcp_emit); nothing else takes it in, forwards it or answers it.
   if flen > FRAME_MAX && !(mine && n.lo_in && cast[u64](bget(n.pkt, 23)) == IP_TCP) {
+    return;
+  }
+  if !nf_hook(&mut n, NF_PRE, 0, flen, n.in_if, NO_IF) {
     return;
   }
   // A namespace that forwards passes on what comes in on a virtual
@@ -892,6 +1125,11 @@ fn ip_in(n: &mut Net, flen: u64)
   if !mine && !(dst == IP_MAX && cast[u64](bget(n.pkt, 23)) == IP_UDP) {
     return;
   }
+  // No reassembly: a fragment (more-fragments set, or an offset) is not a
+  // whole datagram, and must not be taken for one.
+  if be16(n.pkt, 20) % 16384 != 0 {
+    return;
+  }
   let total = be16(n.pkt, 16);
   // The header's length must fit in what arrived, and in what we can send.
   if total < 28 || 14 + total > flen || 14 + total > NET_BUF {
@@ -901,6 +1139,19 @@ fn ip_in(n: &mut Net, flen: u64)
   if 14 + total > FRAME_MAX && proto != IP_TCP {
     return;
   }
+  if !nf_hook(&mut n, NF_IN, 0, flen, n.in_if, NO_IF) {
+    return;
+  }
+  // IPsec (src/xfrm.bastio): what came in plain must not be what an in
+  // policy wants in ESP. (A packet round the loopback queue is this machine's
+  // own: the one inside an ESP packet comes back that way.)
+  if mine && !(n.lo_in && n.in_if == ns_lo(n)) && !esp_plain_ok(n, src, dst, proto) {
+    return;
+  }
+  if proto == IPPROTO_ESP && mine {
+    esp_in(&mut n, total);
+    return;
+  }
   if proto == IP_ICMP {
     let kind = cast[u64](bget(n.pkt, 34));
     if kind == ICMP_ECHO && csum(n.pkt, 34, total - 20) == 0 {
@@ -908,6 +1159,10 @@ fn ip_in(n: &mut Net, flen: u64)
     } else if kind == ICMP_ECHO_REPLY && n.ping_state == PING_ECHO
       && be16(n.pkt, 38) == PING_ID && be16(n.pkt, 40) == n.seq {
       n.ping_state = PING_DONE;
+    }
+    if mine && kind == ICMP_UNREACH {
+      tcp_icmp_error(&mut n, total);
+      udp_icmp_error(&mut n, total);
     }
     if mine {
       raw_deliver(&mut n, total);
@@ -982,6 +1237,10 @@ fn dhcp_start(n: &mut Net)
   requires net_ok(n)
   ensures net_ok(n)
 {
+  // RFC 2131 4.1: a transaction id the network cannot predict, a new one for
+  // each transaction (net_keyed is only a guess until nic_seed gives the
+  // stack its secret, which then starts the search again).
+  n.dhcp_xid = net_keyed(n, card_mac(n.dev), n.now, 68) % 4294967296;
   n.dhcp_state = DHCP_DISCOVER;
   n.dhcp_offer = 0;
   n.dhcp_until = n.now;
@@ -1016,7 +1275,8 @@ fn dhcp_in(n: &mut Net, ulen: u64)
   let end = 34 + ulen;                // the end of the datagram in the frame
   let extend = n.dhcp_state == DHCP_RENEW || n.dhcp_state == DHCP_REBIND;
   if (n.dhcp_state != DHCP_DISCOVER && n.dhcp_state != DHCP_REQUEST && !extend) || end < 282
-    || bget(n.pkt, 42) != 2 || be32(n.pkt, 46) != n.dhcp_xid || be32(n.pkt, 278) != DHCP_MAGIC {
+    || bget(n.pkt, 42) != 2 || be32(n.pkt, 46) != n.dhcp_xid || be32(n.pkt, 278) != DHCP_MAGIC
+    || be48(n.pkt, 70) != card_mac(n.dev) {
     return;
   }
   let yiaddr = be32(n.pkt, 58);
@@ -1211,7 +1471,9 @@ fn ping_send(n: &mut Net, mac: u64)
     i = i + 1;
   }
   put16(&mut n.out, 36, csum(n.out, 34, total - 20));
-  net_send(&mut n, 14 + total);
+  if nf_out(&mut n, n.ping_ip, 14 + total) {
+    net_send(&mut n, 14 + total);
+  }
   n.ping_state = PING_ECHO;
 }
 
@@ -1547,12 +1809,15 @@ fn raw_sendto(n: &mut Net, s: u64, to: u64, buf: &Bytes, size: u64) -> u64
     return NO_SOCK;
   }
   let kind = sk_get(n, s, S_PORT);
-  if (kind != RAW_ICMP && kind != RAW_ICMP6) || ip > IP_MAX || ip == 0
+  if (kind != RAW_ICMP && kind != RAW_ICMP6 && kind != RAW_ESP) || ip > IP_MAX || ip == 0
     || size < 8 || size > UDP_MAX + 8 || size > blen(buf) {
     return NO_SOCK;
   }
   sk_enter(&mut n, s);
   let mut proto = IP_ICMP;
+  if kind == RAW_ESP {
+    proto = IPPROTO_ESP;
+  }
   if kind == RAW_ICMP6 {
     proto = IP_ICMP6;
     if !is_v6tok(ip) {
@@ -1599,6 +1864,7 @@ fn udp_open(n: &mut Net) -> u64
       sk_set(&mut n, s, S_CORK, 0);
       sk_set(&mut n, s, S_NS, n.ns);
       sk_set(&mut n, s, S_FAM, FAM_V4);
+      sk_set(&mut n, s, S_ERR, 0);
       return s;
     }
     s = s + 1;
@@ -1651,6 +1917,57 @@ fn udp_head_len(n: &mut Net, s: u64) -> u64
   return l;
 }
 
+/// One keyed mixing step (the multiply-xorshift finalizer the generator in
+/// src/lxdev.bastio uses).
+fn net_mix(z: u64) -> u64 {
+  let a = wrap_mul(z ^ (z >> 30), 0xBF58476D1CE4E5B9);
+  let b = wrap_mul(a ^ (a >> 27), 0x94D049BB133111EB);
+  return b ^ (b >> 31);
+}
+
+/// A word that depends on the secret and on a, b and c: what RFC 6528 asks
+/// of the offset of an initial sequence number, and unguessable without the
+/// secret. It is a mixing function, not a MAC; an attacker who cannot see
+/// our traffic has the secret's 64 bits to guess.
+fn net_keyed(n: &Net, a: u64, b: u64, c: u64) -> u64
+  requires net_ok(n)
+{
+  return net_mix(net_mix(net_mix(n.sec ^ a) ^ b) ^ c);
+}
+
+/// Where the next ephemeral port search starts: the counter, which began at
+/// an unguessable place (nic_seed) and moves on by a keyed 1 to 16 each time.
+/// Ports still come round slowly, so a port just closed is not handed out
+/// again at once (a peer, or a NAT, may still hold the old connection).
+fn net_start(n: &mut Net) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && result < EPH_N
+{
+  let c = n.eph % EPH_N;
+  n.eph = (c + 1 + net_keyed(n, c, n.now, 7) % 16) % EPH_N;
+  return c;
+}
+
+/// Gives the stack its secret (once: a later word is ignored).
+fn nic_seed(c: &mut Nic, x: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if n.sec == 0 {
+        n.sec = x | 1;
+        n.eph = net_keyed(n, 0, 0, 0) % EPH_N;
+        if n.dhcp_state == DHCP_DISCOVER && n.dhcp_offer == 0 {
+          dhcp_start(&mut n);         // the first DISCOVER went out with a guessable transaction id
+        }
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
 /// Binds open, unbound socket s to a free ephemeral port. Returns the
 /// port, or 0 if none was found. There are fewer sockets than tries, so
 /// one of the ports tried is always free.
@@ -1659,11 +1976,11 @@ fn udp_bind_any(n: &mut Net, s: u64) -> u64
   ensures net_ok(n) && result <= 65535
 {
   let mut tries = 0;
+  let start = net_start(&mut n);
   while tries <= SOCKS
     invariant net_ok(n)
   {
-    let p = EPH_LO + n.eph % EPH_N;
-    n.eph = (n.eph % EPH_N + 1) % EPH_N;
+    let p = EPH_LO + (start + tries) % EPH_N;
     if sock_find(n, p) == SOCKS {
       sk_set(&mut n, s, S_PORT, p);
       return p;
@@ -1720,16 +2037,40 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
     net_poll(&mut n);
     spin = spin + 1;
   }
-  if !can_reach(n, ip) {
+  return udp_emit(&mut n, s, ip, port, buf, size);
+}
+
+/// The part of udp_sendto that builds and sends the datagram: socket s is
+/// open, ip and port are valid and size <= blen(buf).
+fn udp_emit(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n) && s < SOCKS && ip <= IP_MAX && port <= 65535 && size <= UDP_MAX && size <= blen(buf)
+  ensures net_ok(n)
+{
+  let hop = udp_frame(&mut n, s, ip, port, buf, size);
+  if hop > IP_MAX {
     return NO_SOCK;
   }
-  if sk_get(n, s, S_PORT) == 0 && udp_bind_any(&mut n, s) == 0 {
+  if !send_via(&mut n, hop, 42 + size) {
     return NO_SOCK;
+  }
+  return size;
+}
+
+/// Builds the datagram in n.out; the next hop, or IP_MAX + 1 if it cannot go.
+fn udp_frame(n: &mut Net, s: u64, ip: u64, port: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n) && s < SOCKS && ip <= IP_MAX && port <= 65535 && size <= UDP_MAX && size <= blen(buf)
+  ensures net_ok(n) && (result <= IP_MAX ==> 42 + size <= NET_BUF)
+{
+  if !can_reach(n, ip) {
+    return IP_MAX + 1;
+  }
+  if sk_get(n, s, S_PORT) == 0 && udp_bind_any(&mut n, s) == 0 {
+    return IP_MAX + 1;
   }
   let sport = sk_get(n, s, S_PORT);
   let hop = next_hop(n, ip);
   if sport > 65535 || hop > IP_MAX {
-    return NO_SOCK;
+    return IP_MAX + 1;
   }
   eth_header(&mut n, 0, ETH_IP);
   ip_header(&mut n, 28 + size, IP_UDP, ip);
@@ -1743,11 +2084,38 @@ fn udp_sendto(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -
   put16(&mut n.out, 38, 8 + size);
   bcopy(&mut n.out, 42, buf, 0, size);
   udp_seal(&mut n, ip, 8 + size);
-  if !send_via(&mut n, hop, 42 + size) {
+  return hop;
+}
+
+/// udp_sendto for a caller that is inside the stack's own frame handling
+/// (a packet being sent through a tunnel while one is taken in): it never
+/// polls, so a datagram for a full loopback queue is dropped instead of
+/// waiting for room.
+fn udp_out(n: &mut Net, s: u64, to: u64, port: u64, buf: &Bytes, size: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let ip = dst_ip(to);
+  if !udp_is_open(n, s) || ip > IP_MAX || port == 0 || port > 65535
+    || size > UDP_MAX || size > blen(buf) {
+    return NO_SOCK;
+  }
+  sk_enter(&mut n, s);
+  if lo_full(n, ip) {
+    return NO_SOCK;
+  }
+  let hop = udp_frame(&mut n, s, ip, port, buf, size);
+  if hop > IP_MAX {
+    return NO_SOCK;
+  }
+  // The encrypted packet of a tunnel: it skips the output hook (the packet
+  // inside went through it) and never enters a WireGuard device itself.
+  if !send_nowg(&mut n, hop, 42 + size) {
     return NO_SOCK;
   }
   return size;
 }
+
 
 /// Sends bytes 0..size of buf to ip:port after what MSG_MORE held back on
 /// s; with more, holds them back too. Returns size, or NO_SOCK (also when
@@ -1972,21 +2340,21 @@ fn net_up(d: Card) -> Nic
   ensures nic_ok(result)
 {
   let mut n = Net { dev: d, pkt: balloc(NET_BUF), out: balloc(NET_BUF), ip: 0, gw: 0, span: 1,
-    arp: alloc(ARP_N * 2), arp_next: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
+    arp: alloc(ARP_N * 3), arp_next: 0, icmp_sec: 0, icmp_n: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
     dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), dm: alloc(0), cork: balloc(0), eph: 0,
-    tcbs: alloc(TCB0 * TCB_W), rb: rings_new(), iss: 0,
+    tcbs: alloc(TCB0 * TCB_W), rb: rings_new(), iss: 0, sec: 0,
     lo: balloc(LO_BYTES), lo_len: alloc(LOQ), lo_at: alloc(LOQ), lo_tail: 0, lo_used: 0, lo_head: 0, lo_n: 0, lo_in: false, lo_split: false, lo_src: 0, seen_rx: 0, seen_tick: 0, irq_on: false,
     v6: alloc(V6N * V6W), v6_next: 0, iid: 0, pfx: 0, rtr_mac: 0, rtr_lo: 0, dns6_hi: 0, dns6_lo: 0, rs_n: 0, rs_until: 0,
     ns: 0, ifs: alloc(IFN * IF_W), nss: alloc(NNET * NS_W), ns_seq: 0, lo_if: alloc(LOQ), in_if: IF_ETH,
     nlq: balloc(NLS * NLQ), nls: alloc(NLS * NL_W), nl_at: 0, nl_lim: 0, nl_msg: 0, nl_full: false,
-    nat: alloc(NATN * NAT_W), nat_next: 0 };
+    nat: alloc(NATN * NAT_W), nat_next: 0, wgd: alloc(IFN * WG_W), wgp: alloc(WGPX_LEN),
+    nfw: alloc(NF_WORDS), nfb: balloc(NFS * NFSB), nfr: balloc(NF_REGS), ctw: alloc(NCT_WORDS) };
   netns_init(&mut n);
   n.iid = v6_iid(card_mac(n.dev));
   // The address comes from DHCP, sought from now on.
   if card_live(n.dev) {
-    n.dhcp_xid = card_mac(n.dev) % 4294967296;
     dhcp_start(&mut n);
   } else {
     dhcp_static(&mut n);
@@ -2170,8 +2538,10 @@ fn nic_tick(c: &mut Nic, now: u64)
     Nic::None => { c = Nic::None; },
     Nic::Up(mut n) => {
       n.ns = 0;                       // DHCP and IPv6 are the card's: namespace 0
+      arp_age(&mut n, now);
       dhcp_tick(&mut n, now);
       v6_tick(&mut n, now);
+      xs_reap(&mut n);                // an IPsec association past a limit is deleted, and its listeners told
       tcp_tick(&mut n, now);
       c = Nic::Up(n);
     },
@@ -2342,6 +2712,12 @@ fn net_dismantle(n: Net, m: &mut Mem) -> Card
   bfree(n.nlq);
   free(n.nls);
   free(n.nat);
+  free(n.wgd);
+  free(n.wgp);
+  free(n.nfw);
+  bfree(n.nfb);
+  bfree(n.nfr);
+  free(n.ctw);
   free(n.v6);
   return n.dev;
 }
@@ -2405,6 +2781,23 @@ fn sock_set_fam(c: &mut Nic, s: u64, fam: u64)
   }
 }
 
+/// Makes socket s (just opened) a raw ESP socket: one that sends packets of
+/// protocol 50 (what arrives is the IPsec stack's, not a socket's).
+fn sock_make_raw_esp(c: &mut Nic, s: u64)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      if udp_is_open(n, s) {
+        sk_set(&mut n, s, S_PORT, RAW_ESP);
+      }
+      c = Nic::Up(n);
+    },
+  }
+}
+
 /// Makes socket s (just opened) a raw ICMPv6 socket.
 fn sock_make_raw6(c: &mut Nic, s: u64)
   requires nic_ok(c)
@@ -2426,7 +2819,7 @@ fn sock_is_raw(c: &Nic, s: u64) -> bool
 {
   match c {
     Nic::None => { return false; },
-    Nic::Up(n) => { return udp_is_open(n, s) && (sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6); },
+    Nic::Up(n) => { return udp_is_open(n, s) && (sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 || sk_get(n, s, S_PORT) == RAW_ESP); },
   }
 }
 
@@ -2614,6 +3007,83 @@ fn sock_ready(c: &Nic, s: u64) -> bool
   }
 }
 
+/// An ICMP destination unreachable that came in (total: the IP length) and
+/// quotes a UDP datagram of ours: the socket bound to its source port keeps
+/// the error, with the address and port the datagram went to, for the next
+/// send or receive on a socket connected to that peer (RFC 1122 4.1.3.3).
+fn udp_icmp_error(n: &mut Net, total: u64)
+  requires net_ok(n) && 28 <= total && total <= NET_BUF - 14
+  ensures net_ok(n)
+{
+  if total < 56 || csum(n.pkt, 34, total - 20) != 0 {
+    return;
+  }
+  if cast[u64](bget(n.pkt, 42)) != 69 || cast[u64](bget(n.pkt, 51)) != IP_UDP {
+    return;
+  }
+  let s = sock_find_in(n, be16(n.pkt, 62), false);
+  if s >= SOCKS || !udp_is_open(n, s) {
+    return;
+  }
+  let code = cast[u64](bget(n.pkt, 35));
+  sk_set(&mut n, s, S_ERR, 1 + 16 * (be32(n.pkt, 58) * 65536 + be16(n.pkt, 64)) + code % 16);
+}
+
+/// The ICMP error that socket s holds about a datagram sent to ip:port: its
+/// code plus 1, and it is cleared; 0 if there is none (an error about
+/// another peer is dropped, as a connected socket would never see it).
+fn udp_err_take(n: &mut Net, s: u64, ip: u64, port: u64) -> u64
+  requires net_ok(n)
+  ensures net_ok(n) && result <= 16
+{
+  if !udp_is_open(n, s) || ip > IP_MAX {
+    return 0;
+  }
+  let e = sk_get(n, s, S_ERR);
+  if e == 0 {
+    return 0;
+  }
+  sk_set(&mut n, s, S_ERR, 0);
+  if (e - 1) / 16 == ip * 65536 + port % 65536 {
+    return (e - 1) % 16 + 1;
+  }
+  return 0;
+}
+
+fn sock_err_take(c: &mut Nic, s: u64, ip: u64, port: u64) -> u64
+  requires nic_ok(c)
+  ensures nic_ok(c) && result <= 16
+{
+  match c {
+    Nic::None => {
+      c = Nic::None;
+      return 0;
+    },
+    Nic::Up(mut n) => {
+      let r = udp_err_take(&mut n, s, ip, port);
+      c = Nic::Up(n);
+      return r;
+    },
+  }
+}
+
+/// Does socket s hold an ICMP error about a datagram sent to ip:port (so a
+/// poll of it reports POLLERR)? It does not take the error.
+fn sock_err_pending(c: &Nic, s: u64, ip: u64, port: u64) -> bool
+  requires nic_ok(c)
+{
+  match c {
+    Nic::None => { return false; },
+    Nic::Up(n) => {
+      if !udp_is_open(n, s) || ip > IP_MAX {
+        return false;
+      }
+      let e = sk_get(n, s, S_ERR);
+      return e != 0 && (e - 1) / 16 == ip * 65536 + port % 65536;
+    },
+  }
+}
+
 /// The address and port the last datagram taken from s came from (0
 /// before any).
 fn sock_peer_ip(c: &Nic, s: u64) -> u64
@@ -2672,7 +3142,7 @@ fn sock_row(c: &Nic, s: u64, ns: u64, f: u64) -> u64
   match c {
     Nic::None => { return 0; },
     Nic::Up(n) => {
-      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 {
+      if s >= SOCKS || !udp_is_open(n, s) || sk_get(n, s, S_NS) != ns || sk_get(n, s, S_PORT) == RAW_ICMP || sk_get(n, s, S_PORT) == RAW_ICMP6 || sk_get(n, s, S_PORT) == RAW_ESP {
         return 0;
       }
       if f == 0 {

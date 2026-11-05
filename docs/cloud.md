@@ -117,6 +117,15 @@ boots to the prompt, finds its partition and gets a DHCP address.
    `disk: NVMe`, `net: ena` and an address on `ifconfig` are the three things
    to look for.
 
+If the console says `disk: NVMe found but not started (reason N ...)`, N is the
+step the NVMe driver stopped at: 1 CAP.MPSMIN is not 0 (4 KiB pages), 8 CAP.CSS
+has no NVM command set, 9 CAP.MQES is below 31, 10 the doorbells lie outside the
+BAR, 2 the
+controller would not disable, 3 it did not become ready, 4 Identify namespace
+failed, 5 a block size other than 512 or 4096 bytes, 6 or 7 creating the I/O
+completion or submission queue failed. Without a reason, no NVMe function was
+found, or its BAR did not fit the device window.
+
 If the log stops, or says `net: ena found but not started (reason N ...)`
 (see above), keep the output: it is what is needed to fix the driver. Types
 that accept only low latency queues are the likeliest reason for 5, and trying

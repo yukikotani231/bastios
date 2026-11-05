@@ -20,6 +20,34 @@
 static volatile int got, val;
 static void h(int s, siginfo_t *i, void *c) { (void)c; got = s; val = i->si_value.sival_int; }
 
+/* A close with received bytes nobody read sends a reset, not a FIN: the peer
+ * reads what arrived and then gets ECONNRESET, as on Linux (RFC 2525 2.17). */
+static int close_unread_resets(void) {
+    int ls = socket(AF_INET, SOCK_STREAM, 0), one = 1;
+    struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(0x7f000001)};
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    if (ls < 0 || bind(ls, (void *)&a, sizeof a) != 0 || listen(ls, 2) != 0) return 0;
+    socklen_t l = sizeof a;
+    getsockname(ls, (void *)&a, &l);
+    pid_t k = fork();
+    if (k == 0) {
+        int c = accept(ls, 0, 0);
+        usleep(200000);                         /* the client's bytes are here, unread */
+        if (write(c, "ALERT", 5) != 5) _exit(1);
+        close(c);
+        _exit(0);
+    }
+    int s = socket(AF_INET, SOCK_STREAM, 0), st;
+    char b[16];
+    int ok = connect(s, (void *)&a, sizeof a) == 0 && write(s, "hello", 5) == 5;
+    ok = ok && read(s, b, sizeof b) == 5 && memcmp(b, "ALERT", 5) == 0;
+    ok = ok && read(s, b, sizeof b) == -1 && errno == ECONNRESET;
+    waitpid(k, &st, 0);
+    close(s);
+    close(ls);
+    return ok;
+}
+
 /* Stream socketpairs until one fails (64 fit), each carrying its own byte. */
 static int many_pairs(void) {
     int sv[65][2], n = 0, ok = 1;
@@ -134,6 +162,47 @@ static int reuse_port_listeners(void) {
     return ok;
 }
 
+/* The file broker of Firefox's sandbox: a child sends a request over a
+ * seqpacket pair from three buffers (a header, a path, a second path) with
+ * one end of a new pair in SCM_RIGHTS; the parent takes it into two (the
+ * header, then the rest) and answers over the end it got. */
+static int seqpacket_gather_scatter(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) != 0) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        close(sv[0]);
+        int rp[2];
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, rp) != 0) _exit(2);
+        char head[16] = "HEADER-12345678", path[] = "/usr/share/fonts/x.ttf", none[] = "";
+        struct iovec v[3] = {{head, sizeof head}, {path, sizeof path}, {none, sizeof none}};
+        char cb[CMSG_SPACE(sizeof(int))];
+        struct msghdr m = {.msg_iov = v, .msg_iovlen = 3, .msg_control = cb, .msg_controllen = sizeof cb};
+        struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+        h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(h), &rp[1], sizeof(int));
+        if (sendmsg(sv[1], &m, MSG_NOSIGNAL) != (ssize_t)(sizeof head + sizeof path + sizeof none)) _exit(3);
+        close(rp[1]);
+        char ans[8] = {0};
+        _exit(read(rp[0], ans, sizeof ans) == 2 && memcmp(ans, "ok", 2) == 0 ? 0 : 4);
+    }
+    close(sv[1]);
+    char head[16] = {0}, rest[256] = {0}, cb[CMSG_SPACE(sizeof(int))];
+    struct iovec v[2] = {{head, sizeof head}, {rest, sizeof rest}};
+    struct msghdr m = {.msg_iov = v, .msg_iovlen = 2, .msg_control = cb, .msg_controllen = sizeof cb};
+    ssize_t n = recvmsg(sv[0], &m, MSG_CMSG_CLOEXEC);
+    int fd = -1;
+    struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+    if (h && h->cmsg_level == SOL_SOCKET && h->cmsg_type == SCM_RIGHTS) memcpy(&fd, CMSG_DATA(h), sizeof fd);
+    int ok = n == 16 + 23 + 1 && memcmp(head, "HEADER-12345678", 16) == 0 && strcmp(rest, "/usr/share/fonts/x.ttf") == 0 && fd >= 0 &&
+             (fcntl(fd, F_GETFD) & FD_CLOEXEC) && write(fd, "ok", 2) == 2;
+    if (fd >= 0) close(fd);
+    int st = 0;
+    ok = ok && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    close(sv[0]);
+    return ok;
+}
+
 int main(void) {
     setup();
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
@@ -153,6 +222,7 @@ int main(void) {
            recvmsg(s, &m, 0) == 4 && memcmp(x, "ab", 2) == 0 && memcmp(y, "cd", 2) == 0; }));
     EXPECT("SO_RCVBUF and SO_SNDBUF", ({ int v = 0; socklen_t vl = sizeof v; getsockopt(s, SOL_SOCKET, SO_RCVBUF, &v, &vl) == 0 && v > 0 &&
            (vl = sizeof v, getsockopt(s, SOL_SOCKET, SO_SNDBUF, &v, &vl)) == 0 && v > 0; }));
+    EXPECT("getsockopt gives the length of the value, 4, for an int option", ({ int v = 0; socklen_t vl = 99; getsockopt(s, SOL_SOCKET, SO_SNDBUF, &v, &vl) == 0 && vl == sizeof v; }));
     EXPECT("SO_KEEPALIVE", setsockopt(s, SOL_SOCKET, SO_KEEPALIVE, &one, sizeof one) == 0);
     EXPECT("SO_ERROR is 0", ({ int v = -1; socklen_t vl = sizeof v; getsockopt(c, SOL_SOCKET, SO_ERROR, &v, &vl) == 0 && v == 0; }));
     EXPECT("getpeername", ({ struct sockaddr_in p; socklen_t pl = sizeof p; getpeername(c, (void *)&p, &pl) == 0 && p.sin_port == a.sin_port; }));
@@ -194,6 +264,23 @@ int main(void) {
            for (int i = 0; i < 3; i++)
                ok = ok && got[i] >= 0 && write(got[i], "0123" + i, 1) == 1 && read(p[i][0], &x, 1) == 1 && x == "0123"[i];
            ok; }));
+    EXPECT("SCM_RIGHTS passes twelve descriptors in one message (Firefox's IPC sends nine)", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
+           enum { N = 12 }; int p[N][2]; int fds[N]; for (int i = 0; i < N; i++) { pipe(p[i]); fds[i] = p[i][1]; }
+           char cb[CMSG_SPACE(N * sizeof(int))] = {0}; struct iovec v = {"f", 1};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = sizeof cb};
+           struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
+           memcpy(CMSG_DATA(h), fds, sizeof fds);
+           int ok = sendmsg(sv[0], &m, 0) == 1;
+           char rb[CMSG_SPACE(N * sizeof(int))]; char x; struct iovec rv = {&x, 1};
+           struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+           int got[N]; for (int i = 0; i < N; i++) got[i] = -1;
+           ok = ok && recvmsg(sv[1], &r, 0) == 1 && (h = CMSG_FIRSTHDR(&r)) && h->cmsg_type == SCM_RIGHTS && h->cmsg_len == CMSG_LEN(sizeof got) &&
+                !(r.msg_flags & MSG_CTRUNC) && (memcpy(got, CMSG_DATA(h), sizeof got), 1);
+           for (int i = 0; i < N; i++)
+               ok = ok && got[i] >= 0 && write(got[i], "abcdefghijkl" + i, 1) == 1 && read(p[i][0], &x, 1) == 1 && x == "abcdefghijkl"[i];
+           for (int i = 0; i < N; i++) { close(p[i][0]); close(p[i][1]); if (got[i] >= 0) close(got[i]); }
+           close(sv[0]); close(sv[1]);
+           ok; }));
     EXPECT("SCM_RIGHTS with a short buffer closes the rest and says MSG_CTRUNC", socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0 && ({
            int p[3][2]; int fds[3]; for (int i = 0; i < 3; i++) { pipe(p[i]); fds[i] = p[i][1]; }
            char cb[CMSG_SPACE(3 * sizeof(int))] = {0}; struct iovec v = {"f", 1};
@@ -228,6 +315,21 @@ int main(void) {
            struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof fds);
            memcpy(CMSG_DATA(h), fds, sizeof fds);
            sendmsg(sv[0], &m, 0) == -1 && errno == EBADF; }));
+    EXPECT("SCM_RIGHTS with no descriptors in it (Firefox's IPC sends such a header) sends the bytes alone, on a stream and a seqpacket pair", ({
+           int ok = 1;
+           int types[2] = {SOCK_STREAM, SOCK_SEQPACKET};
+           for (int t = 0; t < 2 && ok; t++) {
+               int s2[2]; ok = socketpair(AF_UNIX, types[t], 0, s2) == 0;
+               char cb[CMSG_SPACE(sizeof(int))] = {0}; struct iovec v = {"hello", 5};
+               struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = cb, .msg_controllen = CMSG_LEN(0)};
+               struct cmsghdr *h = CMSG_FIRSTHDR(&m); h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(0);
+               ok = ok && sendmsg(s2[0], &m, 0) == 5;
+               char got[8] = {0}, rb[CMSG_SPACE(sizeof(int))]; struct iovec rv = {got, sizeof got};
+               struct msghdr r = {.msg_iov = &rv, .msg_iovlen = 1, .msg_control = rb, .msg_controllen = sizeof rb};
+               ok = ok && recvmsg(s2[1], &r, 0) == 5 && memcmp(got, "hello", 5) == 0 && r.msg_controllen == 0;
+               close(s2[0]); close(s2[1]);
+           }
+           ok; }));
     EXPECT("SCM_RIGHTS from two clients that sent and closed before the accept, and a child that closes the listener", ({
            struct sockaddr_un ua = {.sun_family = AF_UNIX}; strcpy(ua.sun_path, "/tmp/t_scm.sock"); unlink(ua.sun_path);
            int ls = socket(AF_UNIX, SOCK_STREAM, 0); int ok = ls >= 0 && bind(ls, (void *)&ua, sizeof ua) == 0 && listen(ls, 4) == 0;
@@ -256,6 +358,7 @@ int main(void) {
                close(a);
            }
            ok; }));
+    EXPECT("a seqpacket message sent from three buffers with a descriptor comes in whole over two, as Firefox's sandbox asks for files", seqpacket_gather_scatter());
     EXPECT("AF_UNIX SOCK_DGRAM socketpair", socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0 && send(sv[0], "dg", 2, 0) == 2 &&
            recv(sv[1], b, sizeof b, 0) == 2);
     {
@@ -283,6 +386,7 @@ int main(void) {
                read(f, &i, sizeof i) == sizeof i && i.ssi_signo == SIGUSR1 && i.ssi_code == SI_QUEUE && i.ssi_int == 7);
         close(f);
     }
+    EXPECT("closing a TCP socket with unread bytes resets the peer, after it read what had arrived", close_unread_resets());
     EXPECT("a nonblocking connect to a closed port reads ECONNREFUSED from SO_ERROR, once", refused_connect());
     EXPECT("TCP listeners that set SO_REUSEPORT share a port; one that did not is refused", reuse_port_listeners());
     EXPECT("56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails", many_pairs());

@@ -26,6 +26,7 @@ const WOP_PROTECT: u64 = 1;             // arg: 2 read-write, 1 read-only, 0 PRO
 const WOP_MOVE: u64 = 2;                // arg: where the first page goes
 const WOP_COUNT: u64 = 3;               // only count the mapped pages
 const WOP_ZERO: u64 = 4;                // fill the private pages with zeros (madvise)
+const WOP_FREE: u64 = 5;                // give back the private writable pages (madvise); counts those it gave back
 const WIN_L1S: u64 = 512;             // level-1 tables under one level-2 table
 const L2_PAGES: u64 = 262144;         // pages under one level-2 table: WIN_L1S * 512
 const L2_SIZE: u64 = 0x40000000;      // L2_PAGES * 4096 (1 GiB)

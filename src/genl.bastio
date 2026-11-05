@@ -1,0 +1,221 @@
+// Generic netlink (NETLINK_GENERIC): the controller family "nlctrl", which
+// programs ask which family number a name has (CTRL_CMD_GETFAMILY, by name,
+// by number, or as a dump), and "wireguard" (src/wgdev.bastio). Other
+// families are listed in the tables below as they are added; a message for a number nothing has
+// claimed is answered ENOENT, as Linux does.
+//
+// What is not done: multicast groups (a family has none to list), the
+// CTRL_ATTR_OPS list, CTRL_CMD_GETPOLICY, and notifications of families
+// coming and going.
+
+const NETLINK_GENERIC: u64 = 16;
+const GENL_ID_CTRL: u64 = 16;             // also the first number a family can have
+const CTRL_CMD_NEWFAMILY: u64 = 1;
+const CTRL_CMD_GETFAMILY: u64 = 3;
+const CTRL_ATTR_FAMILY_ID: u64 = 1;
+const CTRL_ATTR_FAMILY_NAME: u64 = 2;
+const CTRL_ATTR_VERSION: u64 = 3;
+const CTRL_ATTR_HDRSIZE: u64 = 4;
+const CTRL_ATTR_MAXATTR: u64 = 5;
+const GENL_ID_WG: u64 = 17;
+const WG_CMD_GET_DEVICE: u64 = 0;
+const GENL_FAMILIES: u64 = 2;             // nlctrl and wireguard
+const NE_NOENT: u64 = 2;
+
+/// The family number of family i.
+fn gl_id(i: u64) -> u64
+  ensures result >= GENL_ID_CTRL && result < 65536
+{
+  return GENL_ID_CTRL + smaller(i, 1000);
+}
+
+/// The first and second eight bytes of family i's name, low byte first.
+fn gl_name0(i: u64) -> u64
+{
+  if i == 1 {
+    return 8241997880008796535;           // "wireguar", then "d"
+  }
+  return 119238834744430;                 // "nlctrl"
+}
+
+fn gl_name1(i: u64) -> u64
+{
+  if i == 1 {
+    return 100;
+  }
+  return 0;
+}
+
+fn gl_version(i: u64) -> u64
+{
+  if i == 1 {
+    return 1;
+  }
+  return 2;
+}
+
+/// The largest attribute number family i understands.
+fn gl_maxattr(i: u64) -> u64
+{
+  if i == 1 {
+    return 8;
+  }
+  return 10;
+}
+
+/// The family whose number is id, or GENL_FAMILIES.
+fn gl_by_id(id: u64) -> u64
+  ensures result <= GENL_FAMILIES
+{
+  let mut i = 0;
+  while i < GENL_FAMILIES
+    invariant i <= GENL_FAMILIES
+  {
+    if gl_id(i) == id {
+      return i;
+    }
+    i = i + 1;
+  }
+  return GENL_FAMILIES;
+}
+
+/// The family whose name is the NUL-terminated string at b[a..a + l), or
+/// GENL_FAMILIES.
+fn gl_by_name(b: &Bytes, a: u64, l: u64) -> u64
+  requires a + l <= blen(b)
+  ensures result <= GENL_FAMILIES
+{
+  let mut i = 0;
+  while i < GENL_FAMILIES
+    invariant i <= GENL_FAMILIES && a + l <= blen(b)
+  {
+    let mut same = l <= 16 || (l == 17 && bget(b, a + 16) == 0);
+    let mut j = 0;
+    while j < 16 && same
+      invariant j <= 16 && a + l <= blen(b)
+    {
+      let mut c = 0;
+      if j < l {
+        c = cast[u64](bget(b, a + j));
+      }
+      if c != name_byte(gl_name0(i), gl_name1(i), j) {
+        same = false;
+      }
+      j = j + 1;
+    }
+    if same {
+      return i;
+    }
+    i = i + 1;
+  }
+  return GENL_FAMILIES;
+}
+
+/// CTRL_CMD_NEWFAMILY describing family i.
+fn gl_family(n: &mut Net, i: u64, flags: u64, seq: u64, port: u64)
+  requires net_ok(n) && i < GENL_FAMILIES
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, GENL_ID_CTRL, flags, seq, port);
+  nl_b(&mut n, CTRL_CMD_NEWFAMILY);
+  nl_b(&mut n, 2);                        // the controller's version
+  nl_16(&mut n, 0);
+  nla_head(&mut n, CTRL_ATTR_FAMILY_ID, 2);
+  nl_16(&mut n, gl_id(i));
+  nl_pad(&mut n);
+  nla_str(&mut n, CTRL_ATTR_FAMILY_NAME, gl_name0(i), gl_name1(i));
+  nla_put32(&mut n, CTRL_ATTR_VERSION, gl_version(i));
+  nla_put32(&mut n, CTRL_ATTR_HDRSIZE, 0);
+  nla_put32(&mut n, CTRL_ATTR_MAXATTR, gl_maxattr(i));
+  nl_end(&mut n);
+}
+
+/// The generic netlink messages in b[0..len) sent on socket q: how many
+/// bytes were taken (whole messages).
+fn genl_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
+  requires net_ok(n) && q < NLS && len <= blen(b)
+  ensures net_ok(n)
+{
+  let was = n.ns;
+  let ns = get(n.nls, q * NL_W + NL_NS);
+  let port = get(n.nls, q * NL_W + NL_PORT);
+  if ns >= NNET || !ns_live(n, ns) {
+    return len;
+  }
+  n.ns = ns;                              // the socket's namespace, as rtnetlink does
+  nlw_open(&mut n, q);
+  let mut at = 0;
+  let mut go = true;
+  while go && at < len && len - at >= 16
+    invariant at <= len && len <= blen(b) && net_ok(n) && ns < NNET
+  {
+    let ml = rd32(b, at);
+    if ml < 16 {
+      go = false;
+      at = len;
+    } else if ml > len - at {
+      go = false;
+    } else {
+      let kind = rd16(b, at + 4);
+      let fl = rd16(b, at + 6);
+      let seq = rd32(b, at + 8);
+      let end = at + ml;
+      let mut e = 0;
+      let mut quiet = false;
+      if kind < 16 {
+        quiet = true;                     // NLMSG_NOOP, _ERROR, _DONE
+      } else if kind != GENL_ID_CTRL && kind != GENL_ID_WG {
+        e = NE_NOENT;                     // no such family
+      } else if ml < 20 {
+        e = NE_INVAL;
+      } else if kind == GENL_ID_WG {
+        e = wg_request(&mut n, b, at, end, fl, seq, port, admin);
+        quiet = e == 0 && rd8(b, at + 16) == WG_CMD_GET_DEVICE;
+      } else if rd8(b, at + 16) != CTRL_CMD_GETFAMILY {
+        e = NE_OPNOTSUPP;
+      } else if fl / 256 % 4 == 3 {
+        let mut i = 0;
+        while i < GENL_FAMILIES
+          invariant i <= GENL_FAMILIES && net_ok(n)
+        {
+          gl_family(&mut n, i, NLM_F_MULTI, seq, port);
+          i = i + 1;
+        }
+        nl_done(&mut n, seq, port);
+        quiet = true;
+      } else {
+        let by_name = nla_find(b, at + 20, end, CTRL_ATTR_FAMILY_NAME);
+        let by_id = nla_find(b, at + 20, end, CTRL_ATTR_FAMILY_ID);
+        let mut f = GENL_FAMILIES;
+        if by_name != 0 {
+          f = gl_by_name(b, by_name, nla_len(b, by_name));
+        } else if by_id != 0 && nla_len(b, by_id) >= 2 {
+          f = gl_by_id(rd16(b, by_id));
+        } else {
+          e = NE_INVAL;
+        }
+        if e == 0 {
+          if f < GENL_FAMILIES {
+            gl_family(&mut n, f, 0, seq, port);
+            quiet = true;
+          } else {
+            e = NE_NOENT;
+          }
+        }
+      }
+      if e != 0 || (!quiet && fl / NLM_F_ACK % 2 == 1) {
+        nl_error(&mut n, b, at, e, port);
+      }
+      let step = (ml + 3) / 4 * 4;
+      if step > len - at {
+        at = end;
+        go = false;
+      } else {
+        at = at + step;
+      }
+    }
+  }
+  nlw_close(&mut n, q);
+  n.ns = was;
+  return at;
+}

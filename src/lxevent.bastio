@@ -16,10 +16,21 @@
 // asked for, and the data handed back. An entry whose fd has since been
 // closed or now names another description is dropped when it is next
 // looked at, as Linux drops it when the description closes. Readiness is
-// what poll finds, so edge-triggered entries (EPOLLET) are reported like
-// level-triggered ones: a program that reads until EAGAIN, as EPOLLET
-// requires, sees no difference. An epoll instance inside another never
-// reports ready.
+// what poll finds. An edge-triggered entry (EPOLLET) on a pipe or an
+// eventfd is reported only when the pipe or counter has changed since the
+// entry was last reported (et_gen: a count of changes kept with the pipe
+// or the eventfd, the last one reported kept in the entry's events word,
+// ET_GEN), so a program that leaves a wake-up eventfd unread, as mio's
+// waker does, sleeps until the next write instead of being told of it
+// again and again. Edge-triggered entries on other kinds (sockets,
+// timerfds, ...) are still reported like level-triggered ones, which a
+// program that reads until EAGAIN, as EPOLLET requires, does not notice
+// but for the extra wake-ups. The mount tables are the exception: they
+// are always readable, and reading never drains them, so an edge-triggered
+// entry on one is reported once after it is added and then once after each
+// change of the mount table (EP_ETDONE), as on Linux; libmount's monitor
+// watches mountinfo that way and loops until epoll_wait finds nothing.
+// An epoll instance inside another never reports ready.
 //
 // A signalfd is an open file description of kind OF_SIGFD whose word 2 is
 // the set of signals it takes. A read takes the lowest pending ones in the
@@ -71,6 +82,9 @@ const EPOLL_CTL_DEL: u64 = 2;
 const EPOLL_CTL_MOD: u64 = 3;
 const EPOLLONESHOT: u64 = 0x40000000;
 const EP_OFF: u64 = 0x4000000000000000;      // a one-shot entry that has fired
+const EPOLLET: u64 = 0x80000000;
+const EP_ETDONE: u64 = 0x2000000000000000;   // an edge-triggered entry on a mount table that has been reported (ep_entry_bits)
+const ET_GEN: u64 = 0x100000000;              // the events word holds, times this, et_gen when the edge-triggered entry was last reported (below 2^60)
 const INT_NEG: u64 = 0x80000000;             // an int argument this large is negative
 const VA_LAST: u64 = 0xFFFFFFFFFFFF0000;     // an address past this cannot hold two timespecs
 
@@ -145,7 +159,18 @@ fn ev_write(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
     return EAGAIN;                          // wait for a reader to take some
   }
   of_set(&mut k.ofd, h, 2, c + v);
+  ev_changed(&mut k, h);
   return 8;
+}
+
+/// Counts a change of eventfd description h's counter (word 3 / 256,
+/// modulo ET_GENS), which an edge-triggered epoll entry is told of.
+fn ev_changed(k: &mut Kernel, h: u64)
+  requires kok(k) && h < OFD_N
+  ensures kok(k)
+{
+  let w3 = of_get(k.ofd, h, 3);
+  of_set(&mut k.ofd, h, 3, w3 % 256 + (w3 / 256 % ET_GENS + 1) % ET_GENS * 256);
 }
 
 // ---------------------------------------------------------------- signalfd
@@ -318,6 +343,7 @@ fn ev_read(k: &mut Kernel, pid: u64, kind: u64, x: u64, va: u64, n: u64) -> u64
       return EFAULT;
     }
     of_set(&mut k.ofd, x, 2, c - v);
+    ev_changed(&mut k, x);
     return 8;
   }
   if x >= TFD_N {
@@ -591,6 +617,28 @@ fn mnt_catch_up(k: &mut Kernel, h: u64)
   }
 }
 
+/// Whether descriptor fd of process pid is a mount table (is_mounts_dev).
+fn mounts_fd(k: &Kernel, pid: u64, fd: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  let f = fd_look(k, pid, fd);
+  return f.kind == K_DEV && is_mounts_dev(f.x);
+}
+
+/// A poll, select or epoll_wait of process pid found `bits` on descriptor
+/// fd. If fd is a mount table and they report a change (POLLPRI and
+/// POLLERR), the change is used up: as on Linux, the next poll of the same
+/// description finds none until the table changes again. Reading the file
+/// does not use it up.
+fn mnt_polled(k: &mut Kernel, pid: u64, fd: u64, bits: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if bits & (POLLPRI | POLLERR) != 0 && mounts_fd(k, pid, fd) {
+    mnt_catch_up(&mut k, fd_ofd(k, pid, fd));
+  }
+}
+
 /// epoll_ctl(epfd, op, fd, event).
 fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -605,10 +653,17 @@ fn lx_epoll_ctl(k: &mut Kernel, pid: u64, epfd: u64, op: u64, fd: u64, ev: u64) 
   }
   let e = ep.x;
   let target = fd_look(k, pid, fd);
+  if target.kind == K_BAD && fd < LXNFD && mnt_desc(k, pid, fd) < OFD_N {
+    return EPERM;                           // a file system context or mount object (src/lxmountapi.bastio) cannot be watched
+  }
   if target.kind == K_BAD || fd >= LXNFD {
     return EBADF;
   }
-  if target.kind == K_FILE || target.kind == K_DIR || target.kind == K_DEV && no_poll_dev(target.x) {
+  if target.kind == K_DIR && ofd_lacks(k, fd_ofd(k, pid, fd), ACC_PATH) {
+    return EBADF;                           // an O_PATH handle cannot be watched
+  }
+  if (target.kind == K_FILE && ur_find(k, row_file(k.fs, target.x)) >= URING_N) || target.kind == K_DIR
+     || target.kind == K_DEV && no_poll_dev(target.x) {
     return EPERM;                           // a file is always ready: Linux will not watch one
   }
   if op == EPOLL_CTL_ADD && target.kind == K_EPOLL && target.x < EP_N && e < EP_N {
@@ -664,10 +719,38 @@ fn ep_entry_bits(k: &Kernel, pid: u64, e: u64, j: u64) -> u64
     return 0;
   }
   let events = evg(k, ep_at(e, j, 2));
-  if events & EP_OFF != 0 || fd_ofd(k, pid, w - 1) != evg(k, ep_at(e, j, 1)) {
+  let h = evg(k, ep_at(e, j, 1));
+  if events & EP_OFF != 0 || fd_ofd(k, pid, w - 1) != h {
     return 0;
   }
-  return leaf_bits(k, pid, w - 1) & (events | POLLERR | POLLHUP) & 0xFFFF;
+  if events & EP_ETDONE != 0 && mnt_seen(k, h) == mnt_events(k) && mounts_fd(k, pid, w - 1) {
+    return 0;                               // reported, and the mount table has not changed since
+  }
+  let bits = leaf_bits(k, pid, w - 1) & (events | POLLERR | POLLHUP) & 0xFFFF;
+  if bits != 0 && events & EPOLLET != 0 {
+    let g = et_gen(k, pid, w - 1);
+    if g != 0 && events / ET_GEN % ET_GENS == g {
+      return 0;                             // reported, and nothing has changed since
+    }
+  }
+  return bits;
+}
+
+/// For an edge-triggered entry on descriptor fd of process pid: 1 + the
+/// count of changes of the pipe or eventfd it names, modulo ET_GENS - 1
+/// (so never 0); 0 for a kind that keeps no count.
+fn et_gen(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < ET_GENS
+{
+  let f = fd_look(k, pid, fd);
+  if f.kind == K_EVENT && f.x < OFD_N {
+    return of_get(k.ofd, f.x, 3) / 256 % (ET_GENS - 1) + 1;
+  }
+  if (f.kind == K_PIPE_R || f.kind == K_PIPE_W) && f.x < NPIPES {
+    return pi_get(k.pipes, f.x, 8) % (ET_GENS - 1) + 1;
+  }
+  return 0;
 }
 
 // Epoll instances can watch each other. An entry for one is ready when
@@ -956,6 +1039,19 @@ fn lx_epoll_wait(k: &mut Kernel, pid: u64, n: u64, was: u64, epfd: u64, va: u64,
       if events & EPOLLONESHOT != 0 {
         evs(&mut k, ep_at(e, j, 2), events | EP_OFF);   // until EPOLL_CTL_MOD
       }
+      if events & EPOLLET != 0 && w != 0 {
+        let g = et_gen(k, pid, w - 1);
+        let now = evg(k, ep_at(e, j, 2));
+        if g != 0 {
+          evs(&mut k, ep_at(e, j, 2), now - now / ET_GEN % ET_GENS * ET_GEN + g * ET_GEN);   // until it changes, or EPOLL_CTL_MOD
+        }
+      }
+      if w != 0 && mounts_fd(k, pid, w - 1) {
+        mnt_polled(&mut k, pid, w - 1, bits);
+        if events & EPOLLET != 0 {
+          evs(&mut k, ep_at(e, j, 2), evg(k, ep_at(e, j, 2)) | EP_ETDONE);   // until the next change, or EPOLL_CTL_MOD
+        }
+      }
       got = got + 1;
       last = j;
     }
@@ -1057,6 +1153,10 @@ fn lx_mknod(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, mode: u64, dev: u64
   }
   xfer_load(&mut k, t, 0, n);               // path_meta may have used the transfer buffer
   bfree(t);
+  let ll_e = ll_deny_in(k, pid, ll_make_for(ty), n);
+  if ll_e != 0 {
+    return ll_e;
+  }
   if path_ro(&mut k, n) {
     return EROFS;
   }
