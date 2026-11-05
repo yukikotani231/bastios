@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Two more keyboard layouts for `bwm`: `uk` and `de` (QWERTZ), picked with `k` in the System window or by writing `/etc/keymap`. Characters that need more than one byte or the AltGr key (the pound sign, umlauts, `@` on `de`) are not typed.
 - `w` in the `bsys` window cycles the wallpaper through the `.ppm` and `.bmp` files of `/usr/share/wallpapers` (then none) by writing `/etc/bwm.wallpaper`, which a running `bwm` reads again within a second; a Wallpaper row shows it.
 - A disk that BastiOS leaves alone (one with a partition table or other data on it) can be read: `/dev/sda` is the whole disk and `/dev/sda1` .. `/dev/sda15` its partitions, from a GPT or the four primary slots of an MBR. The devices are read-only (open for writing is `EROFS`), for root and group `disk`, so files can be copied off with `cp` or `cat`, or an ext4 partition copied to a file and mounted through a loop device. Not done: a second disk, writing, logical MBR partitions. See `docs/linux.md`.
 - The `XFRMNLGRP_SA` netlink group of `NETLINK_XFRM` hears `XFRM_MSG_NEWSA` and `XFRM_MSG_DELSA` as security associations are added, replaced, deleted, flushed or expire (`test/compat/progs/t_xfrmev.c`).
