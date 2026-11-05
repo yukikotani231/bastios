@@ -2770,6 +2770,27 @@ t_xfrm: the same SPI to another destination is another association
 t_xfrm: the same one again is EEXIST
 t_xfrm: the same selector in the other direction is another policy
 t_xfrm: two templates are EOPNOTSUPP
+t_xfrmev: the table is flushed first
+t_xfrmev: a socket to configure with
+t_xfrmev: root can join the SA group
+t_xfrmev: sockets in no group and in the expire group
+t_xfrmev: an association is added
+t_xfrmev: NEWSA is reported with its SPI
+t_xfrmev: an association is deleted
+t_xfrmev: DELSA is reported with its SPI
+t_xfrmev: two associations are added
+t_xfrmev: both NEWSA are reported
+t_xfrmev: they are flushed
+t_xfrmev: a DELSA for each
+t_xfrmev: a failed add reports nothing
+t_xfrmev: only the first add is reported
+t_xfrmev: an association with a hard limit
+t_xfrmev: NEWSA
+t_xfrmev: its expiry is a DELSA too
+t_xfrmev: a socket in no group heard nothing
+t_xfrmev: nor the expire group, which hears its own message
+t_xfrmev: the child made one
+t_xfrmev: an association of another namespace is not reported
 t_xfrmexp: NETLINK_ADD_MEMBERSHIP joins
 t_xfrmexp: NETLINK_DROP_MEMBERSHIP leaves
 t_xfrmexp: a socket of another group heard nothing
