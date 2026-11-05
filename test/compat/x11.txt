@@ -163,3 +163,12 @@ fakebwm: window 800x600 X11 :15
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11: a Java media renamer, FileBot, draws its window on the X screen
+# timeout 400
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/b; bb tar -xf /disk/filebot.tar -C /disk/b && bb rm /disk/filebot.tar; /disk/fakebwm 300 'x' >/disk/fb17.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/b -d 16 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /opt/filebot/filebot >/disk/flb.out 2>&1 & until bb grep -q typed /disk/fb17.out; do bb sleep 1; done; bb cat /disk/fb17.out; bb ps | bb grep -q 'filebot' && echo alive || bb cat /disk/flb.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :16
+fakebwm: pixels drawn
+fakebwm: typed
+alive
