@@ -17,6 +17,8 @@
 #define TIMER_INTID 30          /* the EL1 physical timer, a private interrupt */
 #define V_TIMER 32              /* the boot processor's tick, which counts the kernel's time */
 #define V_LTIMER 48             /* any other processor's tick */
+#define V_WAKE 50               /* another processor's wake-up (SGI 1): look for work */
+#define WAKE_INTID 1            /* the software-generated interrupt bst_platform_info(12) sends */
 #define MAX_CPUS 64                     /* the redistributor walk below reads one GICv3 region (QEMU virt: 123 frames); more needs the second one */
 #define CPU_STACK 65536
 
@@ -469,7 +471,8 @@ static void gic_cpu_init(void) {
     if (gic_ver == 2) {
         w32(GICD + 0x0080, 0);                              /* GICD_IGROUPR0: group 0, signalled as IRQ while GICC_CTLR.FIQEn is 0 */
         w8(GICD + 0x0400 + TIMER_INTID, 0x80);               /* priority (a byte register: banked per processor) */
-        w32(GICD + 0x0100, 1u << TIMER_INTID);               /* GICD_ISENABLER0 */
+        w8(GICD + 0x0400 + WAKE_INTID, 0x80);
+        w32(GICD + 0x0100, (1u << TIMER_INTID) | (1u << WAKE_INTID));   /* GICD_ISENABLER0 */
         w32(GICR + 0x0004, 0xFF);                            /* GICC_PMR */
         w32(GICR + 0x0000, 1);                               /* GICC_CTLR: enable */
         return;
@@ -482,7 +485,8 @@ static void gic_cpu_init(void) {
     uint64_t sgi = rd + 0x10000;
     w32(sgi + 0x0080, 0xFFFFFFFFu);                          /* group 1 */
     w8(sgi + 0x0400 + TIMER_INTID, 0x80);                    /* priority */
-    w32(sgi + 0x0100, 1u << TIMER_INTID);                    /* enable */
+    w8(sgi + 0x0400 + WAKE_INTID, 0x80);
+    w32(sgi + 0x0100, (1u << TIMER_INTID) | (1u << WAKE_INTID));   /* enable */
     uint64_t sre;
     __asm__ volatile ("mrs %0, icc_sre_el1" : "=r"(sre));
     __asm__ volatile ("msr icc_sre_el1, %0; isb" : : "r"(sre | 1));
@@ -523,6 +527,8 @@ uint64_t bst_irq_ack(void) {
     if (id == TIMER_INTID) {
         __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(tick_cycles));
         v = this_cpu()->id == 0 ? V_TIMER : V_LTIMER;
+    } else if (id == WAKE_INTID) {
+        v = V_WAKE;
     }
     if (gic_ver == 2) w32(GICR + 0x0010, (uint32_t)id);      /* GICC_EOIR */
     else __asm__ volatile ("msr icc_eoir1_el1, %0; isb" : : "r"(id));
@@ -622,8 +628,19 @@ void bst_platform_smp_join(void) {
 uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; return 256; }
 /* boot_info: query 10 is the device tree, byte i of it, 256 past its end
  * (or when there is none); query 11 is the generic timer's rate in Hz
- * (CNTFRQ_EL0); every other query is 0. */
+ * (CNTFRQ_EL0); query 12 is not a query: it sends the wake-up interrupt to
+ * every other processor (the answer is 0), so those waiting in
+ * bst_cpu_wait look for work now instead of at their next tick; every
+ * other query is 0. */
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    if (what == 12) {
+        if (gic_ver == 2) {
+            w32(GICD + 0x0F00, (1u << 24) | WAKE_INTID);     /* GICD_SGIR: all but this processor */
+        } else {
+            __asm__ volatile ("dsb ishst; msr icc_sgi1r_el1, %0; isb" : : "r"((1ull << 40) | ((uint64_t)WAKE_INTID << 24)) : "memory");
+        }
+        return 0;
+    }
     if (what == 11) {
         uint64_t f;
         __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));
