@@ -2947,6 +2947,16 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, kb);
     a = put_s(&mut o, a, " kB\nThreads:\t");
     a = put_n(&mut o, a, group_size(k, p));
+    a = put_s(&mut o, a, "\nCapInh:\t");
+    a = put_hx16(&mut o, a, cap_word(k, p, 2));   // CAPW_INH
+    a = put_s(&mut o, a, "\nCapPrm:\t");
+    a = put_hx16(&mut o, a, cap_perm_v(k, p));
+    a = put_s(&mut o, a, "\nCapEff:\t");
+    a = put_hx16(&mut o, a, cap_eff_v(k, p));
+    a = put_s(&mut o, a, "\nCapBnd:\t");
+    a = put_hx16(&mut o, a, 0x1FFFFFFFFFF & !cap_word(k, p, 3));
+    a = put_s(&mut o, a, "\nCapAmb:\t");
+    a = put_hx16(&mut o, a, 0);
     a = put_s(&mut o, a, "\nNoNewPrivs:\t");
     if sc_nnp(k, p) {
       a = put_n(&mut o, a, 1);
