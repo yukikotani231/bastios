@@ -77,6 +77,13 @@ def main():
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
+        if tar == "krusader.tar":
+            # A BastiOS disk holds at most 262144 entries (files, directories
+            # and links; DSLOTS in src/diskfs.bastio) and the lane's roots
+            # use most of them. Krusader's icon themes and message catalogues
+            # are tens of thousands of small files it can start without.
+            unpacked[tar] = write_tar(files, os.path.join(work, tar), lambda n: not n.startswith(("usr/share/icons/breeze", "usr/share/locale/")))
+            continue
         if tar == "tag.tar":
             # puddletag's root is 640 MB: its biggest libraries are a file of
             # their own (tag2.tar), unpacked after tag.tar is removed, so the
