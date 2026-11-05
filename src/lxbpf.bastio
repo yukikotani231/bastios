@@ -435,6 +435,9 @@ fn dv_num(d: u64) -> DvNum
   if d >= DEV_LOOP && d < DEV_LOOP + LOOP_N {
     return DvNum { ty: DVT_BLOCK, major: 7, minor: d - DEV_LOOP };
   }
+  if d >= DEV_SD && d < DEV_SD + SD_N {
+    return DvNum { ty: DVT_BLOCK, major: 8, minor: d - DEV_SD };
+  }
   if d >= DEV_PTS && d < DEV_PTS + PTY_N {
     return DvNum { ty: DVT_CHAR, major: 136, minor: d - DEV_PTS };
   }
