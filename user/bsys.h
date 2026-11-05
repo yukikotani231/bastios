@@ -26,7 +26,7 @@
 #include <sys/ioctl.h>
 #include <sys/socket.h>
 
-#define BS_ROWS 15
+#define BS_ROWS 16
 #define BS_MAXPROC 64
 #define BS_PGUP 0x100                             /* keys that are not characters */
 #define BS_PGDN 0x101
@@ -229,6 +229,58 @@ static void bs_next_keymap(void)
     fflush(stdout);
 }
 
+/* w: the next picture of /usr/share/wallpapers (a .ppm or .bmp, by name; then none) goes into /etc/bwm.wallpaper,
+ * which bwm reads again within a second. */
+#define BS_WALL_DIR "/usr/share/wallpapers"
+#define BS_WALL_FILE "/etc/bwm.wallpaper"
+static int bs_wall_cmp(const void *a, const void *b) { return strcmp((const char *)a, (const char *)b); }
+
+static void bs_next_wall(void)
+{
+    static char names[16][64];
+    int n = 0;
+    DIR *d = opendir(BS_WALL_DIR);
+    struct dirent *e;
+    while (d && (e = readdir(d)) && n < 16) {
+        size_t l = strlen(e->d_name);
+        if (l < 5 || l >= sizeof names[0] || (strcmp(e->d_name + l - 4, ".ppm") && strcmp(e->d_name + l - 4, ".bmp")))
+            continue;
+        memcpy(names[n++], e->d_name, l + 1);
+    }
+    if (d)
+        closedir(d);
+    if (n == 0) {
+        puts("bsys: no wallpapers in " BS_WALL_DIR);
+        fflush(stdout);
+        return;
+    }
+    qsort(names, (size_t)n, sizeof names[0], bs_wall_cmp);
+    char cur[160] = "";
+    FILE *f = fopen(BS_WALL_FILE, "r");
+    if (f) {
+        if (fgets(cur, sizeof cur, f))
+            cur[strcspn(cur, "\r\n")] = 0;
+        fclose(f);
+    }
+    int next = 0;                                           /* the first one, when the current is none or not in the list */
+    for (int i = 0; i < n; i++) {
+        char full[160];
+        snprintf(full, sizeof full, BS_WALL_DIR "/%s", names[i]);
+        if (strcmp(cur, full) == 0)
+            next = i + 1;
+    }
+    char line[160] = "";
+    if (next < n)
+        snprintf(line, sizeof line, BS_WALL_DIR "/%s", names[next]);
+    if ((f = fopen(BS_WALL_FILE, "w"))) {
+        fprintf(f, "%s\n", line);
+        fclose(f);
+        printf("bsys: wallpaper %s\n", next < n ? names[next] : "none");
+    } else
+        puts("bsys: cannot write " BS_WALL_FILE);
+    fflush(stdout);
+}
+
 static void bs_paint(unsigned sw, unsigned sh)
 {
     char v[BF_COLS + 1];
@@ -309,7 +361,20 @@ static void bs_paint(unsigned sw, unsigned sh)
         fclose(mf);
     }
     bs_row(13, "Next mode", v);
-    bf_put_row(14, "  r: refresh  t: zone  k: keys  m: mode  p: processes", 54, 0x00808090, 0x00101018);
+    snprintf(v, sizeof v, "none");
+    FILE *wf = fopen(BS_WALL_FILE, "r");
+    if (wf) {
+        char wl[160];
+        if (fgets(wl, sizeof wl, wf)) {
+            wl[strcspn(wl, "\r\n")] = 0;
+            const char *base = strrchr(wl, '/');
+            if (wl[0])
+                snprintf(v, sizeof v, "%.40s", base ? base + 1 : wl);
+        }
+        fclose(wf);
+    }
+    bs_row(14, "Wallpaper", v);
+    bf_put_row(15, "  r: refresh  t: zone  k: keys  m: mode  w: wall  p: procs", 58, 0x00808090, 0x00101018);
 }
 
 static int bsys_main(void)
@@ -444,6 +509,9 @@ static int bsys_main(void)
             bs_paint(sw, sh);
         } else if (!bs_tasks && c == 'k') {
             bs_next_keymap();
+            bs_paint(sw, sh);
+        } else if (!bs_tasks && c == 'w') {
+            bs_next_wall();
             bs_paint(sw, sh);
         } else if (!bs_tasks && c == 't') {
             bs_next_zone();

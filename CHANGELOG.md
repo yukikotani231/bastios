@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `w` in the `bsys` window cycles the wallpaper through the `.ppm` and `.bmp` files of `/usr/share/wallpapers` (then none) by writing `/etc/bwm.wallpaper`, which a running `bwm` reads again within a second; a Wallpaper row shows it.
 - The `XFRMNLGRP_SA` netlink group of `NETLINK_XFRM` hears `XFRM_MSG_NEWSA` and `XFRM_MSG_DELSA` as security associations are added, replaced, deleted, flushed or expire (`test/compat/progs/t_xfrmev.c`).
 - `bwm` reads `/etc/bwm.wallpaper` again when it changes (about once a second): `echo /root/photo.ppm > /etc/bwm.wallpaper` puts a new wallpaper on the running desktop, an empty file takes it off, and a file bwm cannot use leaves the old one and says so in the task bar. `bwm -w FILE` is not replaced.
 - `bwm`: a line written to `/tmp/bwm.notice` (`echo Build done > /tmp/bwm.notice`) shows in the task bar for three seconds, then the file is removed; the bar checks for it every second or so.
