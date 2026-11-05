@@ -9,3 +9,8 @@ fn oflags_in(f: u64) -> u64 {
   let rest = f - f % 0x40000 + f % 0x4000;
   return rest + (f / 0x4000 % 2) * 0x10000 + (f / 0x8000 % 2) * 0x20000 + (f / 0x10000 % 2) * 0x4000 + (f / 0x20000 % 2) * 0x8000;
 }
+
+/// The flags of an F_GETFL answer, in the caller's numbering (the swap is its own inverse).
+fn oflags_out(f: u64) -> u64 {
+  return oflags_in(f);
+}

@@ -1803,3 +1803,841 @@ t_va: munmap over both
 t_va: each is gone
 t_va: a page in every segment
 t_va: a child sees them copied
+t_alg: AEAD key lengths are checked
+t_alg: a bad address is EFAULT and the message is as it was
+t_alg: a changed associated datum is EBADMSG
+t_alg: a changed ciphertext byte is EBADMSG
+t_alg: a changed tag is EBADMSG and no text comes out
+t_alg: a ciphertext shorter than a tag is EINVAL
+t_alg: a datagram AF_ALG socket is refused
+t_alg: a hash name under type aead, and an AEAD name under type hash, are ENOENT
+t_alg: a key longer than the socket takes is EINVAL
+t_alg: a key setting on a hash with no key is ENOSYS
+t_alg: a key setting on sha1 is ENOSYS
+t_alg: a message past the limit is refused and the message is as it was
+t_alg: a request with no operation is EINVAL
+t_alg: a result buffer too small is EINVAL
+t_alg: a short read returns the start of the digest
+t_alg: a type that is not hash is ENOENT
+t_alg: accepting an hmac with no key is ENOKEY
+t_alg: accepting hmac(sha1) with no key is ENOKEY
+t_alg: accepting on a socket not bound is EINVAL
+t_alg: an AEAD with no key cannot be accepted
+t_alg: an IV that is not 12 bytes is EINVAL
+t_alg: an accepted socket works after the bound one is closed
+t_alg: an unknown algorithm is ENOENT
+t_alg: associated data longer than the message is EINVAL
+t_alg: gcm(aes) opens it again
+t_alg: gcm(aes) seals the NIST test case 2
+t_alg: gcm(aes) with a 32-byte key and associated data comes back, and the data come first
+t_alg: hmac(md5), RFC 2202 test case 1
+t_alg: hmac(md5), RFC 2202 test case 2
+t_alg: hmac(sha1), RFC 2202 test case 1
+t_alg: hmac(sha1), RFC 2202 test case 2
+t_alg: hmac(sha256), RFC 4231 test case 1
+t_alg: hmac(sha256), RFC 4231 test case 2
+t_alg: hmac(sha384), RFC 4231 test case 2
+t_alg: md5 of abc
+t_alg: pieces sent with MSG_MORE hash as one message
+t_alg: poll reports an accepted socket ready
+t_alg: reading the digest begins a new message
+t_alg: rfc7539 refuses a changed tag
+t_alg: rfc7539(chacha20,poly1305) opens what it sealed, with associated data
+t_alg: sending to a socket that was not accepted is refused
+t_alg: sendmsg with three buffers is one message
+t_alg: sha1 is not an aead
+t_alg: sha1 of abc
+t_alg: sha256 of abc
+t_alg: sha256 of nothing
+t_alg: sha384 of abc
+t_alg: sha512 of abc
+t_alg: socket(AF_ALG, SOCK_SEQPACKET) makes a socket
+t_alg: sockets are limited, and closing them gives the room back
+t_alg: the data sent are a copy: changing the buffer afterwards changes nothing
+t_alg: the key is a copy: a later key for the same socket does not change an accepted one
+t_alg: the tag size can be set to 16 and not to 8
+t_alg: the text is copied: changing the buffer after the send changes nothing
+t_algskc: a 12-byte IV is refused, as is a 23-byte key
+t_algskc: a CBC message that is not whole blocks is EINVAL and gives nothing
+t_algskc: a bad address for the result leaves the message to be read again
+t_algskc: a buffer too small for the result is EINVAL and nothing is written
+t_algskc: a skcipher socket binds to cbc(aes) and ctr(aes)
+t_algskc: a socket with no key cannot be accepted
+t_algskc: an aead operation is refused on a skcipher: no associated length
+t_algskc: an empty message reads as nothing
+t_algskc: an skcipher cannot be bound as a hash or an aead
+t_algskc: an unknown skcipher is ENOENT, and so is a hash name of that type
+t_algskc: and a counter continues after the blocks it used
+t_algskc: and decrypts it
+t_algskc: cbc(aes) with a 128-bit key encrypts the SP 800-38A F.2.1 message
+t_algskc: cbc(aes) with a 192-bit key encrypts SP 800-38A F.2.3 and decrypts it
+t_algskc: cbc(aes) with a 256-bit key encrypts F.2.5 and decrypts it
+t_algskc: ctr(aes) takes any length: 20 bytes give the first 20 of the 32
+t_algskc: ctr(aes) with a 128-bit key encrypts the SP 800-38A F.5.1 message and decrypts it
+t_algskc: ctr(aes) with a 192-bit key gives F.5.3
+t_algskc: ctr(aes) with a 256-bit key gives F.5.5
+t_algskc: ecb(aes) gives the same block twice for the same input, and a short message is EINVAL
+t_algskc: ecb(aes) takes a zero-length IV and refuses a 16-byte one
+t_algskc: ecb(aes) with a 128-bit key encrypts SP 800-38A F.1.1 and decrypts it, with no IV
+t_algskc: ecb(aes) with a 192-bit key gives F.1.3
+t_algskc: encrypting from a file leaves the file as the plaintext
+t_algskc: no operation, or no IV, is EINVAL
+t_algskc: reading into the memory that was sent is fine and gives the same result
+t_algskc: sendfile into a hash socket gives the digest of the file
+t_algskc: sendfile of a file of ciphertext decrypts it, and the file stays the ciphertext
+t_algskc: sendfile to a socket that is bound but not accepted fails
+t_algskc: splice from a file through a pipe, as a program like OpenSSL does, gives the same
+t_algskc: splice from a pipe into the socket adds to the message like send
+t_algskc: the IV goes on: a second message with no new IV continues the CBC chain
+t_algskc: the counter carries through all 16 bytes: ff..ff then 00..00
+t_algskc: the file changed after the sendfile does not change the result
+t_algskc: the input is a copy: changing the memory after the send changes nothing
+t_algskc: the key is a copy: a socket accepted before a new key keeps the old one
+t_algskc: the result goes only to the buffer read into: the sent memory is not changed
+t_algskc: xts(aes) gives IEEE 1619 vector 1 and decrypts it
+t_algskc: xts(aes) takes 64-byte keys and refuses 16- and 33-byte ones and a partial block
+t_algskc: xts(aes) with two different keys and a tweak gives vector 2
+t_core: a dump goes to the file the pattern expands to
+t_core: a pipe pattern leaves no dump
+t_core: and reads back with a newline
+t_core: core_pattern can be written
+t_dir: long name: create, stat, rename, list, remove; one byte more is ENAMETOOLONG
+t_dockerd: a MAP_POPULATE mapping past the end of a growing file sees pwrite (disk)
+t_dockerd: a MAP_POPULATE mapping past the end of a growing file sees pwrite (tmpfs)
+t_dockerd: a mapping past the end of a growing file sees pwrite (disk)
+t_dockerd: a mapping past the end of a growing file sees pwrite (tmpfs)
+t_dockerd: a peer's shutdown(SHUT_WR) is POLLRDHUP, not POLLHUP, and this end can still write
+t_dockerd: inotify_add_watch on /proc/self/status succeeds
+t_dockerd: oom_score_adj takes a number with a trailing NUL
+t_dockerd: readlinkat of an empty path on an O_PATH|O_NOFOLLOW handle of a /proc/self/fd link is its target
+t_esn: GETSA reports the ESN state of the parent's sending association
+t_esn: GETSA says the sender is at 1:3
+t_esn: a child in a new network namespace
+t_esn: a client socket
+t_esn: a number below the wrap and outside the window is not
+t_esn: a number whose high half is far ahead is not taken (the window cannot jump on an inferred half)
+t_esn: a packet numbered 0xFFFFFFF5, below the wrap but inside the window, is echoed
+t_esn: a packet sealed under the high half 0 for the low half 0x10, which the receiver reads as 1:0x10, is not
+t_esn: a packet sealed under the high half 2 for the low half 0x11 is not
+t_esn: a packet sealed with the 8 bytes of a 32-bit association is not
+t_esn: a packet with a bit of its IV changed is not
+t_esn: a raw ESP socket opens
+t_esn: a sealed packet numbered 1:0x10 is echoed
+t_esn: a veth pair, one end in the child's namespace
+t_esn: after those, the next real packet 1:0x12 is echoed: no forgery moved the window
+t_esn: and played again it is not
+t_esn: and the answers took the parent's other association's numbers from 1
+t_esn: and the window is where it was: 1:0x14 is echoed
+t_esn: go
+t_esn: netlink sockets
+t_esn: played again it is not
+t_esn: six datagrams are echoed through the wrap of the sequence number
+t_esn: the child has them too
+t_esn: the child is ready
+t_esn: the child reports
+t_esn: the child stops
+t_esn: the child took in exactly the datagrams that were whole, fresh and ours
+t_esn: the parent has ESN associations
+t_esn: the parent's end has an address
+t_esn: the sender still counts on
+t_esn: without IPsec the datagram is echoed
+t_esp: a child in a new network namespace
+t_esp: a client socket
+t_esp: a datagram that goes out plain is dropped by the child, whose in policy asks for ESP
+t_esp: a datagram under an out block policy goes nowhere
+t_esp: a forged packet with a huge number is not echoed
+t_esp: a number outside the window is not
+t_esp: a packet cut in the tag is not echoed
+t_esp: a packet cut to its header is not echoed
+t_esp: a packet for an SPI the child has no association for is not echoed
+t_esp: a packet one byte short is not echoed
+t_esp: a packet sealed by hand is made
+t_esp: a packet sealed with another key is not echoed
+t_esp: a packet with a bit of the IV changed is not echoed
+t_esp: a packet with a bit of the SPI changed is not echoed
+t_esp: a packet with a bit of the ciphertext changed is not echoed
+t_esp: a packet with a bit of the ciphertext's middle changed is not echoed
+t_esp: a packet with a bit of the sequence number changed is not echoed
+t_esp: a packet with a bit of the tag changed is not echoed
+t_esp: a packet with wrong padding is not echoed
+t_esp: a raw ESP socket opens
+t_esp: a real packet far ahead moves the window
+t_esp: a tunnel-mode packet sealed by hand is echoed
+t_esp: a tunnel-mode packet with a bit changed is not
+t_esp: a veth pair, one end in the child's namespace
+t_esp: an inner packet from 127.0.0.1 is not
+t_esp: an inner packet from a source no policy names is not
+t_esp: an older number inside the window and not yet taken is echoed
+t_esp: and played again it is not
+t_esp: and the echo with it
+t_esp: and the window has not moved to it: the next real packet is echoed
+t_esp: and then 1002 is behind it
+t_esp: datagrams of five sizes are echoed through ESP (transport mode)
+t_esp: datagrams of four sizes are echoed through ESP (tunnel mode)
+t_esp: go
+t_esp: netlink sockets
+t_esp: played again it is not
+t_esp: sent to the child, it is echoed
+t_esp: sequence number 0 is not
+t_esp: the ESP policy is back
+t_esp: the child is configured for transport mode
+t_esp: the child is configured for tunnel mode
+t_esp: the child is ready
+t_esp: the child reports
+t_esp: the child stops
+t_esp: the child took in exactly the datagrams that were whole, fresh and ours
+t_esp: the out policy is back
+t_esp: the out policy is removed
+t_esp: the parent is configured for transport mode
+t_esp: the parent is configured for tunnel mode
+t_esp: the parent's end has an address
+t_esp: the same packet again is not
+t_esp: without IPsec the datagram is echoed
+t_espudp: GETSA reports the encapsulation
+t_espudp: a child in a new network namespace
+t_espudp: a client socket
+t_espudp: a datagram that starts with four zero bytes goes to the socket layer: no socket, so ECONNREFUSED
+t_espudp: a one-byte keep-alive is sent
+t_espudp: a packet sealed by hand and sent in UDP to port 4500 is echoed
+t_espudp: a raw ESP socket and a UDP socket to port 4500 open
+t_espudp: a veth pair, one end in the child's namespace
+t_espudp: and a real packet sent in UDP after all that is echoed
+t_espudp: datagrams of five sizes are echoed through ESP in UDP (transport mode)
+t_espudp: datagrams of five sizes are echoed through ESP in UDP (tunnel mode)
+t_espudp: go
+t_espudp: netlink sockets
+t_espudp: played again it is not
+t_espudp: the child is ready
+t_espudp: the child is too
+t_espudp: the child reports
+t_espudp: the child stops
+t_espudp: the child took in exactly the datagrams that were whole, fresh and ours
+t_espudp: the next real packet is echoed: the forged one did not move the window
+t_espudp: the out policy is removed for the hand-made packets
+t_espudp: the parent is configured for transport mode
+t_espudp: the parent is configured for tunnel mode
+t_espudp: the parent's end has an address
+t_espudp: the same kind of packet as plain ESP (protocol 50) is not taken by an association that wants UDP
+t_espudp: with a bit of the ciphertext changed it is not
+t_espudp: without IPsec the datagram is echoed
+t_fanotify: a write to an unlinked open file still reaches the mark on its directory
+t_fdshare: a process that shares its working directory with a helper (CLONE_FS) starts threads, which share it too
+t_file: O_DIRECT can be cleared and set again with F_SETFL
+t_file: O_DIRECT does not disturb O_ASYNC or O_NONBLOCK
+t_file: O_EXCL on a dangling symbolic link is EEXIST and makes nothing
+t_file: an aligned O_DIRECT write and read come back
+t_file: open with O_DIRECT is accepted and F_GETFL reports it
+t_file: read across a hole into unaligned buffers
+t_file: read into a buffer that ends at an unmapped page returns what fits
+t_file: read into a copy-on-write buffer leaves the parent's own
+t_file: read into a read-only buffer is EFAULT
+t_file: read into an unmapped buffer is EFAULT
+t_file: read into untouched anonymous memory
+t_file: read sees a store through a shared mapping
+t_genl: GETFAMILY by id finds nlctrl
+t_genl: GETFAMILY by name finds nlctrl
+t_genl: GETFAMILY without an attribute is EINVAL
+t_genl: a NETLINK_GENERIC socket opens
+t_genl: a dump lists nlctrl and ends
+t_genl: a message shorter than a generic header is EINVAL
+t_genl: a message to a family that is not there is ENOENT
+t_genl: an attribute longer than its message is refused
+t_genl: an unknown controller command is EOPNOTSUPP
+t_genl: an unknown family id is ENOENT
+t_genl: an unknown family name is ENOENT
+t_genl: the reply carries the name back
+t_genl: the reply is a NEWFAMILY of the controller
+t_genl: the reply names the version and the largest attribute
+t_genl: the socket still answers after bad requests
+t_inotify: a write to an unlinked open file still reaches the watch on its directory, unless it asked for IN_EXCL_UNLINK
+t_landlock: a restricted child is held to its rules
+t_landlock: a rule below a directory
+t_landlock: a ruleset is made
+t_landlock: an unknown access is EINVAL
+t_landlock: the ABI version is 1
+t_landlock: the parent is not restricted
+t_ltp2: MSG_PEEK on a UDP socket leaves the datagram queued
+t_ltp2: SO_REUSEADDR, SO_REUSEPORT and SO_KEEPALIVE read back as set, and clear again
+t_ltp2: TCP getsockname reads the bound address, and a connected or accepted socket's local address
+t_ltp2: a UDP datagram longer than the buffer sets MSG_TRUNC in recvmsg, and recv with MSG_TRUNC returns its length
+t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
+t_ltp2: a name below a device node or a built-in program is ENOTDIR, below nothing ENOENT
+t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them
+t_ltp2: a tmpfs mounted nosymfollow reports it, refuses to follow a link under it (ELOOP) but reads the link, and remount clears it
+t_ltp2: a unix stream socket that is bound to a name can still connect, and the connection carries data
+t_ltp2: an IPV6_V6ONLY listener takes a connection to ::1, and names it ::1
+t_ltp2: an edge-triggered epoll entry on a pipe is reported once per write and when the writer closes
+t_ltp2: an edge-triggered epoll entry on an eventfd left unread is reported once per write, not again and again
+t_ltp2: an edge-triggered epoll entry on mountinfo is reported once when added and once after each change of the mount table
+t_ltp2: getsockname of a UDP socket bound to 127.0.0.1 reads that address, of one bound to none 0.0.0.0
+t_ltp2: poll, select and epoll report POLLPRI|POLLERR once on /proc/self/mounts and mountinfo after a mount or umount, and reading does not take it back
+t_ltp2: sched_getaffinity of a negative pid is ESRCH, of a pid that is not there too
+t_ltp2: send(MSG_DONTWAIT) on a blocking TCP socket with a full send buffer is EAGAIN, not a wait
+t_ltp2: the console keeps a window size set with TIOCSWINSZ
+t_ltp2: utimensat on a directory sets its access and modification times apart
+t_mem: FUTEX_WAKE_OP changes the second word
+t_mem: FUTEX_WAKE_OP wakes a waiter of the second word when the old value compares
+t_mem: FUTEX_WAKE_OP with an unknown operation is ENOSYS
+t_mem: MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again
+t_mem: VmRSS of a process running on another processor is not the size of the address space
+t_mem: a MAP_SHARED mapping from a read-only descriptor sees what is written to the file later, in another process too, and cannot become writable
+t_mem: a file written with write(2) and mapped MAP_SHARED is the same memory to a mapping made after the page cache has filled up
+t_mem: a memfd mapped MAP_SHARED keeps what was written through the mapping when the caches are dropped, for a later mapping in another process
+t_mem: a page another thread unmaps while this one makes quick system calls faults on its next touch
+t_mem: memory that may run code stays runnable when its record gives up its slot to a later mmap, while another thread runs on the other processor
+t_mem: pages come when first touched even after 100 separate untouched mappings (a browser's thread stacks and heap chunks): then 4 GiB of mmap touched at both ends
+t_mem: pages come when first touched even after 400 scattered pages were handed back with MADV_DONTNEED (jemalloc's purge): then 4 GiB of mmap touched at both ends, and the pages between keep what they hold
+t_mem: seventy read-only MAP_SHARED mappings still read their file after a writable mapping takes a record
+t_mountapi: a bind mount
+t_mountapi: a context is created
+t_mountapi: a context is created once
+t_mountapi: a file can be made in it
+t_mountapi: a flag parameter
+t_mountapi: a flag with a value is EINVAL
+t_mountapi: a mount object is not a context
+t_mountapi: a proc mount
+t_mountapi: a procfs directory clones
+t_mountapi: a read-only mount object
+t_mountapi: a relative one clones
+t_mountapi: a remount without flags clears them
+t_mountapi: a second context
+t_mountapi: a string parameter
+t_mountapi: an unknown command is EOPNOTSUPP
+t_mountapi: an unknown flag parameter is EINVAL
+t_mountapi: and is set read-only
+t_mountapi: and is set read-only (relative)
+t_mountapi: and mount(2) binds onto it
+t_mountapi: and moved back (relative to a descriptor)
+t_mountapi: and moved back (relative to the cwd)
+t_mountapi: and moved back over itself
+t_mountapi: and the attributes from fsmount
+t_mountapi: clones a directory of it
+t_mountapi: fsmount
+t_mountapi: fsmount before the context is created is EINVAL
+t_mountapi: fsmount of a closed descriptor is EBADF
+t_mountapi: fsmount with a bad attribute is EINVAL
+t_mountapi: fsopen of an unknown type is ENODEV
+t_mountapi: fsopen of tmpfs
+t_mountapi: fsopen with a bad flag is EINVAL
+t_mountapi: it can be attached once
+t_mountapi: it has no attributes
+t_mountapi: it is read-only
+t_mountapi: it unmounts
+t_mountapi: it unmounts again
+t_mountapi: its files are not in the target yet
+t_mountapi: mount_setattr changes a mount that exists
+t_mountapi: mount_setattr on a path in no mount is EINVAL
+t_mountapi: mount_setattr sets attributes on a clone
+t_mountapi: mount_setattr with a short struct is EINVAL
+t_mountapi: move_mount attaches it
+t_mountapi: move_mount attaches the clone
+t_mountapi: move_mount onto a descriptor with T_EMPTY_PATH
+t_mountapi: move_mount to a name that is not there is ENOENT
+t_mountapi: move_mount with a bad flag is EINVAL
+t_mountapi: move_mount with a name that is not there is ENOENT
+t_mountapi: moves it back over itself
+t_mountapi: noexec refuses to run a file in it
+t_mountapi: nothing can be made in it
+t_mountapi: open_tree of a missing path is ENOENT
+t_mountapi: open_tree on a bad descriptor is EBADF
+t_mountapi: open_tree with a bad flag is EINVAL
+t_mountapi: open_tree with a clone of a directory is a handle
+t_mountapi: open_tree without a clone is a handle
+t_mountapi: remounting it sets nosuid, nodev, noexec and read-only
+t_mountapi: sets it read-only
+t_mountapi: so does /proc/mounts
+t_mountapi: statvfs reports them
+t_mountapi: the clone is attached once
+t_mountapi: the directory is a mount point
+t_mountapi: the source is not changed
+t_mountapi: the target shows the files
+t_mountapi: then move_mount attaches it with them
+t_mountapi: with a bad flag is EINVAL
+t_mountapi: with an unknown attribute is EINVAL
+t_mountapi: with the flag from fsconfig
+t_mountprop: MS_PRIVATE clears it
+t_mountprop: MS_SHARED again is a new group
+t_mountprop: MS_SHARED shows shared:N
+t_mountprop: MS_SLAVE leaves the group of the last peer
+t_mountprop: MS_UNBINDABLE shows unbindable
+t_mountprop: a bind is private at first
+t_mountprop: a bind of a shared mount is its peer
+t_mountprop: a mount below the master shows below the slave
+t_mountprop: a mount below the slave stays there
+t_mountprop: a mount here still shows there
+t_mountprop: a mount in the container reaches the host
+t_mountprop: a mount on the host appears in the container
+t_mountprop: a plain bind does not bring the mount along
+t_mountprop: a recursive bind does
+t_mountprop: a relative name finds the mount a descriptor path made
+t_mountprop: a relative name finds the mount move_mount made onto a descriptor
+t_mountprop: a slave receives
+t_mountprop: an unbindable mount cannot be bound
+t_mountprop: an unmount here takes it from the slave
+t_mountprop: and goes when the container unmounts it
+t_mountprop: and goes when the host unmounts it
+t_mountprop: and private again
+t_mountprop: both are in one group
+t_mountprop: clean up
+t_mountprop: clean up the binds
+t_mountprop: it shows up below b
+t_mountprop: its mounts reach its peers, not its master
+t_mountprop: make a directory to mount on
+t_mountprop: make a shared
+t_mountprop: make the namespace private
+t_mountprop: make the sub directory
+t_mountprop: mount a tmpfs below a
+t_mountprop: private b: nothing passes
+t_mountprop: propagation through /proc/self/fd/N reaches the mount
+t_mountprop: rbind of an unbindable mount below is left out
+t_mountprop: rbind: set up a with a mount in it
+t_mountprop: rshared on a slave keeps its master
+t_mountprop: start a helper process
+t_mountprop: the container lets go of c
+t_mountprop: the container lets go of d
+t_mountprop: the copy is a slave of the mount it came from
+t_mountprop: the helper binds v into c, a slave like v
+t_mountprop: the helper binds v into d
+t_mountprop: the helper gets a copy of the namespace
+t_mountprop: the helper makes v a slave
+t_mountprop: the helper mounts a tmpfs below v
+t_mountprop: the helper sees it
+t_mountprop: the helper unmounts its mount
+t_mountprop: the helper unmounts its own
+t_mountprop: the helper's mount stays in its namespace
+t_mountprop: the propagation of a plain directory is EINVAL
+t_mountprop: the root can be made shared
+t_mountprop: this namespace mounts one below v
+t_mountprop: this namespace sees it
+t_mountprop: this namespace unmounts its one
+t_mountprop: two types at once are EINVAL
+t_mountprop: unmounting below b unmounts below a
+t_mountprop: unshare a mount namespace
+t_mountprop: v is a shared mount
+t_mountprop: v is shared with the copy: the same group
+t_newer: a range across a page boundary
+t_newer: a range past the end
+t_newer: cachestat counts the pages of a file
+t_newer: cachestat of a bad range pointer is EFAULT
+t_newer: cachestat of a closed descriptor is EBADF
+t_newer: cachestat of a pipe is EBADF
+t_newer: cachestat of a range
+t_newer: cachestat with flags is EINVAL
+t_newer: futex_waitv on private words is woken by a thread
+t_newer: futex_waitv returns the index woken
+t_newer: futex_waitv times out
+t_newer: futex_waitv with 129 words is EINVAL
+t_newer: futex_waitv with a bad clock is EINVAL
+t_newer: futex_waitv with a bad flag is EINVAL
+t_newer: futex_waitv with a word that differs is EAGAIN
+t_newer: futex_waitv with an unaligned word is EINVAL
+t_newer: futex_waitv without a timeout is woken too
+t_nft: a batch makes a table, a chain and rules
+t_nft: a batch with a rule that cannot run changes nothing
+t_nft: a named set: a rule drops what the set holds, and elements can be removed
+t_nft: a rule drops TCP to its port
+t_nft: a rule drops UDP to its port
+t_nft: a table that exists is refused with NLM_F_EXCL
+t_nft: connection state: only answers to a connection made here come in
+t_nft: deleting the table lifts its rules
+t_nft: generation id
+t_nft: limit lets a burst through and then drops
+t_nft: netlink netfilter socket
+t_nft: nft 1.0.9 loads a ruleset with limit, jump, reject, ct and notrack
+t_nft: nft 1.0.9 loads a ruleset with sets, intervals and counters
+t_nft: reject answers at once instead of dropping
+t_nft: stale references: a set a rule uses cannot go, and a vanished jump target is skipped
+t_nft: the rule's counter counted the dropped packets
+t_nft: the table, the chain and the rules are listed
+t_nldns: a UDP socket binds 127.0.0.11 at a port of its own
+t_nldns: a datagram for 127.0.0.11:53 reaches that socket and the answer reads as from port 53
+t_nldns: a datagram for another port is not redirected
+t_nldns: a network namespace of its own with lo up
+t_nldns: a stream connection to 127.0.0.11:53 reaches that listener
+t_nldns: a stream connection to the listener's own port works
+t_nldns: a stream listener binds 127.0.0.11 at a port of its own
+t_nldns: the first namespace has no redirect: a stream connect to 127.0.0.11:53 is refused
+t_nlveth: a child in a new network namespace
+t_nlveth: a peer in a namespace of no process is refused
+t_nlveth: a peer name that is taken is refused
+t_nlveth: a veth pair with its peer in another namespace
+t_nlveth: netlink socket
+t_nlveth: the child ended well
+t_nlveth: the child is ready
+t_nlveth: the host end is here
+t_nlveth: the peer is not here
+t_nlveth: the peer there: addressed, routes asked for
+t_nx: a read-write-execute page emptied with MADV_DONTNEED still runs code
+t_path: a name below a directory, a file or a link that replaced a directory
+t_path: a path of 3000 bytes works; a component of 256 bytes is ENAMETOOLONG
+t_proc: CapEff is what capget says
+t_proc: dropping a capability from the bounding set shows in CapBnd
+t_proc: sixteen forks after a process ended do not reuse its id
+t_proc: status has CapInh, CapPrm, CapEff, CapBnd and CapAmb
+t_ptrace2: PTRACE_DETACH right after PTRACE_INTERRUPT cut a traced read short: the process reads on and is not killed by SIGTRAP
+t_ptrace2: PTRACE_INTERRUPT of a tracee waiting in a traced read: the read ends, the event stop, then the read starts again
+t_ptrace2: PTRACE_SYSCALL after seizing a tracee that waits in read: the first stop is the read's entry, then its exit
+t_ptrace2: a traced futex wait that another process wakes stops at its exit with 0, before the next call
+t_sock2: SCM_RIGHTS passes twelve descriptors in one message (Firefox's IPC sends nine)
+t_sock2: SCM_RIGHTS with no descriptors in it (Firefox's IPC sends such a header) sends the bytes alone, on a stream and a seqpacket pair
+t_sock2: closing a TCP socket with unread bytes resets the peer, after it read what had arrived
+t_sock2: getsockopt gives the length of the value, 4, for an int option
+t_subreaper: a second thread
+t_subreaper: pipes
+t_subreaper: release the grandchild
+t_subreaper: set the flag in the main thread
+t_subreaper: the child ended
+t_subreaper: the child was forked
+t_subreaper: the flag reads back in another thread
+t_subreaper: the grandchild is still running
+t_subreaper: the grandchild runs
+t_subreaper: the orphan is reparented to the subreaper and its exit is seen
+t_sys: pids.events counts the forks pids.max refused
+t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
+t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
+t_thread: a thread reads the leader's maps, cmdline, auxv and statm and finds the group's memory
+t_thread: oom_score counts the memory a thread touched, while it waits and while it runs
+t_wg: a device with no name is EINVAL
+t_wg: a kind that continues past it is refused
+t_wg: a kind that only starts like it is refused
+t_wg: a name that is taken is EEXIST
+t_wg: a wireguard device is made
+t_wg: deleting it again is ENODEV
+t_wg: it goes up
+t_wg: it has no link-layer address
+t_wg: it has no link-layer type
+t_wg: it is deleted
+t_wg: it is gone
+t_wg: it is listed
+t_wg: it shows up
+t_wg: it takes an address
+t_wg: its MTU is 1420
+t_wg: its kind is wireguard
+t_wg: netlink socket
+t_wg: the refused devices were not made
+t_wgcfg: GET without a dump is EOPNOTSUPP
+t_wgcfg: REPLACE_PEERS
+t_wgcfg: SET_DEVICE with a key, a port and a peer
+t_wgcfg: a /33 allowed IP is EINVAL
+t_wgcfg: a device is made
+t_wgcfg: a dump without a device is EBADR
+t_wgcfg: a new one is made
+t_wgcfg: a peer is removed
+t_wgcfg: a port that a socket holds
+t_wgcfg: a second peer is added
+t_wgcfg: a short private key is EINVAL
+t_wgcfg: an IPv6 allowed IP is EAFNOSUPPORT
+t_wgcfg: an ordinary link is not a wireguard device
+t_wgcfg: an unknown command is EOPNOTSUPP
+t_wgcfg: an unknown device is ENODEV
+t_wgcfg: and the device keeps its port
+t_wgcfg: deleting it frees its port
+t_wgcfg: is refused with EADDRINUSE
+t_wgcfg: it can be taken again
+t_wgcfg: it holds no key and no peers
+t_wgcfg: leaves none
+t_wgcfg: more allowed IPs than a peer holds is ENOSPC
+t_wgcfg: nlctrl knows the wireguard family
+t_wgcfg: one peer
+t_wgcfg: port 0 gives the port up
+t_wgcfg: sockets
+t_wgcfg: the device is deleted
+t_wgcfg: the dump shows the device
+t_wgcfg: the firewall mark
+t_wgcfg: the first is 10.0.0.0/24
+t_wgcfg: the first peer lost the network it shared (the address is masked)
+t_wgcfg: the keep-alive interval
+t_wgcfg: the listen port
+t_wgcfg: the listen port is taken by the device
+t_wgcfg: the new one is taken
+t_wgcfg: the old port is free
+t_wgcfg: the others stay
+t_wgcfg: the peer's endpoint
+t_wgcfg: the peer's pre-shared key
+t_wgcfg: the peer's public key
+t_wgcfg: the port is changed
+t_wgcfg: the private key is shown clamped
+t_wgcfg: the public key is X25519 of the private key (RFC 7748)
+t_wgcfg: two allowed IPs
+t_wgcfg: two peers
+t_wgcookie: a child in a new network namespace
+t_wgcookie: a client socket
+t_wgcookie: a device with an address
+t_wgcookie: a veth pair, one end in the child's namespace
+t_wgcookie: an initiation with a bad mac1 gets no reply
+t_wgcookie: and none of them twice
+t_wgcookie: each reply is 64 bytes, type 3 and has the index of an initiation
+t_wgcookie: fewer replies than initiations: the first ones were taken before it was busy
+t_wgcookie: five more are echoed while it goes on
+t_wgcookie: go
+t_wgcookie: its last handshake time is set
+t_wgcookie: keys are traded
+t_wgcookie: sockets
+t_wgcookie: the BLAKE2s used here gives the known digest of abc
+t_wgcookie: the busy device answered with cookie replies
+t_wgcookie: the child is ready
+t_wgcookie: the child is set up
+t_wgcookie: the child reports
+t_wgcookie: the child stops
+t_wgcookie: the child took at least six packets and no more than were sent
+t_wgcookie: the flood was sent
+t_wgcookie: the flooder reports
+t_wgcookie: the flooder stops
+t_wgcookie: the handshake gets through the flood, by cookie
+t_wgcookie: the parent's end has an address
+t_wgcookie: the peer is set up, the child's endpoint direct
+t_wgcookie: the peer shows traffic both ways and a handshake
+t_wgcookieresp: a child in a new network namespace
+t_wgcookieresp: a client socket
+t_wgcookieresp: a device with an address
+t_wgcookieresp: a packet is echoed over the new session while the flood goes on
+t_wgcookieresp: a veth pair, one end in the child's namespace
+t_wgcookieresp: an initiation with a bad mac1 gets no reply
+t_wgcookieresp: each reply is 64 bytes, type 3 and has the index of an initiation
+t_wgcookieresp: fewer replies than initiations: the first ones were taken before it was busy
+t_wgcookieresp: go
+t_wgcookieresp: its last handshake time is set
+t_wgcookieresp: keys are traded
+t_wgcookieresp: sockets
+t_wgcookieresp: the BLAKE2s used here gives the known digest of abc
+t_wgcookieresp: the busy device answered with cookie replies
+t_wgcookieresp: the child is ready
+t_wgcookieresp: the child is set up
+t_wgcookieresp: the child is told to start the handshake
+t_wgcookieresp: the child reports
+t_wgcookieresp: the child stops
+t_wgcookieresp: the child took the packet
+t_wgcookieresp: the flood was sent
+t_wgcookieresp: the flooder reports
+t_wgcookieresp: the flooder stops
+t_wgcookieresp: the handshake the busy child started completes, by cookie reply to our response
+t_wgcookieresp: the parent's end has an address
+t_wgcookieresp: the peer is set up (no keep-alive: this side never starts a handshake)
+t_wghs: a capture socket
+t_wghs: a message of an unknown type gets none
+t_wghs: a peer without a keep-alive starts nothing
+t_wghs: a pre-shared key that differs breaks the handshake
+t_wghs: a response for another index is dropped
+t_wghs: a response with a bad mac1 is dropped
+t_wghs: a short initiation gets none
+t_wghs: an initiation is sent: 148 bytes, type 1
+t_wghs: an initiation with a bad mac1 gets no answer
+t_wghs: devices are made
+t_wghs: it completes
+t_wghs: mac1 is set and mac2 is zero (no cookie yet)
+t_wghs: more devices
+t_wghs: sockets
+t_wghs: the answer is addressed to the initiator's index
+t_wghs: the real initiation is answered: 92 bytes, type 2
+t_wghs: the responder learned the initiator's address
+t_wghs: the responder shows no handshake before a packet arrives
+t_wghs: the response completes the handshake
+t_wghs: the same initiation again is not answered (replay)
+t_wghs: the same response again changes nothing
+t_wghs: wga has no handshake yet
+t_wghs: wga's peer points at the capture socket
+t_wghs: wgb knows wga
+t_wghs: wgc starts a handshake with wgd
+t_wghs: wgd knows wgc
+t_wghs: wge, unknown to wgd, gets nowhere
+t_wgnext: a child in a new network namespace
+t_wgnext: a client socket
+t_wgnext: a device with an address
+t_wgnext: a last handshake time
+t_wgnext: a new handshake is asked for
+t_wgnext: a veth pair, one end in the child's namespace
+t_wgnext: and again
+t_wgnext: go
+t_wgnext: keys are traded
+t_wgnext: sockets
+t_wgnext: the child is ready
+t_wgnext: the child is set up
+t_wgnext: the child stops
+t_wgnext: the first response is to be dropped
+t_wgnext: the initiator has not completed the handshake
+t_wgnext: the parent's end has an address
+t_wgnext: the peer is set up with the relay as its endpoint
+t_wgnext: the relay's control socket
+t_wgnext: the responder answered and the relay dropped the response
+t_wgnext: the responder still sends under the old keys, which the initiator takes
+t_wgnext: the responder's last handshake is set
+t_wgnext: the session is renewed
+t_wgnext: the tunnel carries traffic on the new session
+t_wgnext: the tunnel comes up
+t_wgprev: a child in a new network namespace
+t_wgprev: a client socket
+t_wgprev: a device with an address
+t_wgprev: a last handshake time
+t_wgprev: a packet sent under the old keys is still taken after the rekey, and echoed once
+t_wgprev: a veth pair, one end in the child's namespace
+t_wgprev: go
+t_wgprev: it is not taken once the old session is 180 s old
+t_wgprev: keys are traded
+t_wgprev: nothing came back while they were held
+t_wgprev: sockets
+t_wgprev: the child is ready
+t_wgprev: the child is set up
+t_wgprev: the child stops
+t_wgprev: the first old packet is released twice
+t_wgprev: the parent's end has an address
+t_wgprev: the peer is set up with the relay as its endpoint
+t_wgprev: the relay's control socket
+t_wgprev: the second old packet is released late
+t_wgprev: the session is renewed
+t_wgprev: the tunnel carries new traffic
+t_wgprev: the tunnel comes up
+t_wgprev: the tunnel still works
+t_wgprev: two messages are held
+t_wgtimer: a child in a new network namespace
+t_wgtimer: a client socket
+t_wgtimer: a device with an address
+t_wgtimer: a keep-alive interval of 1 s
+t_wgtimer: a last handshake time
+t_wgtimer: a new handshake follows and the tunnel works again
+t_wgtimer: a veth pair, one end in the child's namespace
+t_wgtimer: and carries traffic
+t_wgtimer: go
+t_wgtimer: keep-alives were sent on time
+t_wgtimer: keys are traded
+t_wgtimer: sockets
+t_wgtimer: the child is ready
+t_wgtimer: the child is set up
+t_wgtimer: the child stops
+t_wgtimer: the first packet after 180 s without a renewal is not carried
+t_wgtimer: the keep-alive is switched off
+t_wgtimer: the parent's end has an address
+t_wgtimer: the peer is set up with the relay as its endpoint
+t_wgtimer: the session is renewed after 120 s
+t_wgtimer: the tunnel comes up
+t_wgtimer: with a later last handshake time
+t_wgtun: a child in a new network namespace
+t_wgtun: a client socket
+t_wgtun: a datagram of 1392 bytes (the largest the tunnel takes in one piece)
+t_wgtun: a device with an address
+t_wgtun: a packet from an address the peer may not use is dropped
+t_wgtun: a packet sent twice by the relay is taken once
+t_wgtun: a packet with one bit changed is not taken
+t_wgtun: a veth pair, one end in the child's namespace
+t_wgtun: and the next one is
+t_wgtun: data messages for an unknown index and a cut short one are ignored
+t_wgtun: five more are echoed
+t_wgtun: go
+t_wgtun: its last handshake time is set once a packet came
+t_wgtun: keys are traded
+t_wgtun: sockets
+t_wgtun: the child is ready
+t_wgtun: the child is set up
+t_wgtun: the child narrows the parent's allowed IPs
+t_wgtun: the child reports
+t_wgtun: the child stops
+t_wgtun: the child took each packet once, and none that was not allowed
+t_wgtun: the parent's end has an address
+t_wgtun: the peer is set up with the relay as its endpoint
+t_wgtun: the peer shows traffic both ways and a handshake
+t_xfrm: AH is refused
+t_xfrm: UPDPOLICY replaces one, and NEWPOLICY does not
+t_xfrm: a 96-bit tag is EINVAL
+t_xfrm: a NETLINK_XFRM socket opens
+t_xfrm: a block policy is added and read back
+t_xfrm: a block policy with a template is EINVAL
+t_xfrm: a direction that is not in or out is EINVAL
+t_xfrm: a dump lists both
+t_xfrm: a dump lists them
+t_xfrm: a key length that is neither AES-128 nor AES-256 is EINVAL
+t_xfrm: a message with no algorithm is EINVAL
+t_xfrm: a network namespace has associations of its own
+t_xfrm: a network namespace has policies of its own
+t_xfrm: a policy is deleted, and then it is ESRCH
+t_xfrm: a prefix longer than 32 is EINVAL
+t_xfrm: a program that is not privileged cannot add, read or delete
+t_xfrm: a program that is not privileged cannot add, read or delete a policy
+t_xfrm: a selector with a port is EOPNOTSUPP
+t_xfrm: a template for a protocol other than ESP is refused
+t_xfrm: a truncated message is EINVAL
+t_xfrm: a truncated policy is EINVAL
+t_xfrm: an AES-256 one with another SPI is added
+t_xfrm: an algorithm the kernel does not have is ENOENT
+t_xfrm: an association can be replaced
+t_xfrm: an association is deleted, and then it is ESRCH
+t_xfrm: an association with an AES-128 key is added
+t_xfrm: an out policy with an ESP template is added
+t_xfrm: an unauthenticated cipher is refused
+t_xfrm: flush removes them all
+t_xfrm: flushing policies removes them all, and gives the room back
+t_xfrm: host bits of a selector are cleared
+t_xfrm: reading one by its id gives its SPI, mode, reqid and algorithm
+t_xfrm: reading one by its index gives the same policy
+t_xfrm: reading one by selector gives its template, priority and direction
+t_xfrm: reading one that is not there is ESRCH
+t_xfrm: replacing one that is not there is ESRCH
+t_xfrm: room for associations is limited, and flushing gives it back
+t_xfrm: the forward direction is EOPNOTSUPP
+t_xfrm: the key comes back as it was given
+t_xfrm: the same SPI to another destination is another association
+t_xfrm: the same one again is EEXIST
+t_xfrm: the same selector in the other direction is another policy
+t_xfrm: two templates are EOPNOTSUPP
+t_xfrmexp: NETLINK_ADD_MEMBERSHIP joins
+t_xfrmexp: NETLINK_DROP_MEMBERSHIP leaves
+t_xfrmexp: a socket of another group heard nothing
+t_xfrmexp: a socket that did not join heard nothing
+t_xfrmexp: a socket that joined no group
+t_xfrmexp: a socket to configure with
+t_xfrmexp: an association of another namespace is not reported
+t_xfrmexp: an association with a soft and a hard limit is added
+t_xfrmexp: an association with short limits is added
+t_xfrmexp: an unprivileged socket cannot join the group, by bind or by option
+t_xfrmexp: and the association is gone
+t_xfrmexp: and the hard limit is not heard any more
+t_xfrmexp: another group is accepted
+t_xfrmexp: nothing before the soft limit
+t_xfrmexp: root can join the expire group
+t_xfrmexp: the association still works until the hard limit
+t_xfrmexp: the child made it
+t_xfrmexp: the hard limit is reported, with the hard byte set
+t_xfrmexp: the option's listener hears the soft limit
+t_xfrmexp: the other listener hears it
+t_xfrmexp: the soft limit is not reported again
+t_xfrmexp: the soft limit is reported to the group, once
+t_xfrmlife: GETSA answers
+t_xfrmlife: a child in a new network namespace
+t_xfrmlife: a client socket
+t_xfrmlife: a datagram is echoed
+t_xfrmlife: a datagram passes at once
+t_xfrmlife: a packet sealed by hand with the right key and a new number is not echoed
+t_xfrmlife: a raw ESP socket opens
+t_xfrmlife: a veth pair, one end in the child's namespace
+t_xfrmlife: an association that was not limited is still there
+t_xfrmlife: and so is every later datagram
+t_xfrmlife: and the first use is recorded
+t_xfrmlife: both sides are configured without limits
+t_xfrmlife: eight forged packets are sent and none is echoed
+t_xfrmlife: four datagrams pass, the soft limit among them
+t_xfrmlife: four datagrams pass: the byte count was under the limit before the fourth
+t_xfrmlife: four seconds after that, none passes
+t_xfrmlife: go
+t_xfrmlife: it was added before it was first used
+t_xfrmlife: its bytes were counted
+t_xfrmlife: netlink sockets
+t_xfrmlife: no limit reads back as ~0
+t_xfrmlife: none passes after four seconds
+t_xfrmlife: one packet was carried
+t_xfrmlife: the association is gone
+t_xfrmlife: the child has a hard limit of 3 packets on what it receives
+t_xfrmlife: the child is ready
+t_xfrmlife: the child reports
+t_xfrmlife: the child stops
+t_xfrmlife: the child took in exactly three
+t_xfrmlife: the fifth does not
+t_xfrmlife: the fourth does not
+t_xfrmlife: the limits are reported
+t_xfrmlife: the parent has a hard limit of 3 seconds from its adding
+t_xfrmlife: the parent has a hard limit of 3 seconds from its first use
+t_xfrmlife: the parent has a hard limit of three packets and a byte
+t_xfrmlife: the parent has a soft limit of 2 and a hard limit of 4 packets
+t_xfrmlife: the parent is configured
+t_xfrmlife: the parent's end has an address
+t_xfrmlife: they did not use up the limit: three real datagrams pass
+t_xfrmlife: two more datagrams: the counters add up
+t_xfrmlife: unused for four seconds, it still carries a datagram
+t_xfrmlife: without IPsec the datagram is echoed
