@@ -3315,16 +3315,16 @@ fn proc_fd(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   let e = comp_end(x, 5, n);
   let p = proc_pid(procs, x, 5, e);
-  if p >= NPROC || n < e + 5 || n > e + 6 || !xfer_is(x, e, e + 4, "/fd/") {
+  if p >= NPROC || n < e + 5 || n > e + 8 || !xfer_is(x, e, e + 4, "/fd/") {
     return NO_RESULT;
   }
   let mut fd = 0;
   let mut i = e + 4;
   while i < n
-    invariant e + 4 <= i && i <= n && n <= e + 6 && fd < 100
+    invariant e + 4 <= i && i <= n && n <= e + 8 && fd < 10000
   {
     let c = cast[u64](bget(x, i));
-    if c < 48 || c > 57 || fd >= 10 {
+    if c < 48 || c > 57 || fd >= 1000 {
       return NO_RESULT;
     }
     fd = fd * 10 + (c - 48);
