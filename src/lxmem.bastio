@@ -837,9 +837,10 @@ fn hole_add(k: &mut Kernel, pid: u64, first: u64, end: u64)
 /// INTERP_TOP, below the mmap area, with no record; a hint or MAP_FIXED
 /// far below it (the JVM's compressed-oops heap at a few GiB) made the
 /// whole span above one hole, so mmap could hand out libc's own pages
-/// again. If something is there, the space is not handed out (only
-/// address space is lost). win_op counts "something" while another
-/// processor runs the space, so then too.
+/// again. If something is there, only the parts below the lowest page in
+/// use and above the highest become holes (what lies between is lost
+/// address space). win_op counts "something" while another processor
+/// runs the space, so then nothing is recorded.
 fn hole_add_empty(k: &mut Kernel, pid: u64, first: u64, end: u64)
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -847,15 +848,61 @@ fn hole_add_empty(k: &mut Kernel, pid: u64, first: u64, end: u64)
   if first >= end || end > WPAGES {
     return;
   }
+  if !span_used(&mut k, pid, first, end) {
+    hole_add(&mut k, pid, first, end);
+    return;
+  }
+  // Something is there (the interpreter): the free space below the lowest
+  // page in use and above the highest one is still free. Without it, a JVM
+  // that hinted its heap at a few GiB had only the space between the break
+  // and the heap left, and failed to reserve its metaspace.
+  let mut lo = first;
+  let mut hi = end;
+  while hi - lo > 1
+    invariant first <= lo && lo < hi && hi <= end && end <= WPAGES && kok(k) && pid < NPROC
+  {
+    let mid = lo + (hi - lo) / 2;
+    if span_used(&mut k, pid, lo, mid) {
+      hi = mid;
+    } else {
+      lo = mid;
+    }
+  }
+  let low_used = lo;
+  lo = first;
+  hi = end;
+  while hi - lo > 1
+    invariant first <= lo && lo < hi && hi <= end && end <= WPAGES && kok(k) && pid < NPROC
+  {
+    let mid = lo + (hi - lo) / 2;
+    if span_used(&mut k, pid, mid, hi) {
+      lo = mid;
+    } else {
+      hi = mid;
+    }
+  }
+  let high_used = lo;
+  if first < low_used && !span_used(&mut k, pid, first, low_used) {
+    hole_add(&mut k, pid, first, low_used);
+  }
+  if high_used + 1 < end && !span_used(&mut k, pid, high_used + 1, end) {
+    hole_add(&mut k, pid, high_used + 1, end);
+  }
+}
+
+/// Whether anything of process pid is in window pages first .. end: a
+/// mapped page, a lazy anonymous record, or code exec left to read when
+/// first touched (src/lazy.bastio). Also true while another processor runs
+/// the space (win_op then counts "something").
+fn span_used(k: &mut Kernel, pid: u64, first: u64, end: u64) -> bool
+  requires kok(k) && pid < NPROC && first <= end && end <= WPAGES
+  ensures kok(k)
+{
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, first, end, 0) != 0 || anon_count(&mut k, pid, first, end) != 0 {
-    return;
+    return true;
   }
-  // Nor code pages exec left to read when first touched (src/lazy.bastio).
   let lz1 = get(k.lazy, lz_at(pid, 0));
-  if lz1 != 0 && lz1 - 1 < end && (first <= lz1 - 1 || first - (lz1 - 1) < get(k.lazy, lz_at(pid, 1))) {
-    return;
-  }
-  hole_add(&mut k, pid, first, end);
+  return lz1 != 0 && lz1 - 1 < end && (first <= lz1 - 1 || first - (lz1 - 1) < get(k.lazy, lz_at(pid, 1)));
 }
 
 /// Window pages first .. end of process pid were just mapped where the
