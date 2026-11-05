@@ -489,12 +489,16 @@ fuzz: build/bastios.elf
 COMPAT_PROGS := $(patsubst test/compat/progs/%.c,%,$(wildcard test/compat/progs/t_*.c))
 COMPAT_BINS  := $(COMPAT_PROGS:%=build/compat/%)
 
-$(filter-out build/compat/t_nopie,$(COMPAT_BINS)): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | build/compat
+$(filter-out build/compat/t_nopie build/compat/t_hintdyn,$(COMPAT_BINS)): build/compat/%: test/compat/progs/%.c test/compat/progs/compat.h | build/compat
 	$(MUSLCC) -static-pie -O2 -Wall -Wno-unused-result -o $@ $<
 
 # Linked at a fixed address (musl's default for -static -no-pie is 0x400000).
 build/compat/t_nopie: test/compat/progs/t_nopie.c test/compat/progs/compat.h | build/compat
 	$(MUSLCC) -static -no-pie -O2 -Wall -Wno-unused-result -o $@ $<
+
+# Dynamically linked: the kernel maps its interpreter (ld-musl).
+build/compat/t_hintdyn: test/compat/progs/t_hintdyn.c test/compat/progs/compat.h | build/compat
+	$(MUSLCC) -O2 -Wall -Wno-unused-result -o $@ $<
 
 build/compat:
 	mkdir -p $@

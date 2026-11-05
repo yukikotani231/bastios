@@ -857,6 +857,33 @@ fn hole_add(k: &mut Kernel, pid: u64, first: u64, end: u64)
   hole_put(&mut k, pid, f, e);
 }
 
+/// hole_add for space between the mmap area's old and new bottom that no
+/// call unmapped: only if nothing is mapped there and no lazy record
+/// covers it. The kernel puts a program's interpreter (ld-musl) under
+/// INTERP_TOP, below the mmap area, with no record; a hint or MAP_FIXED
+/// far below it (the JVM's compressed-oops heap at a few GiB) made the
+/// whole span above one hole, so mmap could hand out libc's own pages
+/// again. If something is there, the space is not handed out (only
+/// address space is lost). win_op counts "something" while another
+/// processor runs the space, so then too.
+fn hole_add_empty(k: &mut Kernel, pid: u64, first: u64, end: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if first >= end || end > WPAGES {
+    return;
+  }
+  if win_op(&mut k.mem, &mut k.spaces, pid, WOP_COUNT, first, end, 0) != 0 || anon_count(&mut k, pid, first, end) != 0 {
+    return;
+  }
+  // Nor code pages exec left to read when first touched (src/lazy.bastio).
+  let lz1 = get(k.lazy, lz_at(pid, 0));
+  if lz1 != 0 && lz1 - 1 < end && (first <= lz1 - 1 || first - (lz1 - 1) < get(k.lazy, lz_at(pid, 1))) {
+    return;
+  }
+  hole_add(&mut k, pid, first, end);
+}
+
 /// Window pages first .. end of process pid were just mapped where the
 /// program asked (MAP_FIXED, shmat at an address, MREMAP_FIXED). mmap
 /// without an address must never hand them out again: they stop being a
@@ -874,7 +901,7 @@ fn fixed_taken(k: &mut Kernel, pid: u64, first: u64, end: u64)
   if b <= USER_SIZE && (b + 4095) / 4096 <= first && first < low && low <= STACK_FIRST {
     pset(&mut k.procs, pid, F_MMAP, first * 4096);
     if end < low {
-      hole_add(&mut k, pid, end, low);
+      hole_add_empty(&mut k, pid, end, low);
     }
   }
 }
@@ -988,7 +1015,7 @@ fn mmap_hint(k: &mut Kernel, pid: u64, addr: u64, pages: u64) -> u64
   }
   if e * 4096 <= low {
     pset(&mut k.procs, pid, F_MMAP, h * 4096);
-    hole_add(&mut k, pid, e, low / 4096);
+    hole_add_empty(&mut k, pid, e, low / 4096);
     return h;
   }
   if hole_within(k, pid, h, e) {
