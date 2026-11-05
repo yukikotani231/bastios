@@ -180,13 +180,15 @@ int main(void) {
         umount("/tmp/pp");
         rmdir("/tmp/pp");
         {
-            /* A name through /proc/self/fd/N is the descriptor's own description: no clone of it, so a program (crun) falls back to mount(2). */
+            /* A name through /proc/self/fd/N is followed to the directory the descriptor names, as on Linux: it can be cloned. */
             mkdir("/tmp/pp", 0755);
             mount("proc", "/tmp/pp", "proc", 0, NULL);
             int tfd = open("/tmp/pp/sys", O_PATH | O_DIRECTORY);
             char pfd[64];
             snprintf(pfd, sizeof pfd, "/proc/self/fd/%d", tfd);
-            EXPECT("a clone through /proc/self/fd/N is ENOSYS", syscall(OPEN_TREE, AT_FDCWD, pfd, 1 | 0x80000 | 0x8000) == -1 && errno == ENOSYS);
+            int c2 = syscall(OPEN_TREE, AT_FDCWD, pfd, 1 | 0x80000 | 0x8000);
+            EXPECT("a clone through /proc/self/fd/N is a handle on the directory", c2 >= 0);
+            if (c2 >= 0) close(c2);
             EXPECT("and mount(2) binds onto it", mount("/tmp/pp/sys", pfd, NULL, MS_BIND, NULL) == 0);
             int c3 = syscall(OPEN_TREE, AT_FDCWD, "/tmp/pp/sys", 1 | 0x80000 | 0x8000);
             EXPECT("move_mount onto a descriptor with T_EMPTY_PATH", c3 >= 0 && syscall(MOVE_MOUNT, c3, "", tfd, "", EMPTY | 0x40) == 0);
