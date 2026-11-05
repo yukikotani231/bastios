@@ -3057,6 +3057,9 @@ sd_lines = [
     ("{ read a; read b; } < /dev/sda1; echo $a/$b", b"SDTEST-PART1/SDLINE-TWO\r\n", b"\n# "),
     ("cat /dev/sda1 | wc -c; cat /dev/sda | wc -c", b"%d\r\n%d\r\n" % (pn * 512, sdsize), b"\n# "),
     ("cp /dev/sda1 /part; { read a; read b; } < /part; echo $a/$b; wc -c < /part", b"SDTEST-PART1/SDLINE-TWO\r\n%d\r\n" % (pn * 512), b"\n# "),
+    ("cat /proc/partitions", b"   8 0 %d sda\r\n   8 1 %d sda1\r\n" % (sdsize // 1024, pn // 2), b"\n# "),
+    ("for f in size ro removable queue/logical_block_size dev sda1/size sda1/start sda1/dev sda1/ro; do cat /sys/block/sda/$f; done", b"%d\r\n1\r\n0\r\n512\r\n8:0\r\n%d\r\n%d\r\n8:1\r\n1\r\n" % (sdsize // 512, pn, pf), b"\n# "),
+    ("cat /sys/block/sda/sda2/size || echo nosda2", b"nosda2", b"\n# "),
     ("echo x > /dev/sda1 || echo refused; cat /dev/sda2 || echo none", b"Read-only file system\r\nrefused\r\n", b"\n# "),
 ]
 qemu = boot(1, extra=["-drive", f"file={gptdisk},format=raw,if=none,id=sd", "-device", "virtio-blk-pci,drive=sd"])
