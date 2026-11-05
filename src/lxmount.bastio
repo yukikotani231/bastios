@@ -27,6 +27,7 @@ import "lxns.bastio";
 import "lxnsk.bastio";
 import "lxxattr.bastio";
 import "ext4.bastio";
+import "fat.bastio";
 
 const LX_MOUNT: u64 = 165;
 const LX_UMOUNT2: u64 = 166;
@@ -41,6 +42,7 @@ const FST_NONE: u64 = 0;
 const FST_TMPFS: u64 = 1;
 const FST_BSTDISK: u64 = 2;
 const FST_EXT4: u64 = 3;                // ext4, and ext2 and ext3 images without a journal to replay (src/ext4.bastio)
+const FST_VFAT: u64 = 4;                // FAT16 and FAT32 images, read-only (src/fat.bastio)
 const FST_NS: u64 = 16;                 // FST_NS + MK_*: mounted per namespace (src/lxns.bastio)
 const MS_BIND: u64 = 4096;
 
@@ -107,6 +109,9 @@ fn fs_type(k: &mut Kernel, pid: u64, va: u64) -> u64
   }
   if type_is(&mut k, pid, va, "ext4") || type_is(&mut k, pid, va, "ext2") || type_is(&mut k, pid, va, "ext3") {
     return FST_EXT4;
+  }
+  if type_is(&mut k, pid, va, "vfat") || type_is(&mut k, pid, va, "msdos") {
+    return FST_VFAT;
   }
   return FST_NONE;
 }
@@ -286,7 +291,7 @@ fn lx_mount(k: &mut Kernel, pid: u64, source: u64, target: u64, fstype: u64, fla
   let mut img = NFILES;
   let mut eimg = NO_FILE;
   let mut ldev = LO_NODEV;
-  if t == FST_EXT4 {
+  if t == FST_EXT4 || t == FST_VFAT {
     eimg = ext_image(&mut k, pid, source);
     if eimg == NO_FILE {
       return k.perr;
@@ -336,7 +341,7 @@ fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n:
     if s >= MNT_N {
       return EINVAL;                        // not a mount
     }
-    if vfs_mount_ext(k.fs, s) && flags & MS_RDONLY == 0 {
+    if (vfs_mount_ext(k.fs, s) || vfs_mount_vfat(k.fs, s)) && flags & MS_RDONLY == 0 {
       return EROFS;                         // an ext4 image is only read
     }
     vfs_set_ro(&mut k.fs, s, flags & MS_RDONLY != 0);
@@ -346,7 +351,7 @@ fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n:
   if s < MNT_N || i + 1 == k.fs.lo_at || vfs_ram_has_children(&mut k.fs, n) {
     return EBUSY;
   }
-  if t == FST_EXT4 {
+  if t == FST_EXT4 || t == FST_VFAT {
     // The image is read now and copied into memory below the directory;
     // the mount is read-only. The transfer buffer still holds the path.
     if n == 0 || n > FNAME_MAX {
@@ -355,7 +360,12 @@ fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n:
     if !vfs_mount(&mut k.fs, i, false) {
       return ENOMEM;
     }
-    let r = ex_import(&mut k.fs, &mut k.mem, eimg, n);
+    let mut r = EX_OK;
+    if t == FST_VFAT {
+      r = fat_import(&mut k.fs, &mut k.mem, eimg, n);
+    } else {
+      r = ex_import(&mut k.fs, &mut k.mem, eimg, n);
+    }
     let ms = vfs_mount_slot(k.fs, i);
     if ms >= MNT_N {
       return EINVAL;
@@ -364,7 +374,11 @@ fn mount_at(k: &mut Kernel, pid: u64, t: u64, img: u64, eimg: u64, ldev: u64, n:
       vfs_umount(&mut k.fs, &mut k.mem, ms);
       return ext_errno(r);
     }
-    vfs_set_ext(&mut k.fs, ms);
+    if t == FST_VFAT {
+      vfs_set_vfat(&mut k.fs, ms);
+    } else {
+      vfs_set_ext(&mut k.fs, ms);
+    }
     vfs_set_mflags(&mut k.fs, ms, kept_flags(flags));
     return 0;
   }
