@@ -160,7 +160,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
-    deadline = time.time() + 900
+    deadline = time.time() + 1500
     def until(marker, start):
         nonlocal out
         while marker not in out[start:]:
@@ -394,14 +394,50 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
         # bwm (user/bwm.c), the window manager: windows, a pointer, focus,
         # dragging and typing, driven through QEMU's monitor.
-        def monitor(*cmds, gap=0.15):
+        # The pauses are most of the test's run time (about 450 s of 940 s
+        # in a measured BIOS run, 460 calls), so they are kept short: the
+        # callers that need the guest to have acted wait for the screen or
+        # the serial line themselves.
+        # Keys keep the long gap between them (Alt-Shift with three arrow keys
+        # in one call lost one at 0.08 s); only the mouse's are cut.
+        def monitor(*cmds, gap=None):
             m3 = socket.socket(socket.AF_UNIX)
             m3.connect(mon_path)
             for c in cmds:
                 m3.sendall(c.encode() + b"\n")
-                time.sleep(gap)
-            time.sleep(0.4)
+                time.sleep(gap if gap is not None else 0.08 if c.startswith("mouse_") else 0.15)
+            time.sleep(0.2)
             m3.close()
+        if os.environ.get("BWM_BENCH") or os.environ.get("BTERM_BENCH") or os.environ.get("BFILES_BENCH"):   # BWM_BENCH=N: print what N frames of bwm cost (not a check)
+            mark = len(out)
+            q.stdin.write(b"ash\r"); q.stdin.flush()
+            until(b"# ", mark)
+            if os.environ.get("BWM_BENCH"):
+                mark = len(out)
+                q.stdin.write(f"BWM_BENCH={os.environ['BWM_BENCH']} bwm\r".encode()); q.stdin.flush()
+                until(b"bwm: bench done", mark)
+                print(f"bench ({name}):", " | ".join(l.strip() for l in out[mark:].decode(errors="replace").splitlines() if "bwm: bench" in l and "done" not in l))
+            if os.environ.get("BTERM_BENCH"):                 # BTERM_BENCH=N: what N screens of scrolling text cost bterm
+                mark = len(out)
+                q.stdin.write(f"BTERM_BENCH={os.environ['BTERM_BENCH']} bwm -c bterm\r".encode()); q.stdin.flush()
+                until(b"bterm: bench done", mark)
+                print(f"bench ({name}):", " | ".join(l.strip() for l in out[mark:].decode(errors="replace").splitlines() if "bterm: bench" in l and "done" not in l))
+                if os.environ.get("BWM_BENCH_ONLY"):
+                    subprocess.run(["pkill", "-x", "qemu-system-x86"])
+                    sys.exit(0)
+            if os.environ.get("BFILES_BENCH"):
+                mark = len(out)
+                q.stdin.write(f"BFILES_BENCH={os.environ['BFILES_BENCH']} bwm -c bfiles\r".encode()); q.stdin.flush()
+                until(b"bfiles: bench done", mark)
+                print(f"bench ({name}):", " | ".join(l.strip() for l in out[mark:].decode(errors="replace").splitlines() if "bfiles: bench" in l and "done" not in l))
+                subprocess.run(["pkill", "-x", "qemu-system-x86"])
+                sys.exit(0)
+            mark = len(out)
+            q.stdin.write(b"exit\r"); q.stdin.flush()
+            until(b"bastios> ", mark)
+            if os.environ.get("BWM_BENCH_ONLY"):
+                subprocess.run(["pkill", "-x", "qemu-system-x86"])
+                sys.exit(0)
         mark = len(out)
         q.stdin.write(b"bwm\r"); q.stdin.flush()
         good = until(b"bwm: ready 1024x768", mark)
@@ -465,6 +501,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
             fails += not good
+            # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
+            # a step the other way undoes it, and three in one direction go all the way round.
+            monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar
+            time.sleep(1)
+            before = above_bar()                 # the pointer is in the bar now: take the picture again
+            for _ in range(20):
+                px = above_bar()
+                if px == before:
+                    break
+                before = px
+            monitor("mouse_move 0 0 1")
+            once = settle(lambda px: px != before)
+            monitor("mouse_move 0 0 -1")
+            back = settle(lambda px: px == before)
+            monitor("mouse_move 0 0 1", "mouse_move 0 0 1", "mouse_move 0 0 1")
+            round3 = settle(lambda px: px == before)
+            good = once != before and back == before and round3 == before
+            print(("ok  " if good else "FAIL"), f"({name}) the wheel over the task bar cycles the windows")
+            fails += not good
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"bastios> ", mark)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Q ends bwm and the console comes back")
@@ -524,6 +579,19 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             w, h, px = screendump()
             good = at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) its task bar button shows the window again")
+            fails += not good
+            # A second click on the button of the focused window hides it; a third shows it.
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = at(80, 100) != (0, 255, 0) and at(260, 100) != (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) the task bar button of the focused window hides it")
+            fails += not good
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            good = at(80, 100) == (0, 255, 0) and at(260, 100) == (0, 0, 255)
+            print(("ok  " if good else "FAIL"), f"({name}) and the button shows it again")
             fails += not good
             monitor("mouse_move 25 -308", "mouse_move 25 -308")                          # back to where the next step starts
             # The grip at the corner of the frame: dragging it 100 right and 60
@@ -590,6 +658,67 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = good and at(100, 200) == (255, 255, 0) and at(350, 200) == (0, 0, 255)
             print(("ok  " if good else "FAIL"), f"({name}) a shared window is resized with new shared memory")
             fails += not good
+            # With Alt held, a drag from inside the window (the pointer is at its grip, 220 right and
+            # 105 down of where this puts it, inside the contents) moves it, and the client sees no click.
+            mark_ad = len(out)
+            monitor("mouse_move -220 -105", "sendkey alt 4000")
+            time.sleep(0.5)
+            monitor("mouse_button 1", "mouse_move 50 0", "mouse_move 50 0", "mouse_button 0")
+            time.sleep(1)
+            w, h, px = screendump()
+            good = at(100, 200) != (255, 255, 0) and at(250, 200) == (255, 255, 0) and b"bhello: mouse" not in bytes(out[mark_ad:])
+            print(("ok  " if good else "FAIL"), f"({name}) an Alt-drag from inside a window moves it without a click for the client")
+            if not good:
+                print("pixels", [at(x, 200) for x in (100, 250, 350)])
+            fails += not good
+            time.sleep(5)                                    # Alt is up before the next key (it is held for 4 s from the sendkey, and the calls before this one are short now)
+            # Alt-Shift with an arrow key moves the focused window 16 pixels.
+            def left_edge():
+                w, h, px = screendump()
+                for x in range(0, 700):
+                    if tuple(px[(200 * w + x) * 3:(200 * w + x) * 3 + 3]) == (255, 255, 0):
+                        return x
+                return -1
+            e0 = left_edge()
+            monitor("sendkey alt-shift-left", "sendkey alt-shift-left", "sendkey alt-shift-right")
+            time.sleep(1)
+            e1 = left_edge()
+            good = e0 > 0 and e1 == e0 - 16
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift with the arrow keys moves the window 16 pixels")
+            if not good:
+                print("edges", e0, e1)
+            fails += not good
+            # Ctrl-Alt with an arrow key resizes it by 16 pixels (the client says what size it took).
+            mark_rs = len(out)
+            monitor("sendkey ctrl-alt-right")
+            good = until(b"bhello: resized 316 160", mark_rs)
+            # One key at a time, each after the client has seen the one before: two keys
+            # in one call lost the second on a loaded host.
+            monitor("sendkey ctrl-alt-down")
+            good = good and until(b"bhello: resized 316 176", mark_rs)
+            monitor("sendkey ctrl-alt-left")
+            good = good and until(b"bhello: resized 300 176", mark_rs)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Alt with the arrow keys resizes the window by 16 pixels")
+            fails += not good
+            # Alt with the right button drags the lower right corner from anywhere in a resizable window.
+            mark_rs = len(out)
+            monitor("sendkey alt 4000")
+            time.sleep(0.5)
+            monitor("mouse_button 2", "mouse_move 40 0", "mouse_move 40 0", "mouse_button 0")
+            good = until(b"bhello: resized 380 176", mark_rs)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt and the right button resize a window from inside it")
+            fails += not good
+            time.sleep(5)
+            # Dragging a window to the left edge of the screen and letting go fills the left half of it.
+            mark_rs = len(out)
+            monitor("mouse_move -100 -60")                           # off the corner grip, into the window
+            monitor("sendkey alt 6000")
+            time.sleep(0.5)
+            monitor("mouse_button 1", *(["mouse_move -255 0"] * 5), "mouse_button 0")
+            good = until(b"bhello: resized 508 722", mark_rs)
+            print(("ok  " if good else "FAIL"), f"({name}) a window dragged to the left edge fills the left half of the screen")
+            fails += not good
+            time.sleep(6)
             monitor("sendkey ctrl-q")
             good = until(b"bwm: bye", mark) and until(b"# ", mark)
             fails += not good
@@ -660,10 +789,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             mark2 = len(out)
             monitor("sendkey ctrl-t")
             good = until(b"bterm: window", mark2)
+            # The ninth and tenth: bwm used to serve eight clients and
+            # closed the connection of any further one.
+            for _ in range(8):
+                time.sleep(1)
+                monitor("sendkey ctrl-t")
+            good = good and until(b"bterm: window 10", mark2)
             time.sleep(1)
             monitor("sendkey ctrl-q")
             good = good and until(b"bwm: bye", mark2)
-            print(("ok  " if good else "FAIL"), f"({name}) bwm still gets keys with two terminal windows open")
+            print(("ok  " if good else "FAIL"), f"({name}) bwm still gets keys with ten terminal windows open")
             fails += not good
         else:
             monitor("sendkey ctrl-q")
@@ -673,7 +808,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         q.stdin.write(b"\r"); q.stdin.flush()
         until(b"# ", mark)
         # The task bar: its Term button starts a terminal window, and a click
-        # on the button of that window (the top one already) changes nothing.
+        # on the button of that window (the top one) hides it, and another shows it.
         mark = len(out)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
         good = until(b"bwm: ready", mark)
@@ -687,10 +822,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             time.sleep(1.5)
             w, h, before = screendump()
             monitor("mouse_move 60 0", "mouse_button 1", "mouse_button 0")
-            time.sleep(0.5)
+            time.sleep(0.7)
+            w, h, hid = screendump()
+            good = before[:w * 3 * 740] != hid[:w * 3 * 740]
+            print(("ok  " if good else "FAIL"), f"({name}) a click on the button of the top window hides it")
+            fails += not good
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(0.7)
             w, h, after = screendump()
             good = before[:w * 3 * 740] == after[:w * 3 * 740]       # above the bar, where the pointer is
-            print(("ok  " if good else "FAIL"), f"({name}) a click on the button of the top window changes nothing")
+            print(("ok  " if good else "FAIL"), f"({name}) and another click shows it as it was")
             fails += not good
             # Alt-Left and Alt-Right put the window on half of the screen, Alt-Up
             # on all of it (a title bar along the top shows where it reaches).
@@ -752,6 +893,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = not any(blue(x) for x in range(0, 1000, 8))
             print(("ok  " if good else "FAIL"), f"({name}) Alt-F9 minimizes the focused window")
             fails += not good
+            # A middle click on the window's task bar button (the pointer is on it) closes the window.
+            w, h, before = screendump()
+            monitor("mouse_button 4", "mouse_button 0")
+            time.sleep(1.5)
+            w, h, after = screendump()
+            good = before[w * 3 * 745:] != after[w * 3 * 745:]       # the button is gone from the bar
+            print(("ok  " if good else "FAIL"), f"({name}) a middle click on a task bar button closes the window")
+            fails += not good
+            # A double click on the empty desktop starts a terminal window.
+            monitor("mouse_move 0 -250", "mouse_move 0 -50")
+            time.sleep(0.5)
+            mark = len(out)
+            monitor("mouse_button 1", "mouse_button 0", "mouse_button 1", "mouse_button 0", gap=0.05)
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) a double click on the empty desktop starts a terminal")
+            fails += not good
+            time.sleep(1)
+            monitor("sendkey alt-f4")
+            time.sleep(0.5)
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)
@@ -761,11 +921,18 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         # The launcher menu: the Menu button at the right end of the task bar
         # opens a list above it, Terminal starts a terminal window, Quit ends bwm.
         mark = len(out)
+        q.stdin.write(b"echo Build done > /tmp/bwm.notice\r"); q.stdin.flush()
+        time.sleep(0.5)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
         good = until(b"bwm: ready", mark)
         if good:
-            time.sleep(1)
+            time.sleep(2)                                            # bwm looks for the file within a second, and shows it for three
             w, h, px = screendump()
+            # A line in /tmp/bwm.notice shows in the task bar for a few seconds.
+            nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 10, 1)[0]      # the green channel: the notice is white on a red bar
+            good = nt == "Build done"
+            print(("ok  " if good else "FAIL"), f"({name}) a line in /tmp/bwm.notice shows in the task bar ({nt!r})")
+            fails += not good
             # The clock left of the Menu button: white digits on the task bar.
             clock = any(tuple(px[(y * w + x) * 3:(y * w + x) * 3 + 3]) == (255, 255, 255) for y in range(746, 766) for x in range(915, 965))
             print(("ok  " if clock else "FAIL"), f"({name}) the task bar shows a clock")
@@ -854,6 +1021,28 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = b"bterm: window" not in out[mark:]
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-U clears the Run prompt line")
             fails += not good
+            # Ctrl-V pastes the clipboard (/tmp/bwm.clip) into the Run prompt: the clipboard is made by a command that writes it.
+            time.sleep(1)
+            monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "echo"], "sendkey spc", *[f"sendkey {c}" for c in "true"],
+                    "sendkey spc", "sendkey shift-dot", *[f"sendkey {c}" for c in ("slash", "t", "m", "p", "slash", "b", "w", "m", "dot", "c", "l", "i", "p")], "sendkey ret")
+            time.sleep(2.5)
+            monitor("sendkey alt-f4")
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey alt-f2", "sendkey ctrl-v", "sendkey ret")
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Ctrl-V in the Run prompt pastes the clipboard")
+            fails += not good
+            time.sleep(1)
+            monitor("sendkey alt-f4")
+            time.sleep(1)
+            mark = len(out)
+            monitor("sendkey alt-f2", "sendkey shift-insert", "sendkey ret")
+            good = until(b"bterm: window", mark)
+            print(("ok  " if good else "FAIL"), f"({name}) Shift-Insert in the Run prompt pastes the clipboard")
+            fails += not good
+            time.sleep(1)
+            monitor("sendkey alt-f4")
             # Tab completes the first word from /bin: mhel is mhello, whose output goes to a file.
             time.sleep(1)
             monitor("sendkey alt-f2", *[f"sendkey {c}" for c in "mhel"], "sendkey tab")
@@ -1216,6 +1405,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             monitor("mouse_button 1")
             movep(-300, -200)
             movep(-300, -200)
+            movep(3, 3)                                            # off the screen edge, where letting go would snap the window
             monitor("mouse_button 0")
             time.sleep(0.5)
             w, h, px = screendump()
@@ -2589,6 +2779,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("\n".join(l for l in lines if l))
         print(("ok  " if good else "FAIL"), f"({name}) the bfiles title row counts the entries")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(4)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # The viewer's header says how long the file is.
+        mark = len(out)
+        q.stdin.write(b"printf 'one\\ntwo\\nthree\\n' > /tmp/ct/f.txt; bwm -n -c bfiles /tmp/ct/f.txt\r"); q.stdin.flush()
+        good = until(b"bfiles: view /tmp/ct/f.txt", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 72, 90, 60, 4)
+            good = "(3 lines, 14 bytes)" in lines[0]
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) the bfiles viewer's header gives the lines and bytes")
         fails += not good
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)

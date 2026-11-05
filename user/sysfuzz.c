@@ -235,9 +235,9 @@ static u64 arg(void) {
 /* The Linux calls BastiOS implements (most of the fuzzing goes here), and
  * the rest of the table now and then. test/sysfuzz_calls.sh checks that
  * every call the kernel dispatches is here or in this list of calls that
- * `tame` leaves out:
+ * `tame` leaves out (446, landlock_restrict_self, would confine the fuzzer itself):
  *
- * left out: 15 34 42 60 130 153 169 231 436
+ * left out: 15 34 42 60 130 153 169 231 436 446
  */
 static const unsigned short linux_calls[] = {
     0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
@@ -252,8 +252,8 @@ static const unsigned short linux_calls[] = {
     244, 245, 247, 248, 249, 250, 251, 252, 253, 254, 255, 257, 258, 259, 260, 261, 262, 263, 264, 265, 266, 267, 268,
     269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 280, 281, 282, 283, 284, 285, 286, 287,
     288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312,
-    314, 315, 316, 317, 318, 319, 321, 322, 324, 325, 326, 327, 328, 332, 334, 424, 425, 428, 429, 430, 431, 432, 433, 434, 435, 437, 438,
-    439, 441, 452, 20819,
+    314, 315, 316, 317, 318, 319, 321, 322, 324, 325, 326, 327, 328, 332, 334, 424, 425, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435, 437, 438,
+    439, 441, 442, 444, 445, 449, 451, 452, 20819,
 };
 #define NLINUX (sizeof linux_calls / sizeof linux_calls[0])
 

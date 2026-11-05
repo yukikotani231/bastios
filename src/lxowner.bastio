@@ -136,7 +136,7 @@ fn set_async(k: &mut Kernel, h: u64, on: bool)
   if on {
     a = 1;
   }
-  of_set(&mut k.ofd, h, OF_ASYNC, a);
+  of_set(&mut k.ofd, h, OF_ASYNC, of_get(k.ofd, h, OF_ASYNC) / 2 * 2 + a);   // bit 1 is O_DIRECT
   let p = of_get(k.ofd, h, 2);
   if on && of_get(k.ofd, h, 0) == OF_PIPE_R && p < NPIPES {
     pi_set(&mut k.pipes, p, 7, 1);
@@ -220,7 +220,7 @@ fn sigio_pipe(k: &mut Kernel, p: u64)
   while h < OFD_N
     invariant h <= OFD_N && kok(k)
   {
-    if of_get(k.ofd, h, 0) == OF_PIPE_R && of_get(k.ofd, h, 2) == p && of_get(k.ofd, h, OF_ASYNC) == 1 {
+    if of_get(k.ofd, h, 0) == OF_PIPE_R && of_get(k.ofd, h, 2) == p && of_get(k.ofd, h, OF_ASYNC) % 2 == 1 {
       sigio_send(&mut k, h);
     }
     h = h + 1;

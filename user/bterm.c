@@ -249,6 +249,22 @@ static int draw_cell(int r, int c, int cursor)
         return 0;
     shown[r][c] = now;
     shown_ok[r][c] = 1;
+    if (!e->attr && fz == 1 && cp < 128) {              /* plain ASCII at normal size: no italic, underline or wide cases to test per pixel */
+        uint32_t *d = &pix[(size_t)(r * CH) * WIDTH + c * CW];
+        const unsigned char *fp = &font8x8[cp * 8];
+        for (int y = 0; y < CH; y++, d += WIDTH) {
+            unsigned bits = fp[y / 2];
+            d[0] = bits & 1 ? f : b;
+            d[1] = bits & 2 ? f : b;
+            d[2] = bits & 4 ? f : b;
+            d[3] = bits & 8 ? f : b;
+            d[4] = bits & 16 ? f : b;
+            d[5] = bits & 32 ? f : b;
+            d[6] = bits & 64 ? f : b;
+            d[7] = bits & 128 ? f : b;
+        }
+        return 1;
+    }
     const unsigned char *g = cp >= 128 ? glyph16(cp, &wide) : 0;
     int ch = cp < 128 ? cp : ' ';
     for (int y = 0; y < CH; y++) {
@@ -674,6 +690,7 @@ static int repaint(int fd, int id, int *old_cx, int *old_cy)
     dirty[*old_cy] = 1;
     int ccx = cx >= cols ? cols - 1 : cx;
     dirty[cy] = 1;
+    int ux0 = cols, ux1 = -1, uy0 = rows, uy1 = -1;       /* shared memory: one damage for everything that changed, not one message a row */
     for (int r = 0; r < rows; r++) {
         if (!dirty[r])
             continue;
@@ -686,10 +703,19 @@ static int repaint(int fd, int id, int *old_cx, int *old_cy)
         dirty[r] = 0;
         if (c1 < 0)
             continue;
+        if (shared) {
+            if (c0 < ux0) ux0 = c0;
+            if (c1 > ux1) ux1 = c1;
+            if (r < uy0) uy0 = r;
+            uy1 = r;
+            continue;
+        }
         int x = c0 * CW, w = (c1 + 1) * CW - x;
-        if ((shared ? bwm_damage(fd, id, x, r * CH, w, CH) : bwm_draw(fd, id, pix, WIDTH, x, r * CH, w, CH)) != 0)
+        if (bwm_draw(fd, id, pix, WIDTH, x, r * CH, w, CH) != 0)
             return -1;
     }
+    if (ux1 >= 0 && bwm_damage(fd, id, ux0 * CW, uy0 * CH, (ux1 + 1 - ux0) * CW, (uy1 + 1 - uy0) * CH) != 0)
+        return -1;
     *old_cx = ccx;
     *old_cy = cy;
     return 0;
@@ -959,6 +985,31 @@ int main(int argc, char **argv)
     if (fz != 1)
         printf("bterm: text size %d (%d x %d)\n", fz, cols, rows);
     fflush(stdout);
+    if (getenv("BTERM_BENCH")) {                  /* BTERM_BENCH=N: time N screens of scrolling text (fed straight in, then drawn), then stop */
+        int n = atoi(getenv("BTERM_BENCH"));
+        long long tf = 0, tp = 0, t0, t1;
+        struct timespec ts;
+        for (int i = 0; i < n; i++) {
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            t0 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+            for (int l = 0; l < rows; l++) {
+                char line[96];
+                int k = snprintf(line, sizeof line, "%d the quick brown fox jumps over the lazy dog 0123456789\r\n", i * rows + l);
+                for (int j = 0; j < k; j++)
+                    feed((unsigned char)line[j]);
+            }
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+            tf += t1 - t0;
+            repaint(fd, id, &ocx, &ocy);
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            tp += ts.tv_sec * 1000000LL + ts.tv_nsec / 1000 - t1;
+        }
+        printf("bterm: bench feed %lld us, draw %lld us a screen\n", tf / (n ? n : 1), tp / (n ? n : 1));
+        printf("bterm: bench done\n");
+        fflush(stdout);
+        return 0;
+    }
     for (;;) {
         struct pollfd p[2] = { { fd, POLLIN, 0 }, { m, POLLIN, 0 } };
         if (poll(p, 2, -1) < 0)

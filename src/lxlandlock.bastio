@@ -1,0 +1,544 @@
+// Landlock, ABI 1: a program restricts itself, and what it starts, to the
+// parts of the file system it names. landlock_create_ruleset makes a
+// ruleset (a description of kind OF_LL) that handles some of the file
+// accesses below, landlock_add_rule allows them below a directory or on a
+// file, and landlock_restrict_self adds the ruleset to the process as a
+// layer: from then on every access a layer handles must be allowed by a
+// rule of every layer that handles it, for the process, its children and
+// what they execute. A layer cannot be removed.
+//
+// Rules are paths, not inodes: the path a rule was made for (the
+// descriptor's name when it was added) is compared with the path an access
+// resolves to, byte by byte, so a rule on "a/b" allows "a/b" and what is
+// below it. A directory that is renamed or mounted over, or a file that is
+// reached through a path the process cannot reach another way, is not
+// followed; the accesses are checked on the paths the file layer resolves
+// (symbolic links and ".." are already taken out). open, execve, mkdir,
+// rmdir, unlink, rename, link, symlink and mknod are checked.
+//
+// As in ABI 1, a rename or link to another directory is EXDEV once a layer
+// handles anything. The later ABIs (reparenting rights, truncation, ioctl,
+// network ports, scopes) are not offered: the version query says 1. There
+// are 16 rulesets, 64 domains (a layer each; one is freed when no process
+// and no child layer uses it), 16 rules of paths up to 96 bytes in a
+// ruleset, and 16 layers a process.
+
+import "lxmountapi.bastio";
+
+const LX_LL_CREATE: u64 = 444;
+const LX_LL_ADD: u64 = 445;
+const LX_LL_RESTRICT: u64 = 446;
+
+const LL_ABI: u64 = 1;
+const LL_VERSION: u64 = 1;                 // landlock_create_ruleset's LANDLOCK_CREATE_RULESET_VERSION
+const LL_RULE_PATH: u64 = 1;               // LANDLOCK_RULE_PATH_BENEATH
+const LL_PBYTES: u64 = 96;                 // bytes of path a rule keeps
+const LL_LAYERS: u64 = 16;
+const EBADFD: u64 = 18446744073709551539;  // 2^64 - 77
+
+const LL_FILE_ACCESS: u64 = 7;             // what a rule on a file (not a directory) may allow
+
+fn is_landlock_call(n: u64) -> bool {
+  return n == LX_LL_CREATE || n == LX_LL_ADD || n == LX_LL_RESTRICT;
+}
+
+fn ll_rs(r: u64) -> u64
+  requires r < LL_RS_N
+  ensures result + LL_RS_W <= SYS_LLD - SYS_LLR
+{
+  return r * LL_RS_W;
+}
+
+/// Byte i of the path of the rule whose first word is at k.sys[base].
+fn ll_pbyte(k: &Kernel, base: u64, i: u64) -> u64
+  requires kok(k) && base + LL_RULE_W <= len(k.sys) && i < LL_PBYTES
+  ensures result < 256
+{
+  return (get(k.sys, base + 2 + i / 8) >> (8 * (i % 8))) % 256;
+}
+
+/// Is the path in the first n bytes of the transfer buffer the one of the
+/// rule at k.sys[base], or below it?
+fn ll_covers(k: &Kernel, base: u64, n: u64) -> bool
+  requires kok(k) && base + LL_RULE_W <= len(k.sys) && n <= FNAME_MAX
+{
+  let r = get(k.sys, base + 1);
+  if r > LL_PBYTES || r > n {
+    return false;
+  }
+  let mut i = 0;
+  while i < r
+    invariant i <= r && r <= LL_PBYTES && r <= n && n <= FNAME_MAX && kok(k) && base + LL_RULE_W <= len(k.sys)
+  {
+    if cast[u64](bget(k.fs.xfer, i)) != ll_pbyte(k, base, i) {
+      return false;
+    }
+    i = i + 1;
+  }
+  return r == 0 || n == r || bget(k.fs.xfer, r) == 47;
+}
+
+/// May the access (one LL_* bit) happen on the path in the first n bytes
+/// of the transfer buffer, as far as layer d (a domain slot) says?
+fn ll_layer_ok(k: &Kernel, d: u64, access: u64, n: u64) -> bool
+  requires kok(k) && d < LL_DM_N && n <= FNAME_MAX
+{
+  let at = SYS_LLD + d * LL_DM_W;
+  if get(k.sys, at + 2) & access == 0 {
+    return true;                           // the layer does not handle it
+  }
+  let cnt = smaller(get(k.sys, at + 3), LL_RULES);
+  let mut j = 0;
+  while j < cnt
+    invariant j <= cnt && cnt <= LL_RULES && kok(k) && d < LL_DM_N && n <= FNAME_MAX
+  {
+    let base = at + 4 + j * LL_RULE_W;
+    if get(k.sys, base) & access == access && ll_covers(k, base, n) {
+      return true;
+    }
+    j = j + 1;
+  }
+  return false;
+}
+
+/// 0 if the access is allowed on the path in the first n bytes of the
+/// transfer buffer, else -EACCES: every layer of the process must allow it.
+fn ll_deny(k: &Kernel, pid: u64, access: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+{
+  let mut d = get(k.sys, SYS_LLP + pid);
+  let mut guard = 0;
+  while d != 0 && guard < LL_DM_N
+    invariant guard <= LL_DM_N && kok(k) && pid < NPROC && n <= FNAME_MAX
+  {
+    if d > LL_DM_N {
+      return EACCES;
+    }
+    if !ll_layer_ok(k, d - 1, access, n) {
+      return EACCES;
+    }
+    d = get(k.sys, SYS_LLD + (d - 1) * LL_DM_W + 1);
+    guard = guard + 1;
+  }
+  return 0;
+}
+
+/// ll_deny for the directory that holds the path in the first n bytes: the
+/// accesses that change a directory's entries are checked there.
+fn ll_deny_in(k: &Kernel, pid: u64, access: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC && n <= FNAME_MAX
+{
+  if get(k.sys, SYS_LLP + pid) == 0 {
+    return 0;
+  }
+  let mut e = n;
+  while e > 0 && bget(k.fs.xfer, e - 1) != 47
+    invariant e <= n && n <= FNAME_MAX && kok(k)
+  {
+    e = e - 1;
+  }
+  let mut p = 0;
+  if e > 0 {
+    p = e - 1;
+  }
+  return ll_deny(k, pid, access, p);
+}
+
+/// Does process pid have a layer that handles anything?
+fn ll_active(k: &Kernel, pid: u64) -> bool
+  requires kok(k) && pid < NPROC
+{
+  return get(k.sys, SYS_LLP + pid) != 0;
+}
+
+/// The access a new file of the given st_mode type needs: LL_MAKE_*.
+fn ll_make_for(mode: u64) -> u64 {
+  let t = mode / 4096 % 16;
+  if t == 8 {
+    return LL_MAKE_REG;
+  }
+  if t == 2 {
+    return LL_MAKE_CHAR;
+  }
+  if t == 6 {
+    return LL_MAKE_BLOCK;
+  }
+  if t == 1 {
+    return LL_MAKE_FIFO;
+  }
+  if t == 12 {
+    return LL_MAKE_SOCK;
+  }
+  if t == 4 {
+    return LL_MAKE_DIR;
+  }
+  return LL_MAKE_REG;
+}
+
+/// A new process or thread c of p: the layers carry over.
+fn ll_fork(k: &mut Kernel, p: u64, c: u64)
+  requires kok(k) && p < NPROC && c < NPROC
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_LLP + c, get(k.sys, SYS_LLP + p));
+}
+
+/// Clears process p's layers for the next process in its slot.
+fn ll_clear(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_LLP + p, 0);
+}
+
+/// Frees the domains nothing uses: no process has one as its innermost
+/// layer and no other domain has it as parent. Returns whether any was freed.
+fn ll_gc(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  let cap = smaller(len(k.procs) / STRIDE, NPROC);
+  let mut freed = false;
+  let mut pass = 0;
+  while pass < LL_LAYERS
+    invariant pass <= LL_LAYERS && cap <= NPROC && kok(k)
+  {
+    let mut s = 0;
+    while s < LL_DM_N
+      invariant s <= LL_DM_N && cap <= NPROC && kok(k)
+    {
+      let at = SYS_LLD + s * LL_DM_W;
+      if get(k.sys, at) != 0 {
+        let mut used = false;
+        let mut p = 0;
+        while p < NPROC && !used
+          invariant p <= NPROC && kok(k)
+        {
+          if get(k.sys, SYS_LLP + p) == s + 1 {
+            used = true;
+          }
+          p = p + 1;
+        }
+        let mut t = 0;
+        while t < LL_DM_N && !used
+          invariant t <= LL_DM_N && kok(k)
+        {
+          if get(k.sys, SYS_LLD + t * LL_DM_W) != 0 && get(k.sys, SYS_LLD + t * LL_DM_W + 1) == s + 1 {
+            used = true;
+          }
+          t = t + 1;
+        }
+        if !used {
+          k.sys = set(k.sys, at, 0);
+          freed = true;
+        }
+      }
+      s = s + 1;
+    }
+    pass = pass + 1;
+  }
+  return freed;
+}
+
+/// A free domain slot, or LL_DM_N.
+fn ll_dom_free(k: &mut Kernel) -> u64
+  requires kok(k)
+  ensures kok(k) && result <= LL_DM_N
+{
+  let mut tries = 0;
+  while tries < 2
+    invariant tries <= 2 && kok(k)
+  {
+    let mut s = 0;
+    while s < LL_DM_N
+      invariant s <= LL_DM_N && kok(k)
+    {
+      if get(k.sys, SYS_LLD + s * LL_DM_W) == 0 {
+        return s;
+      }
+      s = s + 1;
+    }
+    if tries == 0 && !ll_gc(&mut k) {
+      return LL_DM_N;
+    }
+    tries = tries + 1;
+  }
+  return LL_DM_N;
+}
+
+/// The ruleset behind descriptor fd: its slot, or -EBADF / -EBADFD.
+fn ll_ruleset(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < LL_RS_N || result == EBADF || result == EBADFD
+{
+  if fd >= 0x80000000 {
+    return EBADF;
+  }
+  let h = fd_ofd(k, pid, fd);
+  if h >= OFD_N {
+    return EBADF;
+  }
+  if of_get(k.ofd, h, 0) != OF_LL {
+    return EBADFD;
+  }
+  let x = of_get(k.ofd, h, 2);
+  if x >= LL_RS_N || get(k.sys, SYS_LLR + ll_rs(x)) == 0 {
+    return EBADFD;
+  }
+  return x;
+}
+
+/// A description of kind OF_LL is closed: its ruleset is free again.
+fn ll_closed(k: &mut Kernel, x: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if x < LL_RS_N {
+    k.sys = set(k.sys, SYS_LLR + ll_rs(x), 0);
+  }
+}
+
+/// landlock_create_ruleset(attr, size, flags).
+fn ll_create(k: &mut Kernel, pid: u64, attr: u64, size: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    if flags == LL_VERSION && attr == 0 && size == 0 {
+      return LL_ABI;
+    }
+    return EINVAL;
+  }
+  if size < 8 {
+    return EINVAL;
+  }
+  if size > 4096 {
+    return E2BIG;
+  }
+  if attr < USER_BASE || attr >= USER_BASE + USER_SIZE - 8 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, 8) != 8 {
+    return EFAULT;
+  }
+  let handled = get_u64(k.fs.xfer, 0);
+  if handled & !LL_ALL != 0 {
+    return EINVAL;
+  }
+  if handled == 0 {
+    return ENOMSG;
+  }
+  let mut r = 0;
+  while r < LL_RS_N && get(k.sys, SYS_LLR + ll_rs(r)) != 0
+    invariant r <= LL_RS_N && kok(k)
+  {
+    r = r + 1;
+  }
+  if r >= LL_RS_N {
+    return ENOMEM;
+  }
+  let fd = ev_install(&mut k, pid, OF_LL, r, 0, true);
+  if fd >= LXNFD {
+    return fd;                              // EMFILE or ENFILE
+  }
+  let at = SYS_LLR + ll_rs(r);
+  k.sys = set(k.sys, at, 1);
+  k.sys = set(k.sys, at + 1, handled);
+  k.sys = set(k.sys, at + 2, 0);
+  return fd;
+}
+
+/// The path descriptor fd names, in the first bytes of the transfer
+/// buffer: its length and whether it is a directory (in k.perr: 1 for a
+/// directory), or NO_RESULT with the errno in k.perr.
+fn ll_fd_path(k: &mut Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures result == NO_RESULT || result <= FNAME_MAX
+{
+  k.perr = EBADF;
+  if fd >= 0x80000000 {
+    return NO_RESULT;
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind == K_BAD {
+    return NO_RESULT;
+  }
+  if d.kind == K_FILE {
+    let f = vfs_row_file(k.fs, d.x);
+    if f == NO_FILE {
+      k.perr = EBADFD;
+      return NO_RESULT;
+    }
+    let n = vfs_dirent(&mut k.fs, f);
+    if n == NO_FILE || n > FNAME_MAX {
+      k.perr = EBADFD;
+      return NO_RESULT;
+    }
+    k.perr = 0;
+    return n;
+  }
+  if d.kind == K_DIR {
+    let h = dir_ofd(k, pid, fd);
+    if h >= OFD_N {
+      k.perr = EBADFD;
+      return NO_RESULT;
+    }
+    let dl = base_len(k, pid, h);
+    let mut i = 0;
+    while i < dl
+      invariant i <= dl && dl <= FNAME_MAX && kok(k) && pid < NPROC && h < OFD_N
+    {
+      bset(&mut k.fs.xfer, i, base_byte(k, pid, h, i));
+      i = i + 1;
+    }
+    k.perr = 1;
+    return dl;
+  }
+  k.perr = EBADFD;
+  return NO_RESULT;
+}
+
+/// landlock_add_rule(ruleset_fd, rule_type, rule_attr, flags).
+fn ll_add(k: &mut Kernel, pid: u64, fd: u64, rtype: u64, attr: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    return EINVAL;
+  }
+  let r = ll_ruleset(k, pid, fd);
+  if r >= LL_RS_N {
+    return r;
+  }
+  if rtype != LL_RULE_PATH {
+    return EINVAL;
+  }
+  if attr < USER_BASE || attr >= USER_BASE + USER_SIZE - 16 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, 12) != 12 {
+    return EFAULT;
+  }
+  let allowed = get_u64(k.fs.xfer, 0);
+  let pfd = get_u64(k.fs.xfer, 8) % 0x100000000;   // the high four bytes are the next field's (none here)
+  if allowed == 0 {
+    return ENOMSG;
+  }
+  let at = SYS_LLR + ll_rs(r);
+  if allowed & !get(k.sys, at + 1) != 0 {
+    return EINVAL;                          // an access the ruleset does not handle
+  }
+  let n = ll_fd_path(&mut k, pid, pfd);
+  if n == NO_RESULT {
+    return k.perr;
+  }
+  if k.perr != 1 && allowed & !LL_FILE_ACCESS != 0 {
+    return EINVAL;                          // a directory's accesses on a file
+  }
+  if n > LL_PBYTES {
+    return ENAMETOOLONG;
+  }
+  let cnt = smaller(get(k.sys, at + 2), LL_RULES);
+  // A second rule for the same path adds its accesses to the first.
+  let mut j = 0;
+  while j < cnt
+    invariant j <= cnt && cnt <= LL_RULES && n <= LL_PBYTES && kok(k)
+  {
+    let base = at + 3 + j * LL_RULE_W;
+    if get(k.sys, base + 1) == n && ll_covers(k, base, n) {
+      k.sys = set(k.sys, base, get(k.sys, base) | allowed);
+      return 0;
+    }
+    j = j + 1;
+  }
+  if cnt >= LL_RULES {
+    return ENOMEM;
+  }
+  let base = at + 3 + cnt * LL_RULE_W;
+  k.sys = set(k.sys, base, allowed);
+  k.sys = set(k.sys, base + 1, n);
+  let mut w = 0;
+  while w < 12
+    invariant w <= 12 && n <= LL_PBYTES && kok(k) && base + LL_RULE_W <= len(k.sys)
+  {
+    let mut v = 0;
+    let mut b = 0;
+    while b < 8
+      invariant b <= 8 && w < 12 && kok(k)
+    {
+      let i = w * 8 + b;
+      if i < n {
+        v = v | (cast[u64](bget(k.fs.xfer, i)) << (8 * b));
+      }
+      b = b + 1;
+    }
+    k.sys = set(k.sys, base + 2 + w, v);
+    w = w + 1;
+  }
+  k.sys = set(k.sys, at + 2, cnt + 1);
+  return 0;
+}
+
+/// landlock_restrict_self(ruleset_fd, flags): the ruleset becomes a layer
+/// of the process.
+fn ll_restrict(k: &mut Kernel, pid: u64, fd: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !sc_nnp(k, pid) && !cap_has(k, pid, CAP_SYS_ADMIN) {
+    return EPERM;
+  }
+  if flags != 0 {
+    return EINVAL;
+  }
+  let r = ll_ruleset(k, pid, fd);
+  if r >= LL_RS_N {
+    return r;
+  }
+  let mut layers = 0;
+  let mut d = get(k.sys, SYS_LLP + pid);
+  while d != 0 && d <= LL_DM_N && layers <= LL_LAYERS
+    invariant layers <= LL_LAYERS + 1 && kok(k)
+  {
+    layers = layers + 1;
+    d = get(k.sys, SYS_LLD + (d - 1) * LL_DM_W + 1);
+  }
+  if layers >= LL_LAYERS {
+    return E2BIG;
+  }
+  let s = ll_dom_free(&mut k);
+  if s >= LL_DM_N {
+    return ENOMEM;
+  }
+  let at = SYS_LLR + ll_rs(r);
+  let dt = SYS_LLD + s * LL_DM_W;
+  let cnt = smaller(get(k.sys, at + 2), LL_RULES);
+  k.sys = set(k.sys, dt + 1, get(k.sys, SYS_LLP + pid));
+  k.sys = set(k.sys, dt + 2, get(k.sys, at + 1));
+  k.sys = set(k.sys, dt + 3, cnt);
+  let mut w = 0;
+  while w < cnt * LL_RULE_W
+    invariant w <= cnt * LL_RULE_W && cnt <= LL_RULES && kok(k)
+  {
+    k.sys = set(k.sys, dt + 4 + w, get(k.sys, at + 3 + w));
+    w = w + 1;
+  }
+  k.sys = set(k.sys, dt, 1);
+  k.sys = set(k.sys, SYS_LLP + pid, s + 1);
+  return 0;
+}
+
+/// The Landlock calls.
+fn lx_landlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if n == LX_LL_CREATE {
+    return ll_create(&mut k, pid, a, b, c % 0x100000000);
+  }
+  if n == LX_LL_ADD {
+    return ll_add(&mut k, pid, a % 0x100000000, b % 0x100000000, c, pget(k.procs, pid, F_REGS + R_R10) % 0x100000000);
+  }
+  return ll_restrict(&mut k, pid, a % 0x100000000, b % 0x100000000);
+}

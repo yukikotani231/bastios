@@ -24,6 +24,7 @@ import "net.bastio";
 // (TCP_RING bytes each way) are rings of pages, in src/tcpbuf.bastio.
 
 const TCP_MSS_V6: u64 = 1440;         // ... and to an IPv6 peer, whose headers are 20 bytes longer
+const TCP_MSS_WG: u64 = 1380;         // through a WireGuard device (MTU 1420)
 const TCP_MSS: u64 = 1460;            // the largest segment we send to or ask of another machine
 const TCP_MSS_LO: u64 = 14946;        // ... and to an address of this one: a frame of NET_BUF bytes
 const TCP_WS: u64 = 4;                // our window scale (RFC 7323): TCP_RING fits in 16 bits after it
@@ -349,10 +350,14 @@ fn tcp_fast_rexmit(n: &mut Net, t: u64)
 /// frames, or the loopback buffer's if `ip` is an address of this machine.
 fn mss_for(n: &Net, ip: u64) -> u64
   requires net_ok(n)
-  ensures result == TCP_MSS || result == TCP_MSS_LO || result == TCP_MSS_V6
+  ensures result == TCP_MSS || result == TCP_MSS_LO || result == TCP_MSS_V6 || result == TCP_MSS_WG
 {
   if is_local(n, ip) {
     return TCP_MSS_LO;
+  }
+  let o = route_if(n, ip);
+  if o < IFN && iw(n, o, IF_KIND) == IFK_WG {
+    return TCP_MSS_WG;
   }
   if is_v6tok(ip) {
     return TCP_MSS_V6;
@@ -579,8 +584,21 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
   requires net_ok(n) && dlen <= NET_BUF
   ensures net_ok(n)
 {
+  let src = tcp_refuse_frame(&mut n, flags, dlen);
+  if src != 0 {
+    reply_send(&mut n, src, 54);
+  }
+}
+
+/// Builds the reset in the outgoing frame and returns the address to send
+/// it to, or 0 if there is to be none. (A packet filter's reject sends it
+/// without running the output hook again, so it cannot recurse.)
+fn tcp_refuse_frame(n: &mut Net, flags: u64, dlen: u64) -> u64
+  requires net_ok(n) && dlen <= NET_BUF
+  ensures net_ok(n)
+{
   if flags % 8 >= TF_RST {
-    return;                           // never answer a reset
+    return 0;                         // never answer a reset
   }
   let src = be32(n.pkt, 26);
   let smac = be48(n.pkt, 6);
@@ -612,7 +630,7 @@ fn tcp_refuse(n: &mut Net, flags: u64, dlen: u64)
   put16(&mut n.out, 48, 0);
   put32(&mut n.out, 50, 0);
   put16(&mut n.out, 50, 65535 - l4_sum(n.out, src_ip(n, src), src, IP_TCP, 20));
-  reply_send(&mut n, src, 54);
+  return src;
 }
 
 // ---------------------------------------------------------------- the table
@@ -977,15 +995,38 @@ fn tcp_icmp_error(n: &mut Net, total: u64)
     return;
   }
   let code = cast[u64](bget(n.pkt, 35));
-  if !(code == 2 || code == 3 || code == 9 || code == 10 || code == 13) {
+  if !(code == 2 || code == 3 || code == 4 || code == 9 || code == 10 || code == 13) {
     return;
   }
   if cast[u64](bget(n.pkt, 42)) != 69 || cast[u64](bget(n.pkt, 51)) != IP_TCP {
     return;
   }
   let t = tcb_find(n, be16(n.pkt, 62), be32(n.pkt, 58), be16(n.pkt, 64));
-  if t < TCBS && tw(n, t, W_STATE) == T_SYN_SENT && be32(n.pkt, 66) == twb(n, t, W_ISS, SEQ_MOD) {
-    tcb_close(&mut n, t, true);
+  if t >= TCBS {
+    return;
+  }
+  let seq = be32(n.pkt, 66);
+  if code != 4 {
+    if tw(n, t, W_STATE) == T_SYN_SENT && seq == twb(n, t, W_ISS, SEQ_MOD) {
+      tcb_close(&mut n, t, true);
+    }
+    return;
+  }
+  // Fragmentation needed with DF set (RFC 1191, RFC 5927 4.2): the segment
+  // quoted must be one we have sent and not had acknowledged. Segments
+  // shrink to fit the next hop's MTU (never under 68 bytes, so a segment
+  // of 28 bytes of data) and what is unacknowledged goes out again.
+  let mtu = be16(n.pkt, 40);
+  let st = tw(n, t, W_STATE);
+  if (st == T_ESTABLISHED || st == T_CLOSE_WAIT) && mtu >= 68 && mtu - 40 < tw(n, t, W_MSS)
+    && seq_diff(seq, tw(n, t, W_UNA)) < TCP_RING && seq_diff(seq, tw(n, t, W_NXT)) >= TCP_RING {
+    tset(&mut n, t, W_MSS, mtu - 40);
+    tset(&mut n, t, W_NXT, tw(n, t, W_UNA));
+    tset(&mut n, t, W_CWND, 0);
+    tset(&mut n, t, W_RTTT, 0);
+    tset(&mut n, t, W_DUPS, 0);
+    tset(&mut n, t, W_TIMER, 0);
+    tcp_output(&mut n, t, true);
   }
 }
 
@@ -1063,6 +1104,21 @@ fn tcp_in(n: &mut Net, total: u64)
       tset(&mut n, t, W_TRIES, 0);
       tset(&mut n, t, W_STATE, T_ESTABLISHED);
       tcp_output(&mut n, t, true);
+    } else if is_syn && !is_ack && !is_rst {
+      // Simultaneous open (RFC 9293 3.5): the peer's SYN crossed ours. Take
+      // what it offers, answer with SYN+ACK from our initial sequence number
+      // and wait in SYN_RCVD for the ACK of our SYN.
+      tset(&mut n, t, W_RCV, seq_add(seq, 1));
+      tset(&mut n, t, W_WND, be16(n.pkt, 48));
+      tset(&mut n, t, W_MSS, tcp_mss_opt(n, hl));
+      tset(&mut n, t, W_WS, tcp_ws_opt(n, hl));
+      if tcp_opt(n, hl, 4, 2) != 0 {
+        tset(&mut n, t, W_SACK, 1);
+      }
+      tset(&mut n, t, W_STATE, T_SYN_RCVD);
+      tset(&mut n, t, W_TRIES, 0);
+      tcp_emit(&mut n, t, TF_SYN + TF_ACK, twb(n, t, W_ISS, SEQ_MOD), 0, 0);
+      tcp_arm(&mut n, t);
     }
     return;
   }
@@ -1571,7 +1627,8 @@ fn tcp_read(n: &mut Net, t: u64, buf: &mut Bytes, max: u64, peek: bool) -> u64
 }
 
 /// The caller lets go of t: a listener stops, a connection sends its FIN
-/// after the data still buffered (the slot is freed once the close
+/// after the data still buffered (a reset instead, if received bytes were
+/// never read) (the slot is freed once the close
 /// completes), and one that never connected is dropped.
 fn tcp_release(n: &mut Net, t: u64) -> bool
   requires net_ok(n)
@@ -1584,6 +1641,13 @@ fn tcp_release(n: &mut Net, t: u64) -> bool
   tset(&mut n, t, W_HELD, 0);
   tset(&mut n, t, W_PARENT, TCBS);          // accepted once: never handed out again
   let st = tw(n, t, W_STATE);
+  if (st == T_ESTABLISHED || st == T_CLOSE_WAIT) && tw(n, t, W_RXLEN) > 0 {
+    // Bytes that arrived and were never read: as on Linux (RFC 2525 2.17),
+    // the peer gets a reset, not a FIN, so it knows they were lost.
+    tcp_emit(&mut n, t, TF_RST + TF_ACK, twb(n, t, W_NXT, SEQ_MOD), 0, 0);
+    tcb_close(&mut n, t, false);
+    return true;
+  }
   if st == T_LISTEN {
     tcp_orphans(&mut n, t);
   }

@@ -24,12 +24,15 @@
 // the queue is one short of full an IN_Q_OVERFLOW event takes the last
 // place.
 //
+// An unlinked file that is still open keeps its directory and name in the
+// newest GH_N (seven) ghosts (gh_save), so events on it still reach watches on that
+// directory unless they asked for IN_EXCL_UNLINK.
+//
 // Not done: events from BastiOS's native system calls (src/syscall.bastio)
 // and from writes through shared mappings; IN_UNMOUNT; IN_DELETE_SELF is
 // reported when the last name goes, not when the last open description
-// closes; an unlinked file that is still open has no name, so its events
-// reach only watches on the file itself (as IN_EXCL_UNLINK would ask);
-// /proc/PID/fdinfo; FIONREAD. The limits (INO_N instances, INO_W watches
+// closes; a ghost lasts until a newer unlink takes its place (a nameless
+// file that reuses the handle would be misreported); /proc/PID/fdinfo; FIONREAD. The limits (INO_N instances, INO_W watches
 // each, INO_Q - 1 queued events) are fixed, and /proc/sys/fs/inotify shows
 // them.
 
@@ -118,6 +121,8 @@ const G_PID: u64 = 119;
 const G_FANM: u64 = 120;
 const G_COOL: u64 = 121;                       // no call waits for a reader before this time (ns): the last wait found none, and nothing was read since
 const G_PROG: u64 = 122;                       // events queued in all when the wait began: a reader that took some is making progress
+const G_EXCL: u64 = 124;                       // set while ino_child reports on an unlinked file: watches with IN_EXCL_UNLINK skip it
+const G_GHNEXT: u64 = 125;                     // the next ghost slot to reuse (gh_save)
 const G_READ: u64 = 123;                       // when an instance was last read with events queued (ns)
 const P_F: u64 = 0;                            // the handle the path names, or NO_FILE
 const P_PAR: u64 = 1;                          // its directory's handle, or NO_FILE
@@ -519,7 +524,7 @@ fn ino_note(k: &mut Kernel, h: u64, mask: u64, cookie: u64, nat: u64, nlen: u64)
       {
         let at = wat_at(i, w);
         let wm = iget(k, at + 1);
-        if iget(k, at) == h + 1 && wm & mask & IN_ALL_EVENTS != 0 {
+        if iget(k, at) == h + 1 && wm & mask & IN_ALL_EVENTS != 0 && !(iget(k, INO_G + G_EXCL) == 1 && wm & IN_EXCL_UNLINK != 0) {
           let wd = iget(k, at + 2);
           ino_queue(&mut k, i, wd, mask, cookie, nat, nlen);
           if wm & IN_ONESHOT != 0 {
@@ -682,6 +687,94 @@ fn note_entry(k: &mut Kernel, p: u64, mask: u64, cookie: u64)
   ino_note(&mut k, iget(k, at + P_PAR), m, cookie, at + P_NAME, smaller(iget(k, at + P_NAMELEN), COMP_MAX));
 }
 
+/// Handle f lost its last name while it may be open: keeps its directory and
+/// the name from path slot P1, so that what happens to it later still
+/// reaches the watches on that directory (as on Linux, unless they asked for
+/// IN_EXCL_UNLINK). The newest GH_N are kept.
+fn gh_save(k: &mut Kernel, f: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if f == NO_FILE || f >= HFILES {
+    return;
+  }
+  let par = iget(k, INO_G + P1 + P_PAR);
+  let nl = iget(k, INO_G + P1 + P_NAMELEN);
+  if par == NO_FILE || nl == 0 || nl > COMP_MAX {
+    return;
+  }
+  let mut e = 0;
+  let mut slot = GH_N;
+  while e < GH_N
+    invariant e <= GH_N && slot <= GH_N && kok(k)
+  {
+    if iget(k, GH_AT + e * GH_W) == f + 1 {
+      slot = e;
+    }
+    e = e + 1;
+  }
+  if slot >= GH_N {
+    // the oldest goes: the next in turn
+    slot = iget(k, INO_G + G_GHNEXT) % GH_N;
+    iput(&mut k, INO_G + G_GHNEXT, slot + 1);
+  }
+  let at = GH_AT + slot * GH_W;
+  iput(&mut k, at, f + 1);
+  iput(&mut k, at + 1, par);
+  iput(&mut k, at + 2, nl);
+  let mut w = 0;
+  while w < INO_NAMEW
+    invariant w <= INO_NAMEW && at + 3 + INO_NAMEW <= EVT_LEN && kok(k)
+  {
+    iput(&mut k, at + 3 + w, iget(k, INO_G + P1 + P_NAME + w));
+    w = w + 1;
+  }
+}
+
+/// The unlinked file f is reported to the watches on the directory it was
+/// in: the event mask m, with the name it had.
+fn gh_note(k: &mut Kernel, f: u64, m: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if f >= HFILES {
+    return;
+  }
+  let mut e = 0;
+  while e < GH_N
+    invariant e <= GH_N && kok(k)
+  {
+    let at = GH_AT + e * GH_W;
+    if iget(k, at) == f + 1 {
+      iput(&mut k, INO_G + G_EXCL, 1);
+      ino_note(&mut k, iget(k, at + 1), m, 0, at + 3, smaller(iget(k, at + 2), COMP_MAX));
+      iput(&mut k, INO_G + G_EXCL, 0);
+      return;
+    }
+    e = e + 1;
+  }
+}
+
+/// The directory the unlinked file f was in (see gh_save), or NO_FILE.
+fn gh_parent(k: &Kernel, f: u64) -> u64
+  requires kok(k)
+{
+  if f >= HFILES {
+    return NO_FILE;
+  }
+  let mut e = 0;
+  while e < GH_N
+    invariant e <= GH_N && kok(k)
+  {
+    let at = GH_AT + e * GH_W;
+    if iget(k, at) == f + 1 {
+      return iget(k, at + 1);
+    }
+    e = e + 1;
+  }
+  return NO_FILE;
+}
+
 /// An event on handle f that its directory hears of too (IN_ACCESS,
 /// IN_MODIFY, IN_ATTRIB, IN_OPEN, IN_CLOSE_*): to the watches on the
 /// directory its name is in, with that name, then to those on f. The
@@ -704,6 +797,8 @@ fn ino_child(k: &mut Kernel, f: u64, mask: u64)
       keep_path(&mut k, P3, n);
       ino_note(&mut k, iget(k, INO_G + P3 + P_PAR), m, 0, INO_G + P3 + P_NAME,
         smaller(iget(k, INO_G + P3 + P_NAMELEN), COMP_MAX));
+    } else {
+      gh_note(&mut k, f, m);               // unlinked, still open
     }
   }
   ino_note(&mut k, f, m, 0, INO_G + P3 + P_NAME, 0);
@@ -1176,6 +1271,9 @@ fn ino_after_call(k: &mut Kernel, pid: u64, call: u64, r: u64, kept: bool, a: u6
       }
     }
     note_entry(&mut k, P1, IN_DELETE, 0);
+    if iget(k, INO_G + P1 + P_DIR) == 0 && iget(k, INO_G + P1 + P_NLINK) <= 1 {
+      gh_save(&mut k, f);
+    }
     return;
   }
   if call == LX_RENAME || call == LX_RENAMEAT || call == LX_RENAMEAT2 {
@@ -1684,6 +1782,12 @@ fn fan_event(k: &mut Kernel, f: u64, mask: u64)
       pl = s - 1;
     }
     parent = vfs_dir_lookup(&mut k.fs, pl);
+  }
+  if n == 0 {
+    let gp = gh_parent(k, f);               // unlinked, still open: its directory's marks with FAN_EVENT_ON_CHILD still hear
+    if gp != NO_FILE {
+      parent = gp;
+    }
   }
   let mut i = 0;
   while i < INO_N

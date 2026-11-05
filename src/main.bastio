@@ -41,6 +41,9 @@ import "lxmem.bastio";
 import "lxmisc.bastio";
 import "lxkeys.bastio";
 import "lxaio.bastio";
+import "lxuring.bastio";
+import "lxalg.bastio";
+import "lxreflink.bastio";
 import "lxthread.bastio";
 import "lxdev.bastio";
 import "lxevent.bastio";
@@ -72,6 +75,8 @@ import "lxloop.bastio";
 import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
+import "lxmountapi.bastio";
+import "lxlandlock.bastio";
 import "lxns.bastio";
 import "lxnsk.bastio";
 import "lxuser.bastio";
@@ -421,6 +426,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           put_space(&mut s.k.spaces, p, Space::Mapped(sp));
           regs_load(&mut cpu, s.k.procs, p, 18);
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
+          boot_info(cpu, INFO_GSBASE, pget(s.k.procs, p, F_GSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
           return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), vppid: lx_ppid(s.k, p), rg: reap_gen(s.k), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
         },
@@ -649,6 +655,13 @@ fn linux_trap(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64) -> u64
     sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
   }
   if disk_hold(&mut s.k, p, EIO) || what == SWITCH || ino_pressed(s.k) {
+    if what == SWITCH {
+      // A call that is over but gives up the processor (it unblocked a
+      // signal, signalled itself, yielded) still has its stop after the
+      // call; pt_sys_exit leaves out one that waits or ended the process.
+      // Without it a tracer took the next call's entry for its exit.
+      let stopped = pt_sys_exit(&mut s.k, p);
+    }
     return (p + 1) % NPROC;     // (ino_pressed: a reader of a half-full inotify queue goes first)
   }
   if what == KEEP && pt_sys_exit(&mut s.k, p) {
@@ -1069,6 +1082,7 @@ fn syscall_turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, v
             put_space(&mut s.k.spaces, p, Space::Mapped(sp));
             regs_load(&mut cpu, s.k.procs, p, 18);
             cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
+            boot_info(cpu, INFO_GSBASE, pget(s.k.procs, p, F_GSBASE));
             pset(&mut s.k.procs, p, F_STATE, RUNNING);
             let mut w = reap_gen(s.k) * 2;
             if other {
@@ -2011,6 +2025,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.lazy);
   free(sys.k.anon);
   free(sys.k.locks);
+  free(sys.k.wv);
   free(sys.k.loops);
   free(sys.k.ptys);
   bfree(sys.k.ptyb);
@@ -2025,6 +2040,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   free(sys.k.sigsave);
   free(sys.k.ux);
   bfree(sys.k.uxb);
+  bfree(sys.k.algb);
   bfree(sys.k.lexb);
   free(sys.k.mns);
   free(sys.k.scf);

@@ -47,6 +47,7 @@ const LX_MOVE_MOUNT: u64 = 429;
 const LX_FSOPEN: u64 = 430;
 const LX_FSCONFIG: u64 = 431;
 const LX_FSMOUNT: u64 = 432;
+const LX_MOUNT_SETATTR: u64 = 442;
 const LX_FSPICK: u64 = 433;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO (src/lxaio.bastio)
@@ -58,7 +59,9 @@ const LX_MEMBARRIER: u64 = 324;
 const LX_MBIND: u64 = 237;
 const LX_SET_MEMPOLICY: u64 = 238;
 const LX_GET_MEMPOLICY: u64 = 239;
-const LX_IO_URING_SETUP: u64 = 425;    // libuv and BIND try it and do without
+const LX_IO_URING_SETUP: u64 = 425;    // src/lxuring.bastio
+const LX_IO_URING_ENTER: u64 = 426;
+const LX_IO_URING_REGISTER: u64 = 427;
 const LX_OPENAT: u64 = 257;
 const LX_CREAT: u64 = 85;
 const LX_STAT: u64 = 4;
@@ -107,6 +110,8 @@ const PATH_FIRST: u64 = 256;            // read first; most paths end within it
 
 const ARCH_SET_FS: u64 = 0x1002;
 const ARCH_GET_FS: u64 = 0x1003;
+const ARCH_SET_GS: u64 = 0x1001;
+const ARCH_GET_GS: u64 = 0x1004;
 const ARCH_GET_CPUID: u64 = 0x1011;
 const ARCH_SET_CPUID: u64 = 0x1012;
 const IOV_MAX: u64 = 1024;
@@ -167,6 +172,7 @@ const LX_EXECVEAT: u64 = 322;
 const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 const LX_FUTEX: u64 = 202;
+const LX_FUTEX_WAITV: u64 = 449;
 const LX_REBOOT: u64 = 169;
 
 // What thread_exec says.
@@ -292,6 +298,23 @@ fn read_l3(l3: &mut PageTable, off: u64) -> Word
   return Word { ok: true, v: v };
 }
 
+/// The end of read(2): large reads look at memory.max, then the result is returned.
+fn lx_read_done(k: &mut Kernel, pid: u64, r: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if r >= READ_MAX / 2 && r <= READ_MAX {
+    // A read this large may have faulted its buffer in from the kernel
+    // (copy_to_user), which anon_fault's look at every 256th page never
+    // sees, and it can finish before a timer tick does (under KVM, 120 MiB
+    // from /dev/zero in a quarter of a second): memory.max is looked at
+    // here too. Outside a group with a limit the look ends at once.
+    cg_oom_tick(&mut k, pid);
+  }
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
 /// read(2) and readv(2) (kept out of linux_syscall, whose proof is near the
 /// solver's limit).
 fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, was: u64) -> u64
@@ -335,9 +358,6 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if d.kind == K_DEV && d.x == DEV_KEYEV {
     return keyev_read(&mut k, pid, n, a, va, cnt);  // src/lxkeyev.bastio
   }
-  if d.kind == K_DEV && is_mounts_dev(d.x) {
-    mnt_catch_up(&mut k, fd_ofd(k, pid, a));  // reading a mount table answers a change of it
-  }
   let mut r = EBADF;
   if d.kind == K_FILE {
     r = lx_file_read(&mut k, pid, d.x, va, cnt);
@@ -375,16 +395,7 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if r == DISK_RETRY {
     return disk_retry(&mut k, pid, n);     // blocks not cached yet: wait for the disk
   }
-  if r >= READ_MAX / 2 && r <= READ_MAX {
-    // A read this large may have faulted its buffer in from the kernel
-    // (copy_to_user), which anon_fault's look at every 256th page never
-    // sees, and it can finish before a timer tick does (under KVM, 120 MiB
-    // from /dev/zero in a quarter of a second): memory.max is looked at
-    // here too. Outside a group with a limit the look ends at once.
-    cg_oom_tick(&mut k, pid);
-  }
-  ret(&mut k.procs, pid, r);
-  return KEEP;
+  return lx_read_done(&mut k, pid, r);
 }
 
 /// Handles the Linux system call process `pid` just made.
@@ -429,7 +440,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
       return KEEP;                          // stopped for its tracer (SECCOMP_RET_TRACE): the call starts again when it goes on
     }
     if !v.run {
-      ret(&mut k.procs, pid, v.ret);
+      if !sc_rollback(v.ret) {
+        ret(&mut k.procs, pid, v.ret);
+      }
       return KEEP;
     }
   }
@@ -478,7 +491,7 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     return SWITCH;                          // PTRACE_O_TRACEEXIT: the tracer is told first
   }
   if n == LX_EXIT && thread_only(k.procs, pid) {
-    lx_thread_exit(&mut k, mmu, pid);
+    lx_thread_exit(&mut k, mmu, pid, a);
     return SWITCH;
   }
   if n == LX_EXIT || n == LX_EXIT_GROUP {
@@ -489,6 +502,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_FUTEX {
     return lx_futex(&mut k, pid, was, a, b, c);
+  }
+  if n == LX_FUTEX_WAITV {
+    return lx_futex_waitv(&mut k, pid, was, a, b, c);
   }
   if n == LX_REBOOT {
     // reboot(2), for root alone holding CAP_SYS_BOOT (cap_has implies
@@ -670,8 +686,18 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
     let flags = pget(k.procs, pid, F_REGS + R_R10);
     let fd = pget(k.procs, pid, F_REGS + R_R8);
     let off = pget(k.procs, pid, F_REGS + R_R9);
-    if flags / MAP_FIXED % 2 == 1 && !win_quiet(&mut k, pid) {
-      return lx_retry(&mut k, pid, n);      // MAP_FIXED unmaps: another thread of pid runs on a processor
+    // MAP_FIXED unmaps, and a mapping that is not plain read-write has its
+    // pages protected after they are mapped (read_only): both wait until
+    // no other thread of pid runs on a processor, as win_op needs. (Private
+    // anonymous PROT_NONE maps nothing.) So does an address hint: whether
+    // anything is mapped there is counted with win_op (mmap_hint), which
+    // answers "something" while another thread runs. A hint then went
+    // unheard: Firefox maps its shared memory again read-only at the same
+    // address, checks that it got it, and gives the mapping up if not.
+    let protects = prot_arg(c) != 2 && !(c == 0 && flags & MAP_ANONYMOUS != 0 && flags & MAP_SHARED_VALIDATE == MAP_PRIVATE);
+    let hinted = a != 0 && flags / MAP_FIXED % 2 == 0;      // (MAP_FIXED_NOREPLACE too)
+    if (flags / MAP_FIXED % 2 == 1 || protects || hinted) && !win_quiet(&mut k, pid) {
+      return lx_retry(&mut k, pid, n);
     }
     let r = lx_mmap(&mut k, pid, a, b, c, flags, fd, off);
     if r < 0x8000000000000000 {
@@ -920,6 +946,10 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, lx_mount_call(&mut k, pid, n, a, b, c));
     return KEEP;
   }
+  if is_landlock_call(n) {
+    ret(&mut k.procs, pid, lx_landlock_call(&mut k, pid, n, a, b, c));   // src/lxlandlock.bastio
+    return KEEP;
+  }
   if is_procfs_call(n) {
     ret(&mut k.procs, pid, lx_procfs_call(&mut k, pid, n, a, b, c));
     return KEEP;
@@ -951,6 +981,16 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     } else if a == ARCH_GET_FS {
       xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_REGS + R_FSBASE));
       ret(&mut k.procs, pid, lx_put_out(&mut k, pid, b, 8));
+    } else if a == ARCH_SET_GS {
+      if b > 0x00007FFFFFFFFFFF {
+        ret(&mut k.procs, pid, EPERM);        // a base that is not canonical
+      } else {
+        pset(&mut k.procs, pid, F_GSBASE, b);
+        ret(&mut k.procs, pid, 0);
+      }
+    } else if a == ARCH_GET_GS {
+      xfer_u64(&mut k.fs.xfer, 0, pget(k.procs, pid, F_GSBASE));
+      ret(&mut k.procs, pid, lx_put_out(&mut k, pid, b, 8));
     } else if a == ARCH_GET_CPUID {
       ret(&mut k.procs, pid, 1);              // cpuid runs
     } else if a == ARCH_SET_CPUID {
@@ -981,11 +1021,13 @@ fn lx_last_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, lx_bpf(&mut k, pid, a, b, c));   // src/lxbpf.bastio
     return KEEP;
   }
-  // The new mount API (runc and crun use it when present) likewise falls
-  // back on ENOSYS.
-  if n == LX_RSEQ || n == LX_IO_URING_SETUP
-      || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN
-      || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_FSPICK {
+  // fspick of the new mount API likewise falls back on ENOSYS; the rest
+  // (open_tree included) is src/lxmountapi.bastio.
+  if n >= LX_IO_URING_SETUP && n <= LX_IO_URING_REGISTER {
+    return lx_uring_call(&mut con, &mut k, pid, n, a, b, c, pget(k.procs, pid, F_REGS + R_R10));
+  }
+  if n == LX_RSEQ
+      || n == LX_FSPICK {
     ret(&mut k.procs, pid, ENOSYS);
     return KEEP;
   }
@@ -1228,6 +1270,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     }
     let r = lx_fcntl(&mut k, pid, fd, F_SETFL, nf);
     return r;
+  }
+  if is_reflink_ioctl(req % 0x100000000) {
+    return lx_reflink_ioctl(&mut k, pid, fd, req % 0x100000000, arg);   // src/lxreflink.bastio
   }
   if d.kind == K_SECCOMP && d.x < SC_N {
     return sc_ioctl(&mut k, pid, d.x, pipe_nonblock(k, pid, fd), req % 0x100000000, arg);   // src/lxseccomp.bastio
@@ -2967,6 +3012,25 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   ensures kok(k)
   ensures lx_user_addr_or_errno(result)
 {
+  // A ring of io_uring (src/lxuring.bastio) is mapped at offsets of its own.
+  let mut o = off;
+  if flags / MAP_ANONYMOUS % 2 == 0 {
+    let rf = ur_file(k, pid, fd);
+    if rf < NO_FILE {
+      o = ur_mmap_off(k, rf, off);
+      if o == 0xFFFFFFFFFFFFF000 {
+        return EINVAL;
+      }
+    }
+  }
+  return lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+}
+
+fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
+{
   // In Linux's order: the offset, the descriptor, the length, the type.
   if off % 4096 != 0 {
     return EINVAL;
@@ -3026,12 +3090,16 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
   let can_write = mode / O_WRITE % 2 == 1;
   let pages = (n + 4095) / 4096;
   // A shared file mapping maps the page cache's pages (src/pcache.bastio)
-  // instead of fresh ones, if the file was opened for writing. From a
-  // descriptor that may only read, it gets a copy, as a private mapping
-  // does: mprotect could make the mapping writable later, and a write to
-  // the cache's page would reach every reader of the file
-  // (docs/security.md). Such a copy does not see later writes to the file.
-  let cached = sh && !anon && f != NO_FILE && can_write;
+  // instead of fresh ones, so it sees what other processes write to the
+  // file (Firefox's content processes read the font list and other shared
+  // memory that the parent keeps writing, through descriptors that may
+  // only read). From such a descriptor the pages must never become
+  // writable, or a write would reach every reader of the file
+  // (docs/security.md): its record says so to mprotect (map_no_write) and
+  // is never given up for another (map_record), so it needs a free record
+  // now. Without one the mapping gets a copy, as a private mapping does,
+  // and the copy does not see later writes to the file.
+  let cached = sh && !anon && f != NO_FILE && (can_write || map_room(k, pid));
   // A private mapping the program cannot write maps the page cache's pages
   // for the part of the file that fills whole pages, read-only and marked
   // as program text: no copy, and mprotect gives a private one before a
@@ -3073,7 +3141,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
         hole_add(&mut k, pid, hp, hp + pages);
         return ENOMEM;
       }
-      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
+      return lx_mmap_fill(&mut k, pid, hp * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh, can_write);
     }
     // A hole munmap left first (src/lxmem.bastio): its pages are unmapped.
     let h = hole_take(&mut k, pid, pages);
@@ -3082,7 +3150,7 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
         hole_add(&mut k, pid, h, h + pages);
         return ENOMEM;
       }
-      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
+      return lx_mmap_fill(&mut k, pid, h * 4096, pages, prot, flags, fd, off, anon, cached, ro, f, sh, can_write);
     }
     let brk = pget(k.procs, pid, F_BRK);
     let low = pget(k.procs, pid, F_MMAP);
@@ -3102,14 +3170,14 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
     pset(&mut k.procs, pid, F_MMAP, at);
   }
-  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, ro, f, sh);
+  return lx_mmap_fill(&mut k, pid, at, pages, prot, flags, fd, off, anon, cached, ro, f, sh, can_write);
 }
 
 /// The rest of mmap once window offset `at` has its pages (a `cached`
 /// mapping gets the page cache's instead): a file's bytes copied in, the
 /// mapping recorded if shared, and write access taken away without
 /// PROT_WRITE.
-fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, ro: bool, f: u64, sh: bool) -> u64
+fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags: u64, fd: u64, off: u64, anon: bool, cached: bool, ro: bool, f: u64, sh: bool, can_write: bool) -> u64
   requires kok(k) && pid < NPROC && at <= USER_SIZE && pages <= WPAGES && off % 4096 == 0
   ensures kok(k)
   ensures lx_user_addr_or_errno(result)
@@ -3119,7 +3187,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     read_only(&mut k, pid, at / 4096, pages, prot);
     // /dev/zero opened read-only (lx_mmap checked the rest)
     if flags / MAP_ANONYMOUS % 2 == 0 && sh && ofd_lacks(k, fd_ofd(k, pid, fd), ACC_NOWRITE) {
-      map_record(&mut k, pid, fd, at / 4096, pages, off);
+      map_record(&mut k, pid, fd, at / 4096, pages, off, false);
     }
     return USER_BASE + at;
   }
@@ -3127,11 +3195,16 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     if at / 4096 > WPAGES || pages > WPAGES - at / 4096 {
       return ENOMEM;
     }
-    let r = lx_map_file_shared(&mut k, pid, at / 4096, pages, f, off);
+    let r = lx_map_file_shared(&mut k, pid, at / 4096, pages, f, off, can_write);
     if r != 0 {
       return r;
     }
-    map_record(&mut k, pid, fd, at / 4096, pages, off);
+    if !map_record(&mut k, pid, fd, at / 4096, pages, off, !can_write) && !can_write {
+      // No record to keep the pages from becoming writable (lx_mmap saw a
+      // free one): they go again.
+      win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
+      return ENOMEM;
+    }
     read_only(&mut k, pid, at / 4096, pages, prot);
     bus_mark(&mut k, pid, at / 4096, pages);     // pages past the file's end: SIGBUS
     return USER_BASE + at;
@@ -3156,6 +3229,16 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     let mut got = 0;
     if f != NO_FILE && off <= 0xFFFFFFFFFFFFFFFF - done {
       got = vfs_read_at(&mut k.fs, f, off + done, step);
+      if got == NO_FD && f >= NFILES && f - NFILES < DSLOTS && off + done < vfs_size(&mut k.fs, f) {
+        // A disk file's block the bounded wait for the disk could not
+        // get (disk_read_wait gives up on a disk that does not answer):
+        // the mapping fails rather than hold zeros where the file has
+        // data.
+        if at / 4096 <= WPAGES && pages <= WPAGES - at / 4096 {
+          win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0);
+        }
+        return EIO;
+      }
       if got == NO_FD {
         got = 0;
       }
@@ -3173,7 +3256,7 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     done = done + step;
   }
   if sh {
-    map_record(&mut k, pid, fd, at / 4096, pages, off);
+    map_record(&mut k, pid, fd, at / 4096, pages, off, false);
   }
   read_only(&mut k, pid, at / 4096, pages, prot);
   if sh {

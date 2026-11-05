@@ -430,6 +430,9 @@ fn set_owner(k: &mut Kernel, pid: u64, f: u64, mode: u64, own: u64, u: u64, g: u
     if nu == 0 && ng == 0 {
       return 0;                             // root's already, and it keeps no other
     }
+    if uid == 0 {
+      return 0;                             // root may chown any file; a device keeps no owner, so xterm's chown of its pty to group tty is accepted and not kept
+    }
     return EPERM;
   }
   if !vfs_set_owner(&mut k.fs, f, nu, ng) {
@@ -590,7 +593,7 @@ fn exec_ids(k: &mut Kernel, pid: u64, file: bool, f: u64)
   }
   // A file in a loop-mounted image (handles LO0 on) is as if mounted
   // nosuid: whoever made the image chose its owners and modes.
-  if file && f < LO0 && !nnp && vfs_file_mflags(&mut k.fs, f) / 2 % 2 == 0 {   // not on a nosuid mount
+  if file && f < LO0 && !nnp && vfs_file_mflags(&mut k.fs, f) / 2 % 2 == 0 && lpath_stflags(k) / 2 % 2 == 0 {   // not on a nosuid mount
     let m = vfs_meta(&mut k.fs, f);
     if m.ok && m.mode & S_ISUID != 0 {
       euid = m.own % ID_SPAN;

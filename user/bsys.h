@@ -321,13 +321,13 @@ static int bsys_main(void)
         puts("bsys: no window server");
         return 2;
     }
-    int id = bwm_create(fd, BF_WIDTH, BS_ROWS * BF_CH, "System");
+    int id = bf_window(&fd, BS_ROWS * BF_CH, "System");
     if (id < 0) {
         puts("bsys: cannot open a window");
         return 1;
     }
     bs_paint(sw, sh);
-    if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
+    if (bf_send(fd, id, BS_ROWS * BF_CH) != 0)
         return 1;
     printf("bsys: window %d\n", id);
     fflush(stdout);
@@ -341,7 +341,7 @@ static int bsys_main(void)
                 bs_paint_tasks();
             } else
                 bs_paint(sw, sh);
-            if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
+            if (bf_send(fd, id, BS_ROWS * BF_CH) != 0)
                 break;
             if (!live) {
                 live = 1;
@@ -362,7 +362,7 @@ static int bsys_main(void)
                 bs_move(wheel ? wheel * 3 : bs_top + row - bs_sel);
                 bs_paint_tasks();
                 fflush(stdout);
-                if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
+                if (bf_send(fd, id, BS_ROWS * BF_CH) != 0)
                     break;
             }
             continue;
@@ -458,7 +458,7 @@ static int bsys_main(void)
         } else
             continue;
         fflush(stdout);
-        if (bwm_draw(fd, id, bf_pix, BF_WIDTH, 0, 0, BF_WIDTH, BS_ROWS * BF_CH) != 0)
+        if (bf_send(fd, id, BS_ROWS * BF_CH) != 0)
             break;
     }
     return 0;

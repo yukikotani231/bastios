@@ -15,11 +15,15 @@ cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 SEED=${SEED:-1}
 NIC=${NIC:-virtio-net-pci}
+MUSLCC=${MUSLCC:-musl-gcc}
+mkdir -p build/tcp
+$MUSLCC -O2 -fPIE -static-pie -o build/tcp/udperr test/udperr.c || exit 1
+test/compat/mkdisk.py build/tcp/disk.img build/tcp/udperr >/dev/null || exit 1
 
-python3 - "$KERNEL" "$SEED" "$NIC" <<'PY'
+python3 - "$KERNEL" "$SEED" "$NIC" build/tcp/disk.img <<'PY'
 import os, random, select, socket, struct, subprocess, sys, time
 
-kernel, seed, card = sys.argv[1], int(sys.argv[2]), sys.argv[3]
+kernel, seed, card, disk = sys.argv[1], int(sys.argv[2]), sys.argv[3], sys.argv[4]
 
 GUEST_IP = (10 << 24) | (0 << 16) | (2 << 8) | 15
 HOST_IP = (10 << 24) | (0 << 16) | (2 << 8) | 2
@@ -270,6 +274,14 @@ class Peer:
                 self.agree(s)
                 self.ack_now()
                 self.output()
+            elif s["flags"] & SYN and not s["flags"] & ACK:
+                # Simultaneous open: its SYN crossed ours.
+                self.irs = s["seq"]
+                self.peer_wnd = s["wnd"]
+                self.agree(s)
+                self.state = "SYN_RCVD"
+                self.emit(SYN, self.iss)
+                self.timer = time.time() + self.rto
             return
         if s["flags"] & SYN:
             self.ack_now()                  # our ACK of its SYN was lost
@@ -372,6 +384,13 @@ class Net:
             mac = bytes([2, 0, 0, 0, 1, dst - HOST_IP])
             self.link.send(f[6:12] + mac + b"\x08\x00" + ip_packet(1, dst, GUEST_IP, body))
             return
+        if f[23] == 17 and len(f) >= 42 and struct.unpack("!H", f[36:38])[0] == 9999:
+            # Nobody listens: say so, quoting the datagram (RFC 792).
+            body = struct.pack("!BBHI", 3, 3, 0, 0) + f[14:14 + 28]
+            body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+            self.send_ip(1, body)
+            self.udp9999 = getattr(self, "udp9999", 0) + 1
+            return
         if f[23] == 17 and len(f) >= 42 and struct.unpack("!H", f[34:36])[0] == 7:
             self.echoes.append(bytes(f[42:]))      # the guest's echo service answering
             return
@@ -423,9 +442,10 @@ if card == "ena":
 link = Link()
 net = Net(link)
 qemu = subprocess.Popen(
-    [qemu_bin, "-kernel", kernel, "-m", "64M", "-smp", "2",
+    [qemu_bin, "-kernel", kernel, "-m", "128M", "-smp", "2",
      "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
      "-serial", "stdio", "-monitor", "none",
+     "-drive", f"file={disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
      "-netdev", f"dgram,id=n0,local.type=inet,local.host=127.0.0.1,local.port={link.guest_port},"
                 f"remote.type=inet,remote.host=127.0.0.1,remote.port={link.port}",
      "-device", f"{card},netdev=n0"],
@@ -971,6 +991,73 @@ else:
     check(False, "ICMP port unreachable: no SYN seen")
 link.in_rule = lambda f: 0
 until(lambda: b"bastios> " in out[mark:], 10)
+
+# 6h. Simultaneous open (RFC 9293 3.5): our SYN crosses the guest's. The
+#     guest answers it with a SYN+ACK from its own initial sequence number and
+#     the connection comes up on both sides.
+mark = len(out)
+syn_seen.clear()
+def catch_syn2(f):
+    s = tcp_of(f)
+    if s and s["flags"] & SYN and not s["flags"] & ACK and s["dport"] == 8082:
+        syn_seen.append(s)
+    return 0
+link.in_rule = catch_syn2
+type_line("tcpget 10.0.2.2 8082 hi")
+until(lambda: syn_seen, 10)
+if syn_seen:
+    sim = Peer(net, 8082, syn_seen[0]["sport"], b"", active=True)
+    net.peer = sim
+    until(lambda: sim.state == "ESTABLISHED" and b"connected" in out[mark:], 10)
+    check(sim.state == "ESTABLISHED" and b"connected" in out[mark:],
+          f"simultaneous open: both sides establish (peer {sim.state})")
+    sim.closing = True
+else:
+    check(False, "simultaneous open: no SYN seen")
+link.in_rule = lambda f: 0
+net.peer = None
+until(lambda: b"bastios> " in out[mark:], 20)
+
+# 6i. Path MTU (RFC 1191, RFC 5927 4.2): our segments carry DF, so an ICMP
+#     "fragmentation needed" for one of them with a next hop MTU of 600 makes
+#     the guest send the rest in segments of at most 560 bytes of data.
+pm = {"cut": None, "sizes": []}
+def mtu_rule(f):
+    x = tcp_of(f)
+    if x and x["data"]:
+        if pm["cut"] is None and len(x["data"]) > 560:
+            pm["cut"] = x["seq"]
+            inner = f[14:14 + 28]
+            body = struct.pack("!BBHHH", 3, 4, 0, 0, 600) + inner
+            body = body[:2] + struct.pack("!H", csum(body)) + body[4:]
+            net.send_ip(1, body)
+            return None                 # the router drops it
+        if pm["cut"] is not None and x["seq"] == pm["cut"]:
+            pm["again"] = True          # the resend, after the guest heard of the MTU
+        if pm.get("again"):
+            pm["sizes"].append(len(x["data"]))
+    return 0
+def mtu_setup(p):
+    p.ws, p.sack_ok, p.rwin, p.mss = 3, True, 200000, 1460
+    link.in_rule = mtu_rule
+p = echo_run("path MTU", pattern(30000, 11), mtu_setup)
+check(pm["cut"] is not None and pm["sizes"] and max(pm["sizes"]) <= 560,
+      f"path MTU: from the resend on the guest's segments are at most {max(pm['sizes']) if pm['sizes'] else -1} bytes (560 allowed)")
+
+# 6j. ICMP errors reach UDP sockets (RFC 1122 4.1.3.3): see test/udperr.c.
+mark = len(out)
+type_line("ash")
+until(lambda: b"# " in out[mark:], 20)
+mark = len(out)
+type_line("/disk/udperr")
+done = until(lambda: b"done " in out[mark:], 60)
+text = out[mark:].decode(errors="replace").replace("\r", "")
+for line in text.split("\n"):
+    if line.startswith("ok ") or line.startswith("FAIL "):
+        check(line.startswith("ok "), "guest: " + line.split(" ", 1)[1])
+check(done and "done 0" in text, "ICMP errors for UDP: the guest program finished with every check passing")
+if not done or "FAIL" in text:
+    print(text[-1500:])
 
 qemu.kill(); qemu.wait()
 print("---- transcript ----")

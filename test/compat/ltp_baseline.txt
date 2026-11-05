@@ -29,6 +29,7 @@ bind04
 bind05
 brk01
 brk02
+cachestat02
 capget01
 capget02
 capset01
@@ -87,6 +88,7 @@ confstr01
 connect01
 connect02
 connect03
+cve-2022-0185
 fanotify01
 fanotify02
 fanotify04
@@ -102,7 +104,17 @@ flistxattr03
 fork13
 fremovexattr01
 fremovexattr02
+fsconfig01
+fsconfig02
+fsconfig03
 fsetxattr01
+fsmount01
+fsmount02
+fsopen01
+fsopen02
+futex_waitv01
+futex_waitv02
+futex_waitv03
 getxattr01
 getxattr02
 inotify02
@@ -110,6 +122,7 @@ inotify06
 inotify07
 inotify09
 inotify11
+inotify12
 io_cancel01
 io_destroy02
 io_getevents01
@@ -139,6 +152,11 @@ keyctl21
 keyctl22
 keyctl24
 kill11
+landlock01
+landlock02
+landlock03
+landlock04
+landlock07
 lgetxattr01
 lgetxattr02
 listxattr01
@@ -148,6 +166,10 @@ llistxattr01
 llistxattr02
 llistxattr03
 lremovexattr01
+mount_setattr01
+mount_setattr02
+move_mount01
+move_mount02
 msgget03
 removexattr01
 removexattr02
@@ -638,6 +660,8 @@ open11
 open15
 open_by_handle_at01
 open_by_handle_at02
+open_tree01
+open_tree02
 openat01
 openat201
 openat202

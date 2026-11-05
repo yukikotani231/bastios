@@ -2,10 +2,12 @@
 // iovec), with a destination or source address, and SCM_RIGHTS control
 // messages that pass a descriptor over an AF_UNIX socket.
 //
-// Not done: on an AF_UNIX datagram socket a message goes out from the
-// first non-empty buffer alone (more than one is -EINVAL, not a gather;
-// UDP gathers them), and a datagram comes in to the first buffer (the
-// rest of the list stays empty). SCM_RIGHTS passes one descriptor per message, at most
+// A datagram (AF_UNIX datagram and seqpacket sockets, UDP) goes out from
+// all the buffers of the list, joined. On AF_UNIX one also comes in spread
+// over them. Not done: with an address to send to, an AF_UNIX datagram
+// goes out from the first non-empty buffer alone (more than one is
+// -EINVAL, not a gather), and a UDP datagram comes in to the first buffer
+// (the rest of the list stays empty). SCM_RIGHTS passes one descriptor per message, at most
 // one in flight per direction (a second waits until the first is
 // received), and it goes with the next bytes read rather than with the
 // bytes it was sent beside. The console has no description: sending it
@@ -29,7 +31,7 @@ const MSGHDR: u64 = 56;                   // struct msghdr
 const SCM_RIGHTS: u64 = 1;
 const CMSG_ONE: u64 = 20;                 // CMSG_LEN(sizeof(int))
 const CMSG_ROOM: u64 = 24;                // CMSG_SPACE(sizeof(int))
-const SCM_MAX: u64 = 8;                   // descriptors one message passes: 1 + UX_XTRA
+const SCM_MAX: u64 = 16;                  // descriptors one message passes: 1 + UX_XTRA (Linux: 253)
 const MSG_CTRUNC: u64 = 8;
 const MSG_CMSG_CLOEXEC: u64 = 0x40000000;
 const ETOOMANYREFS: u64 = 18446744073709551507;   // 2^64 - 109
@@ -182,8 +184,11 @@ fn rights_in(k: &mut Kernel, pid: u64, ctl: u64, clen: u64) -> u64
   if level != SOL_SOCKET || kind != SCM_RIGHTS {
     return OFD_N;                           // another control message: ignored
   }
-  if len < CMSG_ONE || len > clen {
+  if len < 16 || len > clen {
     return EINVAL;
+  }
+  if len < CMSG_ONE {
+    return OFD_N;                           // a header with no descriptor in it: nothing to pass (as on Linux)
   }
   if len > CMSG_ONE + 4 * (SCM_MAX - 1) {
     return ETOOMANYREFS;                    // more than SCM_MAX descriptors
@@ -270,6 +275,9 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   if d.kind == K_BAD {
     return EBADF;                           // before the header, as on Linux
   }
+  if is_alg(k, pid, fd) {
+    return alg_sendmsg(&mut k, pid, fd, msg);   // src/lxalg.bastio
+  }
   if msg > 0xFFFFFFFFFFFF0000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, msg, &mut k.fs.xfer, MSGHDR) != MSGHDR {
     return EFAULT;
   }
@@ -301,7 +309,7 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
       return SK_WAIT;                       // the last one is not received yet
     }
   }
-  let dgram = !is_tcp(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));
+  let dgram = !is_tcp(k, pid, fd) && !is_alg(k, pid, fd) && (!unix || ux_dgram(k, pid, fd));   // buffers sent to a hash socket join one message
   if dgram && !unix && !is_nl(k, pid, fd) {
     return udp_gather(&mut k, pid, fd, iov, cnt, name, nlen, flags);
   }
@@ -313,6 +321,44 @@ fn lx_sendmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
     before = smaller(uc_get(k, tx, 1), UX_CAP);
   }
   let mut i = 0;
+  if unix && dgram && name == 0 && cnt > 1 {
+    // A datagram from several buffers: they are joined into one, as on
+    // Linux (the sandbox of Firefox sends its file requests that way).
+    let mut g = balloc(XFER);
+    let mut total = 0;
+    while i < cnt
+      invariant i <= cnt && cnt <= 1024 && total <= XFER && blen(g) == XFER && kok(k)
+    {
+      if !iov_at(&mut k, pid, iov, i) {
+        bfree(g);
+        return EFAULT;
+      }
+      let base = get_u64(k.fs.xfer, 0);
+      let len = get_u64(k.fs.xfer, 8);
+      if len > XFER - total {
+        bfree(g);
+        return EMSGSIZE;
+      }
+      if len > 0 {
+        if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, base, &mut k.fs.xfer, len) != len {
+          bfree(g);
+          return EFAULT;
+        }
+        bcopy(&mut g, total, k.fs.xfer, 0, len);
+        total = total + len;
+      }
+      i = i + 1;
+    }
+    bcopy(&mut k.fs.xfer, 0, g, 0, total);
+    bfree(g);
+    let r = ux_send_from(&mut k, pid, fd, 0, total, flags / MSG_DONTWAIT % 2 == 1, 0, 0, true);
+    if r > 0x7FFFFFFFFFFFFFFF {
+      return r;                             // -errno, or SK_WAIT
+    }
+    sent = true;
+    done = r;
+    stop = true;
+  }
   while i < cnt && !stop
     invariant i <= cnt && cnt <= 1024 && kok(k)
   {
@@ -370,7 +416,7 @@ fn recv_hlim(k: &mut Kernel, pid: u64, fd: u64, ctl: u64, clen: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k) && result <= 25
 {
-  if ctl == 0 || ctl > 0xFFFFFFFFFFFF0000 || clen < 24 || is_tcp(k, pid, fd) || is_unix(k, pid, fd) || is_nl(k, pid, fd) {
+  if ctl == 0 || ctl > 0xFFFFFFFFFFFF0000 || clen < 24 || is_tcp(k, pid, fd) || is_unix(k, pid, fd) || is_nl(k, pid, fd) || is_alg(k, pid, fd) {
     return 0;
   }
   let h = fd_ofd(k, pid, fd);
@@ -445,6 +491,59 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   let mut got = false;
   let mut stop = false;
   let mut i = 0;
+  if unix && dgram && cnt > 1 {
+    // A datagram over several buffers: it is taken whole and spread over
+    // them in turn, as on Linux (the sandbox of Firefox reads its file
+    // requests that way: a header, then the path).
+    let mut room = 0;
+    while i < cnt
+      invariant i <= cnt && cnt <= 1024 && room <= XFER && kok(k)
+    {
+      if !iov_at(&mut k, pid, iov, i) {
+        if fly != 0 && rx < UX_N {
+          uc_set_fly(&mut k, rx, fly);
+        }
+        return EFAULT;
+      }
+      room = smaller(sat_add(room, get_u64(k.fs.xfer, 8)), XFER);
+      i = i + 1;
+    }
+    let mut g = balloc(XFER);
+    let r = ux_recv_to(&mut k, pid, fd, 0, room, flags / MSG_DONTWAIT % 2 == 1, peek, flags / 32 % 2 == 1, name, namep, &mut g, true);
+    if r > 0x7FFFFFFFFFFFFFFF {
+      done = r;                             // -errno, or SK_WAIT
+    } else {
+      got = true;
+      done = r;
+      let mut left = smaller(r, room);      // MSG_TRUNC returns more than was taken
+      let mut off = 0;
+      let mut j = 0;
+      while j < cnt && left > 0
+        invariant j <= cnt && cnt <= 1024 && off + left <= XFER && blen(g) == XFER && kok(k)
+      {
+        if !iov_at(&mut k, pid, iov, j) {
+          bfree(g);
+          return EFAULT;
+        }
+        let base = get_u64(k.fs.xfer, 0);
+        let take = smaller(get_u64(k.fs.xfer, 8), left);
+        if take > 0 {
+          bcopy(&mut k.fs.xfer, 0, g, off, take);
+          let put = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, base, k.fs.xfer, take);
+          if put != take {
+            bfree(g);
+            return EFAULT;
+          }
+          off = off + take;
+          left = left - take;
+        }
+        j = j + 1;
+      }
+    }
+    bfree(g);
+    stop = true;
+    i = cnt;
+  }
   while i < cnt && !stop
     invariant i <= cnt && cnt <= 1024 && kok(k)
   {
@@ -608,6 +707,20 @@ fn lx_recvmsg(k: &mut Kernel, pid: u64, fd: u64, msg: u64, flags: u64) -> u64
   return done;
 }
 
+/// The end of sendmsg(2), recvmsg(2) and the mmsg calls: store the result, and
+/// raise SIGPIPE for a send on a broken pipe.
+fn lx_msg_done(k: &mut Kernel, pid: u64, n: u64, fl: u64, r: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  ret(&mut k.procs, pid, r);
+  if r == EPIPE && (n == LX_SENDMSG || n == LX_SENDMMSG) && fl / MSG_NOSIGNAL % 2 == 0 {
+    post_sig(&mut k, pid, SIGPIPE);
+    return SWITCH;
+  }
+  return KEEP;
+}
+
 /// The two calls. Returns KEEP or SWITCH, as linux_syscall does.
 fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires kok(k) && 1 <= pid && pid < NPROC
@@ -629,10 +742,5 @@ fn lx_msg_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   if r == SK_WAIT {
     return lx_retry(&mut k, pid, n);
   }
-  ret(&mut k.procs, pid, r);
-  if r == EPIPE && (n == LX_SENDMSG || n == LX_SENDMMSG) && fl / MSG_NOSIGNAL % 2 == 0 {
-    post_sig(&mut k, pid, SIGPIPE);
-    return SWITCH;
-  }
-  return KEEP;
+  return lx_msg_done(&mut k, pid, n, fl, r);
 }

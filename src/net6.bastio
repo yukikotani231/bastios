@@ -325,11 +325,11 @@ fn v6_in(n: &mut Net, flen: u64)
   if flen < 54 || bget(n.pkt, 14) / 16 != 6 {
     return;
   }
-  let plen = be16(n.pkt, 18);
+  let mut plen = be16(n.pkt, 18);
   if 54 + plen > flen || 54 + plen > FRAME_MAX {
     return;
   }
-  let nh = cast[u64](bget(n.pkt, 20));
+  let mut nh = cast[u64](bget(n.pkt, 20));
   let shi = be64(n.pkt, 22);
   let slo = be64(n.pkt, 30);
   let dhi = be64(n.pkt, 38);
@@ -339,6 +339,44 @@ fn v6_in(n: &mut Net, flen: u64)
   let group = dhi == MC_HI && (dlo == 1 || dlo == SNM_LO + n.iid % TWO24);
   if !mine && !group {
     return;
+  }
+  if nh == 0 || nh == 43 || nh == 60 {
+    // Extension headers (RFC 8200 4): hop-by-hop options, routing (only with
+    // no segments left) and destination options are walked and closed up,
+    // so that everything below sees the plain header. Options in them are
+    // not acted on. Anything else (a fragment, an authentication header)
+    // stays what it was and is dropped below.
+    let end = 54 + plen;
+    let mut off = 54;
+    let mut steps = 0;
+    while (nh == 0 || nh == 43 || nh == 60) && steps < 8
+      invariant 54 <= off && off <= end && nh <= 255 && end <= FRAME_MAX && end <= flen && flen <= RX_BUF && net_ok(n)
+    {
+      if off + 8 > end {
+        return;
+      }
+      let l = 8 * (cast[u64](bget(n.pkt, off + 1)) + 1);
+      if off + l > end || (nh == 43 && bget(n.pkt, off + 3) != 0) {
+        return;
+      }
+      nh = cast[u64](bget(n.pkt, off));
+      off = off + l;
+      steps = steps + 1;
+    }
+    if nh == 0 || nh == 43 || nh == 60 {
+      return;
+    }
+    let cut = off - 54;
+    let mut i = 54;
+    while i < end - cut
+      invariant 54 <= i && i <= end - cut && end <= FRAME_MAX && end <= flen && flen <= RX_BUF && net_ok(n)
+    {
+      bset(&mut n.pkt, i, bget(n.pkt, i + cut));
+      i = i + 1;
+    }
+    plen = plen - cut;
+    put16(&mut n.pkt, 18, plen);
+    bset(&mut n.pkt, 20, cast[u8](nh));
   }
   if nh == NH_ICMP6 {
     if plen >= 4 && v6_sum_in(n.pkt, nh, plen) == 65535 {
@@ -488,21 +526,27 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
 {
   let kind = cast[u64](bget(n.pkt, 54));
   let hops = cast[u64](bget(n.pkt, 21));
+  let code = cast[u64](bget(n.pkt, 55));
   if kind == ICMP6_ECHO && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46)) {
     net_copy(&mut n, 54 + plen);
     bset(&mut n.out, 54, cast[u8](ICMP6_ECHO_REPLY));
     v6_header(&mut n, smac, NH_ICMP6, plen, be64(n.pkt, 38), n.iid, shi, slo, 64);
     net_send(&mut n, 54 + plen);
-  } else if kind == ICMP6_NS && plen >= 24 && hops == 255 {
+  } else if kind == ICMP6_NS && plen >= 24 && hops == 255 && code == 0 {
     let thi = be64(n.pkt, 62);
     let tlo = be64(n.pkt, 70);
     if v6_mine(n, thi, tlo) && shi != 0 {
       if v6_onlink(n, shi) {
         v6_token(&mut n, shi, slo, smac);   // it will want an answer back
       }
-      na_send(&mut n, smac, shi, slo, thi, tlo);
+      na_send(&mut n, smac, shi, slo, thi, tlo, true);
+    } else if v6_mine(n, thi, tlo) && be64(n.pkt, 38) == MC_HI && be64(n.pkt, 46) == SNM_LO + n.iid % TWO24 && plen == 24 {
+      // Duplicate address detection by another node (RFC 4861 7.2.4): the
+      // solicitation has no source address and no source link-layer option.
+      // Say so to every node, with the Solicited flag clear.
+      na_send(&mut n, 0x333300000001, MC_HI, 1, thi, tlo, false);
     }
-  } else if kind == ICMP6_NA && plen >= 24 && hops == 255 {
+  } else if kind == ICMP6_NA && plen >= 24 && hops == 255 && code == 0 {
     let thi = be64(n.pkt, 62);
     let tlo = be64(n.pkt, 70);
     let i = v6_find(n, thi, tlo);
@@ -511,7 +555,7 @@ fn icmp6_in(n: &mut Net, plen: u64, shi: u64, slo: u64, smac: u64)
       let tok = V6_BASE + i;
       v6_release(&mut n, tok);
     }
-  } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI {
+  } else if kind == ICMP6_RA && plen >= 16 && hops == 255 && shi == LL_HI && code == 0 {
     ra_in(&mut n, plen, smac, slo);
   } else if (kind == ICMP6_ECHO_REPLY || (1 <= kind && kind <= 4)) && plen >= 8 && v6_mine(n, be64(n.pkt, 38), be64(n.pkt, 46))
     && shi / TWO48 != 0xFF02 {
@@ -558,14 +602,18 @@ fn v6_release(n: &mut Net, tok: u64)
   }
 }
 
-fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64)
+fn na_send(n: &mut Net, mac: u64, dhi: u64, dlo: u64, thi: u64, tlo: u64, solicited: bool)
   requires net_ok(n) && mac < MAC_LIMIT
   ensures net_ok(n)
 {
   bset(&mut n.out, 54, cast[u8](ICMP6_NA));
   bset(&mut n.out, 55, 0);
   put32(&mut n.out, 56, 0);
-  put32(&mut n.out, 58, 0x60000000);  // solicited, override
+  if solicited {
+    put32(&mut n.out, 58, 0x60000000);  // solicited, override
+  } else {
+    put32(&mut n.out, 58, 0x20000000);  // override
+  }
   put64(&mut n.out, 62, thi);
   put64(&mut n.out, 70, tlo);
   bset(&mut n.out, 78, 2);            // option: our link-layer address
@@ -585,6 +633,9 @@ fn ra_in(n: &mut Net, plen: u64, smac: u64, slo: u64)
   if be16(n.pkt, 60) != 0 {
     n.rtr_mac = smac;                 // a router lifetime: a default router
     n.rtr_lo = slo;
+  } else if n.rtr_mac == smac && n.rtr_lo == slo {
+    n.rtr_mac = 0;                    // lifetime 0: it is no default router any more (RFC 4861 6.3.4)
+    n.rtr_lo = 0;
   }
   let end = 54 + plen;
   let mut o = 70;

@@ -84,7 +84,7 @@ struct fix_info {
 #define GRIP 14                          /* the resize grip at the corner of a frame */
 #define MIN_CW 64
 #define MIN_CH 32
-#define MAXCLI 8
+#define MAXCLI MAXWIN                    /* one connection per window: both limits must agree */
 #define RXCAP (BWM_MAX_PAYLOAD + 64)
 
 static int fb = -1;
@@ -123,6 +123,7 @@ static long long now_ms(void);
 static char notice[40];                  /* a short message in the task bar (no room for a window, say) */
 static long long notice_due;             /* when it goes; 0 when none shows */
 #define NOTICE_MS 3000
+#define NOTICE_FILE "/tmp/bwm.notice"   /* a line written here is shown in the task bar for a few seconds */
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
@@ -888,17 +889,16 @@ static void draw_cursor(int mx, int my)
         }
 }
 
-/* Writes n bytes to the screen at byte offset at. The device takes what it takes per write (the position moves on), so this goes on until all are in. */
+/* Writes n bytes to the screen at byte offset at. The device takes what it takes per write, so this goes on until all are in. */
 static int fb_put(off_t at, const void *p, size_t n)
 {
     const char *src = p;
-    if (lseek(fb, at, SEEK_SET) != at)
-        return -1;
     while (n) {
-        ssize_t got = write(fb, src, n);
+        ssize_t got = pwrite(fb, src, n, at);                 /* at the offset in one call: lseek and write were two */
         if (got <= 0)
             return -1;
         src += got;
+        at += got;
         n -= (size_t)got;
     }
     return 0;
@@ -976,6 +976,22 @@ static void raise_win(struct win *w)
         return;
     memmove(&z[i], &z[i + 1], (nz - 1 - i) * sizeof z[0]);
     z[nz - 1] = w;
+}
+
+/* Alt-Tab and the wheel over the task bar: the window at the bottom comes up
+ * or, going back, the top one goes to the bottom. */
+static void cycle_windows(int back)
+{
+    if (nz < 2)
+        return;
+    if (back) {
+        struct win *t = z[nz - 1];
+        memmove(&z[1], &z[0], (nz - 1) * sizeof z[0]);
+        z[0] = t;
+    } else {
+        raise_win(z[0]);
+    }
+    touch_all();
 }
 
 /* ---- clients ---- */
@@ -1336,6 +1352,8 @@ static int k_shift, k_ctrl, k_alt, k_caps;
 #define DOUBLE_CLICK_MS 400
 static struct win *last_click_win;        /* the window whose title bar was clicked last, and when */
 static long long last_click_ms;
+static int ralt_on, raw_right;            /* Alt-right-drag resizes: whether one is going on, and whether the right button was down */
+static long long desk_click_ms;           /* when the empty desktop was last clicked */
 static int last_click_maxed;              /* whether it was maximized before that click */
 static int clock_shown = -1;              /* the minute of the day the task bar shows */
 static unsigned rep_code;
@@ -1465,6 +1483,20 @@ static void close_win(struct win *w)
         touch_win(w);
         win_free(w);
     }
+}
+
+/* Alt-Shift with an arrow key: the window moves 16 pixels, kept where its title bar stays reachable (as a drag keeps it). */
+static void nudge_win(struct win *w, int dx, int dy)
+{
+    touch_win(w);
+    w->maxed = 0;
+    w->x += dx;
+    w->y += dy;
+    if (w->x > (int)W - 60) w->x = (int)W - 60;
+    if (w->x < 60 - w->w) w->x = 60 - w->w;
+    if (w->y > (int)H - BAR_H - TITLE_H) w->y = (int)H - BAR_H - TITLE_H;
+    if (w->y < 0) w->y = 0;
+    touch_win(w);
 }
 
 /* Fills the left (side -1) or right (side 1) half of the screen above the
@@ -2091,6 +2123,43 @@ int main(int argc, char **argv)
     flush(0, 0, W, H, mx, my);
     printf("bwm: ready %ux%u\n", W, H);
     fflush(stdout);
+    if (getenv("BWM_BENCH") && nz > 0) {                      /* BWM_BENCH=N: time N frames of a drag, a full redraw and a pointer move, then stop */
+        int n = atoi(getenv("BWM_BENCH"));
+        struct win *w = z[nz - 1];
+        long long t0, t1;
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t0 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        for (int i = 0; i < n; i++) {                         /* a drag: the old and the new place of the window are painted and written */
+            int ox = w->x, oy = w->y, ow = w->w, oh = w->h;
+            w->x += i & 1 ? -9 : 9;
+            w->y += i & 1 ? -7 : 7;
+            int x0 = ox < w->x ? ox : w->x, y0 = oy < w->y ? oy : w->y;
+            int x1 = ox + ow > w->x + w->w ? ox + ow : w->x + w->w, y1 = oy + oh > w->y + w->h ? oy + oh : w->y + w->h;
+            draw_scene(x0, y0, x1, y1);
+            flush(x0, y0, x1, y1, mx, my);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        printf("bwm: bench drag %lld us a frame\n", (t1 - t0) / (n ? n : 1));
+        t0 = t1;
+        for (int i = 0; i < n; i++) {
+            draw_scene(0, 0, W, H);
+            flush(0, 0, W, H, mx, my);
+        }
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        printf("bwm: bench full %lld us a frame\n", (t1 - t0) / (n ? n : 1));
+        t0 = t1;
+        for (int i = 0; i < n; i++)
+            flush(mx - CUR_R, my - CUR_R, mx + CUR_BOX, my + CUR_BOX, mx + (i & 7), my);
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        t1 = ts.tv_sec * 1000000LL + ts.tv_nsec / 1000;
+        printf("bwm: bench pointer %lld us a frame\n", (t1 - t0) / (n ? n : 1));
+        printf("bwm: bench done\n");
+        fflush(stdout);
+        return 0;
+    }
     if (child && fork() == 0) {                               /* -c PROGRAM [ARGS]: start a client */
         const char *img = strcmp(child[0], "bfiles") == 0 || strcmp(child[0], "bsys") == 0 || strcmp(child[0], "bview") == 0 ? "bterm" : child[0];     /* bfiles is bterm under that name */
         execv(img[0] == '/' ? img : (snprintf(path, sizeof path, "/bin/%s", img), path), child);
@@ -2135,8 +2204,8 @@ int main(int argc, char **argv)
                 wait = d < 0 ? 0 : (int)d;
         }
         int until_min = (int)(60 - time(NULL) % 60) * 1000;      /* the clock changes at the next minute */
-        if (until_min > 3000)
-            until_min = 3000;                                    /* but a new time zone is noticed within 3 s */
+        if (until_min > 1000)
+            until_min = 1000;                                    /* but a new time zone, or a notice file, is noticed within a second */
         if (wait < 0 || until_min < wait)
             wait = until_min;
         if (poll(p, np, wait) < 0 && errno != EINTR)
@@ -2152,6 +2221,30 @@ int main(int argc, char **argv)
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
         kb_poll();
+        {                                                     /* a program posts a notice by writing a line to /tmp/bwm.notice (echo TEXT > /tmp/bwm.notice) */
+            static long long notice_chk;
+            long long now = now_ms();
+            if (now >= notice_chk + 500) {
+                notice_chk = now;
+                FILE *nf = fopen(NOTICE_FILE, "r");
+                if (nf) {
+                    char line[sizeof notice];
+                    int got = 0;
+                    if (fgets(line, sizeof line, nf)) {      /* an empty file is a writer that has not finished: look again */
+                        line[strcspn(line, "\r\n")] = 0;
+                        if (line[0]) {
+                            snprintf(notice, sizeof notice, "%s", line);
+                            notice_due = now + NOTICE_MS;
+                            touch_bar();
+                            got = 1;
+                        }
+                    }
+                    fclose(nf);
+                    if (got)
+                        unlink(NOTICE_FILE);
+                }
+            }
+        }
         int clock_h, clock_m;
         clock_hm(&clock_h, &clock_m);
         if (clock_h * 60 + clock_m != clock_shown) {
@@ -2195,6 +2288,10 @@ int main(int argc, char **argv)
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
+                        if (code == 110 && k_shift) {                      /* Shift-Insert pastes, as in a terminal window */
+                            out[0] = 22;
+                            m = 1;
+                        }
                         if (code != 15)
                             tab_k = 0;
                         if ((code == 103 || code == 108) && run_nh > 0) {      /* Up and Down: earlier commands */
@@ -2267,6 +2364,19 @@ int main(int argc, char **argv)
                                 memmove(run_buf + e, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
                                 run_n -= run_cur - e;
                                 run_cur = e;
+                            } else if (c == 22) {                  /* Ctrl-V: the first line of the clipboard, at the cursor */
+                                char clip[160];
+                                int fd = open("/tmp/bwm.clip", O_RDONLY | O_CLOEXEC);
+                                ssize_t got = fd >= 0 ? read(fd, clip, sizeof clip) : 0;
+                                if (fd >= 0)
+                                    close(fd);
+                                for (ssize_t k = 0; k < got && clip[k] != '\n' && run_n < (int)sizeof run_buf - 1; k++) {
+                                    if (clip[k] < 32 || clip[k] >= 127)
+                                        continue;
+                                    memmove(run_buf + run_cur + 1, run_buf + run_cur, (size_t)(run_n - run_cur + 1));
+                                    run_buf[run_cur++] = clip[k];
+                                    run_n++;
+                                }
                             } else if (c == 1) {                   /* Ctrl-A, Ctrl-E: start and end */
                                 run_cur = 0;
                             } else if (c == 5) {
@@ -2307,14 +2417,22 @@ int main(int argc, char **argv)
                         menu_sel = 0;
                         touch_all();
                     } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
-                        if (nz > 1) {
-                            if (k_shift) {                              /* the other way: the top one goes to the bottom */
-                                struct win *t = z[nz - 1];
-                                memmove(&z[1], &z[0], (nz - 1) * sizeof z[0]);
-                                z[0] = t;
-                            } else {
-                                raise_win(z[0]);
-                            }
+                        cycle_windows(k_shift);
+                    } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_ctrl && !k_shift) {
+                        struct win *t = focus();                    /* Ctrl-Alt-arrows: grow or shrink a resizable window by 16 pixels */
+                        if (t && t->resizable) {
+                            raise_win(t);
+                            t->maxed = 0;
+                            t->want_cw = cw_of(t) + (code == 106 ? 16 : code == 105 ? -16 : 0);
+                            t->want_ch = ch_of(t) + (code == 108 ? 16 : code == 103 ? -16 : 0);
+                            request_size(t);
+                            touch_all();
+                        }
+                    } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_shift) {
+                        struct win *t = focus();                    /* Alt-Shift-arrows: nudge the focused window by 16 pixels */
+                        if (t) {
+                            raise_win(t);
+                            nudge_win(t, code == 105 ? -16 : code == 106 ? 16 : 0, code == 103 ? -16 : code == 108 ? 16 : 0);
                             touch_all();
                         }
                     } else if ((code == 105 || code == 106 || code == 103) && down && k_alt) {
@@ -2454,9 +2572,17 @@ int main(int argc, char **argv)
                 if (my < 0) my = 0;
                 if (mx >= (int)W) mx = W - 1;
                 if (my >= (int)H) my = H - 1;
-                int down = m[0] & 1;
                 int in_bar = my >= (int)H - BAR_H;
                 struct win *under = in_bar ? NULL : hit(mx, my);
+                int right = (m[0] & 2) != 0;                 /* Alt with the right button on a resizable window drags its lower right corner, from anywhere in it */
+                if (!right)
+                    ralt_on = 0;
+                else if (!raw_right && k_alt && !(m[0] & 1) && under && under->resizable)
+                    ralt_on = 1;
+                raw_right = right;
+                if (ralt_on)
+                    m[0] = (unsigned char)((m[0] & ~3) | 1);   /* it goes on as a left press, with the corner as its edges */
+                int down = m[0] & 1;
                 if (menu_open && (dx || dy)) {
                     touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + menu_n * MENU_ITEM_H + 1);
                     menu_mx = mx; menu_my = my;
@@ -2471,10 +2597,16 @@ int main(int argc, char **argv)
                     buttons = m[0];
                     continue;
                 }
+                if (wheel && in_bar && !menu_open && !run_on)
+                    cycle_windows(wheel < 0);            /* the wheel over the task bar goes through the windows */
                 if ((m[0] & 2) && !(buttons & 2) && !in_bar && !under && !menu_open) {
                     menu_show(mx, my);                   /* a right click on the desktop opens the menu there */
                     menu_mx = mx; menu_my = my;
                     touch_all();
+                } else if ((m[0] & 4) && !(buttons & 4) && in_bar && mx < (int)W - MENU_W - 4 && !(mx >= TERM_X && mx < TERM_X + TERM_W)) {
+                    struct win *bw = bar_window(mx);     /* a middle click on a window's task bar button closes the window */
+                    if (bw)
+                        close_win(bw);
                 } else if (down && !(buttons & 1) && in_bar && mx >= (int)W - MENU_W - 4) {
                     menu_show((int)W - 4 - MENU_ITEM_W, (int)H - BAR_H - menu_n * MENU_ITEM_H);
                     menu_mx = mx; menu_my = my;
@@ -2487,6 +2619,9 @@ int main(int argc, char **argv)
                         if (bw && (bw != focus() || bw->hidden)) {
                             raise_win(bw);
                             touch_all();
+                        } else if (bw) {
+                            minimize(bw);                /* the button of the focused window hides it */
+                            touch_all();
                         }
                     }
                 } else if (down && !(buttons & 1) && under) {
@@ -2496,7 +2631,9 @@ int main(int argc, char **argv)
                     int in_title = my >= under->y + BORDER && my < under->y + TITLE_H;
                     int on_max = under->resizable && in_title && mx >= title_btn(under, 1) && mx < title_btn(under, 1) + CLOSE_W - 2;
                     int on_min = in_title && mx >= title_btn(under, under->resizable ? 2 : 1) && mx < title_btn(under, under->resizable ? 2 : 1) + CLOSE_W - 2;
-                    int edges = edges_at(under, mx, my);
+                    int edges = ralt_on ? 10 : edges_at(under, mx, my);
+                    if (ralt_on)
+                        on_close = on_max = on_min = 0;
                     if (on_close) {
                         close_win(under);
                         under = NULL;
@@ -2527,7 +2664,7 @@ int main(int argc, char **argv)
                             last_click_ms = now;
                             last_click_maxed = under->maxed;
                         }
-                        drag = !dbl && my < under->y + TITLE_H ? under : NULL;
+                        drag = !dbl && (my < under->y + TITLE_H || k_alt) ? under : NULL;   /* Alt-drag moves a window by any part of it */
                         if (drag)
                             under->maxed = 0;                    /* moved by hand: no longer "maximized" */
                         if (edges) {
@@ -2548,7 +2685,20 @@ int main(int argc, char **argv)
                 } else if (down && !(buttons & 1) && !in_bar && icon_at(mx, my) >= 0) {
                     if (launch_entry(icon_at(mx, my)))
                         running = 0;
+                } else if (down && !(buttons & 1) && !in_bar && !under && !menu_open) {
+                    long long now = now_ms();                    /* a double click on the empty desktop starts a terminal */
+                    if (desk_click_ms && now - desk_click_ms < DOUBLE_CLICK_MS) {
+                        desk_click_ms = 0;
+                        launch_terminal();
+                    } else {
+                        desk_click_ms = now;
+                    }
                 } else if (!down) {
+                    if (drag && drag->resizable && !drag->maxed) {   /* a window let go at the left or right edge of the screen fills that half of it, at the top all of it */
+                        if (mx <= 0) snap_win(drag, -1);
+                        else if (mx >= (int)W - 1) snap_win(drag, 1);
+                        else if (my <= 0) snap_win(drag, 0);
+                    }
                     drag = NULL;
                     if (sizing && !sizing->pend)
                         sizing->keep_r_on = sizing->keep_b_on = 0;     /* else the answer lets go of them */
@@ -2595,14 +2745,19 @@ int main(int argc, char **argv)
             draw_scene(dx0, dy0, dx1, dy1);
             if (flush(dx0, dy0, dx1, dy1, mx, my) != 0)
                 break;
-            if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
-                break;
-        } else if (mx != ox || my != oy) {
-            if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
-                break;
         }
-        if (mx != ox || my != oy)
-            flush(mx - CUR_R, my - CUR_R, mx + CUR_BOX, my + CUR_BOX, mx, my);
+        if (mx != ox || my != oy) {
+            /* The pointer moved: the box it left and the box it is in. Close together they are one piece, so a small move is one set of
+             * rows written, not two (a row is a system call). */
+            if (abs(mx - ox) < CUR_BOX && abs(my - oy) < CUR_BOX) {
+                if (flush((mx < ox ? mx : ox) - CUR_R, (my < oy ? my : oy) - CUR_R, (mx > ox ? mx : ox) + CUR_BOX, (my > oy ? my : oy) + CUR_BOX, mx, my) != 0)
+                    break;
+            } else {
+                if (flush(ox - CUR_R, oy - CUR_R, ox + CUR_BOX, oy + CUR_BOX, mx, my) != 0)
+                    break;
+                flush(mx - CUR_R, my - CUR_R, mx + CUR_BOX, my + CUR_BOX, mx, my);
+            }
+        }
     }
     if (have_tty)
         tcsetattr(0, TCSANOW, &old);

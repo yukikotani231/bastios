@@ -27,6 +27,14 @@ with tar, gzip, a file system walk, and a download of a 16 MiB file from a web
 server on this machine, between the builds. A round is one build and its
 companions; the same checks apply.
 
+--docker IMG runs containers instead: dockerd (the docker:dind image on the
+disk IMG made by test/compat/dockerdisk.py) starts as in test/compat/docker.txt,
+and every round runs and removes containers (exit status, logs, a memory
+limit, three in a row, one on the bridge). The memory check allows 4 MiB for
+dockerd's own state. Run on a KVM host: under plain emulation dockerd's
+clients sometimes time out (set DSOAK_PAR=1 in docker_round.sh to run three at
+once, which fails there with "error waiting for container: unexpected EOF").
+
 --secs runs rounds until that much time has passed (default 120); --rounds
 runs exactly that many. Every round's line is kept in OUT/soak.log (--keep
 names the directory, default a temporary one that is removed).
@@ -54,6 +62,7 @@ def main():
     ap.add_argument("--env", action="append", default=[], help="NAME=VALUE for msoak (e.g. SOAK_IPC=m)")
     ap.add_argument("--par", type=int, default=1, help="msoak instances at once (they stop on their own after --secs)")
     ap.add_argument("--alpine", help="run the Alpine build workload on this disk image instead of msoak")
+    ap.add_argument("--docker", help="run containers under Docker's dockerd on this disk image (test/compat/dockerdisk.py) instead of msoak")
     ap.add_argument("--only", help="comma-separated steps of msoak to run (default: all)")
     ap.add_argument("--keep", help="directory for the log and disk image")
     a = ap.parse_args()
@@ -62,8 +71,8 @@ def main():
     work = a.keep or tmp.name
     os.makedirs(work, exist_ok=True)
     disk = os.path.join(work, "soak-disk.img")
-    if a.alpine:
-        shutil.copyfile(a.alpine, disk)
+    if a.alpine or a.docker:
+        shutil.copyfile(a.alpine or a.docker, disk)
         if a.mem < 1024:
             a.mem = 1024
     else:
@@ -194,6 +203,25 @@ def main():
             finish()
         mark = len(out)
         send(f"{bb} sh /tmp/asoak.sh {big} 10.0.2.2:{port} {blob_md5}\r".encode())
+    elif a.docker:
+        bb = "/disk/busybox"
+        setup = open(os.path.join(ROOT, "test/compat/docker.txt")).read().split("\n$ ", 1)[1].split("\n", 1)[0]
+        send((setup.replace("HOSTURL", "") + "; echo docker-setup-$((40+2))\r").encode())
+        if not read_until(b"docker-setup-42", mark, 400) or b"\nlinux" not in bytes(out[mark:]):
+            fails.append("starting dockerd")
+            finish()
+        script = open(os.path.join(HERE, "soak/docker_round.sh"), "rb").read()
+        enc = base64.b64encode(script).decode()
+        mark = len(out)
+        send(b": > /tmp/dsoak.b64\r")
+        for i in range(0, len(enc), 800):
+            send(f"printf '%s' '{enc[i:i + 800]}' >> /tmp/dsoak.b64\r".encode())
+        send(f"{bb} base64 -d /tmp/dsoak.b64 > /tmp/dsoak.sh; echo script-md5=$({bb} md5sum < /tmp/dsoak.sh)\r".encode())
+        if not read_until(f"script-md5={hashlib.md5(script).hexdigest()}".encode(), mark, 120):
+            fails.append("sending the workload script")
+            finish()
+        mark = len(out)
+        send(f"{bb} sh /tmp/dsoak.sh {big}\r".encode())
     else:
         pre = (f"SOAK_ONLY={a.only} " if a.only else "") + "".join(e + " " for e in a.env)
         if a.par > 1:
@@ -219,7 +247,7 @@ def main():
         if b"/disk/msoak: not found" in text or b"ash: /disk/msoak:" in text:
             fails.append("msoak did not start: " + re.search(rb"ash: /disk/msoak:[^\r\n]*", text).group(0).decode())
             break
-        if b"soak: FAIL" in text:
+        if re.search(rb"soak: FAIL[^\r\n]*[\r\n]", text):
             fails.append("msoak: " + re.search(rb"soak: FAIL[^\r\n]*", text).group(0).decode())
             break
         if b"kernel fault" in text or b"bastio: out of memory" in text or b"panic" in text.lower():
@@ -265,10 +293,13 @@ def main():
             lo_base = min(r[2] for r in base)
             lo_tail = min(r[2] for r in tail)
             print(f"free memory: {lo_base} kB after the warm-up, {lo_tail} kB at the end")
-            if a.par == 1 and lo_base - lo_tail > a.leak_kb:   # with --par, others' pressure moves free memory
+            leak_kb = max(a.leak_kb, 4096) if a.docker else a.leak_kb   # dockerd's own heap and state grow
+            if a.par == 1 and lo_base - lo_tail > leak_kb:   # with --par, others' pressure moves free memory
                 fails.append(f"free memory fell by {lo_base - lo_tail} kB over {len(rows) - a.warmup} rounds")
             fds = {r[4] for r in rows}
-            procs = {r[5] for r in rows}
+            procs = {r[5] for r in rows[a.warmup:]}
+            if a.docker and max(procs) - min(procs) <= 2:
+                procs = {0}       # containerd's helper processes come and go
             if a.par == 1 and len(fds) > 1:      # instances see one another's descriptors and processes
                 fails.append(f"descriptor count changed: {sorted(fds)}")
             if a.par == 1 and len(procs) > 1:

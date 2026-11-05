@@ -14,8 +14,9 @@
 // k.pipes, words p * PIPE_STRIDE: head, count, the descriptions of its
 // read end and of its write end, the FIFO it belongs to + 1 (0 for an
 // anonymous pipe; src/lxevent.bastio), 1 once a writer has opened it,
-// the size F_SETPIPE_SZ gave it (0: PIPE_CAP), and 1 once a read end
-// has had O_ASYNC; the ring itself is
+// the size F_SETPIPE_SZ gave it (0: PIPE_CAP), 1 once a read end
+// has had O_ASYNC, and a count of its changes (pipe_changed, for
+// edge-triggered epoll, modulo ET_GENS); the ring itself is
 // slot p of k.pipebuf: PIPE_PAGE bytes at first, doubling up to PIPE_CAP
 // as the pipe fills (pipe_ready, pipe_grow), a position's byte at that
 // position modulo the ring's length.
@@ -374,8 +375,20 @@ fn pipe_keep(t: &mut Buf, p: u64, r: &Ring)
   requires len(t) == PIPES_LEN && p < NPIPES
   ensures len(t) == PIPES_LEN
 {
+  if pi_get(t, p, 0) != r.h || pi_get(t, p, 1) != r.n {
+    pipe_changed(&mut t, p);
+  }
   pi_set(&mut t, p, 0, r.h);
   pi_set(&mut t, p, 1, r.n);
+}
+
+/// Counts a change of pipe p (bytes in or out, an end closed), which an
+/// edge-triggered epoll entry on either end is told of (et_gen).
+fn pipe_changed(t: &mut Buf, p: u64)
+  requires len(t) == PIPES_LEN && p < NPIPES
+  ensures len(t) == PIPES_LEN
+{
+  pi_set(&mut t, p, 8, (pi_get(t, p, 8) % ET_GENS + 1) % ET_GENS);
 }
 
 /// How many bytes pipe p may hold: PIPE_CAP unless F_SETPIPE_SZ made it
@@ -502,7 +515,7 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   if kind == OF_DIR {
     return Fd { kind: K_DIR, x: x };
   }
-  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK {
+  if kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK || kind == OF_ALG {
     return Fd { kind: K_SOCK, x: x };
   }
   if kind == OF_DEV || kind == OF_PTY {
@@ -679,6 +692,8 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     ino_closed(&mut k, x, true);
   } else if kind == OF_INOTIFY && x < INO_N {
     ino_free(&mut k, x);
+  } else if kind == OF_LL {
+    ll_closed(&mut k, x);                   // src/lxlandlock.bastio
   } else if kind == OF_SECCOMP && x < SC_N {
     sc_listener_closed(&mut k, x);          // src/lxseccomp.bastio
   } else if kind == OF_DEV && x == DEV_FB {
@@ -694,15 +709,19 @@ fn unref_one(k: &mut Kernel, v: u64) -> u64
     if w / PIPE_BOTH % 2 == 1 && wl > 0 {
       pi_set(&mut k.pipes, x, 3, wl - 1);     // it was a writer too (a FIFO opened O_RDWR)
     }
+    pipe_changed(&mut k.pipes, x);
     pipe_release(&mut k, x);
   } else if kind == OF_PIPE_W && x < NPIPES {
     let left = pi_get(k.pipes, x, 3);
     if left > 0 {
       pi_set(&mut k.pipes, x, 3, left - 1);   // one description fewer on this end
     }
+    pipe_changed(&mut k.pipes, x);
     pipe_release(&mut k, x);
   } else if kind == OF_SOCK {
     sock_close(&mut k.nic, x);
+  } else if kind == OF_ALG {
+    alg_close(&mut k, x);                   // src/lxalg.bastio: the key is erased
   } else if kind == OF_NETLINK {
     nic_nl_close(&mut k.nic, x);           // src/rtnl.bastio
   } else if kind == OF_TCP && x < TCBS {
@@ -1152,6 +1171,26 @@ fn lx_open_n(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64) -> u64
   if (flags % 4 != 0 || flags & LO_CREAT != 0) && flags & LO_PATH == 0 && dir_at(&mut k, n) != NO_FILE {
     return EISDIR;                          // a directory is not written through open
   }
+  if ll_active(k, pid) && flags & LO_PATH == 0 {
+    let isd = dir_at(&mut k, n) != NO_FILE;
+    let ex = vfs_lookup(&mut k.fs, n) != NO_FILE;
+    let mut ll_e = 0;
+    if isd {
+      ll_e = ll_deny(k, pid, LL_READ_DIR, n);
+    } else if !ex && flags & LO_CREAT != 0 {
+      ll_e = ll_deny_in(k, pid, LL_MAKE_REG, n);
+    } else {
+      if flags % 4 != 1 {
+        ll_e = ll_deny(k, pid, LL_READ_FILE, n);
+      }
+      if ll_e == 0 && (flags % 4 != 0 || flags & LO_TRUNC != 0) {
+        ll_e = ll_deny(k, pid, LL_WRITE_FILE, n);
+      }
+    }
+    if ll_e != 0 {
+      return ll_e;
+    }
+  }
   if (flags % 4 != 0 || flags & LO_TRUNC != 0 || flags & LO_CREAT != 0) && path_ro(&mut k, n) {
     let exists = vfs_lookup(&mut k.fs, n) != NO_FILE || dir_at(&mut k, n) != NO_FILE;
     if (exists && (flags % 4 != 0 || flags & LO_TRUNC != 0)) || (!exists && flags & LO_CREAT != 0) {
@@ -1321,6 +1360,7 @@ fn lx_open_orphan(k: &mut Kernel, pid: u64, f: u64, flags: u64) -> u64
     return ENFILE;
   }
   of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  of_set(&mut k.ofd, h, OF_ASYNC, flags / LO_DIRECT % 2 * 2);   // O_DIRECT is kept for F_GETFL, not enforced
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -1534,7 +1574,7 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
     return fifo_open(&mut k, pid, ff, flags);
   }
   let nt = vfs_node_type(&mut k.fs, fh);
-  if fh != NO_FILE && (nt == T_CHR || nt == T_BLK) && flags & LO_PATH == 0 && vfs_path_mflags(&mut k.fs, n) / 4 % 2 == 1 {
+  if fh != NO_FILE && (nt == T_CHR || nt == T_BLK) && flags & LO_PATH == 0 && (vfs_path_mflags(&mut k.fs, n) / 4 % 2 == 1 || lpath_stflags(k) / 4 % 2 == 1) {
     return EACCES;                          // a nodev mount
   }
   if fh != NO_FILE && (nt == T_CHR || nt == T_BLK || nt == T_SOCK) && flags & LO_PATH == 0 {
@@ -1592,6 +1632,9 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
       return ENFILE;
     }
     dpath_keep(&mut k.dpath, &mut k.dpathx, hd, k.mstr, lpath_len(k));   // for *at calls and fchdir: the logical name
+    if flags & LO_PATH != 0 {
+      of_set(&mut k.ofd, hd, OF_ACC, ACC_PATH);
+    }
     return fd_install(&mut k, pid, hd);
   }
   let acc = flags % 4;
@@ -1643,7 +1686,8 @@ fn lx_open_node(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
     vfs_close(&mut k.fs, &mut k.mem, row);
     return ENFILE;
   }
-  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);   // kept for F_GETFL only
+  of_set(&mut k.ofd, h, 3, flags / LO_NONBLOCK % 2);
+  of_set(&mut k.ofd, h, OF_ASYNC, flags / LO_DIRECT % 2 * 2);   // O_DIRECT is kept for F_GETFL, not enforced   // kept for F_GETFL only
   let fd = fd_install(&mut k, pid, h);
   if fd < LXNFD && flags / LO_CLOEXEC % 2 == 1 {
     fd_set_k(&mut k, pid, fd, FD_OFD + h + FD_CLOEXEC);
@@ -1720,7 +1764,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
   let pipe = h < OFD_N && can_block(kind);
   // Sockets keep O_NONBLOCK in the low bit of word 3 too (src/lxsock.bastio,
   // src/lxtcp.bastio, src/lxunix.bastio), above their other state.
-  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK);
+  let sock = h < OFD_N && (kind == OF_SOCK || kind == OF_TCP || kind == OF_UNIX || kind == OF_NETLINK || kind == OF_ALG);
   let mut row = FD_ROWS;
   if h < OFD_N && kind == OF_FILE {
     row = of_get(k.ofd, h, 2);
@@ -1737,7 +1781,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     if m / O_APPEND % 2 == 1 {
       fl = fl + LO_APPEND;
     }
-    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC;
+    return fl + of_get(k.ofd, h, 3) % 2 * LO_NONBLOCK + of_get(k.ofd, h, OF_ASYNC) % 2 * LO_ASYNC + of_get(k.ofd, h, OF_ASYNC) / 2 % 2 * LO_DIRECT;
   }
   if cmd == F_SETFL && row < FD_ROWS {
     // O_APPEND takes effect; O_NONBLOCK is only reported back (a file never blocks).
@@ -1748,7 +1792,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     }
     fset(&mut k.fs.ftab, row, FD_MODE, nm);
     of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);
-    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2);
+    of_set(&mut k.ofd, h, OF_ASYNC, arg / LO_ASYNC % 2 + arg / LO_DIRECT % 2 * 2);
     return 0;
   }
   if cmd == F_GETFL {

@@ -400,6 +400,112 @@ static int process_cpu(void) {
     return 1;
 }
 
+/* A thread reads its process's memory files through the leader's id: the
+ * leader's row does not hold the group's address space while this thread
+ * runs, and the files must describe the group's memory all the same. */
+static int count_lines(const char *path) {
+    char b[4096];
+    int fd = open(path, O_RDONLY), n = 0;
+    ssize_t r;
+    if (fd < 0) return -1;
+    while ((r = read(fd, b, sizeof b)) > 0)
+        for (ssize_t i = 0; i < r; i++) n += b[i] == '\n';
+    close(fd);
+    return n;
+}
+static long file_size(const char *path) {
+    char b[4096];
+    int fd = open(path, O_RDONLY);
+    long n = 0;
+    ssize_t r;
+    if (fd < 0) return -1;
+    while ((r = read(fd, b, sizeof b)) > 0) n += r;
+    close(fd);
+    return n;
+}
+static void *memfiles(void *arg) {
+    (void)arg;
+    char p[64];
+    int ok = 1;
+    snprintf(p, sizeof p, "/proc/%d/maps", getpid());
+    ok = ok && count_lines(p) >= 4;               // the program, libc or the stack, the vDSO and more
+    snprintf(p, sizeof p, "/proc/%d/cmdline", getpid());
+    ok = ok && file_size(p) > 0;
+    snprintf(p, sizeof p, "/proc/%d/auxv", getpid());
+    ok = ok && file_size(p) > 0;
+    snprintf(p, sizeof p, "/proc/%d/statm", getpid());
+    FILE *f = fopen(p, "r");
+    long size = 0;
+    ok = ok && f && fscanf(f, "%ld", &size) == 1 && size > 0;
+    if (f) fclose(f);
+    return (void *)(long)ok;
+}
+
+/* oom_score of a process whose memory a thread touched, read by another
+   process while that thread waits and then while it runs on a processor.
+   (The group's address space is kept with the thread whose call was
+   handled last, not with the leader.) */
+static int oom_up[2], oom_down[2];
+static volatile int oom_stop;
+static size_t oom_len;
+static long read_score(pid_t p) {
+    char path[64], b[32];
+    snprintf(path, sizeof path, "/proc/%d/oom_score", (int)p);
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return -1;
+    long n = read(fd, b, sizeof b - 1);
+    close(fd);
+    if (n <= 0) return -1;
+    b[n] = 0;
+    return strtol(b, 0, 10);
+}
+static void *oom_toucher(void *a) {
+    char c = 'a';
+    char *m = mmap(0, oom_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED) return 0;
+    for (size_t i = 0; i < oom_len; i += 4096) m[i] = 1;
+    if (write(oom_up[1], &c, 1) != 1 || read(oom_down[0], &c, 1) != 1 || write(oom_up[1], &c, 1) != 1) return 0;
+    while (!oom_stop) ;
+    munmap(m, oom_len);
+    return (void *)1;
+}
+static int oom_score_of_threads(void) {
+    long kb = 0;
+    char b[4096];
+    int fd = open("/proc/meminfo", O_RDONLY);
+    long n = fd < 0 ? -1 : read(fd, b, sizeof b - 1);
+    if (fd >= 0) close(fd);
+    if (n <= 0) return 0;
+    b[n] = 0;
+    if (sscanf(b, "MemTotal: %ld", &kb) != 1) return 0;
+    oom_len = (size_t)kb * 1024 / 16;               /* a sixteenth of the memory, 16 .. 512 MiB */
+    if (oom_len < (16u << 20)) oom_len = 16u << 20;
+    if (oom_len > (512u << 20)) oom_len = 512u << 20;
+    if (pipe(oom_up) || pipe(oom_down)) return 0;
+    pid_t me = getpid();
+    pid_t c = fork();
+    if (c < 0) return 0;
+    if (c == 0) {
+        char x;
+        if (read(oom_up[0], &x, 1) != 1) _exit(2);
+        long waiting = read_score(me), own = read_score(getpid());
+        if (write(oom_down[1], &x, 1) != 1 || read(oom_up[0], &x, 1) != 1) _exit(3);
+        struct timespec ts = {0, 50000000};
+        nanosleep(&ts, 0);
+        long running = read_score(me);
+        _exit(waiting > own && running > own ? 0 : 1);
+    }
+    pthread_t t;
+    void *r = 0;
+    int st = -1;
+    if (pthread_create(&t, 0, oom_toucher, 0) != 0) { kill(c, SIGKILL); waitpid(c, 0, 0); return 0; }
+    pid_t w = waitpid(c, &st, 0);
+    oom_stop = 1;
+    pthread_join(t, &r);
+    close(oom_up[0]); close(oom_up[1]); close(oom_down[0]); close(oom_down[1]);
+    return w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && r == (void *)1;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -418,6 +524,9 @@ int main(void) {
            pthread_join(t[0], 0) == 0);
     EXPECT("timed condition wait, signalled early (realtime)", timed_wake(CLOCK_REALTIME));
     EXPECT("timed condition wait, signalled early (monotonic)", timed_wake(CLOCK_MONOTONIC));
+    EXPECT("a thread reads the leader's maps, cmdline, auxv and statm and finds the group's memory",
+           pthread_create(&t[0], 0, memfiles, 0) == 0 && pthread_join(t[0], &r) == 0 && r == (void *)1);
+    EXPECT("oom_score counts the memory a thread touched, while it waits and while it runs", oom_score_of_threads());
     EXPECT("thread-local storage", pthread_create(&t[0], 0, tlsf, 0) == 0 && pthread_join(t[0], &r) == 0 && r == (void *)2 && tls == 1);
     EXPECT("pthread_detach", pthread_create(&t[0], 0, tlsf, 0) == 0 && pthread_detach(t[0]) == 0);
     EXPECT("gettid differs in a thread", ({ pthread_t x; long other = 0;
