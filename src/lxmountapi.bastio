@@ -23,6 +23,7 @@
 
 import "lxmount.bastio";
 import "lxevent.bastio";
+import "lxprocfs.bastio";
 
 const OF_MNT: u64 = 22;               // a file system context or a mount object: see above
 
@@ -59,7 +60,7 @@ const MNT_STAGES: u64 = 8;
 const MNT_FLAGSHIFT: u64 = 64;
 
 fn is_mountapi_call(n: u64) -> bool {
-  return n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_MOUNT_SETATTR;
+  return n == LX_STATMOUNT || n == LX_LISTMOUNT || n == LX_OPEN_TREE || n == LX_MOVE_MOUNT || n == LX_FSOPEN || n == LX_FSCONFIG || n == LX_FSMOUNT || n == LX_MOUNT_SETATTR;
 }
 
 /// Is the NUL-terminated string at user address va s (at most 16 bytes)?
@@ -608,6 +609,359 @@ fn lx_open_tree(k: &mut Kernel, pid: u64, dfd: u64, path: u64, flags: u64) -> u6
   return fd;
 }
 
+// statmount and listmount describe the mounts of the caller's namespace from
+// the lines of its /proc/PID/mountinfo, so a mount's id is the id that file
+// shows (a position in the table, not stable across mounts and unmounts as
+// Linux's 64-bit ids are). Different from Linux: the tree is flat (every mount
+// other than the first has the first as its parent), a mount's root is "/"
+// and its device numbers are made up, as mountinfo shows them.
+
+const LSMT_ROOT: u64 = 18446744073709551615;
+const STATMOUNT_SB_BASIC: u64 = 1;
+const STATMOUNT_MNT_BASIC: u64 = 2;
+const STATMOUNT_MNT_ROOT: u64 = 8;
+const STATMOUNT_MNT_POINT: u64 = 0x10;
+const STATMOUNT_FS_TYPE: u64 = 0x20;
+const STATMOUNT_SUPPORTED: u64 = 0x3b;
+const STATMOUNT_HDR: u64 = 512;           // sizeof(struct statmount): the strings follow
+
+/// The decimal number in t[s..e), or NO_RESULT if there is none or it is long.
+fn dec_span(t: &Bytes, s: u64, e: u64, n: u64) -> u64
+  requires blen(t) == PROC_OUT && s <= e && e <= n && n <= PROC_OUT
+{
+  if e == s || e - s > 12 {
+    return NO_RESULT;
+  }
+  let mut v = 0;
+  let mut j = s;
+  while j < e
+    invariant j >= s && j <= e && e <= n && n <= PROC_OUT && blen(t) == PROC_OUT && v < 1000000000000
+  {
+    let c = bget(t, j);
+    if c < 48 || c > 57 {
+      return NO_RESULT;
+    }
+    if v > 99999999999 {
+      return NO_RESULT;
+    }
+    v = v * 10 + cast[u64](c - 48);
+    j = j + 1;
+  }
+  return v;
+}
+
+/// The start of the line of t[0..n) whose first field is the number id, or n.
+fn mi_line(t: &Bytes, n: u64, id: u64) -> u64
+  requires blen(t) == PROC_OUT && n <= PROC_OUT
+  ensures result <= n
+{
+  let mut i = 0;
+  while i < n
+    invariant i <= n && n <= PROC_OUT && blen(t) == PROC_OUT
+  {
+    let e = tok_end(t, i, n);
+    if dec_span(t, i, e, n) == id {
+      return i;
+    }
+    let mut j = e;
+    while j < n && bget(t, j) != 10
+      invariant j >= e && j <= n && n <= PROC_OUT && blen(t) == PROC_OUT
+    {
+      j = j + 1;
+    }
+    i = smaller(j + 1, n);
+    if j >= n {
+      i = n;
+    }
+  }
+  return n;
+}
+
+/// The start of field idx of the line starting at ls, or n if the line has
+/// fewer fields.
+fn mi_field(t: &Bytes, n: u64, ls: u64, idx: u64) -> u64
+  requires blen(t) == PROC_OUT && n <= PROC_OUT && ls <= n
+  ensures result <= n
+{
+  let mut j = ls;
+  let mut c = 0;
+  while c < idx
+    invariant j >= ls && j <= n && n <= PROC_OUT && blen(t) == PROC_OUT && c <= idx
+  {
+    if j >= n || bget(t, j) == 10 {
+      return n;
+    }
+    j = tok_end(t, j, n);
+    if j < n && bget(t, j) == 32 {
+      j = j + 1;
+    }
+    c = c + 1;
+  }
+  if j < n && bget(t, j) == 10 {
+    return n;
+  }
+  return j;
+}
+
+/// The MOUNT_ATTR_* bits of the comma-separated options t[s..e).
+fn mi_attrs(t: &Bytes, s: u64, e: u64, n: u64) -> u64
+  requires blen(t) == PROC_OUT && s <= e && e <= n && n <= PROC_OUT
+{
+  let mut a = 0;
+  if e >= s + 2 && bget(t, s) == 114 && bget(t, s + 1) == 111 {
+    a = MOUNT_ATTR_RDONLY;                  // "ro"
+  }
+  let mut i = s;
+  while i < e
+    invariant i >= s && i <= e && e <= n && n <= PROC_OUT && blen(t) == PROC_OUT
+  {
+    let mut j = i;
+    while j < e && bget(t, j) != 44
+      invariant j >= i && j <= e && e <= n && n <= PROC_OUT && blen(t) == PROC_OUT
+    {
+      j = j + 1;
+    }
+    if j - i >= 3 && bget(t, i) == 110 && bget(t, i + 1) == 111 {
+      let c = bget(t, i + 2);
+      if j - i == 6 && c == 115 {
+        a = a | MOUNT_ATTR_NOSUID;
+      }
+      if j - i == 5 && c == 100 {
+        a = a | MOUNT_ATTR_NODEV;
+      }
+      if j - i == 6 && c == 101 {
+        a = a | MOUNT_ATTR_NOEXEC;
+      }
+      if j - i == 7 && c == 97 {
+        a = a | MOUNT_ATTR_NOATIME;
+      }
+    }
+    if j < e {
+      i = j + 1;
+    } else {
+      i = e;
+    }
+  }
+  return a;
+}
+
+/// The offset from str[] of the byte at a, which follows the header.
+fn str_off(a: u64) -> u64
+  ensures result <= PROC_OUT
+{
+  if a >= STATMOUNT_HDR && a <= PROC_OUT {
+    return a - STATMOUNT_HDR;
+  }
+  return 0;
+}
+
+/// statmount(req, buf, bufsize, flags): what the mount named by req.mnt_id
+/// is, for the fields req.param asks for that are known (the others are left
+/// out of the mask it returns).
+fn lx_statmount(k: &mut Kernel, pid: u64, ureq: u64, ubuf: u64, bufsize: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    return EINVAL;
+  }
+  if bufsize < STATMOUNT_HDR {
+    return EOVERFLOW;
+  }
+  if ureq < USER_BASE || ureq >= USER_BASE + USER_SIZE - 32 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ureq, &mut k.fs.xfer, 24) != 24 {
+    return EFAULT;
+  }
+  if rd64(k.fs.xfer, 0) % 0x100000000 < 24 {
+    return EINVAL;
+  }
+  let id = get_u64(k.fs.xfer, 8);
+  let want = get_u64(k.fs.xfer, 16) & STATMOUNT_SUPPORTED;
+  let mut t = balloc(PROC_OUT);
+  let n = smaller(mountinfo_text(&mut k, pid, &mut t), PROC_OUT);
+  let ls = mi_line(t, n, id);
+  if ls >= n {
+    bfree(t);
+    return ENOENT;
+  }
+  let fpar = mi_field(t, n, ls, 1);
+  let fmp = mi_field(t, n, ls, 4);
+  let fop = mi_field(t, n, ls, 5);
+  let mut fd = mi_field(t, n, ls, 6);          // the optional fields, up to the "-"
+  let mut peer = 0;
+  let mut mst = 0;
+  let mut prop = 0x40000;                      // MS_PRIVATE
+  let mut guard = 0;
+  while fd < n && bget(t, fd) != 45 && guard < 8
+    invariant fd <= n && n <= PROC_OUT && blen(t) == PROC_OUT && guard <= 8
+  {
+    let fe = tok_end(t, fd, n);
+    let mut colon = fd;
+    while colon < fe && bget(t, colon) != 58
+      invariant colon >= fd && colon <= fe && fe <= n && n <= PROC_OUT && blen(t) == PROC_OUT
+    {
+      colon = colon + 1;
+    }
+    let v = dec_span(t, smaller(colon + 1, fe), fe, n);
+    if colon - fd == 6 && bget(t, fd) == 115 && v != NO_RESULT {
+      peer = v;                                // shared:N
+      prop = 0x100000;
+    }
+    if colon - fd == 6 && bget(t, fd) == 109 && v != NO_RESULT {
+      mst = v;                                 // master:N
+      if prop == 0x40000 {
+        prop = 0x80000;
+      }
+    }
+    if fe - fd == 10 && bget(t, fd) == 117 {
+      prop = 0x20000;                          // unbindable
+    }
+    fd = smaller(fe + 1, n);
+    guard = guard + 1;
+  }
+  let fdash = fd;
+  let mut ftype = n;
+  if fdash < n {
+    ftype = smaller(tok_end(t, fdash, n) + 1, n);
+  }
+  let fpe = tok_end(t, fpar, n);
+  let fme = tok_end(t, fmp, n);
+  let foe = tok_end(t, fop, n);
+  let fte = tok_end(t, ftype, n);
+  let parent = dec_span(t, fpar, fpe, n);
+  let attrs = mi_attrs(t, fop, foe, n);
+  // The magic number of the file system types the kernel has.
+  let mut magic = 0;
+  if fte - ftype == 5 && bget(t, ftype) == 116 {
+    magic = 0x01021994;                        // tmpfs
+  }
+  if fte - ftype == 4 && bget(t, ftype) == 101 {
+    magic = 0xEF53;                            // ext4
+  }
+  if fte - ftype == 4 && bget(t, ftype) == 112 {
+    magic = 0x9fa0;                            // proc
+  }
+  let mut r = balloc(PROC_OUT);
+  zero(&mut r, 0, PROC_OUT);
+  put_u64(&mut r, 8, want);
+  if want & STATMOUNT_SB_BASIC != 0 {
+    put_u64(&mut r, 16, (id % 0x100000000) * 0x100000000);     // major 0 (offset 16), minor (offset 20)
+    put_u64(&mut r, 24, magic);
+    if attrs & MOUNT_ATTR_RDONLY != 0 {
+      put_u64(&mut r, 32, 1);                  // sb_flags: SB_RDONLY (fs_type at 36 stays 0 here)
+    }
+  }
+  if want & STATMOUNT_MNT_BASIC != 0 {
+    put_u64(&mut r, 40, id);
+    put_u64(&mut r, 48, parent);
+    put_u64(&mut r, 56, id % 0x100000000 + (parent % 0x100000000) * 0x100000000);   // the old 32-bit ids
+    put_u64(&mut r, 64, attrs);
+    put_u64(&mut r, 72, prop);
+    put_u64(&mut r, 80, peer);
+    put_u64(&mut r, 88, mst);
+  }
+  let mut a = STATMOUNT_HDR;
+  if want & STATMOUNT_MNT_ROOT != 0 {
+    put_u64(&mut r, 104, str_off(a));   // mnt_root (low half; mnt_point is the high half); offsets are from str[]
+    a = put_s(&mut r, a, "/");
+    a = put_c(&mut r, a, 0);
+  }
+  if want & STATMOUNT_MNT_POINT != 0 {
+    let sp = str_off(a);
+    a = put_span(&mut r, a, t, fmp, fme, n);
+    a = put_c(&mut r, a, 0);
+    put_u64(&mut r, 104, get_u64(r, 104) % 0x100000000 + sp * 0x100000000);
+  }
+  if want & STATMOUNT_FS_TYPE != 0 {
+    let sp = str_off(a);
+    a = put_span(&mut r, a, t, ftype, fte, n);
+    a = put_c(&mut r, a, 0);
+    put_u64(&mut r, 32, get_u64(r, 32) % 0x100000000 + sp * 0x100000000);   // fs_type (offset 36) is the high half
+  }
+  put_u64(&mut r, 0, a);                       // size (low half), the spare after it is 0
+  bfree(t);
+  if a > bufsize {
+    bfree(r);
+    return EOVERFLOW;
+  }
+  let w = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, ubuf, r, a);
+  bfree(r);
+  if w != a {
+    return EFAULT;
+  }
+  return 0;
+}
+
+/// listmount(req, mnt_ids, nr_mnt_ids, flags): the ids of the mounts under
+/// req.mnt_id (LSMT_ROOT: all), the ones after req.param, as many as fit.
+fn lx_listmount(k: &mut Kernel, pid: u64, ureq: u64, uids: u64, nr: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !1 != 0 {
+    return EINVAL;
+  }
+  if ureq < USER_BASE || ureq >= USER_BASE + USER_SIZE - 32 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, ureq, &mut k.fs.xfer, 24) != 24 {
+    return EFAULT;
+  }
+  if rd64(k.fs.xfer, 0) % 0x100000000 < 24 {
+    return EINVAL;
+  }
+  let under = get_u64(k.fs.xfer, 8);
+  let last = get_u64(k.fs.xfer, 16);
+  if nr == 0 || nr > 1024 {
+    if nr == 0 {
+      return 0;
+    }
+    return EOVERFLOW;
+  }
+  if uids < USER_BASE || uids >= USER_BASE + USER_SIZE || 8 * nr > USER_BASE + USER_SIZE - uids {
+    return EFAULT;
+  }
+  let mut t = balloc(PROC_OUT);
+  let n = smaller(mountinfo_text(&mut k, pid, &mut t), PROC_OUT);
+  let mut ids = balloc(8 * nr);
+  let mut cnt = 0;
+  let mut id = 1;
+  while id < 100 && cnt < nr
+    invariant id >= 1 && id <= 100 && cnt <= nr && blen(ids) == 8 * nr && n <= PROC_OUT && blen(t) == PROC_OUT && kok(k)
+  {
+    let mut cur = id;
+    if flags & 1 != 0 {
+      cur = 100 - id;                          // newest first
+    }
+    let ls = mi_line(t, n, cur);
+    if ls < n {
+      let fpe = mi_field(t, n, ls, 1);
+      let parent = dec_span(t, fpe, tok_end(t, fpe, n), n);
+      let mut take = under == LSMT_ROOT || parent == under;
+      if flags & 1 == 0 && last != 0 && cur <= last {
+        take = false;
+      }
+      if flags & 1 != 0 && last != 0 && cur >= last {
+        take = false;
+      }
+      if take {
+        put_u64(&mut ids, 8 * cnt, cur);
+        cnt = cnt + 1;
+      }
+    }
+    id = id + 1;
+  }
+  bfree(t);
+  let w = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, uids, ids, 8 * cnt);
+  bfree(ids);
+  if w != 8 * cnt {
+    return EFAULT;
+  }
+  return cnt;
+}
+
 /// The new mount API's calls; full says whether the caller may change the
 /// machine's mounts, as for mount(2). fsconfig's key is the third
 /// argument, its value the fourth (r10).
@@ -616,6 +970,12 @@ fn lx_mountapi_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, fu
   ensures kok(k)
 {
   let r10 = pget(k.procs, pid, F_REGS + R_R10);
+  if n == LX_STATMOUNT {
+    return lx_statmount(&mut k, pid, a, b, c, r10);
+  }
+  if n == LX_LISTMOUNT {
+    return lx_listmount(&mut k, pid, a, b, c, r10);
+  }
   if n == LX_OPEN_TREE {
     return lx_open_tree(&mut k, pid, a, b, c % 0x100000000);
   }

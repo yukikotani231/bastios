@@ -1262,6 +1262,39 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_statmount: MNT_BASIC alone leaves out the strings
+t_statmount: a small buffer is EOVERFLOW
+t_statmount: an unknown mount is ENOENT
+t_statmount: bind it
+t_statmount: bind the shared mount
+t_statmount: flags are EINVAL
+t_statmount: it is gone
+t_statmount: it is private
+t_statmount: its file system type is tmpfs
+t_statmount: its id is its own
+t_statmount: its magic number is tmpfs's
+t_statmount: its mask has the fields asked for
+t_statmount: its root is /
+t_statmount: listmount holds to the room it is given
+t_statmount: listmount in reverse starts with the newest
+t_statmount: listmount lists the mounts
+t_statmount: listmount starts after the last id
+t_statmount: make it shared
+t_statmount: make the copy a slave
+t_statmount: mount tmpfs
+t_statmount: nosuid and nodev show
+t_statmount: remount read-only
+t_statmount: statmount shows ro
+t_statmount: statmount shows shared and a peer group
+t_statmount: statmount shows the master
+t_statmount: the bind mount has an id of its own
+t_statmount: the ids are ascending
+t_statmount: the new mount is found by its mount point
+t_statmount: the size covers the strings
+t_statmount: the tmpfs is gone
+t_statmount: unmount
+t_statmount: unmount the bind mount
+t_statmount: unmount the slave
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
