@@ -35,6 +35,9 @@ const FUTEX_WOKEN: u64 = 1;         // F_FUTEX of a timed waiter woken on a proc
 const FUTEX_CLOCK_REALTIME: u64 = 256;
 const FUTEX_CMD: u64 = 127;
 const FUTEX_PRIVATE: u64 = 128;
+const FUTEX_WV: u64 = 3;             // F_FUTEX of a futex_waitv waiter (not a word's address: those are multiples of 4)
+const FUTEX_WV_NOTE: u64 = 0x4000000000000000;   // + the index: a futex_waitv waiter woken while on a processor
+const WV_MAX: u64 = 128;             // FUTEX_WAITV_MAX
 const FUTEX_PHYS: u64 = 0x8000000000000000;   // keys of futexes on shared pages          // the rest: FUTEX_PRIVATE_FLAG, FUTEX_CLOCK_REALTIME
 const ETIMEDOUT: u64 = 18446744073709551506;   // 2^64 - 110
 
@@ -816,6 +819,109 @@ fn futex_group(procs: &Buf, pid: u64, key: u64) -> u64
   return tgid(procs, pid);
 }
 
+/// Whether p is blocked in futex_waitv (so its slot of k.wv is in use).
+fn waitv_live(procs: &Buf, p: u64) -> bool
+  requires ptab_ok(procs) && p < NPROC
+{
+  return pget(procs, p, F_REGS + R_LXNR) == LX_FUTEX_WAITV && pget(procs, p, F_FUTEX) == FUTEX_WV;
+}
+
+/// The slot of k.wv process p's waitv uses: the one it owns, else a free
+/// one or one whose owner no longer waits; WV_N if all are in use.
+fn waitv_slot(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k) && result <= WV_N
+{
+  let mut s = 0;
+  while s < WV_N
+    invariant s <= WV_N && kok(k)
+  {
+    if wget(k.wv, s * WV_ROW) == p + 1 {
+      return s;
+    }
+    s = s + 1;
+  }
+  s = 0;
+  while s < WV_N
+    invariant s <= WV_N && kok(k)
+  {
+    let o = wget(k.wv, s * WV_ROW);
+    if o == 0 || o > NPROC || !waitv_live(k.procs, o - 1) {
+      wset(&mut k.wv, s * WV_ROW, p + 1);
+      wset(&mut k.wv, s * WV_ROW + 1, 0);
+      return s;
+    }
+    s = s + 1;
+  }
+  return WV_N;
+}
+
+/// The index of the entry of futex_waitv waiter q's keys (its slot of
+/// k.wv, set when it started waiting) that is key `addr` in group g (as
+/// futex_key and futex_group give them), or NO_RESULT.
+fn waitv_match(k: &mut Kernel, q: u64, g: u64, addr: u64) -> u64
+  requires kok(k) && q < NPROC
+  ensures kok(k) && (result == NO_RESULT || result < WV_MAX)
+{
+  if g != 0 && tgid(k.procs, q) != g {
+    return NO_RESULT;
+  }
+  let mut s = 0;
+  while s < WV_N
+    invariant s <= WV_N && kok(k)
+  {
+    if wget(k.wv, s * WV_ROW) == q + 1 {
+      let nr = smaller(wget(k.wv, s * WV_ROW + 1), WV_MAX);
+      let mut i = 0;
+      while i < nr
+        invariant i <= nr && nr <= WV_MAX && s < WV_N && kok(k)
+      {
+        if wget(k.wv, s * WV_ROW + 2 + i) == addr {
+          return i;
+        }
+        i = i + 1;
+      }
+    }
+    s = s + 1;
+  }
+  return NO_RESULT;
+}
+
+/// Wakes futex_waitv waiter q if one of its futexes is key addr (group g),
+/// as futex_wake does a plain waiter: true if it woke.
+fn waitv_wake(k: &mut Kernel, q: u64, g: u64, addr: u64) -> bool
+  requires kok(k) && 1 <= q && q < NPROC
+  ensures kok(k)
+{
+  if pget(k.procs, q, F_REGS + R_LXNR) != LX_FUTEX_WAITV || pget(k.procs, q, F_FUTEX) != FUTEX_WV {
+    return false;
+  }
+  let st = state(k.procs, q);
+  let waiting = (st == FUTEXWAIT || st == TIMEWAIT || st == READY) && pget(k.procs, q, F_RESTART) != 0;
+  let polling = st == RUNNING && pget(k.procs, q, F_RESTART) >= 2;
+  if !waiting && !polling {
+    return false;
+  }
+  let ix = waitv_match(&mut k, q, g, addr);
+  if ix == NO_RESULT {
+    return false;
+  }
+  if polling {
+    pset(&mut k.procs, q, F_FUTEX, FUTEX_WV_NOTE + ix);
+    return true;
+  }
+  let rip = pget(k.procs, q, F_REGS + R_RIP);
+  if rip <= 0xFFFFFFFFFFFFFFF0 {
+    pset(&mut k.procs, q, F_REGS + R_RIP, rip + SYSCALL_LEN);
+  }
+  pset(&mut k.procs, q, F_REGS + R_RET, ix);
+  pset(&mut k.procs, q, F_RESTART, 0);
+  pset(&mut k.procs, q, F_FUTEX, 0);
+  pset(&mut k.procs, q, F_STATE, READY);
+  pt_woken(&mut k, q);
+  return true;
+}
+
 /// Wakes up to n waiters on key (futex_key) that pid reaches; returns how
 /// many.
 fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
@@ -843,6 +949,8 @@ fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
       pset(&mut k.procs, q, F_FUTEX, 0);
       pset(&mut k.procs, q, F_STATE, READY);
       pt_woken(&mut k, q);                // its tracer sees the call end (src/lxptrace.bastio)
+      woken = woken + 1;
+    } else if q != pid && waitv_wake(&mut k, q, g, addr) {
       woken = woken + 1;
     }
     q = q + 1;
@@ -1112,6 +1220,143 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
   if r == SWITCH {
     if was == 0 {
       pset(&mut k.procs, pid, F_FUTEX, key);
+    }
+    pset(&mut k.procs, pid, F_STATE, FUTEXWAIT);
+  }
+  return r;
+}
+
+/// futex_waitv(waiters, nr_futexes, flags, timeout, clockid): waits on up
+/// to FUTEX_WAITV_MAX futex words at once and returns the index of the one
+/// that was woken. Each entry is {u64 val, u64 uaddr, u32 flags, u32
+/// reserved}; flags must be FUTEX_32 (2), with FUTEX_PRIVATE_FLAG (128)
+/// if the word is private. The timeout is absolute, on CLOCK_REALTIME (0)
+/// or CLOCK_MONOTONIC (1). A waiter is found by futex_wake (waitv_wake)
+/// by the keys it left in k.wv.
+fn lx_futex_waitv(k: &mut Kernel, pid: u64, was: u64, waiters: u64, nr: u64, flags: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let to = pget(k.procs, pid, F_REGS + R_R10);
+  let clk = pget(k.procs, pid, F_REGS + R_R8) % 0x100000000;
+  let mut dl = FOREVER;
+  if was == 0 {
+    if flags % 0x100000000 != 0 {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    let n = nr % 0x100000000;
+    if waiters == 0 || n == 0 || n > WV_MAX {
+      ret(&mut k.procs, pid, EINVAL);
+      return KEEP;
+    }
+    if to != 0 {
+      if clk > 1 {
+        ret(&mut k.procs, pid, EINVAL);
+        return KEEP;
+      }
+      let ts = ts_in(&mut k, pid, to);
+      if ts.err != 0 {
+        ret(&mut k.procs, pid, ts.err);
+        return KEEP;
+      }
+      if clk == 0 {
+        if ts.ns > k.epoch {
+          dl = ts.ns - k.epoch;
+        } else {
+          dl = 0;
+        }
+      } else {
+        dl = ts.ns;
+      }
+    }
+    if waiters >= 0x800000000000 {
+      ret(&mut k.procs, pid, EFAULT);
+      return KEEP;
+    }
+    // Every entry parsed first, then each word checked, as Linux does.
+    let mut eb = balloc(32);
+    let mut i = 0;
+    while i < n
+      invariant i <= n && n <= WV_MAX && blen(eb) == 32 && kok(k) && pid < NPROC && waiters < 0x800000000000
+    {
+      if waiters >= 0x800000000000 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, waiters + 24 * i, &mut eb, 24) != 24 {
+        bfree(eb);
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
+      let fl = get_u64(eb, 16);
+      if get_u64(eb, 0) >= 0x100000000 || fl / 0x100000000 != 0 || (fl != 2 && fl != 130) {
+        bfree(eb);
+        ret(&mut k.procs, pid, EINVAL);
+        return KEEP;
+      }
+      i = i + 1;
+    }
+    let sl = waitv_slot(&mut k, pid);
+    if sl >= WV_N {
+      bfree(eb);
+      ret(&mut k.procs, pid, ENOMEM);
+      return KEEP;
+    }
+    i = 0;
+    while i < n
+      invariant i <= n && n <= WV_MAX && blen(eb) == 32 && kok(k) && pid < NPROC && waiters < 0x800000000000 && sl < WV_N
+    {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, waiters + 24 * i, &mut eb, 24) != 24 {
+        bfree(eb);
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
+      let val = get_u64(eb, 0);
+      let ua = get_u64(eb, 8);
+      if ua % 4 != 0 {
+        bfree(eb);
+        ret(&mut k.procs, pid, EINVAL);
+        return KEEP;
+      }
+      let w = user_u32(&mut k, pid, ua);
+      if !w.ok {
+        bfree(eb);
+        ret(&mut k.procs, pid, EFAULT);
+        return KEEP;
+      }
+      if w.v != val {
+        bfree(eb);
+        ret(&mut k.procs, pid, EAGAIN);
+        return KEEP;
+      }
+      wset(&mut k.wv, sl * WV_ROW + 2 + i, futex_key(&mut k, pid, ua, get_u64(eb, 16) % 0x100000000));
+      i = i + 1;
+    }
+    bfree(eb);
+    wset(&mut k.wv, sl * WV_ROW + 1, n);
+  } else {
+    let f = pget(k.procs, pid, F_FUTEX);
+    if f >= FUTEX_WV_NOTE && f < FUTEX_WV_NOTE + WV_MAX {
+      pset(&mut k.procs, pid, F_FUTEX, 0);  // woken while on a processor (waitv_wake)
+      ret(&mut k.procs, pid, f - FUTEX_WV_NOTE);
+      return KEEP;
+    }
+    if was >= 2 {
+      dl = was - 2;
+    }
+  }
+  if dl < FOREVER {
+    if k.ns >= dl {
+      ret(&mut k.procs, pid, ETIMEDOUT);
+      return KEEP;
+    }
+    let r = wait_until(&mut k, pid, LX_FUTEX_WAITV, dl);
+    if was == 0 {
+      pset(&mut k.procs, pid, F_FUTEX, FUTEX_WV);
+    }
+    return r;
+  }
+  let r = lx_retry(&mut k, pid, LX_FUTEX_WAITV);
+  if r == SWITCH {
+    if was == 0 {
+      pset(&mut k.procs, pid, F_FUTEX, FUTEX_WV);
     }
     pset(&mut k.procs, pid, F_STATE, FUTEXWAIT);
   }
