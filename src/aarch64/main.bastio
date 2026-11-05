@@ -67,6 +67,7 @@ import "lxcore.bastio";
 import "lxcap.bastio";
 import "lxlink.bastio";
 import "lxloop.bastio";
+import "lxsd.bastio";
 import "lxpty.bastio";
 import "lxxattr.bastio";
 import "lxmount.bastio";
@@ -290,6 +291,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   group_take(&mut s.k, mmu, p);
   let killed = state(s.k.procs, p) == KILLED;
   if state(s.k.procs, p) == RUNNING || killed {
+    if (v == V_TIMER || v == V_LTIMER) && !killed {
+      csw_count(&mut s.k, p, true);         // the tick took the processor away
+    }
     pset(&mut s.k.procs, p, F_STATE, READY);
   }
   if killed {
@@ -351,6 +355,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       return (p + 1) % NPROC;               // (a reader of a half-full inotify queue goes first)
     }
     ino_before(&mut s.k, p);                // src/lxinotify.bastio
+    let nr = pget(s.k.procs, p, F_REGS + R_LXNR);
     let what = linux_syscall(&mut s.con, &mut s.k, mmu, p);
     ino_after(&mut s.k, p);
     set_clock(&mut s, cpu);
@@ -358,11 +363,15 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       tm_sys_add(&mut s.k, p, s.k.ns - began);   // system time (src/lxrlimit.bastio)
     }
     call_done(&mut s.k, p);
+    if what == KEEP {
+      io_account(&mut s.k, p, nr);          // /proc/PID/io (src/lxprio.bastio)
+    }
     if what == POWEROFF || what == REBOOT {
       s.stop = true;
     }
     sock_wake(&mut s.k);
     if what == SWITCH {
+      csw_count(&mut s.k, p, false);        // the call blocked or yielded
       sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
     }
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH || ino_pressed(s.k) {
@@ -765,6 +774,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
     puts(&mut console, "net: e1000\r\n");
   }
   let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
+  sd_scan(&mut k);                          // /dev/sda of a disk left alone (src/lxsd.bastio)
   let mut hi = 0;
   while hi < hw_n
     invariant hi <= hw_n && hw_n <= VRNG_WORDS && len(hw) == VRNG_WORDS && kok(k)
@@ -835,6 +845,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.locks);
   free(s.k.wv);
   free(s.k.loops);
+  free(s.k.sdp);
   free(s.k.ptys);
   bfree(s.k.ptyb);
   bfree(s.k.mice);
