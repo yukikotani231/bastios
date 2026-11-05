@@ -1041,6 +1041,7 @@ t_misc: voluntary_ctxt_switches counts the sleeps, and /proc/stat ctxt and getru
 t_misc: /proc/self/io counts the read and write calls and their characters
 t_misc: seccomp filter denies getpid
 t_misc: forty stacked seccomp filters
+t_misc: seccomp SECCOMP_RET_TRAP: the SIGSYS handler finds the data of the filter's return value in si_errno
 t_misc: seccomp SECCOMP_RET_TRAP: the SIGSYS handler sees the call's registers as they were and answers it
 t_misc: statfs
 t_misc: strtod
@@ -1894,6 +1895,7 @@ t_sock2: TCP listeners that set SO_REUSEPORT share a port; one that did not is r
 t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65th fails
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
+t_sock2: a seqpacket message sent from three buffers with a descriptor comes in whole over two, as Firefox's sandbox asks for files
 t_sys: a cgroup namespace roots the tree
 t_sys: cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there
 t_sys: pids.events counts the forks pids.max refused
@@ -2532,6 +2534,7 @@ t_wgcfg: two peers
 t_mem: MADV_DONTNEED gives the memory of private writable pages back, which read as zeros and work again
 t_mem: a file written with write(2) and mapped MAP_SHARED is the same memory to a mapping made after the page cache has filled up
 t_mem: a memfd mapped MAP_SHARED keeps what was written through the mapping when the caches are dropped, for a later mapping in another process
+t_mem: a shared file mapping takes an address hint in a range just unmapped, and again read-only, while another thread runs on the other processor
 t_wgcfg: a port that a socket holds
 t_wgcfg: and the device keeps its port
 t_wgcfg: deleting it frees its port

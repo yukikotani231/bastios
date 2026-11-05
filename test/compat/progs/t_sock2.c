@@ -162,6 +162,47 @@ static int reuse_port_listeners(void) {
     return ok;
 }
 
+/* The file broker of Firefox's sandbox: a child sends a request over a
+ * seqpacket pair from three buffers (a header, a path, a second path) with
+ * one end of a new pair in SCM_RIGHTS; the parent takes it into two (the
+ * header, then the rest) and answers over the end it got. */
+static int seqpacket_gather_scatter(void) {
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, sv) != 0) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        close(sv[0]);
+        int rp[2];
+        if (socketpair(AF_UNIX, SOCK_SEQPACKET, 0, rp) != 0) _exit(2);
+        char head[16] = "HEADER-12345678", path[] = "/usr/share/fonts/x.ttf", none[] = "";
+        struct iovec v[3] = {{head, sizeof head}, {path, sizeof path}, {none, sizeof none}};
+        char cb[CMSG_SPACE(sizeof(int))];
+        struct msghdr m = {.msg_iov = v, .msg_iovlen = 3, .msg_control = cb, .msg_controllen = sizeof cb};
+        struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+        h->cmsg_level = SOL_SOCKET; h->cmsg_type = SCM_RIGHTS; h->cmsg_len = CMSG_LEN(sizeof(int));
+        memcpy(CMSG_DATA(h), &rp[1], sizeof(int));
+        if (sendmsg(sv[1], &m, MSG_NOSIGNAL) != (ssize_t)(sizeof head + sizeof path + sizeof none)) _exit(3);
+        close(rp[1]);
+        char ans[8] = {0};
+        _exit(read(rp[0], ans, sizeof ans) == 2 && memcmp(ans, "ok", 2) == 0 ? 0 : 4);
+    }
+    close(sv[1]);
+    char head[16] = {0}, rest[256] = {0}, cb[CMSG_SPACE(sizeof(int))];
+    struct iovec v[2] = {{head, sizeof head}, {rest, sizeof rest}};
+    struct msghdr m = {.msg_iov = v, .msg_iovlen = 2, .msg_control = cb, .msg_controllen = sizeof cb};
+    ssize_t n = recvmsg(sv[0], &m, MSG_CMSG_CLOEXEC);
+    int fd = -1;
+    struct cmsghdr *h = CMSG_FIRSTHDR(&m);
+    if (h && h->cmsg_level == SOL_SOCKET && h->cmsg_type == SCM_RIGHTS) memcpy(&fd, CMSG_DATA(h), sizeof fd);
+    int ok = n == 16 + 23 + 1 && memcmp(head, "HEADER-12345678", 16) == 0 && strcmp(rest, "/usr/share/fonts/x.ttf") == 0 && fd >= 0 &&
+             (fcntl(fd, F_GETFD) & FD_CLOEXEC) && write(fd, "ok", 2) == 2;
+    if (fd >= 0) close(fd);
+    int st = 0;
+    ok = ok && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    close(sv[0]);
+    return ok;
+}
+
 int main(void) {
     setup();
     struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)};
@@ -317,6 +358,7 @@ int main(void) {
                close(a);
            }
            ok; }));
+    EXPECT("a seqpacket message sent from three buffers with a descriptor comes in whole over two, as Firefox's sandbox asks for files", seqpacket_gather_scatter());
     EXPECT("AF_UNIX SOCK_DGRAM socketpair", socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) == 0 && send(sv[0], "dg", 2, 0) == 2 &&
            recv(sv[1], b, sizeof b, 0) == 2);
     {
