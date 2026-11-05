@@ -81,7 +81,9 @@ static int sem_many(void) {
         if (s[made] == SEM_FAILED) { ok = 0; break; }
     }
     if (ok) {
+        /* musl keeps the semaphore as /dev/shm/NAME, glibc as /dev/shm/sem.NAME */
         int f = open("/dev/shm/cm_many79", O_RDWR), v = -1;
+        if (f < 0) f = open("/dev/shm/sem.cm_many79", O_RDWR);
         sem_t *m = f >= 0 ? mmap(0, sizeof(sem_t), PROT_READ | PROT_WRITE, MAP_SHARED, f, 0) : MAP_FAILED;
         if (f >= 0) close(f);
         ok = m != MAP_FAILED && sem_post(s[N - 1]) == 0 && sem_getvalue(m, &v) == 0 && v == 1 &&
