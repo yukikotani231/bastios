@@ -833,6 +833,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   free(s.k.lazy);
   free(s.k.anon);
   free(s.k.locks);
+  free(s.k.wv);
   free(s.k.loops);
   free(s.k.ptys);
   bfree(s.k.ptyb);

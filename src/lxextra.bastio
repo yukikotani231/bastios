@@ -18,6 +18,7 @@ const LX_USTAT: u64 = 136;
 const LX_SYSFS: u64 = 139;
 const LX_VHANGUP: u64 = 153;
 const LX_READAHEAD: u64 = 187;
+const LX_CACHESTAT: u64 = 451;
 const LX_SYNC_FILE_RANGE: u64 = 277;
 const LX_PREADV2: u64 = 327;
 const LX_PWRITEV2: u64 = 328;
@@ -55,7 +56,7 @@ fn fs_type_name(t: u64) -> Str {
 
 fn is_extra_call(n: u64) -> bool {
   return n == LX_USTAT || n == LX_SYSFS || n == LX_VHANGUP || n == LX_READAHEAD || n == LX_SYNC_FILE_RANGE
-    || n == LX_MLOCK2 || n == LX_PREADV2 || n == LX_PWRITEV2 || n == LX_FCHMODAT2 || n == LX_BSTDISK;
+    || n == LX_MLOCK2 || n == LX_PREADV2 || n == LX_PWRITEV2 || n == LX_FCHMODAT2 || n == LX_BSTDISK || n == LX_CACHESTAT;
 }
 
 /// The call process pid's registers ask for, as the dispatcher should see
@@ -112,7 +113,7 @@ fn opath_denied(k: &Kernel, pid: u64, n: u64) -> bool
     return is_opath(k, pid, a);
   }
   let on_a = n == LX_FCHMOD || n == LX_FCHOWN || n == LX_IOCTL || n == LX_FTRUNCATE || n == LX_FSYNC
-    || n == LX_FDATASYNC || n == LX_FALLOCATE || n == LX_FADVISE64 || n == LX_READAHEAD || n == LX_FLOCK
+    || n == LX_FDATASYNC || n == LX_FALLOCATE || n == LX_FADVISE64 || n == LX_READAHEAD || n == LX_FLOCK || n == LX_CACHESTAT
     || n == LX_SYNC_FILE_RANGE || (n >= XATTR_FIRST && n <= XATTR_LAST && (n - XATTR_FIRST) % 3 == 2);
   return on_a && is_opath(k, pid, a);
 }
@@ -150,6 +151,8 @@ fn lx_extra_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
     } else if d.kind != K_FILE || ur_find(k, row_file(k.fs, d.x)) < URING_N {
       r = EINVAL;                           // nothing to read ahead from (a ring is no file)
     }
+  } else if n == LX_CACHESTAT {
+    r = lx_cachestat(&mut k, pid, a, b, c, r10);
   } else if n == LX_SYNC_FILE_RANGE {
     let d = fd_look(k, pid, a);
     if b >= 0x8000000000000000 || c >= 0x8000000000000000 || b > 0x7FFFFFFFFFFFFFFF - c || r10 & !SFR_FLAGS != 0 {
@@ -182,6 +185,45 @@ fn lx_extra_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64
   }
   ret(&mut k.procs, pid, r);
   return KEEP;
+}
+
+/// cachestat(fd, range, stat, flags): what the page cache holds of a range
+/// of a file. A file here is read whole into memory (or cached by the disk
+/// layer as it is read), so every page of the range that lies inside the
+/// file counts as cached, none as dirty, under writeback or evicted. A
+/// range with length 0 runs to the end of the file. Only a regular file has
+/// a page cache to ask: any other descriptor is EBADF.
+fn lx_cachestat(k: &mut Kernel, pid: u64, fd: u64, rng: u64, st: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    return EINVAL;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, rng, &mut k.fs.xfer, 16) != 16 {
+    return EFAULT;
+  }
+  let off = rd64(k.fs.xfer, 0);
+  let len = rd64(k.fs.xfer, 8);
+  let d = fd_look(k, pid, fd % 0x100000000);
+  if d.kind != K_FILE || d.x >= FD_ROWS {
+    return EBADF;
+  }
+  let size = vfs_size(&mut k.fs, vfs_row_file(k.fs, d.x));
+  if size >= 0x8000000000000000 {
+    return EBADF;
+  }
+  let mut pages = 0;
+  if off < size {
+    let mut end = size;
+    if len != 0 && len < size - off {
+      end = off + len;
+    }
+    pages = (end + 4095) / 4096 - off / 4096;
+  }
+  lx_fill(&mut k, 0, 40);
+  xfer_u64(&mut k.fs.xfer, 0, pages);        // nr_cache; nr_dirty, nr_writeback, nr_evicted and nr_recently_evicted stay 0
+  return lx_put_out(&mut k, pid, st, 40);
 }
 
 /// fchmodat2(dirfd, path, mode, flags): fchmodat with flags. A symbolic

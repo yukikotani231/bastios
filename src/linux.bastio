@@ -172,6 +172,7 @@ const LX_EXECVEAT: u64 = 322;
 const LX_WAIT4: u64 = 61;
 const LX_GETTID: u64 = 186;
 const LX_FUTEX: u64 = 202;
+const LX_FUTEX_WAITV: u64 = 449;
 const LX_REBOOT: u64 = 169;
 
 // What thread_exec says.
@@ -501,6 +502,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if n == LX_FUTEX {
     return lx_futex(&mut k, pid, was, a, b, c);
+  }
+  if n == LX_FUTEX_WAITV {
+    return lx_futex_waitv(&mut k, pid, was, a, b, c);
   }
   if n == LX_REBOOT {
     // reboot(2), for root alone holding CAP_SYS_BOOT (cap_has implies

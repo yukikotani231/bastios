@@ -408,7 +408,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 time.sleep(gap if gap is not None else 0.08 if c.startswith("mouse_") else 0.15)
             time.sleep(0.2)
             m3.close()
-        if os.environ.get("BWM_BENCH") or os.environ.get("BTERM_BENCH"):   # BWM_BENCH=N: print what N frames of bwm cost (not a check)
+        if os.environ.get("BWM_BENCH") or os.environ.get("BTERM_BENCH") or os.environ.get("BFILES_BENCH"):   # BWM_BENCH=N: print what N frames of bwm cost (not a check)
             mark = len(out)
             q.stdin.write(b"ash\r"); q.stdin.flush()
             until(b"# ", mark)
@@ -425,6 +425,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 if os.environ.get("BWM_BENCH_ONLY"):
                     subprocess.run(["pkill", "-x", "qemu-system-x86"])
                     sys.exit(0)
+            if os.environ.get("BFILES_BENCH"):
+                mark = len(out)
+                q.stdin.write(f"BFILES_BENCH={os.environ['BFILES_BENCH']} bwm -c bfiles\r".encode()); q.stdin.flush()
+                until(b"bfiles: bench done", mark)
+                print(f"bench ({name}):", " | ".join(l.strip() for l in out[mark:].decode(errors="replace").splitlines() if "bfiles: bench" in l and "done" not in l))
+                subprocess.run(["pkill", "-x", "qemu-system-x86"])
+                sys.exit(0)
             mark = len(out)
             q.stdin.write(b"exit\r"); q.stdin.flush()
             until(b"bastios> ", mark)
@@ -685,8 +692,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             mark_rs = len(out)
             monitor("sendkey ctrl-alt-right")
             good = until(b"bhello: resized 316 160", mark_rs)
-            monitor("sendkey ctrl-alt-down", "sendkey ctrl-alt-left")
-            good = good and until(b"bhello: resized 316 176", mark_rs) and until(b"bhello: resized 300 176", mark_rs)
+            # One key at a time, each after the client has seen the one before: two keys
+            # in one call lost the second on a loaded host.
+            monitor("sendkey ctrl-alt-down")
+            good = good and until(b"bhello: resized 316 176", mark_rs)
+            monitor("sendkey ctrl-alt-left")
+            good = good and until(b"bhello: resized 300 176", mark_rs)
             print(("ok  " if good else "FAIL"), f"({name}) Ctrl-Alt with the arrow keys resizes the window by 16 pixels")
             fails += not good
             # Alt with the right button drags the lower right corner from anywhere in a resizable window.
