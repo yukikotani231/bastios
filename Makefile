@@ -1037,7 +1037,7 @@ build/compat/fakebwm: test/compat/x11/fakebwm.c user/bwmlib.h user/bwmproto.h | 
 	$(MUSLCC) -static-pie -O2 -Wno-unused-function -o $@ $<
 
 build/compat/x11.img: test/compat/x11/x11start.sh test/compat/x11disk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/bx11 build/compat/fakebwm
-	test/compat/x11disk.py $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GTK_IMAGE) $(X11_QT_IMAGE) $(X11_QT2_IMAGE) $(X11_JAVA_IMAGE) $(X11_WX_IMAGE) $(X11_PY_IMAGE) $(X11_TAG_IMAGE) $(X11_DIRSTAT_IMAGE) $(X11_FILEZILLA_IMAGE) $(X11_AVIDEMUX_IMAGE) $(X11_HANDBRAKE_IMAGE) $(X11_MKV_IMAGE) $(X11_CZKAWKA_IMAGE) $(X11_TSMUXER_IMAGE) $(X11_FILEBOT_IMAGE) $(X11_FFS_IMAGE) $(X11_KRUSADER_IMAGE) $(X11_EVINCE_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
+	test/compat/x11disk.py $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GTK_IMAGE) $(X11_QT_IMAGE) $(X11_QT2_IMAGE) $(X11_JAVA_IMAGE) $(X11_WX_IMAGE) $(X11_PY_IMAGE) $(X11_TAG_IMAGE) $(X11_DIRSTAT_IMAGE) $(X11_FILEZILLA_IMAGE) $(X11_AVIDEMUX_IMAGE) $(X11_HANDBRAKE_IMAGE) $(X11_MKV_IMAGE) $(X11_CZKAWKA_IMAGE) $(X11_TSMUXER_IMAGE) $(X11_FILEBOT_IMAGE) $(X11_FFS_IMAGE) $(X11_KRUSADER_IMAGE) $(X11_EVINCE_IMAGE) $(X11_VLC_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
 
 # Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
 # Java disk as /opt/jdtls.
