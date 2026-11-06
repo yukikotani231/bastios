@@ -10,6 +10,7 @@
 // device does not open (ENOENT).
 
 import "linux.bastio";
+import "calendar.bastio";
 
 const RTC_RD_TIME: u64 = 0x80247009;      // _IOR('p', 9, struct rtc_time)
 const RTC_SET_TIME: u64 = 0x4024700A;     // _IOW('p', 10, struct rtc_time)
