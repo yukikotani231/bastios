@@ -3,6 +3,8 @@
  * a removal ends, and SEM_UNDO at exit. */
 #include "compat.h"
 #include <fcntl.h>
+#include <pthread.h>
+#include <sys/mman.h>
 #include <signal.h>
 #include <sys/ipc.h>
 #include <sys/msg.h>
@@ -450,6 +452,34 @@ static int shm_remap_loop(void) {
     return ok;
 }
 
+/* A thread that is not the leader attaches, writes and detaches; then a fresh
+ * anonymous mmap, which takes the address space shmdt gave back, reads zeros,
+ * not the segment. */
+static void *shm_thread_detach(void *arg) {
+    int id = *(int *)arg, ok = 1;
+    for (int i = 0; ok && i < 20; i++) {
+        char *p = shmat(id, 0, 0);
+        if (p == (char *)-1) return 0;
+        memset(p, 0x5a, 65536);
+        ok = shmdt(p) == 0;
+        char *q = mmap(0, 65536, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (q == MAP_FAILED) return 0;
+        for (int j = 0; ok && j < 65536; j += 4096) ok = q[j] == 0;
+        q[0] = 1;
+        ok = ok && munmap(q, 65536) == 0;
+    }
+    return ok ? arg : 0;
+}
+
+static int shm_detach_in_thread(void) {
+    int id = shmget(IPC_PRIVATE, 65536, IPC_CREAT | 0600);
+    pthread_t t;
+    void *r = 0;
+    int ok = id >= 0 && pthread_create(&t, 0, shm_thread_detach, &id) == 0 && pthread_join(t, &r) == 0 && r == &id;
+    if (id >= 0) shmctl(id, IPC_RMID, 0);
+    return ok;
+}
+
 int main(void) {
     setup();
     EXPECT("shmat over its own address with SHM_REMAP replaces the attachment", shm_remap_loop());
@@ -466,6 +496,7 @@ int main(void) {
     EXPECT("shmat, a second view, fork, IPC_RMID", shm_basics());
     EXPECT("shmget and shmat errors", shm_errors());
     EXPECT("shmat and shmdt in a loop reuse the address space", shm_loop());
+    EXPECT("shmdt in a thread unmaps the segment: a fresh mmap there reads zeros", shm_detach_in_thread());
     EXPECT("/proc/sysvipc and /proc/sys/kernel limits", proc_files());
     EXPECT("shmmax is written; a segment past it, or with SHM_HUGETLB, is EINVAL", shmmax_written());
     EXPECT("msgmni is written: that many queues, then ENOSPC", msgmni_written());

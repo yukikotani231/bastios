@@ -1746,7 +1746,7 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
       let f0 = get(k.ipc, sa_at(g, d) + 1);
       let n0 = get(k.ipc, sa_at(g, d) + 2);
       if get(k.ipc, sa_at(g, d)) != 0 && f0 >= lo && f0 <= WPAGES && n0 <= WPAGES - f0 && f0 + n0 <= lo + pages {
-        shm_detach(&mut k, g, d, false);
+        shm_detach(&mut k, g, g, d, false);
       }
       d = d + 1;
     }
@@ -1817,10 +1817,15 @@ fn lx_shmat(k: &mut Kernel, pid: u64, id: u64, addr: u64, flg: u64) -> u64
   return USER_BASE + at * 4096;
 }
 
-/// Ends attachment a of process g: unmaps it if `unmap` (shmdt; at exit
-/// and execve the window is gone already) and drops the record.
-fn shm_detach(k: &mut Kernel, g: u64, a: u64, unmap: bool)
-  requires kok(k) && g < NPROC && a < SA_N
+/// Ends attachment a of process g: unmaps it from the window of thread
+/// sp if `unmap` (shmdt; at exit and execve the window is gone already)
+/// and drops the record. The records are the group's (row g), but the
+/// window is in the row of the thread that holds it, the caller of shmdt
+/// (group_take): unmapping from row g left a segment detached by any other
+/// thread mapped, and the next mmap from the hole got its pages, shared
+/// memory where fresh zeros belong.
+fn shm_detach(k: &mut Kernel, g: u64, sp: u64, a: u64, unmap: bool)
+  requires kok(k) && g < NPROC && sp < NPROC && a < SA_N
   ensures kok(k)
 {
   let r = sa_at(g, a);
@@ -1832,7 +1837,7 @@ fn shm_detach(k: &mut Kernel, g: u64, a: u64, unmap: bool)
   let first = get(k.ipc, r + 1);
   let pages = get(k.ipc, r + 2);
   if unmap && first <= WPAGES && pages <= WPAGES - first {
-    win_op(&mut k.mem, &mut k.spaces, g, WOP_UNMAP, first, first + pages, 0);
+    win_op(&mut k.mem, &mut k.spaces, sp, WOP_UNMAP, first, first + pages, 0);
   }
   k.ipc = set(k.ipc, r, 0);
   hset(&mut k, KM, s1 - 1, H_RTIME, ipc_now(k));
@@ -1852,7 +1857,7 @@ fn lx_shmdt(k: &mut Kernel, pid: u64, addr: u64) -> u64
     let first = get(k.ipc, sa_at(g, a) + 1);
     if get(k.ipc, sa_at(g, a)) != 0 && first <= WPAGES && addr == USER_BASE + first * 4096 {
       let pages = get(k.ipc, sa_at(g, a) + 2);
-      shm_detach(&mut k, g, a, true);
+      shm_detach(&mut k, g, pid, a, true);
       if pages <= WPAGES - first && first >= pget(k.procs, pid, F_MMAP) / 4096 {
         hole_add(&mut k, pid, first, first + pages);   // address space shmat and mmap can use again
       }
@@ -1873,7 +1878,7 @@ fn shm_drop_all(k: &mut Kernel, pid: u64)
     invariant a <= SA_N && kok(k)
   {
     if get(k.ipc, sa_at(pid, a)) != 0 {
-      shm_detach(&mut k, pid, a, false);
+      shm_detach(&mut k, pid, pid, a, false);
     }
     a = a + 1;
   }
