@@ -126,3 +126,7 @@ Socket(s): 1
 $ bb mkdir -p /disk/d/dev/pts; bb mount -t devpts devpts /disk/d/dev/pts; bb mknod -m 666 /disk/d/dev/ptmx c 5 2; bb chroot /disk/d /bin/bash -c "timeout 20 script -qc 'echo hi' /dev/null </dev/null | tr -d '\r'; echo rc=\${PIPESTATUS[0]}"
 hi
 rc=0
+
+== debian: lslocks lists a held flock
+$ bb mkdir -p /disk/d/proc /disk/d/tmp && bb mount -t proc proc /disk/d/proc && bb chroot /disk/d /bin/bash -c "flock /tmp/lk1 sleep 4 & sleep 1; lslocks -n -o COMMAND,TYPE,MODE,PATH | tr -s ' '; wait"
+flock FLOCK WRITE /tmp/lk1

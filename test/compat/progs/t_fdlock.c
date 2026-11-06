@@ -6,6 +6,10 @@
  * gets when input arrives with O_ASYNC. */
 #include "compat.h"
 #include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #include <limits.h>
 #include <sys/mman.h>
 #include <signal.h>
@@ -143,8 +147,57 @@ static int memfd_sealing_alone(void) {
     return ok && memfd_create("bad", 4) == -1 && errno == EINVAL;
 }
 
+/* /proc/locks lists each held lock: the kind, the mode, the holder, the
+ * file's inode and the range, and drops it again on unlock. */
+static int proc_locks(void) {
+    char buf[4096], want[128];
+    int fd = open("fl_locks", O_CREAT | O_RDWR, 0644);
+    if (fd < 0) return 0;
+    struct stat st;
+    int ok = fstat(fd, &st) == 0 && lock(fd, F_SETLK, F_WRLCK, 10, 20) == 0;
+    int pf = open("/proc/locks", O_RDONLY);
+    ssize_t n = pf >= 0 ? read(pf, buf, sizeof buf - 1) : -1;
+    if (pf >= 0) close(pf);
+    if (n < 0) n = 0;
+    buf[n] = 0;
+    snprintf(want, sizeof want, ": POSIX  ADVISORY  WRITE %d 00:00:%lu 10 29\n", (int)getpid(), (unsigned long)st.st_ino);
+    ok = ok && strstr(buf, want) != NULL;
+    ok = ok && flock(fd, LOCK_SH) == 0;
+    lock(fd, F_SETLK, F_UNLCK, 0, 0);
+    pf = open("/proc/locks", O_RDONLY);
+    n = pf >= 0 ? read(pf, buf, sizeof buf - 1) : -1;
+    if (pf >= 0) close(pf);
+    if (n < 0) n = 0;
+    buf[n] = 0;
+    snprintf(want, sizeof want, ": FLOCK  ADVISORY  READ  %d 00:00:%lu 0 EOF\n", (int)getpid(), (unsigned long)st.st_ino);
+    ok = ok && strstr(buf, want) != NULL && strstr(buf, "POSIX") == NULL;
+    close(fd);
+    unlink("fl_locks");
+    return ok;
+}
+
+/* stat follows /proc/PID/fd/N to the open file even when it has no path:
+ * a pipe, a device, and a descriptor of another process. */
+static int stat_fd_links(void) {
+    int p[2];
+    struct stat st;
+    if (pipe(p) != 0) return 0;
+    char path[64];
+    snprintf(path, sizeof path, "/proc/self/fd/%d", p[0]);
+    int ok = stat(path, &st) == 0 && S_ISFIFO(st.st_mode);
+    int nul = open("/dev/null", O_RDWR);
+    snprintf(path, sizeof path, "/proc/%d/fd/%d", (int)getpid(), nul);
+    ok = ok && stat(path, &st) == 0 && S_ISCHR(st.st_mode);
+    close(nul);
+    ok = ok && stat(path, &st) == -1 && errno == ENOENT;
+    close(p[0]); close(p[1]);
+    return ok;
+}
+
 int main(void) {
     setup();
+    EXPECT("stat follows /proc/PID/fd/N for a pipe and a device", stat_fd_links());
+    EXPECT("/proc/locks lists record and flock locks and drops them on unlock", proc_locks());
     EXPECT("memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC", memfd_sealing_alone());
     EXPECT("200 separate byte-range locks on one file", many_locks());
     EXPECT("200 descriptors, dup2 to 200 and F_DUPFD from 100", many_descriptors());

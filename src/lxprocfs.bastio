@@ -111,6 +111,7 @@ const SY_CPU: u64 = 102;               // 102 .. 106: /sys/devices/system/cpu/{p
 const SY_CPU_N: u64 = 5;
 const SY_SWAPS: u64 = 100;             // /proc/swaps
 const SY_PARTS: u64 = 101;             // /proc/partitions
+const SY_LOCKS: u64 = 107;             // /proc/locks (the table of src/lxlock.bastio)
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
 const SY_NS: u64 = 128;                // 128 ..: /proc/P/ns link f at P * NF_N + f (src/lxnsk.bastio)
 const NF_N: u64 = 10;
@@ -544,6 +545,9 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
     if xfer_is(x, 5, n, "partitions") {
       return PROC_DEV + PSYS + SY_PARTS;
     }
+    if xfer_is(x, 5, n, "locks") {
+      return PROC_DEV + PSYS + SY_LOCKS;
+    }
     if xfer_is(x, 5, n, "cmdline") {
       return PROC_DEV + PF_CMDLINE;         // pid 0: the kernel's command line
     }
@@ -810,6 +814,129 @@ fn cpu_topo_at(x: &Bytes, n: u64) -> u64
     return base + 3;
   }
   return 0;
+}
+
+/// A live process that holds open file description h, or NPROC: the one a
+/// flock or open-file-description lock is listed under.
+fn ofd_holder(k: &Kernel, h: u64) -> u64
+  requires kok(k)
+  ensures result <= NPROC
+{
+  let mut p = 0;
+  while p < NPROC
+    invariant p <= NPROC && kok(k)
+  {
+    if state(k.procs, p) != FREE {
+      let mut fd = 0;
+      while fd < LXNFD
+        invariant fd <= LXNFD && p < NPROC && kok(k)
+      {
+        if fd_ofd(k, p, fd) == h {
+          return p;
+        }
+        fd = fd + 1;
+      }
+    }
+    p = p + 1;
+  }
+  return NPROC;
+}
+
+/// Appends the line for lock-table entry i (numbered n), as process obs
+/// sees the holder: /proc/locks's, and fdinfo's after "lock:\t".
+fn lock_line(k: &Kernel, obs: u64, i: u64, n: u64, o: &mut Bytes, at: u64) -> u64
+  requires kok(k) && obs < NPROC && i < LK_N && blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let file = get(k.locks, i * LK_W);
+  let class = get(k.locks, i * LK_W + 5);
+  let owner = get(k.locks, i * LK_W + 1);
+  let mut a = put_n(&mut o, at, n);
+  if class == LKC_FLOCK {
+    a = put_s(&mut o, a, ": FLOCK  ADVISORY  ");
+  } else if owner >= LK_DESC {
+    a = put_s(&mut o, a, ": OFDLCK ADVISORY  ");
+  } else {
+    a = put_s(&mut o, a, ": POSIX  ADVISORY  ");
+  }
+  if get(k.locks, i * LK_W + 2) == F_WRLCK {
+    a = put_s(&mut o, a, "WRITE ");
+  } else {
+    a = put_s(&mut o, a, "READ  ");
+  }
+  let mut who = owner;
+  if owner >= LK_DESC {
+    who = ofd_holder(k, owner - LK_DESC);
+  }
+  if who >= NPROC || vpid_of(k, obs, who) == 0 {
+    a = put_s(&mut o, a, "-1");
+  } else {
+    a = put_n(&mut o, a, vpid_of(k, obs, who));
+  }
+  a = put_s(&mut o, a, " 00:00:");
+  let mut fh = 0;
+  if file > 0 {
+    fh = (file - 1) % HFILES;
+  }
+  a = put_n(&mut o, a, INO_FILES + fh);
+  a = put_c(&mut o, a, 32);
+  a = put_n(&mut o, a, get(k.locks, i * LK_W + 3));
+  a = put_c(&mut o, a, 32);
+  let e = get(k.locks, i * LK_W + 4);
+  if e == LK_EOF || e == 0 {
+    a = put_s(&mut o, a, "EOF");
+  } else {
+    a = put_n(&mut o, a, e - 1);
+  }
+  return put_c(&mut o, a, 10);
+}
+
+/// /proc/locks: one line per held lock, as process obs sees the holder.
+/// Record locks name their process; flock and open-file-description locks
+/// (which belong to a description) the first process that has it open, or
+/// -1; a lease is not listed.
+fn locks_text(k: &Kernel, obs: u64, o: &mut Bytes) -> u64
+  requires kok(k) && obs < NPROC && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = 0;
+  let mut n = 0;
+  let mut i = 0;
+  while i < LK_N && a + 128 < PROC_OUT
+    invariant i <= LK_N && n <= i && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    if get(k.locks, i * LK_W) > 0 && get(k.locks, i * LK_W + 5) != LKC_LEASE {
+      n = n + 1;
+      a = lock_line(k, obs, i, n, &mut o, a);
+    }
+    i = i + 1;
+  }
+  return a;
+}
+
+/// The "lock:" lines of fdinfo for descriptor fd of process p, whose open
+/// file is row: the locks on that file the process or the description holds.
+fn fdinfo_locks(k: &Kernel, p: u64, row: u64, h: u64, o: &mut Bytes, at: u64) -> u64
+  requires kok(k) && p < NPROC && row < FD_ROWS && h <= OFD_N && blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let f = vfs_row_file(k.fs, row);
+  let mut a = at;
+  let mut n = 0;
+  let mut i = 0;
+  while i < LK_N && f < HFILES && a + 160 < PROC_OUT
+    invariant i <= LK_N && n <= i && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+  {
+    let owner = get(k.locks, i * LK_W + 1);
+    if get(k.locks, i * LK_W) == f + 1 && get(k.locks, i * LK_W + 5) != LKC_LEASE
+      && (owner == LK_DESC + h || owner == tgid(k.procs, p)) {
+      n = n + 1;
+      a = put_s(&mut o, a, "lock:\t");
+      a = lock_line(k, p, i, n, &mut o, a);
+    }
+    i = i + 1;
+  }
+  return a;
 }
 
 /// The text of topology file t (C * 4 + index): each processor is a core of
@@ -1815,6 +1942,9 @@ fn fdinfo_out(k: &mut Kernel, p: u64, fd: u64, o: &mut Bytes) -> u64
   a = put_s(&mut o, a, "\nmnt_id:\t1\nino:\t");
   a = put_n(&mut o, a, ino);
   a = put_c(&mut o, a, 10);
+  if d.kind == K_FILE && d.x < FD_ROWS {
+    a = fdinfo_locks(k, p, d.x, fd_ofd(k, fd_home(k, p), fd), &mut o, a);
+  }
   if d.kind == K_EVENT && d.x < OFD_N {
     a = put_s(&mut o, a, "eventfd-count: ");
     let c = of_get(k.ofd, d.x, 2);
@@ -2609,6 +2739,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
       a = put_s(&mut o, a, "\npswpout ");
       a = put_n(&mut o, a, swap_pout(k));
       return put_s(&mut o, a, "\n");
+    }
+    if what == SY_LOCKS {
+      return locks_text(k, pid, &mut o);
     }
     if what == SY_PARTS {
       // The one disk (major 8, minor 0, "bastio0") with its size in 1 KiB
@@ -4073,7 +4206,10 @@ fn magic_target(k: &mut Kernel, pid: u64, n: u64) -> u64
   ensures result == NO_RESULT || result <= FNAME_MAX
 {
   let pfd = proc_fd(k.procs, k.fs.xfer, n);
-  if pfd == NO_RESULT || tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) {
+  if pfd == NO_RESULT || pfd / LXNFD >= NPROC {
+    return NO_RESULT;
+  }
+  if tgid(k.procs, pfd / LXNFD) != tgid(k.procs, pid) && !proc_peek(k.procs, pid, pfd / LXNFD) {
     return NO_RESULT;
   }
   let t = pfd / LXNFD;
