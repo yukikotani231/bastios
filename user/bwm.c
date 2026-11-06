@@ -845,6 +845,26 @@ static void wall_watch(void)
     touch_all();
 }
 
+/* The window list shown while Alt-Tab is held: the top window (the one the
+ * switch chose) is lit, the others follow in stacking order. */
+static int switch_on;                    /* Alt-Tab is being held: the window list is shown */
+#define SW_ROW 24
+#define SW_W 260
+static void draw_switcher(void)
+{
+    if (!switch_on || nz < 1)
+        return;
+    int n = nz > 12 ? 12 : nz;
+    int x0 = ((int)W - SW_W) / 2, y0 = ((int)H - n * SW_ROW) / 2;
+    fill(scene, x0 - 3, y0 - 3, x0 + SW_W + 3, y0 + n * SW_ROW + 3, rgb(200, 200, 210));
+    for (int i = 0; i < n; i++) {
+        struct win *w = z[nz - 1 - i];
+        int y = y0 + i * SW_ROW;
+        fill(scene, x0, y, x0 + SW_W, y + SW_ROW, i == 0 ? rgb(40, 90, 200) : rgb(45, 45, 60));
+        text(scene, x0 + 10, y + 4, w->title[0] ? w->title : "(untitled)", rgb(255, 255, 255));
+    }
+}
+
 /* Paints the rectangle of the screen that changed. */
 static void draw_scene(int x0, int y0, int x1, int y1)
 {
@@ -867,6 +887,7 @@ static void draw_scene(int x0, int y0, int x1, int y1)
             draw_win(z[i], z[i] == focus());
     draw_bar();
     draw_menu();
+    draw_switcher();
 }
 
 /* The pointer: '#' black outline, '.' white fill. */
@@ -2377,6 +2398,10 @@ int main(int argc, char **argv)
                         k_ctrl = down;
                     } else if (code == 56 || code == 100) {
                         k_alt = down;
+                        if (!down && switch_on) {
+                            switch_on = 0;
+                            touch_all();
+                        }
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
@@ -2510,6 +2535,8 @@ int main(int argc, char **argv)
                         touch_all();
                     } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
                         cycle_windows(k_shift);
+                        switch_on = nz >= 2;
+                        touch_all();
                     } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_ctrl && !k_shift) {
                         struct win *t = focus();                    /* Ctrl-Alt-arrows: grow or shrink a resizable window by 16 pixels */
                         if (t && t->resizable) {

@@ -501,6 +501,26 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
             fails += not good
+            # Alt held: the window list is on the screen, the chosen window lit;
+            # when Alt comes up it goes away.
+            monitor("sendkey alt-tab 4000")
+            w, h, px = screendump()
+            sx, sy = (w - 260) // 2 + 255, (h - 3 * 24) // 2 + 12
+            end = time.time() + 3
+            while at(sx, sy) != (40, 90, 200) and time.time() < end:
+                w, h, px = screendump()
+            during = at(sx, sy) == (40, 90, 200)
+            time.sleep(4)
+            end = time.time() + 10
+            while True:
+                w, h, px = screendump()
+                if at(sx, sy) != (40, 90, 200) or time.time() > end:
+                    break
+            good = during and at(sx, sy) != (40, 90, 200)
+            print(("ok  " if good else "FAIL"), f"({name}) holding Alt-Tab shows the window list, letting go hides it")
+            fails += not good
+            monitor("sendkey alt-shift-tab")
+            settle(lambda px: px == before)
             # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
             # a step the other way undoes it, and three in one direction go all the way round.
             monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar
