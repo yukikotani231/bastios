@@ -108,7 +108,7 @@ ok  	github.com/gorilla/websocket
 
 == go: UUIDs (google/uuid), tested with go test
 # timeout 1800
-$ bb wget -q -O - HOSTURL/oss/uuid.tar.gz | bb tar -xz -C /disk/g/work; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on; bb chroot /disk/g /usr/local/go/bin/go -C /work/uuid test -mod=vendor -vet=off . 2>&1 | bb sed 's/[[:space:]]*[0-9.]*s$//' | bb grep -v 'no test files'
+$ bb wget -q -O - HOSTURL/oss/uuid.tar.gz | bb tar -xz -C /disk/g/work; export GOCACHE=/tmp/gc HOME=/tmp CGO_ENABLED=0 GOTOOLCHAIN=local GOFLAGS=-p=1 GO111MODULE=on; T() { bb chroot /disk/g /usr/local/go/bin/go -C /work/uuid test -mod=vendor -vet=off . 2>&1; }; T >/tmp/uuid.log || T >/tmp/uuid.log; bb sed 's/[[:space:]]*[0-9.]*s$//' /tmp/uuid.log | bb grep -v 'no test files'
 ok  	github.com/google/uuid
 
 == go: command-line flags (spf13/pflag), tested with go test
