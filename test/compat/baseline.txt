@@ -2296,6 +2296,7 @@ x11: x11: a media player, VLC, draws its window on the X screen
 x11b: x11b: unpack the server and the client roots
 x11b: x11b: an image editor, GIMP, draws its window on the X screen
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
+x11b: x11b: LibreOffice Writer opens its Open dialog on Ctrl+O
 x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
 x11b: x11b: a network protocol analyser, Wireshark, draws its window on the X screen
 x11b: x11b: LibreOffice turns a text file into a PDF, fonts and all
