@@ -136,6 +136,16 @@ int main(void) {
     EXPECT("an attr size under 64 is EINVAL", syscall(SYS_perf_event_open, &samp, 0, -1, -1, 0UL) == -1 && errno == EINVAL);
     samp.size = sizeof samp;
     EXPECT("an unknown flag is EINVAL", syscall(SYS_perf_event_open, &samp, 0, -1, -1, 0x100UL) == -1 && errno == EINVAL);
+    EXPECT("splice into a counter is EINVAL (it has no splice_write)", ({
+        int pp[2];
+        pipe(pp);
+        write(pp[1], "x", 1);
+        long r = splice(pp[0], 0, fd, 0, 1, 0);
+        int ok = r == -1 && errno == EINVAL;
+        close(pp[0]);
+        close(pp[1]);
+        ok;
+    }));
     EXPECT("an unknown ioctl is ENOTTY", ioctl(fd, _IO('$', 0x7f), 0) == -1 && errno == ENOTTY);
 
     EXPECT("an unprivileged program cannot count init", ({

@@ -1549,6 +1549,7 @@ t_perf: pid and cpu both -1 is EINVAL
 t_perf: a process that does not exist is ESRCH
 t_perf: an attr size under 64 is EINVAL
 t_perf: an unknown flag is EINVAL
+t_perf: splice into a counter is EINVAL (it has no splice_write)
 t_perf: an unknown ioctl is ENOTTY
 t_perf: an unprivileged program cannot count init
 t_perm: a new file belongs to its maker
