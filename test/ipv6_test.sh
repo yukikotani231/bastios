@@ -127,11 +127,11 @@ class Wire:
             self.got.append(("ping", dst, f[0:6]))
             self.send(ip6(58, dst, src, bytes([129, 0, 0, 0]) + p[4:], at=2))
 
-    def ra(self):
+    def ra(self, prefix="2001:db8:1::"):
         ra = struct.pack("!BBHBBHII", 134, 0, 0, 64, 0, 1800, 0, 0)
         ra += bytes([1, 1]) + HOST_MAC
         ra += struct.pack("!BBHI", 25, 3, 0, 1800) + ipaddress.IPv6Address("2001:db8:1::53").packed   # RDNSS
-        ra += struct.pack("!BBBBIII", 3, 4, 64, 0xC0, 86400, 14400, 0) + ipaddress.IPv6Address("2001:db8:1::").packed
+        ra += struct.pack("!BBBBIII", 3, 4, 64, 0xC0, 86400, 14400, 0) + ipaddress.IPv6Address(prefix).packed
         self.send(ip6(58, ROUTER_LL, ALL_NODES, ra, hops=255, at=2))
 
     def tcp_in(self, src, p):
@@ -319,6 +319,20 @@ if syn:
     reply = b"".join(c[3] for c in wire.cli if c[3])
     check(reply == b"peer 2001:db8:1::2 port 4001 own 2001:db8:1:0:5054:ff:fe12:3456\n",
           f"getpeername and getsockname of the accepted connection are IPv6 ({reply!r})")
+
+# A router advertisement with another prefix: a netlink listener in the IPv6
+# address and route groups hears the old address and route go and the new ones come.
+mark = len(out)
+type_line("/disk/ipv6probe rtnl &")
+ready = until(lambda: b"ready" in out[mark:], 30)
+check(ready, "the rtnetlink listener is up")
+wire.ra("2001:db8:2::")
+done = until(lambda: b"done " in out[mark:], 30)
+text = out[mark:].decode(errors="replace").replace("\r", "")
+for line in text.split("\n"):
+    if line.startswith("ok ") or line.startswith("FAIL "):
+        check(line.startswith("ok "), "guest: " + line.split(" ", 1)[1])
+check(done and "done 0" in text, "the rtnetlink listener finished with every check passing")
 
 ping = [g for g in wire.got if g[0] == "ping" and g[1] == OFF_LINK]
 check(ping and all(g[2] == HOST_MAC for g in ping), "sent a ping to an off-link host to the router's MAC")

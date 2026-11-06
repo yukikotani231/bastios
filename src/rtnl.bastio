@@ -29,6 +29,9 @@ const RTM_GETLINK: u64 = 18;
 const RTM_SETLINK: u64 = 19;
 const RTNLGRP_LINK_BIT: u64 = 1;          // group 1 (RTNLGRP_LINK) in the sockets' group masks: bit 0
 const RTNLGRP_IPV4_IFADDR_BIT: u64 = 16;  // group 5: bit 4
+const RTNLGRP_IPV4_ROUTE_BIT: u64 = 64;   // group 7
+const RTNLGRP_IPV6_IFADDR_BIT: u64 = 256; // group 9
+const RTNLGRP_IPV6_ROUTE_BIT: u64 = 1024; // group 11
 const RTM_NEWADDR: u64 = 20;
 const RTM_DELADDR: u64 = 21;
 const RTM_GETADDR: u64 = 22;
@@ -228,6 +231,17 @@ fn nlw_close(n: &mut Net, q: u64)
   if n.nl_at >= q * NLQ && n.nl_at <= q * NLQ + NLQ {
     n.nls = set(n.nls, q * NL_W + NL_LEN, n.nl_at - q * NLQ);
   }
+}
+
+/// Ends a request's answer: nlw_close, then the cursor is forgotten, so that
+/// an event written later (rt_event_x, xs_event) cannot take it for the cursor
+/// of an answer still being written on a socket that has taken the slot.
+fn nlw_end(n: &mut Net, q: u64)
+  requires net_ok(n) && q < NLS
+  ensures net_ok(n)
+{
+  nlw_close(&mut n, q);
+  n.nl_lim = 0;
 }
 
 fn nl_b(n: &mut Net, v: u64)
@@ -643,6 +657,19 @@ fn rt_event(n: &mut Net, i: u64, bit: u64, kind: u64)
   requires net_ok(n) && i < IFN && bit > 0
   ensures net_ok(n)
 {
+  rt_event_x(&mut n, i, bit, kind, 0, 0, 0, 0);
+}
+
+/// rt_event for the card's own addresses and routes, which the poll below
+/// finds changed: `sel` 1 is the IPv4 default route through a (the gateway),
+/// 2 the connected route of address a with mask span b, 3 the IPv4 address a
+/// with span b, 4 the IPv6 address a:iid/64 with scope b, 5 the IPv6 route
+/// a::/b through gateway c (0: on the link). Other sel: kind picks link or
+/// address of interface i.
+fn rt_event_x(n: &mut Net, i: u64, bit: u64, kind: u64, sel: u64, a: u64, b: u64, c: u64)
+  requires net_ok(n) && i < IFN && bit > 0 && (sel != 2 || (b > 0 && b <= 4294967296)) && (sel != 3 || (a <= 4294967295 && b > 0 && b <= 4294967296)) && (sel != 5 || b <= 128)
+  ensures net_ok(n)
+{
   let ns = iw(n, i, IF_NS);
   let mut q = 0;
   while q < NLS
@@ -659,7 +686,23 @@ fn rt_event(n: &mut Net, i: u64, bit: u64, kind: u64)
       if !mid {
         nlw_open(&mut n, q);
       }
-      if kind == RTM_NEWLINK || kind == RTM_DELLINK {
+      if sel == 1 {
+        nl_route(&mut n, kind, 0, 0, a, IF_ETH, 0, 0, 0, 0);
+      } else if sel == 2 {
+        nl_route(&mut n, kind, a / b * b, plen_of(b), 0, IF_ETH, a, 0, 0, 0);
+      } else if sel == 3 {
+        let ip = n.ip;
+        let span = n.span;
+        n.ip = a;
+        n.span = b;
+        nl_addr(&mut n, IF_ETH, kind, 0, 0, 0);
+        n.ip = ip;
+        n.span = span;
+      } else if sel == 4 {
+        nl_addr6_one(&mut n, IF_ETH, kind, a, n.iid, 64, b, 0, 0, 0);
+      } else if sel == 5 {
+        nl_route6(&mut n, kind, a, b, c, 0, 0);
+      } else if kind == RTM_NEWLINK || kind == RTM_DELLINK {
         nl_link(&mut n, i, kind, 0, 0, 0);
       } else {
         nl_addr(&mut n, i, kind, 0, 0, 0);
@@ -677,11 +720,11 @@ fn rt_event(n: &mut Net, i: u64, bit: u64, kind: u64)
 }
 
 /// RTM_NEWADDR for one IPv6 address hi:lo/plen of interface i.
-fn nl_addr6_one(n: &mut Net, i: u64, hi: u64, lo: u64, plen: u64, scope: u64, flags: u64, seq: u64, port: u64)
+fn nl_addr6_one(n: &mut Net, i: u64, kind: u64, hi: u64, lo: u64, plen: u64, scope: u64, flags: u64, seq: u64, port: u64)
   requires net_ok(n) && i < IFN
   ensures net_ok(n)
 {
-  nl_begin(&mut n, RTM_NEWADDR, flags, seq, port);
+  nl_begin(&mut n, kind, flags, seq, port);
   nl_b(&mut n, 10);                   // ifaddrmsg: AF_INET6
   nl_b(&mut n, plen);
   nl_b(&mut n, 0x80);                 // IFA_F_PERMANENT
@@ -703,23 +746,23 @@ fn nl_addrs6(n: &mut Net, seq: u64, port: u64)
     return;
   }
   if if_up(n, 0) && iw(n, 0, IF_KIND) == IFK_LO {
-    nl_addr6_one(&mut n, 0, 0, 1, 128, 254, NLM_F_MULTI, seq, port);
+    nl_addr6_one(&mut n, 0, RTM_NEWADDR, 0, 1, 128, 254, NLM_F_MULTI, seq, port);
   }
   if card_live(n.dev) {
     if n.pfx != 0 {
-      nl_addr6_one(&mut n, IF_ETH, n.pfx, n.iid, 64, 0, NLM_F_MULTI, seq, port);
+      nl_addr6_one(&mut n, IF_ETH, RTM_NEWADDR, n.pfx, n.iid, 64, 0, NLM_F_MULTI, seq, port);
     }
-    nl_addr6_one(&mut n, IF_ETH, 0xFE80000000000000, n.iid, 64, 253, NLM_F_MULTI, seq, port);
+    nl_addr6_one(&mut n, IF_ETH, RTM_NEWADDR, 0xFE80000000000000, n.iid, 64, 253, NLM_F_MULTI, seq, port);
   }
 }
 
 /// RTM_NEWROUTE for the IPv6 route hi::/plen out of the card, through gw
 /// (gwlo, in fe80::/64) unless gwlo is 0.
-fn nl_route6(n: &mut Net, hi: u64, plen: u64, gwlo: u64, seq: u64, port: u64)
+fn nl_route6(n: &mut Net, kind: u64, hi: u64, plen: u64, gwlo: u64, seq: u64, port: u64)
   requires net_ok(n) && plen <= 128
   ensures net_ok(n)
 {
-  nl_begin(&mut n, RTM_NEWROUTE, NLM_F_MULTI, seq, port);
+  nl_begin(&mut n, kind, NLM_F_MULTI, seq, port);
   nl_b(&mut n, 10);                   // rtmsg: AF_INET6
   nl_b(&mut n, plen);
   nl_b(&mut n, 0);
@@ -756,21 +799,21 @@ fn nl_routes6(n: &mut Net, seq: u64, port: u64)
     return;
   }
   if n.rtr_mac != 0 && n.rtr_lo != 0 {
-    nl_route6(&mut n, 0, 0, n.rtr_lo, seq, port);
+    nl_route6(&mut n, RTM_NEWROUTE, 0, 0, n.rtr_lo, seq, port);
   }
   if n.pfx != 0 {
-    nl_route6(&mut n, n.pfx, 64, 0, seq, port);
+    nl_route6(&mut n, RTM_NEWROUTE, n.pfx, 64, 0, seq, port);
   }
-  nl_route6(&mut n, 0xFE80000000000000, 64, 0, seq, port);
+  nl_route6(&mut n, RTM_NEWROUTE, 0xFE80000000000000, 64, 0, seq, port);
 }
 
 /// RTM_NEWROUTE: to dst/len through gw (0: on the link) out of interface
 /// i, from src (0: unsaid).
-fn nl_route(n: &mut Net, dst: u64, len: u64, gw: u64, i: u64, src: u64, flags: u64, seq: u64, port: u64)
+fn nl_route(n: &mut Net, kind: u64, dst: u64, len: u64, gw: u64, i: u64, src: u64, flags: u64, seq: u64, port: u64)
   requires net_ok(n) && i < IFN && len <= 32
   ensures net_ok(n)
 {
-  nl_begin(&mut n, RTM_NEWROUTE, flags, seq, port);
+  nl_begin(&mut n, kind, flags, seq, port);
   nl_b(&mut n, 2);                    // rtmsg: AF_INET
   nl_b(&mut n, len);
   nl_b(&mut n, 0);
@@ -821,18 +864,18 @@ fn rt_getroute(n: &mut Net, b: &Bytes, at: u64, end: u64, seq: u64, port: u64) -
     }
     let s = if_span(n, IF_ETH);
     if ip / s == n.ip / s {
-      nl_route(&mut n, ip, 32, 0, IF_ETH, n.ip, 0, seq, port);
+      nl_route(&mut n, RTM_NEWROUTE, ip, 32, 0, IF_ETH, n.ip, 0, seq, port);
       return 0;
     }
     if n.gw == 0 {
       return NE_NETUNREACH;
     }
-    nl_route(&mut n, ip, 32, n.gw, IF_ETH, n.ip, 0, seq, port);
+    nl_route(&mut n, RTM_NEWROUTE, ip, 32, n.gw, IF_ETH, n.ip, 0, seq, port);
     return 0;
   }
   let o = route_if(n, ip);
   if o < IFN {
-    nl_route(&mut n, ip, 32, 0, o, if_ip(n, o), 0, seq, port);
+    nl_route(&mut n, RTM_NEWROUTE, ip, 32, 0, o, if_ip(n, o), 0, seq, port);
     return 0;
   }
   let g = nsw(n, n.ns, NS_GW);
@@ -840,7 +883,7 @@ fn rt_getroute(n: &mut Net, b: &Bytes, at: u64, end: u64, seq: u64, port: u64) -
   if g == 0 || go >= IFN {
     return NE_NETUNREACH;
   }
-  nl_route(&mut n, ip, 32, g, go, if_ip(n, go), 0, seq, port);
+  nl_route(&mut n, RTM_NEWROUTE, ip, 32, g, go, if_ip(n, go), 0, seq, port);
   return 0;
 }
 
@@ -852,17 +895,17 @@ fn nl_routes(n: &mut Net, seq: u64, port: u64)
 {
   if n.ns == 0 {
     if n.ip != 0 && n.gw != 0 {
-      nl_route(&mut n, 0, 0, n.gw, IF_ETH, 0, NLM_F_MULTI, seq, port);
+      nl_route(&mut n, RTM_NEWROUTE, 0, 0, n.gw, IF_ETH, 0, NLM_F_MULTI, seq, port);
     }
     if n.ip != 0 {
       let s = if_span(n, IF_ETH);
-      nl_route(&mut n, n.ip / s * s, plen_of(s), 0, IF_ETH, n.ip, NLM_F_MULTI, seq, port);
+      nl_route(&mut n, RTM_NEWROUTE, n.ip / s * s, plen_of(s), 0, IF_ETH, n.ip, NLM_F_MULTI, seq, port);
     }
   } else {
     let g = nsw(n, n.ns, NS_GW);
     let o = route_if(n, g);
     if g != 0 && o < IFN {
-      nl_route(&mut n, 0, 0, g, o, 0, NLM_F_MULTI, seq, port);
+      nl_route(&mut n, RTM_NEWROUTE, 0, 0, g, o, 0, NLM_F_MULTI, seq, port);
     }
   }
   let mut i = 2;
@@ -872,9 +915,90 @@ fn nl_routes(n: &mut Net, seq: u64, port: u64)
     let ip = if_ip(n, i);
     if iw(n, i, IF_NS) == n.ns && iw(n, i, IF_KIND) != IFK_LO && if_up(n, i) && ip != 0 {
       let s = if_span(n, i);
-      nl_route(&mut n, ip / s * s, plen_of(s), 0, i, ip, NLM_F_MULTI, seq, port);
+      nl_route(&mut n, RTM_NEWROUTE, ip / s * s, plen_of(s), 0, i, ip, NLM_F_MULTI, seq, port);
     }
     i = i + 1;
+  }
+}
+
+// ---------------------------------------------------------------- the card's changes
+
+/// Tells the netlink listeners what changed in the card's IPv4 address,
+/// netmask, gateway, IPv6 prefix and router since the last call: a DHCP lease
+/// (or the fall back to the static address), a lease lost, a router
+/// advertisement. The old address and routes are withdrawn (RTM_DELADDR,
+/// RTM_DELROUTE) before the new ones are announced.
+fn rt_poll(n: &mut Net)
+  requires net_ok(n)
+  ensures net_ok(n)
+{
+  let ip = n.ip;
+  let span = n.span;
+  let gw = n.gw;
+  if ip != n.ev_ip || span != n.ev_span || gw != n.ev_gw {
+    let oip = n.ev_ip;
+    let ospan = n.ev_span;
+    let ogw = n.ev_gw;
+    if oip != 0 && oip <= IP_MAX && ospan > 0 && ospan <= 4294967296 {
+      if ogw != 0 {
+        rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV4_ROUTE_BIT, RTM_DELROUTE, 1, ogw, 0, 0);
+      }
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV4_ROUTE_BIT, RTM_DELROUTE, 2, oip, ospan, 0);
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV4_IFADDR_BIT, RTM_DELADDR, 3, oip, ospan, 0);
+    }
+    n.ev_ip = ip;
+    n.ev_span = span;
+    n.ev_gw = gw;
+    if ip != 0 && span > 0 && span <= 4294967296 {
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV4_IFADDR_BIT, RTM_NEWADDR, 3, ip, span, 0);
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV4_ROUTE_BIT, RTM_NEWROUTE, 2, ip, span, 0);
+      if gw != 0 {
+        rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV4_ROUTE_BIT, RTM_NEWROUTE, 1, gw, 0, 0);
+      }
+    }
+  }
+  if !card_live(n.dev) {
+    return;
+  }
+  let pfx = n.pfx;
+  if pfx != n.ev_pfx {
+    let opfx = n.ev_pfx;
+    if opfx != 0 {
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV6_ROUTE_BIT, RTM_DELROUTE, 5, opfx, 64, 0);
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV6_IFADDR_BIT, RTM_DELADDR, 4, opfx, 0, 0);
+    }
+    n.ev_pfx = pfx;
+    if pfx != 0 {
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV6_IFADDR_BIT, RTM_NEWADDR, 4, pfx, 0, 0);
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV6_ROUTE_BIT, RTM_NEWROUTE, 5, pfx, 64, 0);
+    }
+  }
+  let mut rtr = 0;
+  if n.rtr_mac != 0 && n.rtr_lo != 0 {
+    rtr = n.rtr_lo;
+  }
+  if rtr != n.ev_rtr {
+    let ortr = n.ev_rtr;
+    if ortr != 0 {
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV6_ROUTE_BIT, RTM_DELROUTE, 5, 0, 0, ortr);
+    }
+    n.ev_rtr = rtr;
+    if rtr != 0 {
+      rt_event_x(&mut n, IF_ETH, RTNLGRP_IPV6_ROUTE_BIT, RTM_NEWROUTE, 5, 0, 0, rtr);
+    }
+  }
+}
+
+fn nic_rt_poll(c: &mut Nic)
+  requires nic_ok(c)
+  ensures nic_ok(c)
+{
+  match c {
+    Nic::None => { c = Nic::None; },
+    Nic::Up(mut n) => {
+      rt_poll(&mut n);
+      c = Nic::Up(n);
+    },
   }
 }
 
@@ -1374,7 +1498,7 @@ fn rt_request(n: &mut Net, q: u64, b: &Bytes, len: u64, tgt: u64, ptgt: u64, adm
       }
     }
   }
-  nlw_close(&mut n, q);
+  nlw_end(&mut n, q);
   n.ns = was;
 }
 
@@ -1732,7 +1856,7 @@ fn nic_nl_wake(c: &mut Nic, q: u64, b: &Bytes, at: u64, last: u64)
           i = i + 1;
         }
         nl_b(&mut n, last);
-        nlw_close(&mut n, q);
+        nlw_end(&mut n, q);
         n.nls = set(n.nls, q * NL_W + NL_RAW, 1);
       }
       c = Nic::Up(n);

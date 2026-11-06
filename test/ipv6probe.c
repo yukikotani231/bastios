@@ -4,6 +4,8 @@
  * a static PIE and run from the test's disk. */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
+
+
 #include <errno.h>
 #include <netinet/icmp6.h>
 #include <netinet/in.h>
@@ -235,8 +237,74 @@ static int serve(void) {
     }
 }
 
+/* Router advertisement changes, heard on rtnetlink: joins the IPv6 address
+ * and route groups (and, on a second socket, only the IPv4 address group),
+ * says "ready", and waits for the test script's second advertisement, which
+ * moves the prefix from 2001:db8:1::/64 to 2001:db8:2::/64. */
+static int nl_group_socket(unsigned groups) {
+    int s = socket(AF_NETLINK_, SOCK_RAW, NETLINK_ROUTE_);
+    struct { uint16_t family, pad; uint32_t pid, groups; } sa = {AF_NETLINK_, 0, 0, groups};
+    if (s < 0 || bind(s, (void *)&sa, sizeof sa) < 0) return -1;
+    return s;
+}
+
+static int rtnl_events(void) {
+    int s = nl_group_socket(256 | 1024), other = nl_group_socket(16);
+    unsigned char old_gl[16], new_gl[16], old_pfx[16], new_pfx[16];
+    inet_pton(AF_INET6, "2001:db8:1::5054:ff:fe12:3456", old_gl);
+    inet_pton(AF_INET6, "2001:db8:2::5054:ff:fe12:3456", new_gl);
+    inet_pton(AF_INET6, "2001:db8:1::", old_pfx);
+    inet_pton(AF_INET6, "2001:db8:2::", new_pfx);
+    report(s >= 0 && other >= 0, "netlink sockets bind to the IPv6 and IPv4 groups", "bind");
+    printf("ready\n");
+    int del_addr = 0, new_addr = 0, del_route = 0, new_route = 0, stray = 0;
+    char why[64] = "other message";
+    for (int round = 0; round < 40 && !(del_addr && new_addr && del_route && new_route); round++) {
+        struct pollfd p = {.fd = s, .events = POLLIN};
+        if (poll(&p, 1, 500) != 1) continue;
+        unsigned char b[8192];
+        ssize_t n = recv(s, b, sizeof b, 0);
+        for (ssize_t o = 0; o + 16 <= n;) {
+            uint32_t ml;
+            uint16_t ty;
+            memcpy(&ml, b + o, 4);
+            memcpy(&ty, b + o + 4, 2);
+            if (ml < 16 || o + ml > (size_t)n) break;
+            int addr = ty == 20 || ty == 21, route = ty == 24 || ty == 25;     /* NEW/DELADDR, NEW/DELROUTE */
+            if (!addr && !route) { stray++; snprintf(why, sizeof why, "message type %u", ty); }
+            size_t hdr = addr ? 8 : 12;                                         /* ifaddrmsg, rtmsg */
+            for (size_t a = o + 16 + hdr; (addr || route) && a + 4 <= o + ml;) {
+                uint16_t al, at;
+                memcpy(&al, b + a, 2);
+                memcpy(&at, b + a + 2, 2);
+                if (al < 4 || a + al > o + ml) break;
+                if (al == 20 && at == 1) {                         /* IFA_ADDRESS, RTA_DST */
+                    const void *v = b + a + 4;
+                    if (ty == 21 && !memcmp(v, old_gl, 16)) del_addr = 1;
+                    if (ty == 20 && !memcmp(v, new_gl, 16)) new_addr = 1;
+                    if (ty == 25 && !memcmp(v, old_pfx, 16)) del_route = 1;
+                    if (ty == 24 && !memcmp(v, new_pfx, 16)) new_route = 1;
+                }
+                a += (al + 3) & ~3u;
+            }
+            o += (ml + 3) & ~3u;
+        }
+    }
+    report(del_addr, "a new prefix withdraws the old IPv6 address (RTM_DELADDR)", "not heard");
+    report(new_addr, "a new prefix announces the new IPv6 address (RTM_NEWADDR)", "not heard");
+    report(del_route, "a new prefix withdraws the old on-link route (RTM_DELROUTE)", "not heard");
+    report(new_route, "a new prefix announces the new on-link route (RTM_NEWROUTE)", "not heard");
+    report(stray == 0, "nothing but address and route messages in those groups", why);
+    char b[512];
+    report(recv(other, b, sizeof b, MSG_DONTWAIT) < 0 && errno == EAGAIN,
+           "a socket in the IPv4 address group alone hears nothing of it", "heard something");
+    printf("done %d\n", fails);
+    return fails != 0;
+}
+
 int main(int argc, char **argv) {
     setvbuf(stdout, NULL, _IONBF, 0);
+    if (argc > 1 && strcmp(argv[1], "rtnl") == 0) return rtnl_events();
     if (argc > 1) return serve();
     char from[64] = "";
 
