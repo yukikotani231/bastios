@@ -278,6 +278,7 @@ fn lx_number(n: u64) -> u64
   if n == 436 { return LX_CLOSE_RANGE; }
   if n == 437 { return LX_OPENAT2; }
   if n == 438 { return LX_PIDFD_GETFD; }
+  if n == 241 { return LX_PERF_EVENT_OPEN; }
   if n == 439 { return LX_FACCESSAT2; }
   if n == 441 { return LX_EPOLL_PWAIT2; }
   if n == 442 { return LX_MOUNT_SETATTR; }

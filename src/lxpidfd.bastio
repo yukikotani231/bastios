@@ -388,6 +388,7 @@ fn pidfd_reuse(k: &mut Kernel, c: u64)
   requires kok(k) && c < NPROC
   ensures kok(k)
 {
+  perf_gone(&mut k, c);                     // perf counters on it keep their count (src/lxperf.bastio)
   let hi = smaller(k.ofd_hi, OFD_N);
   let mut h = 0;
   while h < hi
