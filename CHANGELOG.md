@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Page faults are counted per thread: `perf_event_open` `PAGE_FAULTS` and `PAGE_FAULTS_MIN` (they read 0 before), `getrusage` `ru_minflt` and `/proc/PID/stat` `minflt` (`test/compat/progs/t_perf.c`). Every fault is counted as minor; `PAGE_FAULTS_MAJ` still reads 0.
 - `bwm` shows a calendar of the month, today lit, when the clock in the task bar is clicked or Alt-C is pressed; a click anywhere or Escape closes it. It follows the time zone the clock uses.
 - A TCP connection that has been reset or closed now polls as writable as well as readable and hung up, as on Linux, so a `poll` loop waiting for `POLLOUT` on it wakes and sees the write fail instead of stalling (`test/compat/progs/t_tcprst.c`; `msoak` has a 16-connection step).
 - `bwm`: Alt-Home, Alt-Page Up, Alt-End and Alt-Page Down put a resizable window on a quarter of the screen (top left, top right, bottom left, bottom right); Alt-Down or Alt-F10 puts it back, as for a half.

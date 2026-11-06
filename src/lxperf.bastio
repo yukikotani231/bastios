@@ -3,8 +3,9 @@
 // reads it from the descriptor: CPU_CLOCK and TASK_CLOCK count the
 // nanoseconds the process's threads have run (user time from the timer
 // ticks, so in steps of 10 ms, plus the time spent in system calls) and
-// CONTEXT_SWITCHES the switches the process has had. PAGE_FAULTS and its
-// minor and major forms, CPU_MIGRATIONS, ALIGNMENT_FAULTS, EMULATION_FAULTS
+// CONTEXT_SWITCHES the switches the process has had, PAGE_FAULTS and
+// PAGE_FAULTS_MIN the page faults it has had (all are counted as minor).
+// PAGE_FAULTS_MAJ, CPU_MIGRATIONS, ALIGNMENT_FAULTS, EMULATION_FAULTS
 // and DUMMY are accepted and read 0: the kernel does not count those.
 // Hardware, cache, raw, tracepoint and breakpoint events are ENOENT, as on
 // a virtual machine with no performance monitoring unit; a counter that
@@ -34,7 +35,9 @@ const PF_BASE: u64 = 8;
 const PF_BIG: u64 = 0x1000000000000;  // counts stay below 2^48
 
 const PERF_SW_TASK_CLOCK: u64 = 1;
+const PERF_SW_PF: u64 = 2;
 const PERF_SW_CSW: u64 = 3;
+const PERF_SW_PF_MIN: u64 = 5;
 const PERF_SW_MAX: u64 = 9;
 const PERF_IOC_ENABLE: u64 = 0x2400;
 const PERF_IOC_DISABLE: u64 = 0x2401;
@@ -66,6 +69,9 @@ fn perf_now(k: &Kernel, t: u64, cfg: u64) -> u64
     let u = smaller(group_time(k.procs, k.sys, t, 0), 0x1000000000) * NS_PER_TICK;
     let s = smaller(group_time(k.procs, k.sys, t, 1), 0xFFFFFFFFFFFF);
     return smaller(sat_add(u, s), PF_BIG - 1);
+  }
+  if cfg == PERF_SW_PF || cfg == PERF_SW_PF_MIN {
+    return smaller(pf_get(k, t), PF_BIG - 1);
   }
   if cfg == PERF_SW_CSW {
     return smaller(sat_add(csw_get(k, t, false), csw_get(k, t, true)), PF_BIG - 1);
