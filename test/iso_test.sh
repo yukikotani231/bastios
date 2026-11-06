@@ -921,7 +921,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         # The launcher menu: the Menu button at the right end of the task bar
         # opens a list above it, Terminal starts a terminal window, Quit ends bwm.
         mark = len(out)
-        q.stdin.write(b"echo Build done > /tmp/bwm.notice\r"); q.stdin.flush()
+        q.stdin.write(b"printf 'Build done\\nTests passed\\n!Disk full\\n' > /tmp/bwm.notice\r"); q.stdin.flush()
         time.sleep(0.5)
         # A wallpaper named in /etc/bwm.wallpaper while bwm runs replaces the desktop (a 2 x 2 red PPM).
         q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/wall.ppm\r"); q.stdin.flush()
@@ -941,7 +941,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = nt == "Build done"
             print(("ok  " if good else "FAIL"), f"({name}) a line in /tmp/bwm.notice shows in the task bar ({nt!r})")
             fails += not good
-            time.sleep(5)
+            # The next line waits for its turn: a plain line is on a blue bar, a line that starts with ! on a red one.
+            time.sleep(2.5)
+            w, h, px = screendump()
+            nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 12, 1)[0]
+            at = ((h - 24 + 12) * w + 64 + 12 * 8 + 8) * 3                      # on the bar, right of the text
+            bar = tuple(px[at:at + 3])
+            good = nt == "Tests passed" and bar == (40, 80, 150)
+            print(("ok  " if good else "FAIL"), f"({name}) a second line in /tmp/bwm.notice waits for its turn, on a blue bar ({nt!r}, {bar})")
+            fails += not good
+            time.sleep(2.5)
             w, h, px = screendump()
             at = (300 * w + 500) * 3
             good = tuple(px[at:at + 3]) == (255, 0, 0)
