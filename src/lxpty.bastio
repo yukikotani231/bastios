@@ -56,6 +56,7 @@ const TIOCSCTTY: u64 = 0x540E;
 const TIOCNOTTY: u64 = 0x5422;
 const TIOCGPTN: u64 = 0x80045430;
 const TIOCSPTLCK: u64 = 0x40045431;
+const TIOCGPTPEER: u64 = 0x5441;           // the slave of a master, opened with the flags in the argument
 const TCSBRK: u64 = 0x5409;
 const TCXONC: u64 = 0x540A;
 const TCFLSH: u64 = 0x540B;
@@ -681,6 +682,13 @@ fn pty_ioctl(k: &mut Kernel, pid: u64, fd: u64, d: u64, req: u64, arg: u64) -> u
   ensures kok(k)
 {
   let p = pty_of(d);
+  if req == TIOCGPTPEER && is_ptm(d) {
+    // The slave of this master as a new descriptor, opened with the flags
+    // in arg, without a path (so also in a root with no /dev/pts): util-linux's
+    // script and openpty in newer C libraries use it. A locked terminal is
+    // not opened, as on Linux.
+    return pty_open_slave(&mut k, pid, p, arg);
+  }
   if req == TCGETS {
     let mut i = 0;
     while i < TERMIOS_SIZE
