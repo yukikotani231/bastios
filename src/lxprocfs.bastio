@@ -133,6 +133,9 @@ const SY_FI: u64 = SY_PX + NPROC * PXF_N;   // after those: /proc/P/fdinfo/FD at
 const TOPO_CPUS: u64 = 64;             // the processors that have a topology directory
 const TOPO_N: u64 = 256;               // TOPO_CPUS * 4 files: cpuN/topology/{thread_siblings, core_siblings, core_id, physical_package_id}
 const SY_TOPO: u64 = SY_FI + NPROC * LXNFD;   // after the fdinfo files: file f of processor c at c * 4 + f
+const MEM_BLOCKS: u64 = 64;            // the memory blocks that have a directory in /sys/devices/system/memory
+const MEM_N: u64 = 193;                // block_size_bytes, then MEM_BLOCKS * 3 files: memoryN/{state, removable, valid_zones}
+const SY_MEM: u64 = SY_TOPO + TOPO_N;  // after the topology files: file f at 0 (block_size_bytes) or 1 + N * 3 + f
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -484,6 +487,10 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   let tf = cpu_topo_at(x, n);
   if tf != 0 {
     return PROC_DEV + PSYS + SY_TOPO + tf - 1;     // a processor's topology file
+  }
+  let mf = mem_sys_at(x, n);
+  if mf != 0 {
+    return PROC_DEV + PSYS + SY_MEM + mf - 1;      // a memory block's file
   }
   let s = loop_sys_at(x, n);
   if s != 0 {
@@ -859,6 +866,123 @@ fn cpu_sysfs(k: &mut Kernel)
       vfs_mkdir(&mut k.fs, t);
     }
     ci = ci + 1;
+  }
+}
+
+/// The /sys/devices/system/memory file the n-byte path in x names: its
+/// index + 1 (block_size_bytes is 1; memoryN's state, removable and
+/// valid_zones are 2 + N * 3 + 0, 1, 2), or 0. N is one or two digits
+/// below MEM_BLOCKS.
+fn mem_sys_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= MEM_N
+{
+  if n < 26 || !xfer_is(x, 0, 26, "sys/devices/system/memory/") {
+    return 0;
+  }
+  if xfer_is(x, 26, n, "block_size_bytes") {
+    return 1;
+  }
+  if n < 34 || !xfer_is(x, 26, 32, "memory") {
+    return 0;
+  }
+  let c0 = cast[u64](bget(x, 32));
+  if c0 < 48 || c0 >= 58 {
+    return 0;
+  }
+  let mut b = c0 - 48;
+  let mut at = 33;
+  let c1 = cast[u64](bget(x, 33));
+  if c1 >= 48 && c1 < 58 {
+    b = b * 10 + (c1 - 48);
+    at = 34;
+  }
+  if b >= MEM_BLOCKS || n < at + 2 || cast[u64](bget(x, at)) != 47 {
+    return 0;
+  }
+  let base = 2 + b * 3;
+  if xfer_is(x, at + 1, n, "state") {
+    return base;
+  }
+  if xfer_is(x, at + 1, n, "removable") {
+    return base + 1;
+  }
+  if xfer_is(x, at + 1, n, "valid_zones") {
+    return base + 2;
+  }
+  return 0;
+}
+
+/// The size of a memory block in MiB: 128, doubled until MEM_BLOCKS of
+/// them hold the RAM.
+fn mem_block_mib(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result >= 128 && result <= 1048576
+{
+  let mib = pool_size(k.mem.pool) * 4 / 1024;
+  let mut bs = 128;
+  while bs < 1048576 && mib > MEM_BLOCKS * bs
+    invariant bs >= 128 && bs <= 1048576 && kok(k)
+  {
+    bs = bs * 2;
+  }
+  return bs;
+}
+
+/// How many memory blocks the RAM makes (a part of one counts as one).
+fn mem_block_count(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result >= 1 && result <= MEM_BLOCKS
+{
+  let bs = mem_block_mib(k);
+  let mib = pool_size(k.mem.pool) * 4 / 1024;
+  let c = (mib + bs - 1) / bs;
+  if c < 1 {
+    return 1;
+  }
+  if c > MEM_BLOCKS {
+    return MEM_BLOCKS;
+  }
+  return c;
+}
+
+/// The text of memory file t (see MEM_N): the block size in hex, and for
+/// every block "online", not removable (the kernel's own pages are in it),
+/// and the zone Normal. lsmem reads these.
+fn mem_text(k: &Kernel, t: u64, o: &mut Bytes) -> u64
+  requires kok(k) && t < MEM_N && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  if t == 0 {
+    return put_c(&mut o, put_h(&mut o, 0, mem_block_mib(k) * 1048576), 10);
+  }
+  let f = (t - 1) % 3;
+  if f == 0 {
+    return put_s(&mut o, 0, "online\n");
+  }
+  if f == 1 {
+    return put_s(&mut o, 0, "0\n");
+  }
+  return put_s(&mut o, 0, "Normal\n");
+}
+
+/// Makes memoryN for each memory block, where lsmem finds the blocks.
+fn mem_sysfs(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let d = bytes_put_str(&mut k.fs.xfer, 0, "sys/devices/system/memory");
+  if !vfs_mkdir(&mut k.fs, d) {
+    return;
+  }
+  let blocks = mem_block_count(k);
+  let mut b = 0;
+  while b < blocks
+    invariant kok(k) && b <= MEM_BLOCKS
+  {
+    let n = bytes_put_u64(&mut k.fs.xfer, bytes_put_str(&mut k.fs.xfer, 0, "sys/devices/system/memory/memory"), b);
+    vfs_mkdir(&mut k.fs, n);
+    b = b + 1;
   }
 }
 
@@ -2443,6 +2567,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if is_um_file(f) {
       return um_text(k, pid, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
+    }
+    if what >= SY_MEM && what - SY_MEM < MEM_N {
+      return mem_text(k, what - SY_MEM, &mut o);
     }
     if what >= SY_TOPO && what - SY_TOPO < TOPO_N {
       return cpu_topo_text(k, what - SY_TOPO, &mut o);
