@@ -156,7 +156,6 @@ debian: debian: find, xargs and du
 debian: debian: lscpu reads the processors from /sys
 debian: debian: lscpu counts threads, cores and sockets from the topology
 debian: debian: lsmem lists the memory blocks from /sys
-debian: debian: lsblk runs on a machine of loop devices
 debian: debian: script(1) ends when its command does
 debian: debian: lslocks lists a held flock
 debian: debian: lsns lists the namespaces without warnings
