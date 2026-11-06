@@ -53,6 +53,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/ttyUSB0") || xfer_is(x, 0, n, "dev/ttyACM0") {
     return DEV_SER;                         // src/lxserial.bastio
   }
+  if xfer_is(x, 0, n, "dev/rtc0") || xfer_is(x, 0, n, "dev/rtc") || xfer_is(x, 0, n, "dev/misc/rtc") {
+    return DEV_RTC;                         // src/lxrtc.bastio
+  }
   if xfer_is(x, 0, n, "dev/fb0") {
     return DEV_FB;                          // src/lxfb.bastio
   }
@@ -105,6 +108,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_FB {
     return 0x1D00;                          // 29:0, /dev/fb0
   }
+  if d == DEV_RTC {
+    return 0xA87;                           // 10:135 (the rtc misc device), /dev/rtc0
+  }
   if d == DEV_KEYEV {
     return 0xD40;                           // 13:64, /dev/input/event0
   }
@@ -148,6 +154,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   }
   if rdev == 0x1D00 {
     return DEV_FB;
+  }
+  if rdev == 0xA87 {
+    return DEV_RTC;
   }
   if rdev == 0xD40 {
     return DEV_KEYEV;

@@ -1264,6 +1264,58 @@ int main(void) {
            umount("/tmp/msz");
            rmdir("/tmp/msz");
            ok; }));
+    EXPECT("protection keys are not available: pkey_alloc answers ENOSPC (EINVAL for bad arguments), pkey_free EINVAL, pkey_mprotect takes key 0 or -1; memfd_secret returns a file to size and map", ({
+           int ok = syscall(330, 0, 0) < 0 && errno == ENOSPC;
+           ok = ok && syscall(330, 1, 0) < 0 && errno == EINVAL;
+           ok = ok && syscall(330, 0, 4) < 0 && errno == EINVAL;
+           ok = ok && syscall(331, 1) < 0 && errno == EINVAL;
+           char *pg = mmap(0, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           ok = ok && pg != MAP_FAILED;
+           ok = ok && syscall(329, pg, 4096, PROT_READ, -1) == 0;
+           ok = ok && syscall(329, pg, 4096, PROT_READ | PROT_WRITE, 0) == 0;
+           ok = ok && syscall(329, pg, 4096, PROT_READ, 5) < 0 && errno == EINVAL;
+           ok = ok && syscall(447, 1) < 0 && errno == EINVAL;
+           int sfd = syscall(447, 0x80000);
+           ok = ok && sfd >= 0 && (fcntl(sfd, F_GETFD) & FD_CLOEXEC) && ftruncate(sfd, 8192) == 0;
+           char *sm = ok ? mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_SHARED, sfd, 0) : MAP_FAILED;
+           ok = ok && sm != MAP_FAILED;
+           if (sm != MAP_FAILED) { sm[5000] = 7; ok = ok && sm[5000] == 7; }
+           if (sfd >= 0) close(sfd);
+           ok; }));
+    EXPECT("process_madvise advises the ranges of a pidfd's process (WILLNEED, COLD, PAGEOUT only) and returns their length; process_mrelease refuses a process nobody is killing", ({
+           int me = syscall(SYS_pidfd_open, getpid(), 0);
+           char *rg = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           struct iovec iv[2] = { { rg, 4096 }, { rg + 4096, 4096 } };
+           int ok = me >= 0 && rg != MAP_FAILED;
+           ok = ok && syscall(440, me, iv, 2, 20, 0) == 8192;
+           ok = ok && syscall(440, me, iv, 1, 21, 0) == 4096;
+           ok = ok && syscall(440, me, iv, 1, 3, 0) == 4096;
+           ok = ok && syscall(440, me, iv, 1, 4, 0) < 0 && errno == EINVAL;
+           ok = ok && syscall(440, me, iv, 1, 20, 1) < 0 && errno == EINVAL;
+           ok = ok && syscall(440, 999, iv, 1, 20, 0) < 0 && errno == EBADF;
+           struct iovec bad = { (void *)0x1000, 4096 };
+           ok = ok && syscall(440, me, &bad, 1, 20, 0) < 0 && errno == ENOMEM;
+           ok = ok && syscall(448, me, 0) < 0 && errno == EINVAL;
+           ok = ok && syscall(448, me, 1) < 0 && errno == EINVAL;
+           ok = ok && syscall(448, 999, 0) < 0 && errno == EBADF;
+           if (me >= 0) close(me);
+           ok; }));
+    EXPECT("move_pages reports the one memory node: 0 for a touched page, ENOENT for an untouched one, EFAULT for an unmapped address, ENODEV for another node; migrate_pages has nothing to move", ({
+           char *mp = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = mp != MAP_FAILED;
+           if (ok) mp[0] = 1;
+           void *pgs[3] = { mp, mp + 4096, (void *)0x1000 };
+           int st[3] = { 7, 7, 7 };
+           ok = ok && syscall(279, 0, 3, pgs, 0, st, 0) == 0 && st[0] == 0 && st[1] == -ENOENT && st[2] == -EFAULT;
+           int nd[3] = { 0, 0, 0 };
+           st[0] = st[1] = st[2] = 7;
+           ok = ok && syscall(279, 0, 3, pgs, nd, st, 2) == 0 && st[0] == 0 && st[1] == -ENOENT && st[2] == -EFAULT;
+           nd[0] = 1;
+           ok = ok && syscall(279, 0, 1, pgs, nd, st, 2) == 0 && st[0] == -ENODEV;
+           ok = ok && syscall(279, 0, 1, pgs, 0, st, 1) < 0 && errno == EINVAL;
+           ok = ok && syscall(279, 99999, 1, pgs, 0, st, 0) < 0 && errno == ESRCH;
+           ok = ok && syscall(256, 0, 8, 0, 0) == 0;
+           ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;
            int fd = open("/bin/cat", O_RDONLY);

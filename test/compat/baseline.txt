@@ -153,6 +153,10 @@ debian: debian: coreutils make, copy, move, link and look at files
 debian: debian: coreutils, sed, grep and awk in a pipeline
 debian: debian: dpkg knows the packages
 debian: debian: find, xargs and du
+debian: debian: lscpu reads the processors from /sys
+debian: debian: lscpu counts threads, cores and sockets from the topology
+debian: debian: script(1) ends when its command does
+debian: debian: lsns lists the namespaces without warnings
 debian: debian: perl
 debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: the dynamic linker through its links, by hand
@@ -1284,6 +1288,13 @@ t_nft: reject answers at once instead of dropping
 t_nft: stale references: a set a rule uses cannot go, and a vanished jump target is skipped
 t_nft: the rule's counter counted the dropped packets
 t_nft: the table, the chain and the rules are listed
+t_nsioctl: NS_GET_NSTYPE answers on every namespace link in a chroot with its own proc
+t_nsioctl: NS_GET_NSTYPE answers on every namespace link of every process
+t_nsioctl: a PID namespace made inside another has that one as its parent
+t_nsioctl: namespace files have a device of their own (nsfs), shared by all of them
+t_nsioctl: a zombie has no namespace links to open
+t_nsioctl: a thread's directory has namespace links, /proc has none
+t_nsioctl: an inner user namespace's parent is the outer one, seen from outside only
 t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd
 t_pidapi: waitid(P_PIDFD) on it reports the child's status
 t_pidapi: clone3 CLONE_PIDFD and CLONE_PARENT_SETTID at one address is EINVAL
@@ -1781,6 +1792,20 @@ t_ropivot: stat of the descriptor's path is the root directory
 t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
+t_rtc: /dev/rtc0 opens
+t_rtc: it is the character device 10:135
+t_rtc: /dev/rtc is the same clock
+t_rtc: RTC_RD_TIME reads the clock
+t_rtc: it agrees with CLOCK_REALTIME to within 20 seconds
+t_rtc: the weekday and the day of the year are right
+t_rtc: RTC_SET_TIME sets it
+t_rtc: it reads back the same, a moment later
+t_rtc: the weekday is a Friday
+t_rtc: a month of 12 is EINVAL
+t_rtc: a year before 2000 is EINVAL
+t_rtc: an unknown ioctl is ENOTTY
+t_rtc: the clock is put back
+t_rtc: an unprivileged program cannot set it
 t_rtnlev: sockets in the link group, the address group, both and none
 t_rtnlev: a veth pair is made
 t_rtnlev: the link group hears both ends
@@ -1950,6 +1975,39 @@ t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65t
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
 t_sock2: a seqpacket message sent from three buffers with a descriptor comes in whole over two, as Firefox's sandbox asks for files
+t_statmount: MNT_BASIC alone leaves out the strings
+t_statmount: a small buffer is EOVERFLOW
+t_statmount: an unknown mount is ENOENT
+t_statmount: bind it
+t_statmount: bind the shared mount
+t_statmount: flags are EINVAL
+t_statmount: it is gone
+t_statmount: it is private
+t_statmount: its file system type is tmpfs
+t_statmount: its id is its own
+t_statmount: its magic number is tmpfs's
+t_statmount: its mask has the fields asked for
+t_statmount: its root is /
+t_statmount: listmount holds to the room it is given
+t_statmount: listmount in reverse starts with the newest
+t_statmount: listmount lists the mounts
+t_statmount: listmount starts after the last id
+t_statmount: make it shared
+t_statmount: make the copy a slave
+t_statmount: mount tmpfs
+t_statmount: nosuid and nodev show
+t_statmount: remount read-only
+t_statmount: statmount shows ro
+t_statmount: statmount shows shared and a peer group
+t_statmount: statmount shows the master
+t_statmount: the bind mount has an id of its own
+t_statmount: the ids are ascending
+t_statmount: the new mount is found by its mount point
+t_statmount: the size covers the strings
+t_statmount: the tmpfs is gone
+t_statmount: unmount
+t_statmount: unmount the bind mount
+t_statmount: unmount the slave
 t_sys: a cgroup namespace roots the tree
 t_sys: cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there
 t_sys: pids.events counts the forks pids.max refused
@@ -2202,6 +2260,13 @@ x11: x11: a Qt 5 transport stream muxer, tsMuxeR, draws its window on the X scre
 x11: x11: a Java media renamer, FileBot, draws its window on the X screen
 x11: x11: a GTK folder synchroniser, FreeFileSync, draws its window on the X screen
 x11: x11: a Qt file manager, Krusader, draws its window on the X screen
+x11: x11: a GTK PDF viewer, Evince, draws its window on the X screen
+x11: x11: a media player, VLC, draws its window on the X screen
+x11b: x11b: unpack the server and the client roots
+x11b: x11b: an image editor, GIMP, draws its window on the X screen
+x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
+x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
+x11b: x11b: a network protocol analyser, Wireshark, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
@@ -2334,6 +2399,21 @@ t_pty: erasing a two-byte character takes back one cell
 t_pty: with IUTF8 erase takes whole characters
 t_pty: IUTF8 can be cleared
 t_pty: without IUTF8 erase takes one byte
+t_pty: SIGCHLD of a child made with CLONE_CHILD_CLEARTID reaches a signalfd
+t_pty: TIOCGPTPEER gives the slave
+t_pty: a ^D written to the master is accepted
+t_pty: a child's exit reaches a signalfd polled beside the master (script)
+t_pty: a negative fd in a poll set is ignored: the wait runs its course
+t_pty: a poll set of one negative fd just sleeps
+t_pty: a sleeping poll wakes when a child exits and its SIGCHLD is on a signalfd
+t_pty: and it is the slave of that master
+t_pty: and waitpid reaps it
+t_pty: poll on a master says it can be written (script waits for it)
+t_pty: poll on an idle slave times out
+t_pty: script's loop reads the shell's output
+t_pty: script's loop reaps its shell
+t_pty: the signalfd record of a child's exit says CLD_EXITED, its pid and status
+t_pty: waitpid reaps a child made with CLONE_CHILD_CLEARTID
 tty: utf-8: erase takes back a whole character on the console
 alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
 alpine-tty: nvim: it counts characters and cells of Japanese text
@@ -2348,6 +2428,9 @@ java: java: Eclipse JDT LS, the language server, finds a type error and answers 
 java: java: a real library (Apache Commons Codec) with its test libraries, tested with the JUnit console launcher
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
+t_ltp2: protection keys are not available: pkey_alloc answers ENOSPC (EINVAL for bad arguments), pkey_free EINVAL, pkey_mprotect takes key 0 or -1; memfd_secret returns a file to size and map
+t_ltp2: process_madvise advises the ranges of a pidfd's process (WILLNEED, COLD, PAGEOUT only) and returns their length; process_mrelease refuses a process nobody is killing
+t_ltp2: move_pages reports the one memory node: 0 for a touched page, ENOENT for an untouched one, EFAULT for an unmapped address, ENODEV for another node; migrate_pages has nothing to move
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
 t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them
@@ -2903,6 +2986,26 @@ t_xfrmlife: they did not use up the limit: three real datagrams pass
 t_xfrmlife: two more datagrams: the counters add up
 t_xfrmlife: unused for four seconds, it still carries a datagram
 t_xfrmlife: without IPsec the datagram is echoed
+t_xfrmpolev: a socket to configure with
+t_xfrmpolev: the table is flushed first
+t_xfrmpolev: root can join the policy group
+t_xfrmpolev: sockets in no group and in the SA group
+t_xfrmpolev: a policy is added
+t_xfrmpolev: NEWPOLICY is reported with its direction and selector
+t_xfrmpolev: it is replaced
+t_xfrmpolev: UPDPOLICY is reported
+t_xfrmpolev: a failed add (EEXIST) reports nothing
+t_xfrmpolev: another direction is another policy
+t_xfrmpolev: NEWPOLICY for it
+t_xfrmpolev: one is deleted
+t_xfrmpolev: DELPOLICY is reported with its direction
+t_xfrmpolev: deleting what is not there reports nothing
+t_xfrmpolev: the rest are flushed
+t_xfrmpolev: FLUSHPOLICY is reported
+t_xfrmpolev: a socket in no group heard nothing
+t_xfrmpolev: nor the SA group
+t_xfrmpolev: the child made one
+t_xfrmpolev: a policy of another namespace is not reported
 t_landlock: a restricted child is held to its rules
 t_landlock: a rule below a directory
 t_landlock: a ruleset is made

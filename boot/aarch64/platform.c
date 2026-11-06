@@ -562,10 +562,22 @@ uint64_t bst_irq_ack(void) {
     return v;
 }
 
+/* Idle, a processor other than the boot one waits up to a second for its own
+ * tick instead of 10 ms: the kernel wakes it (the wake-up interrupt) when a
+ * process is ready or the kernel stops, and the boot processor's tick keeps
+ * the kernel's time. Not while the kernel waits for I/O: poll_cycles has the
+ * shorter wait then. */
 uint64_t bst_cpu_wait(void) {
     struct pcpu *c = this_cpu();
+    unsigned id = c->id;
+    int untimed = id != 0 && !poll_cycles[id];
     c->irq = 0;
+    if (untimed) {
+        uint64_t t = tick_cycles * TICK_HZ;
+        __asm__ volatile ("msr cntp_tval_el0, %0; isb" : : "r"(t));
+    }
     __asm__ volatile ("msr daifclr, #2; wfi; isb; msr daifset, #2" : : : "memory");
+    if (untimed) timer_rearm();             /* the next tick of its own, now that it is awake */
     return c->irq;
 }
 

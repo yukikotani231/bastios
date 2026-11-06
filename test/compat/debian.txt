@@ -101,3 +101,22 @@ rc 1
 $ bb chroot /disk/d /bin/bash -c 'mkdir -p /mnt/a /mnt/b /mnt/e && mount --bind /mnt/a /mnt/b && mount --make-shared /mnt/b && mount --bind /mnt/b /mnt/e && findmnt -n -o PROPAGATION /mnt/e; mount --make-slave /mnt/e; findmnt -n -o PROPAGATION /mnt/e; umount /mnt/e; umount /mnt/b'
 shared
 private,slave
+
+== debian: lscpu reads the processors from /sys
+$ bb mkdir -p /disk/d/sys && bb mount -t sysfs sysfs /disk/d/sys && bb chroot /disk/d /bin/bash -c "lscpu | grep -c -E '^(Architecture|CPU\(s\)|On-line CPU\(s\) list):'"
+3
+
+== debian: lsns lists the namespaces without warnings
+$ bb mkdir -p /disk/d/proc; bb mount -t proc proc /disk/d/proc; bb chroot /disk/d /bin/bash -c "lsns 2>&1 | grep -c -i -E 'unsupported|warn'; lsns -t pid -n | wc -l"
+0
+1
+
+== debian: lscpu counts threads, cores and sockets from the topology
+$ bb mkdir -p /disk/d/sys && bb mount -t sysfs sysfs /disk/d/sys && bb chroot /disk/d /bin/bash -c "lscpu | grep -E '^(Thread\(s\) per core|Socket\(s\)):' | tr -s ' '"
+Thread(s) per core: 1
+Socket(s): 1
+
+== debian: script(1) ends when its command does
+$ bb mkdir -p /disk/d/dev/pts; bb mount -t devpts devpts /disk/d/dev/pts; bb mknod -m 666 /disk/d/dev/ptmx c 5 2; bb chroot /disk/d /bin/bash -c "timeout 20 script -qc 'echo hi' /dev/null </dev/null | tr -d '\r'; echo rc=\${PIPESTATUS[0]}"
+hi
+rc=0

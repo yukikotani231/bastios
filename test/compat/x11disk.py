@@ -9,7 +9,10 @@ and x11start (the script that starts them all).
 The checks unpack the roots under /disk/x, /disk/t, /disk/g and /disk/q, start Xvfb in the first
 and xterm in the second (which share the X socket through a bind mount).
 
-    x11disk.py OUT.img SERVER_IMAGE CLIENT_IMAGE GTK_IMAGE QT_IMAGE ... PY_IMAGE TAG_IMAGE DIRSTAT_IMAGE FILEZILLA_IMAGE AVIDEMUX_IMAGE HANDBRAKE_IMAGE MKV_IMAGE CZKAWKA_IMAGE TSMUXER_IMAGE FILEBOT_IMAGE FFS_IMAGE KRUSADER_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR
+    x11disk.py [--part2] OUT.img SERVER_IMAGE CLIENT_IMAGE GTK_IMAGE QT_IMAGE ... PY_IMAGE TAG_IMAGE DIRSTAT_IMAGE FILEZILLA_IMAGE AVIDEMUX_IMAGE HANDBRAKE_IMAGE MKV_IMAGE CZKAWKA_IMAGE TSMUXER_IMAGE FILEBOT_IMAGE FFS_IMAGE KRUSADER_IMAGE EVINCE_IMAGE VLC_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR
+
+With --part2 the disk is the second one (lane x11b): `x11disk.py --part2 OUT.img SERVER_IMAGE CLIENT_IMAGE GIMP_IMAGE LIBREOFFICE_IMAGE INKSCAPE_IMAGE WIRESHARK_IMAGE BUSYBOX BX11 FAKEBWM X11START --cache DIR`
+holds the server and client roots, GIMP's, LibreOffice's, Inkscape's and Wireshark's.
 
 The images are Docker Hub images, NAME@sha256:DIGEST (images.mk pins them),
 fetched and cached as alpinedisk.py does it.
@@ -67,13 +70,23 @@ def main():
     if "--cache" in args:
         cache = args[args.index("--cache") + 1]
         del args[args.index("--cache"):args.index("--cache") + 2]
-    out, server, client, gtk, qt, qt2, java, wx, py, tag, dirstat, filezilla, avidemux, handbrake, mkv, czkawka, tsmuxer, filebot, ffs, krusader, busybox, bx11, fakebwm, x11start = args
-    work = os.path.join(os.path.dirname(os.path.abspath(out)), "x11")
+    part2 = "--part2" in args
+    if part2:
+        # The second disk (lane x11b): a BastiOS disk holds at most 262144
+        # entries, which the roots of the first disk nearly fill, so the
+        # apps added since live on a disk of their own.
+        args.remove("--part2")
+        out, server, client, gimp, libreoffice, inkscape, wireshark, busybox, bx11, fakebwm, x11start = args
+        apps = ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gimp, "gimp.tar", "usr/bin/gimp"), (libreoffice, "libreoffice.tar", "usr/bin/soffice"), (inkscape, "inkscape.tar", "usr/bin/inkscape"), (wireshark, "wireshark.tar", "usr/bin/wireshark"))
+    else:
+        out, server, client, gtk, qt, qt2, java, wx, py, tag, dirstat, filezilla, avidemux, handbrake, mkv, czkawka, tsmuxer, filebot, ffs, krusader, evince, vlc, busybox, bx11, fakebwm, x11start = args
+        apps = ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru"), (tag, "tag.tar", "usr/bin/puddletag"), (dirstat, "dirstat.tar", "usr/bin/qdirstat"), (filezilla, "filezilla.tar", "usr/bin/filezilla"), (avidemux, "avidemux.tar", "usr/bin/avidemux3_qt5"), (handbrake, "handbrake.tar", "usr/bin/ghb"), (mkv, "mkv.tar", "usr/bin/mkvtoolnix-gui"), (czkawka, "czkawka.tar", "usr/bin/czkawka_gui"), (tsmuxer, "tsmuxer.tar", "usr/bin/tsMuxerGUI"), (filebot, "filebot.tar", "opt/filebot/filebot"), (ffs, "ffs.tar", "opt/FreeFileSync/Bin/FreeFileSync"), (krusader, "krusader.tar", "usr/bin/krusader"), (evince, "evince.tar", "usr/bin/evince"), (vlc, "vlc.tar", "usr/bin/vlc"))
+    work = os.path.join(os.path.dirname(os.path.abspath(out)), "x11b" if part2 else "x11")
     cache = cache or work
     os.makedirs(cache, exist_ok=True)
     os.makedirs(work, exist_ok=True)
     unpacked = {}                  # tar -> the bytes its files take on the disk once unpacked
-    for image, tar, want in ((server, "server.tar", "usr/bin/Xvfb"), (client, "client.tar", "usr/bin/xterm"), (gtk, "gtk.tar", "usr/bin/putty"), (qt, "qt.tar", "usr/bin/mediainfo-gui"), (qt2, "qt2.tar", "usr/bin/keepassxc"), (java, "java.tar", "usr/bin/java"), (wx, "wx.tar", "usr/bin/audacity"), (py, "py.tar", "usr/bin/dupeguru"), (tag, "tag.tar", "usr/bin/puddletag"), (dirstat, "dirstat.tar", "usr/bin/qdirstat"), (filezilla, "filezilla.tar", "usr/bin/filezilla"), (avidemux, "avidemux.tar", "usr/bin/avidemux3_qt5"), (handbrake, "handbrake.tar", "usr/bin/ghb"), (mkv, "mkv.tar", "usr/bin/mkvtoolnix-gui"), (czkawka, "czkawka.tar", "usr/bin/czkawka_gui"), (tsmuxer, "tsmuxer.tar", "usr/bin/tsMuxerGUI"), (filebot, "filebot.tar", "opt/filebot/filebot"), (ffs, "ffs.tar", "opt/FreeFileSync/Bin/FreeFileSync"), (krusader, "krusader.tar", "usr/bin/krusader")):
+    for image, tar, want in apps:
         files = alpinedisk.merged(alpinedisk.layers(image, cache))
         if want not in files:
             sys.exit(f"x11disk: {image} has no {want}")
@@ -83,6 +96,15 @@ def main():
             # use most of them. Krusader's icon themes and message catalogues
             # are tens of thousands of small files it can start without.
             unpacked[tar] = write_tar(files, os.path.join(work, tar), lambda n: not n.startswith(("usr/share/icons/breeze", "usr/share/locale/")))
+            continue
+        if tar == "gimp.tar":
+            # 20000 entries; the Adwaita theme, the time zone database and the
+            # message catalogues are 8000 of them (see krusader.tar)
+            unpacked[tar] = write_tar(files, os.path.join(work, tar), lambda n: not n.startswith(("usr/share/icons/Adwaita", "usr/share/zoneinfo/", "usr/share/locale/")))
+            continue
+        if tar == "evince.tar":
+            # the Adwaita icon theme is 6000 of its 9000 entries (see krusader.tar)
+            unpacked[tar] = write_tar(files, os.path.join(work, tar), lambda n: not n.startswith("usr/share/icons/Adwaita"))
             continue
         if tar == "tag.tar":
             # puddletag's root is 640 MB: its biggest libraries are a file of
@@ -107,27 +129,10 @@ def main():
     free = sum(unpacked[t] for t in kept) + past + max(unpacked[t] for t in unpacked if t not in kept) + (768 << 20)
     env = dict(os.environ, MKDISK_FREE_MB=str((free >> 20) + 1))
     print(f"x11disk: {free >> 20} MiB free for the cases", file=sys.stderr)
-    os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out,
-                               f"busybox={busybox}", f"bx11={bx11}", f"fakebwm={fakebwm}", f"x11start={x11start}",
-                               f"server.tar={os.path.join(work, 'server.tar')}",
-                               f"client.tar={os.path.join(work, 'client.tar')}",
-                               f"gtk.tar={os.path.join(work, 'gtk.tar')}",
-                               f"qt.tar={os.path.join(work, 'qt.tar')}",
-                               f"qt2.tar={os.path.join(work, 'qt2.tar')}",
-                               f"java.tar={os.path.join(work, 'java.tar')}",
-                               f"wx.tar={os.path.join(work, 'wx.tar')}",
-                               f"py.tar={os.path.join(work, 'py.tar')}",
-                               f"tag.tar={os.path.join(work, 'tag.tar')}",
-                               f"tag2.tar={os.path.join(work, 'tag2.tar')}",
-                               f"dirstat.tar={os.path.join(work, 'dirstat.tar')}",
-                               f"filezilla.tar={os.path.join(work, 'filezilla.tar')}",
-                               f"avidemux.tar={os.path.join(work, 'avidemux.tar')}",
-                               f"handbrake.tar={os.path.join(work, 'handbrake.tar')}",
-                               f"mkv.tar={os.path.join(work, 'mkv.tar')}",
-                               f"czkawka.tar={os.path.join(work, 'czkawka.tar')}",
-                               f"tsmuxer.tar={os.path.join(work, 'tsmuxer.tar')}",
-                               f"filebot.tar={os.path.join(work, 'filebot.tar')}",
-                               f"ffs.tar={os.path.join(work, 'ffs.tar')}",
-                               f"krusader.tar={os.path.join(work, 'krusader.tar')}"], env)
+    names = ["busybox", "bx11", "fakebwm", "x11start"]
+    srcs = {"busybox": busybox, "bx11": bx11, "fakebwm": fakebwm, "x11start": x11start}
+    tars = [t for _, t, _ in apps] + (["tag2.tar"] if "tag2.tar" in unpacked else [])
+    os.execve(sys.executable, [sys.executable, os.path.join(HERE, "mkdisk.py"), out]
+              + [f"{n}={srcs[n]}" for n in names] + [f"{t}={os.path.join(work, t)}" for t in tars], env)
 
 main()

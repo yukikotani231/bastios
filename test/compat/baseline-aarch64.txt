@@ -149,6 +149,12 @@ debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: unpack the root, chroot into it
 debian: debian: the dynamic linker through its links, by hand
 debian: debian: users and the machine
+debian: debian: a bind of a shared mount made a slave
+debian: debian: lscpu reads the processors from /sys
+debian: debian: lsns lists the namespaces without warnings
+debian: debian: mount --make-shared, findmnt shows the propagation
+debian: debian: unshare gives a mount namespace of its own
+debian: debian: util-linux mount tools see the mount table
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
 node: node: an expression
@@ -369,6 +375,8 @@ t_file: write
 t_file: writev
 t_file: a write of many unaligned blocks is not short
 t_file: two hundred attributes on one file
+t_hintdyn: after an mmap hint far below the mmap area, a large mapping still finds room
+t_hintdyn: an mmap hint far below the mmap area leaves libc's pages out of the space mmap hands out
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
@@ -842,6 +850,14 @@ t_nopie: the bss covers what the kernel image would
 t_nopie: the data follows it
 t_nopie: the text is where it was linked
 t_nopie: the whole bss is usable
+t_nsioctl: NS_GET_NSTYPE answers on every namespace link in a chroot with its own proc
+t_nsioctl: NS_GET_NSTYPE answers on every namespace link of every process
+t_nsioctl: NS_GET_NSTYPE works on a ns link opened in a chroot
+t_nsioctl: NS_GET_NSTYPE works on an O_PATH descriptor of a ns link
+t_nsioctl: NS_GET_NSTYPE works on the descriptor NS_GET_USERNS returns
+t_nsioctl: namespace files have a device of their own (nsfs), shared by all of them
+t_nsioctl: a zombie has no namespace links to open
+t_nsioctl: a thread's directory has namespace links, /proc has none
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
@@ -1262,6 +1278,39 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_statmount: MNT_BASIC alone leaves out the strings
+t_statmount: a small buffer is EOVERFLOW
+t_statmount: an unknown mount is ENOENT
+t_statmount: bind it
+t_statmount: bind the shared mount
+t_statmount: flags are EINVAL
+t_statmount: it is gone
+t_statmount: it is private
+t_statmount: its file system type is tmpfs
+t_statmount: its id is its own
+t_statmount: its magic number is tmpfs's
+t_statmount: its mask has the fields asked for
+t_statmount: its root is /
+t_statmount: listmount holds to the room it is given
+t_statmount: listmount in reverse starts with the newest
+t_statmount: listmount lists the mounts
+t_statmount: listmount starts after the last id
+t_statmount: make it shared
+t_statmount: make the copy a slave
+t_statmount: mount tmpfs
+t_statmount: nosuid and nodev show
+t_statmount: remount read-only
+t_statmount: statmount shows ro
+t_statmount: statmount shows shared and a peer group
+t_statmount: statmount shows the master
+t_statmount: the bind mount has an id of its own
+t_statmount: the ids are ascending
+t_statmount: the new mount is found by its mount point
+t_statmount: the size covers the strings
+t_statmount: the tmpfs is gone
+t_statmount: unmount
+t_statmount: unmount the bind mount
+t_statmount: unmount the slave
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
@@ -1592,6 +1641,21 @@ t_pty: without IUTF8 erase takes one byte
 t_pty: sixty-four pseudo-terminal pairs at once, the 65th fails
 t_pty: each pair carries its own bytes
 t_pty: every slave is a device of its own
+t_pty: SIGCHLD of a child made with CLONE_CHILD_CLEARTID reaches a signalfd
+t_pty: TIOCGPTPEER gives the slave
+t_pty: a ^D written to the master is accepted
+t_pty: a child's exit reaches a signalfd polled beside the master (script)
+t_pty: a negative fd in a poll set is ignored: the wait runs its course
+t_pty: a poll set of one negative fd just sleeps
+t_pty: a sleeping poll wakes when a child exits and its SIGCHLD is on a signalfd
+t_pty: and it is the slave of that master
+t_pty: and waitpid reaps it
+t_pty: poll on a master says it can be written (script waits for it)
+t_pty: poll on an idle slave times out
+t_pty: script's loop reads the shell's output
+t_pty: script's loop reaps its shell
+t_pty: the signalfd record of a child's exit says CLD_EXITED, its pid and status
+t_pty: waitpid reaps a child made with CLONE_CHILD_CLEARTID
 t_rootro: unshare a mount namespace
 t_rootro: bind the rootfs onto itself
 t_rootro: make the bind private
@@ -2643,3 +2707,79 @@ t_xfrmlife: two more datagrams: the counters add up
 t_xfrmlife: unused for four seconds, it still carries a datagram
 t_xfrmlife: without IPsec the datagram is echoed
 t_ltp2: a signal reaches a thread running on another processor without waiting for its tick
+t_xfrmev: a socket to configure with
+t_xfrmev: the table is flushed first
+t_xfrmev: root can join the SA group
+t_xfrmev: sockets in no group and in the expire group
+t_xfrmev: an association is added
+t_xfrmev: NEWSA is reported with its SPI
+t_xfrmev: an association is deleted
+t_xfrmev: DELSA is reported with its SPI
+t_xfrmev: two associations are added
+t_xfrmev: both NEWSA are reported
+t_xfrmev: they are flushed
+t_xfrmev: a DELSA for each
+t_xfrmev: a failed add reports nothing
+t_xfrmev: only the first add is reported
+t_xfrmev: an association with a hard limit
+t_xfrmev: NEWSA
+t_xfrmev: its expiry is a DELSA too
+t_xfrmev: a socket in no group heard nothing
+t_xfrmev: nor the expire group, which hears its own message
+t_xfrmev: the child made one
+t_xfrmev: an association of another namespace is not reported
+t_mountprop: mount_setattr sets MS_SHARED through an open_tree descriptor
+t_mountprop: and MS_PRIVATE
+t_mountprop: in a chroot too
+t_mountprop: clean up after mount_setattr
+t_mountprop: rootfs: the helper becomes a slave of everything
+t_mountprop: rootfs: bind it on itself and the volume below
+t_mountprop: rootfs: remount for the options keeps the group
+t_mountprop: rootfs: rshared on it
+t_mountprop: rootfs: a mount on the host reaches it
+t_mountprop: rootfs: a proc below it
+t_mountprop: rootfs: pivot_root into it
+t_mountprop: rootfs: the volume is a mount after pivot_root
+t_mountprop: rootfs: the volume is shared after pivot_root
+t_mountprop: rootfs: the volume is a slave after pivot_root
+t_mountprop: rootfs: a mount made in the container reaches its peers
+t_rtnlev: sockets in the link group, the address group, both and none
+t_rtnlev: a veth pair is made
+t_rtnlev: the link group hears both ends
+t_rtnlev: a socket in both groups hears them too
+t_rtnlev: the address group and no group hear nothing of it
+t_rtnlev: the link has an index
+t_rtnlev: an address is added
+t_rtnlev: the address group hears RTM_NEWADDR with it
+t_rtnlev: the link group does not
+t_rtnlev: the link is set up
+t_rtnlev: the link group hears RTM_NEWLINK for it
+t_rtnlev: the address group does not
+t_rtnlev: the address is removed
+t_rtnlev: the address group hears RTM_DELADDR
+t_rtnlev: the link is removed
+t_rtnlev: the link group hears RTM_DELLINK for both ends
+t_rtnlev: the socket in both groups heard the rest
+t_rtnlev: a socket in no group heard nothing at all
+t_rtnlev: another namespace makes a pair
+t_rtnlev: it is not reported here
+t_xfrmpolev: a socket to configure with
+t_xfrmpolev: the table is flushed first
+t_xfrmpolev: root can join the policy group
+t_xfrmpolev: sockets in no group and in the SA group
+t_xfrmpolev: a policy is added
+t_xfrmpolev: NEWPOLICY is reported with its direction and selector
+t_xfrmpolev: it is replaced
+t_xfrmpolev: UPDPOLICY is reported
+t_xfrmpolev: a failed add (EEXIST) reports nothing
+t_xfrmpolev: another direction is another policy
+t_xfrmpolev: NEWPOLICY for it
+t_xfrmpolev: one is deleted
+t_xfrmpolev: DELPOLICY is reported with its direction
+t_xfrmpolev: deleting what is not there reports nothing
+t_xfrmpolev: the rest are flushed
+t_xfrmpolev: FLUSHPOLICY is reported
+t_xfrmpolev: a socket in no group heard nothing
+t_xfrmpolev: nor the SA group
+t_xfrmpolev: the child made one
+t_xfrmpolev: a policy of another namespace is not reported

@@ -23,6 +23,7 @@ const LX_CLOSE: u64 = 3;
 const LX_LSEEK: u64 = 8;
 const LX_MMAP: u64 = 9;
 const LX_MPROTECT: u64 = 10;
+const LX_PKEY_MPROTECT: u64 = 329;       // protection keys: no CPU feature here, so only key 0 (and -1, "none") work (src/lxmisc.bastio)
 const LX_MUNMAP: u64 = 11;
 const LX_BRK: u64 = 12;
 const LX_IOCTL: u64 = 16;
@@ -48,6 +49,8 @@ const LX_FSOPEN: u64 = 430;
 const LX_FSCONFIG: u64 = 431;
 const LX_FSMOUNT: u64 = 432;
 const LX_MOUNT_SETATTR: u64 = 442;
+const LX_STATMOUNT: u64 = 457;
+const LX_LISTMOUNT: u64 = 458;
 const LX_FSPICK: u64 = 433;
 const LX_UNSHARE: u64 = 272;
 const LX_IO_SETUP: u64 = 206;          // Linux AIO (src/lxaio.bastio)
@@ -1319,6 +1322,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if d.kind == K_DEV && d.x == DEV_KEYEV {
     return keyev_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxkeyev.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_RTC {
+    return rtc_ioctl(&mut k, pid, req % 0x100000000, arg);     // src/lxrtc.bastio
   }
   if d.kind == K_DEV && d.x == DEV_SER {
     return ser_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxserial.bastio

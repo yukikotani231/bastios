@@ -11,9 +11,13 @@
 #include <signal.h>
 #include <sys/epoll.h>
 #include <sys/ioctl.h>
+#include <sys/signalfd.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <sys/syscall.h>
+#include <sched.h>
+#include <time.h>
 
 /* Reads what the master has for us within about a second. */
 static int drain(int m, char *buf, int size) {
@@ -245,6 +249,229 @@ int main(void) {
             close(ms[i]);
             close(ss[i]);
         }
+    }
+    /* script(1): the parent keeps the slave open, the child runs on it, and
+     * the parent learns that the child is gone from SIGCHLD through a
+     * signalfd polled beside the master and its own input. */
+    {
+        int m5 = -1, s5 = -1;
+        int ok = openpty(&m5, &s5, 0, 0, 0) == 0;
+        sigset_t ch, old;
+        sigemptyset(&ch);
+        sigaddset(&ch, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &ch, &old);
+        int sfd = signalfd(-1, &ch, SFD_CLOEXEC);
+        pid_t c = ok ? fork() : -1;
+        if (c == 0) {
+            setsid();
+            ioctl(s5, TIOCSCTTY, 0);
+            dup2(s5, 0);
+            dup2(s5, 1);
+            dup2(s5, 2);
+            write(1, "hi\n", 3);
+            _exit(0);
+        }
+        {
+            struct pollfd w = {.fd = m5, .events = POLLIN | POLLOUT | POLLERR | POLLHUP};
+            int r = poll(&w, 1, 1000);
+            EXPECT("poll on a master says it can be written (script waits for it)", r >= 1 && (w.revents & POLLOUT));
+            struct pollfd sl = {.fd = s5, .events = POLLIN};
+            EXPECT("poll on an idle slave times out", poll(&sl, 1, 10) == 0);
+            int eof = write(m5, "\4", 1);
+            EXPECT("a ^D written to the master is accepted", eof == 1);
+        }
+        int got_sig = 0, got_out = 0, chld_ok = 0;
+        char out[64];
+        for (int tries = 0; tries < 30 && !(got_sig && got_out); tries++) {
+            struct pollfd p[2] = {{.fd = m5, .events = POLLIN}, {.fd = sfd, .events = POLLIN}};
+            if (poll(p, 2, 100) <= 0) continue;
+            if (p[0].revents & POLLIN) {
+                ssize_t n = read(m5, out, sizeof out);
+                if (n > 0) got_out = 1;
+            }
+            if (p[1].revents & POLLIN) {
+                struct signalfd_siginfo si;
+                if (read(sfd, &si, sizeof si) == sizeof si && si.ssi_signo == SIGCHLD) {
+                    got_sig = 1;
+                    chld_ok = si.ssi_code == CLD_EXITED && si.ssi_pid == (unsigned)c && si.ssi_status == 0;
+                }
+            }
+        }
+        EXPECT("a child's exit reaches a signalfd polled beside the master (script)", ok && got_out && got_sig);
+        EXPECT("the signalfd record of a child's exit says CLD_EXITED, its pid and status", chld_ok);
+        int st = -1;
+        EXPECT("and waitpid reaps it", c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st));
+        sigprocmask(SIG_SETMASK, &old, 0);
+        close(sfd);
+        close(m5);
+        close(s5);
+    }
+    /* A poll that is already asleep wakes when a child's exit becomes
+     * readable on a signalfd (script(1) sleeps in poll with no timeout). */
+    {
+        sigset_t ch, old, all;
+        sigemptyset(&ch);
+        sigaddset(&ch, SIGCHLD);
+        sigaddset(&ch, SIGINT);
+        sigaddset(&ch, SIGQUIT);
+        sigaddset(&ch, SIGUSR1);
+        sigaddset(&ch, SIGALRM);
+        sigaddset(&ch, SIGTERM);
+        sigaddset(&ch, SIGWINCH);
+        sigfillset(&all);
+        sigprocmask(SIG_BLOCK, &all, &old);
+        int sfd = signalfd(-1, &ch, SFD_CLOEXEC);
+        pid_t c = fork();
+        if (c == 0) {
+            sigprocmask(SIG_SETMASK, &old, 0);
+            usleep(200000);
+            _exit(0);
+        }
+        struct pollfd p3[3] = {{.fd = sfd, .events = POLLIN | POLLERR | POLLHUP}, {.fd = 0, .events = POLLIN | POLLERR | POLLHUP}, {.fd = -1}};
+        p3[1].fd = -1;                       /* script drops its input after end of file */
+        struct pollfd p = {.fd = sfd, .events = POLLIN};
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int r = poll(p3, 3, -1);             /* no timeout, as script(1) polls */
+        p.revents = p3[0].revents;
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        errno = (int)ms;
+        EXPECT("a sleeping poll wakes when a child exits and its SIGCHLD is on a signalfd", r == 1 && ms < 1500);
+        waitpid(c, 0, 0);
+        sigprocmask(SIG_SETMASK, &old, 0);
+        close(sfd);
+    }
+    /* poll ignores an entry whose fd is negative: it neither counts nor ends the wait. */
+    {
+        int pp[2];
+        pipe(pp);
+        struct pollfd neg[2] = {{.fd = -1, .events = POLLIN}, {.fd = pp[0], .events = POLLIN}};
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        int r = poll(neg, 2, 200);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        long ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        EXPECT("a negative fd in a poll set is ignored: the wait runs its course", r == 0 && ms >= 150 && neg[0].revents == 0);
+        struct pollfd only = {.fd = -1, .events = POLLIN};
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        r = poll(&only, 1, 200);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        EXPECT("a poll set of one negative fd just sleeps", r == 0 && ms >= 150);
+        close(pp[0]);
+        close(pp[1]);
+    }
+    /* fork as glibc does it, with CLONE_CHILD_SETTID and CLONE_CHILD_CLEARTID:
+     * the child's exit still reaches the parent's signalfd and wait. */
+    {
+        sigset_t ch, old;
+        sigemptyset(&ch);
+        sigaddset(&ch, SIGCHLD);
+        sigprocmask(SIG_BLOCK, &ch, &old);
+        int sfd = signalfd(-1, &ch, SFD_CLOEXEC);
+        static pid_t ctid;
+        #if defined(__aarch64__)
+        pid_t c = syscall(SYS_clone, CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | SIGCHLD, 0, 0, 0, &ctid);   /* the order of the last two differs */
+#else
+        pid_t c = syscall(SYS_clone, CLONE_CHILD_CLEARTID | CLONE_CHILD_SETTID | SIGCHLD, 0, 0, &ctid, 0);
+#endif
+        if (c == 0) _exit(0);
+        struct pollfd p = {.fd = sfd, .events = POLLIN};
+        int r = poll(&p, 1, 2000);
+        EXPECT("SIGCHLD of a child made with CLONE_CHILD_CLEARTID reaches a signalfd", c > 0 && r == 1);
+        EXPECT("waitpid reaps a child made with CLONE_CHILD_CLEARTID", c > 0 && waitpid(c, 0, WNOHANG) == c);
+        sigprocmask(SIG_SETMASK, &old, 0);
+        close(sfd);
+    }
+    /* TIOCGPTPEER: the slave straight from the master, as util-linux does. */
+    {
+        int m7 = open("/dev/ptmx", O_RDWR);
+        int zero = 0;
+        ioctl(m7, TIOCSPTLCK, &zero);
+        int s7 = ioctl(m7, 0x5441, O_RDWR | O_NOCTTY);
+        EXPECT("TIOCGPTPEER gives the slave", s7 >= 0 && isatty(s7));
+        char b[16];
+        EXPECT("and it is the slave of that master", s7 >= 0 && write(s7, "z", 1) == 1 && drain(m7, b, sizeof b) == 1 && b[0] == 'z');
+        close(s7);
+        close(m7);
+    }
+    /* script(1) step by step: a non-blocking master, every signal blocked,
+     * a signalfd, a child that makes the slave its terminal and runs a
+     * shell, and a poll with no timeout over the signalfd, the master and a
+     * standard input that is at end of file. */
+    {
+        int m6 = open("/dev/ptmx", O_RDWR);
+        int zero = 0;
+        ioctl(m6, TIOCSPTLCK, &zero);
+        unsigned int pn6 = 0;
+        ioctl(m6, TIOCGPTN, &pn6);
+        char sn[32];
+        snprintf(sn, sizeof sn, "/dev/pts/%u", pn6);
+        int s6 = open(sn, O_RDWR | O_NOCTTY);
+        fcntl(m6, F_SETFL, O_RDONLY | O_NONBLOCK);
+        int nul = open("/dev/null", O_RDONLY);
+        sigset_t ch, old, all;
+        sigemptyset(&ch);
+        sigaddset(&ch, SIGCHLD);
+        sigaddset(&ch, SIGINT);
+        sigaddset(&ch, SIGQUIT);
+        sigaddset(&ch, SIGUSR1);
+        sigaddset(&ch, SIGALRM);
+        sigaddset(&ch, SIGTERM);
+        sigaddset(&ch, SIGWINCH);
+        sigfillset(&all);
+        sigprocmask(SIG_BLOCK, &all, &old);
+        int sfd = signalfd(-1, &ch, SFD_CLOEXEC);
+        pid_t c = fork();
+        if (c == 0) {
+            setsid();
+            ioctl(s6, TIOCSCTTY, 1);
+            close(m6);
+            dup2(s6, 0);
+            dup2(s6, 1);
+            dup2(s6, 2);
+            close(s6);
+            close(sfd);
+            sigprocmask(SIG_SETMASK, &old, 0);
+            execl("/disk/busybox", "sh", "-c", "echo hi", (char *)0);
+            _exit(127);
+        }
+        struct pollfd fds[3] = {{.fd = sfd, .events = POLLIN | POLLERR | POLLHUP}, {.fd = m6, .events = POLLIN | POLLERR | POLLHUP}, {.fd = nul, .events = POLLIN | POLLERR | POLLHUP}};
+        int reaped = 0, saw_out = 0, polls = 0;
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        long ms = 0;
+        while (!reaped && ms < 5000 && polls < 100) {
+            polls++;
+            int r = poll(fds, 3, 5000 - (int)ms);
+            if (r <= 0) break;
+            if (fds[2].revents & POLLIN) {
+                char b[16];
+                if (read(nul, b, sizeof b) == 0) {
+                    fds[2].fd = -1;
+                    write(m6, "\4", 1);
+                }
+            }
+            if (fds[0].revents & POLLIN) {
+                struct signalfd_siginfo si;
+                if (read(sfd, &si, sizeof si) == sizeof si && si.ssi_signo == SIGCHLD && waitpid(c, 0, WNOHANG) == c) reaped = 1;
+            }
+            if (fds[1].revents & POLLIN) {
+                char b[64];
+                if (read(m6, b, sizeof b) > 0) saw_out = 1;
+            }
+            clock_gettime(CLOCK_MONOTONIC, &t1);
+            ms = (t1.tv_sec - t0.tv_sec) * 1000 + (t1.tv_nsec - t0.tv_nsec) / 1000000;
+        }
+        EXPECT("script's loop reaps its shell", reaped);
+        EXPECT("script's loop reads the shell's output", saw_out);
+        if (!reaped) waitpid(c, 0, 0);
+        sigprocmask(SIG_SETMASK, &old, 0);
+        close(sfd);
+        close(nul);
+        close(m6);
+        close(s6);
     }
     return done();
 }

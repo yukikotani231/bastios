@@ -145,7 +145,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             "-drive", f"file={disk},format=raw,if=none,id=vd",
             "-device", "nvme,serial=bastios,drive=vd" if nvme else "virtio-blk-pci,drive=vd",
             "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
-            "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait"]
+            "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait",
+            "-qmp", f"unix:{qmp_path},server,nowait"]
     if stick:
         devs += ["-drive", f"file={stick},format=raw,if=none,id=st",
                  "-device", "qemu-xhci,id=xh", "-device", "usb-storage,bus=xh.0,drive=st,bootindex=0"]
@@ -155,8 +156,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     if usb:
         if not stick:
             devs += ["-device", "qemu-xhci,id=xh"]
-        devs += ["-machine", "pc,i8042=off", "-device", "usb-kbd,bus=xh.0",
-                 "-qmp", f"unix:{qmp_path},server,nowait"]
+        devs += ["-machine", "pc,i8042=off", "-device", "usb-kbd,bus=xh.0"]
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
@@ -501,6 +501,40 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-Tab goes back the other way")
             fails += not good
+            # Alt held: the window list is on the screen, the chosen window lit;
+            # when Alt comes up it goes away.
+            def lit_rows():
+                w, h, px = screendump()
+                sx = (w - 260) // 2 + 255
+                return [y for y in range(h // 2 - 160, h // 2 + 160) if tuple(px[(y * w + sx) * 3:(y * w + sx) * 3 + 3]) == (40, 90, 200)]
+            def qkeys(*evs):                     # (down, key) pairs through QMP: a key can be held there
+                qs = socket.socket(socket.AF_UNIX)
+                qs.connect(qmp_path)
+                qf = qs.makefile("rw")
+                qf.readline()
+                for c in [{"execute": "qmp_capabilities"}] + [{"execute": "input-send-event", "arguments": {"events": [
+                        {"type": "key", "data": {"down": d, "key": {"type": "qcode", "data": k}}}]}} for d, k in evs]:
+                    qf.write(json.dumps(c) + "\n"); qf.flush()
+                    qf.readline()
+                qs.close()
+            idle = lit_rows()
+            qkeys((True, "alt"), (True, "tab"), (False, "tab"))
+            during = lit_rows()
+            end = time.time() + 5
+            while len(during) - len(idle) != 24 and time.time() < end:
+                during = lit_rows()
+            qkeys((False, "alt"))
+            end = time.time() + 10
+            after = lit_rows()
+            while len(after) != len(idle) and time.time() < end:
+                after = lit_rows()
+            good = len(during) - len(idle) == 24 and len(after) == len(idle)
+            if not good:
+                print("     lit rows idle", len(idle), "during", len(during), "after", len(after))
+            print(("ok  " if good else "FAIL"), f"({name}) holding Alt-Tab shows the window list, letting go hides it")
+            fails += not good
+            monitor("sendkey alt-shift-tab")
+            settle(lambda px: px == before)
             # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
             # a step the other way undoes it, and three in one direction go all the way round.
             monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar
@@ -921,7 +955,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         # The launcher menu: the Menu button at the right end of the task bar
         # opens a list above it, Terminal starts a terminal window, Quit ends bwm.
         mark = len(out)
-        q.stdin.write(b"echo Build done > /tmp/bwm.notice\r"); q.stdin.flush()
+        q.stdin.write(b"printf 'Build done\\nTests passed\\n!Disk full\\n' > /tmp/bwm.notice\r"); q.stdin.flush()
         time.sleep(0.5)
         # A wallpaper named in /etc/bwm.wallpaper while bwm runs replaces the desktop (a 2 x 2 red PPM).
         q.stdin.write(b"printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/wall.ppm\r"); q.stdin.flush()
@@ -941,7 +975,16 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = nt == "Build done"
             print(("ok  " if good else "FAIL"), f"({name}) a line in /tmp/bwm.notice shows in the task bar ({nt!r})")
             fails += not good
-            time.sleep(5)
+            # The next line waits for its turn: a plain line is on a blue bar, a line that starts with ! on a red one.
+            time.sleep(2.5)
+            w, h, px = screendump()
+            nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 12, 1)[0]
+            at = ((h - 24 + 12) * w + 64 + 12 * 8 + 8) * 3                      # on the bar, right of the text
+            bar = tuple(px[at:at + 3])
+            good = nt == "Tests passed" and bar == (40, 80, 150)
+            print(("ok  " if good else "FAIL"), f"({name}) a second line in /tmp/bwm.notice waits for its turn, on a blue bar ({nt!r}, {bar})")
+            fails += not good
+            time.sleep(2.5)
             w, h, px = screendump()
             at = (300 * w + 500) * 3
             good = tuple(px[at:at + 3]) == (255, 0, 0)

@@ -7,8 +7,8 @@ import "initfiles.bastio";
 
 /// A kernel with no processes: `m` the pages, `disk` the file system's disk,
 /// `nic` and `snd` the devices, `mice` the pointer buffer, `tsc` the clock.
-fn kernel_new(mut m: Mem, disk: DiskFs, nic: Nic, snd: Snd, mice: Bytes, tsc: Tsc, at: u64, epoch: u64, cpus: u64) -> Kernel
-  requires mem_ok(m) && disk_ok(disk) && nic_ok(nic) && snd_ok(snd) && blen(mice) == MICE_LEN
+fn kernel_new(mut m: Mem, disk: DiskFs, nic: Nic, snd: Snd, hwc: HwClock, mice: Bytes, tsc: Tsc, at: u64, epoch: u64, cpus: u64) -> Kernel
+  requires mem_ok(m) && disk_ok(disk) && nic_ok(nic) && snd_ok(snd) && hw_ok(hwc) && blen(mice) == MICE_LEN
   ensures kok(result)
 {
   let mut spaces = vec_new[Space]();
@@ -30,7 +30,7 @@ fn kernel_new(mut m: Mem, disk: DiskFs, nic: Nic, snd: Snd, mice: Bytes, tsc: Ts
   }
   let shm = new_store(&mut m);
   let txt = new_store(&mut m);
-  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PGROW * STRIDE), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lexb: balloc(PATH_OUT), lxfd: alloc(PGROW * LXNFD), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: vec_new[PipeBuf](), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(PGROW * SIGACT_ROW), cwd: alloc(PGROW * CWD_STRIDE), croot: alloc(PGROW * CWD_STRIDE), cwdx: alloc(0), crootx: alloc(0), dpathx: alloc(0), dpath: alloc(0), sigsave: alloc(PGROW * SIGSAVE_ROW), alarms: alloc(ALARMS_LEN), evt: alloc(0), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), algb: balloc(ALGB_LEN), maps: alloc(PGROW * MAP_N * MAP_W), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), anon: alloc(ANON_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), wv: alloc(WV_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), sdp: alloc(SD_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, mice: mice, gfx: gfx_new(), pdir: false, mns: alloc(MNS_LEN), scf: alloc(0), swp: alloc(0), mstr: balloc(MSTR_LEN), xab: balloc(0), naps: false, socks: false, ux_xtra: false, pid_hi: 0, fd_hi: 0, ofd_hi: 0, mt_hi: 0, undo_hi: 0 };
+  let mut k = Kernel { mem: m, spaces: spaces, fpus: fpus, procs: alloc(PGROW * STRIDE), q: queue_new(INQ_CAP), line: alloc(LINE_LEN), lexb: balloc(PATH_OUT), lxfd: alloc(PGROW * LXNFD), ofd: alloc(OFD_LEN), pipes: alloc(PIPES_LEN), pipebuf: vec_new[PipeBuf](), ticks: 0, ns: at, tsc: tsc, epoch: epoch, rng: rng_new(epoch ^ at), cpus: cpus, fs: vfs_new(disk), nic: nic, sigact: alloc(PGROW * SIGACT_ROW), cwd: alloc(PGROW * CWD_STRIDE), croot: alloc(PGROW * CWD_STRIDE), cwdx: alloc(0), crootx: alloc(0), dpathx: alloc(0), dpath: alloc(0), sigsave: alloc(PGROW * SIGSAVE_ROW), alarms: alloc(ALARMS_LEN), evt: alloc(0), ux: alloc(UX_LEN), uxb: balloc(UXB_LEN), algb: balloc(ALGB_LEN), maps: alloc(PGROW * MAP_N * MAP_W), holes: alloc(HOLES_LEN), lazy: alloc(LAZY_LEN), anon: alloc(ANON_LEN), inet6: alloc(OFD_N), locks: alloc(LK_LEN), wv: alloc(WV_LEN), perr: ENOENT, ipc: alloc(IPC_LEN), ipcb: balloc(IPCB_LEN), shm: shm, txt: txt, sys: alloc(SYS_LEN), loops: alloc(LOOP_LEN), sdp: alloc(SD_LEN), ptys: alloc(PTY_LEN), ptyb: balloc(PTYB_LEN), snd: snd, hwc: hwc, mice: mice, gfx: gfx_new(), pdir: false, mns: alloc(MNS_LEN), scf: alloc(0), swp: alloc(0), mstr: balloc(MSTR_LEN), xab: balloc(0), naps: false, socks: false, ux_xtra: false, pid_hi: 0, fd_hi: 0, ofd_hi: 0, mt_hi: 0, undo_hi: 0 };
   return k;
 }
 
@@ -38,7 +38,7 @@ fn kernel_new(mut m: Mem, disk: DiskFs, nic: Nic, snd: Snd, mice: Bytes, tsc: Ts
 /// FPU page back, so the pages can be counted.
 fn kernel_drop_spaces(k: &mut Kernel, mmu: &Mmu)
   requires kok(k) && mmu_root(mmu) == KERNEL_ROOT
-  ensures mem_ok(k.mem) && vfs_ok(k.fs) && nic_ok(k.nic) && snd_ok(k.snd) && vlen(k.spaces) == 0 && vlen(k.fpus) == 0
+  ensures mem_ok(k.mem) && vfs_ok(k.fs) && nic_ok(k.nic) && snd_ok(k.snd) && hw_ok(k.hwc) && vlen(k.spaces) == 0 && vlen(k.fpus) == 0
 {
   while vec_len(k.spaces) > 0
     invariant mem_ok(k.mem) && mmu_root(mmu) == KERNEL_ROOT
@@ -230,6 +230,13 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   if !make_dir(&mut k.fs, "sys/class") || !make_dir(&mut k.fs, "sys/class/power_supply") {
     puts(&mut con, "cannot make /sys/class/power_supply\r\n");
   }
+  // /sys/devices/system/cpu holds possible, present, online, offline and
+  // kernel_max (src/lxprocfs.bastio): lscpu opens the directory first.
+  if !make_dir(&mut k.fs, "sys/devices") || !make_dir(&mut k.fs, "sys/devices/system") || !make_dir(&mut k.fs, "sys/devices/system/cpu") {
+    puts(&mut con, "cannot make /sys/devices/system/cpu\r\n");
+  }
+  cpu_sysfs(&mut k);                        // cpuN/topology (src/lxprocfs.bastio)
+  sd_sysfs(&mut k);                         // /sys/block/sda and /sys/dev/block (src/lxsd.bastio)
   // The installer image's own files (initextra.bastio) live in /install.
   if NEXTRA > 0 && !make_dir(&mut k.fs, "install") {
     puts(&mut con, "cannot make /install\r\n");

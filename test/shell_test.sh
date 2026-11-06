@@ -549,6 +549,12 @@ steps = [
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
     ("stat -c %F /dev/loop0 /dev/loop-control", b"block special file\r\ncharacter special file\r\n", b"\n# "),
+    # The processors, as lscpu and nproc read them: none is offline, every
+    # one is present and online, as many as /proc/cpuinfo lists.
+    ("cat /sys/devices/system/cpu/offline /sys/devices/system/cpu/kernel_max; cmp /sys/devices/system/cpu/possible /sys/devices/system/cpu/online && cmp /sys/devices/system/cpu/present /sys/devices/system/cpu/online && echo allcpus=same", [b"\r\n\r\n511\r\n", b"allcpus=same"], b"\n# "),
+    # Each processor is a core of its own in one package (cpuN/topology),
+    # the way lscpu counts threads, cores and sockets.
+    ("t=/sys/devices/system/cpu; n=0; for c in $t/cpu[0-9]*; do n=$((n+1)); done; cat $t/cpu1/topology/core_id $t/cpu1/topology/thread_siblings $t/cpu1/topology/physical_package_id; [ \"$(cat $t/cpu0/topology/core_siblings)\" = \"$(printf %x $(( (1 << n) - 1 )))\" ] && echo mask=ok", b"1\r\n2\r\n0\r\nmask=ok\r\n", b"\n# "),
     # An unbound loop device's /sys/block entry: no sectors, not read-only.
     ("cat /sys/block/loop0/size /sys/block/loop0/ro", b"0\r\n0\r\n", b"\n# "),
     # The disk's directory grows past its first 64 entries (dir_grow); the
@@ -3057,6 +3063,14 @@ sd_lines = [
     ("{ read a; read b; } < /dev/sda1; echo $a/$b", b"SDTEST-PART1/SDLINE-TWO\r\n", b"\n# "),
     ("cat /dev/sda1 | wc -c; cat /dev/sda | wc -c", b"%d\r\n%d\r\n" % (pn * 512, sdsize), b"\n# "),
     ("cp /dev/sda1 /part; { read a; read b; } < /part; echo $a/$b; wc -c < /part", b"SDTEST-PART1/SDLINE-TWO\r\n%d\r\n" % (pn * 512), b"\n# "),
+    ("cat /proc/partitions", b"   8 0 %d sda\r\n   8 1 %d sda1\r\n" % (sdsize // 1024, pn // 2), b"\n# "),
+    ("for f in size ro removable queue/logical_block_size dev sda1/size sda1/start sda1/dev sda1/ro; do cat /sys/block/sda/$f; done", b"%d\r\n1\r\n0\r\n512\r\n8:0\r\n%d\r\n%d\r\n8:1\r\n1\r\n" % (sdsize // 512, pn, pf), b"\n# "),
+    ("cat /sys/block/sda/sda2/size || echo nosda2", b"nosda2", b"\n# "),
+    # lsblk walks /sys/dev/block (links named by device number) and the device directories.
+    ("for f in /sys/dev/block/* /sys/block/* /sys/block/sda/*; do echo $f; done", b"/sys/dev/block/8:0\r\n/sys/dev/block/8:1\r\n/sys/block/sda\r\n/sys/block/sda/queue\r\n/sys/block/sda/sda1\r\n", b"\n# "),
+    ("readlink /sys/dev/block/8:0; readlink /sys/dev/block/8:1; cd /sys/dev/block/8:0 && for c in *; do [ -r $c/start ] && echo part:$c; done; cd /", b"../../block/sda\r\n../../block/sda/sda1\r\npart:sda1\r\n", b"\n# "),
+    ("cd /sys/dev/block/8:1 && cat size start partition queue/logical_block_size; cd /; cat /sys/dev/block/8:0/dev", b"%d\r\n%d\r\n1\r\n512\r\n8:0\r\n" % (pn, pf), b"\n# "),
+    ("cat /sys/block/sda/partition || echo nopart", b"nopart", b"\n# "),
     ("echo x > /dev/sda1 || echo refused; cat /dev/sda2 || echo none", b"Read-only file system\r\nrefused\r\n", b"\n# "),
 ]
 qemu = boot(1, extra=["-drive", f"file={gptdisk},format=raw,if=none,id=sd", "-device", "virtio-blk-pci,drive=sd"])
@@ -3074,6 +3088,8 @@ for line, want, until in sd_lines:
         ok = ok and read_until(until, out.index(want, mark) + len(want))   # the shell's own prompt, before the next line is typed
     print(("ok  " if ok else "FAIL"), "(readable foreign disk)", repr(line))
     fails += not ok
+    if not ok:
+        print("     got", repr(out[mark:][:400]))
 qemu.kill(); qemu.wait()
 good = open(gptdisk, "rb").read() == bytes(other)
 print(("ok  " if good else "FAIL"), "(readable foreign disk) not a byte of it changed")

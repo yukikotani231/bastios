@@ -1,0 +1,43 @@
+# The second X11 disk (x11disk.py --part2), for the apps added after the first
+# one's roots used up the 262144 entries a BastiOS disk holds: the server and
+# client roots again, and one root per app. The format is x11.txt's.
+
+== x11b: unpack the server and the client roots
+$ bb mkdir -p /disk/x /disk/t /tmp && bb tar -xf /disk/server.tar -C /disk/x && bb tar -xf /disk/client.tar -C /disk/t && for r in x t; do bb mkdir -p /disk/$r/dev /disk/$r/proc /disk/$r/tmp/.X11-unix && bb mount --bind /dev /disk/$r/dev && bb mount -t proc proc /disk/$r/proc; done; bb mkdir -p /disk/x/tmp/fb; echo ok
+ok
+
+== x11b: an image editor, GIMP, draws its window on the X screen
+# timeout 900
+$ bb mkdir -p /disk/gm/tmp; bb tar -xf /disk/gimp.tar -C /disk/gm && bb rm /disk/gimp.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/gm/tmp/.passwd; echo root:x:0: >/disk/gm/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb22.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/gm -d 2 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/gimp >/disk/gimp.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb22.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb22.out 2>/dev/null || { bb tail -n 12 /disk/gimp.out | bb cut -c1-200; }; bb cat /disk/fb22.out; bb ps | bb grep -q 'gimp' && echo alive || bb cat /disk/gimp.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :2
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11b: an office suite, LibreOffice Writer, draws its window on the X screen
+# timeout 900
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/lo/tmp; bb tar -xf /disk/libreoffice.tar -C /disk/lo && bb rm /disk/libreoffice.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/lo/tmp/.passwd; echo root:x:0: >/disk/lo/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb23.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/lo -d 3 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/soffice --norestore --nologo --writer >/disk/lo.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb23.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb23.out 2>/dev/null || { bb tail -n 12 /disk/lo.out | bb cut -c1-200; }; bb cat /disk/fb23.out; bb ps | bb grep -q 'soffice' && echo alive || bb cat /disk/lo.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :3
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11b: a vector graphics editor, Inkscape, draws its window on the X screen
+# timeout 900
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/ik/tmp; bb tar -xf /disk/inkscape.tar -C /disk/ik && bb rm /disk/inkscape.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/ik/tmp/.passwd; echo root:x:0: >/disk/ik/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb24.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/ik -d 4 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/inkscape >/disk/ik.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb24.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb24.out 2>/dev/null || { bb tail -n 12 /disk/ik.out | bb cut -c1-200; }; bb cat /disk/fb24.out; bb ps | bb grep -q 'inkscape' && echo alive || bb cat /disk/ik.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :4
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11b: a network protocol analyser, Wireshark, draws its window on the X screen
+# timeout 900
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape|wireshark/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/ws/tmp; bb tar -xf /disk/wireshark.tar -C /disk/ws && bb rm /disk/wireshark.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/ws/tmp/.passwd; echo root:x:0: >/disk/ws/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb25.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/ws -d 5 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/wireshark >/disk/ws.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb25.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb25.out 2>/dev/null || { bb tail -n 12 /disk/ws.out | bb cut -c1-200; }; bb cat /disk/fb25.out; bb ps | bb grep -q 'wireshark' && echo alive || bb cat /disk/ws.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :5
+fakebwm: pixels drawn
+fakebwm: typed
+alive

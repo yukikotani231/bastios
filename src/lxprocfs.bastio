@@ -107,6 +107,8 @@ const SY_NETIF6: u64 = 80;             // /proc/net/if_inet6 (SY_SC's 32 .. 72 e
 const SY_NETV6RT: u64 = 81;            // /proc/net/ipv6_route
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
 const SY_VMSTAT: u64 = 99;             // /proc/vmstat (src/oom.bastio's counters)
+const SY_CPU: u64 = 102;               // 102 .. 106: /sys/devices/system/cpu/{possible, present, online, offline, kernel_max}
+const SY_CPU_N: u64 = 5;
 const SY_SWAPS: u64 = 100;             // /proc/swaps
 const SY_PARTS: u64 = 101;             // /proc/partitions
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
@@ -124,8 +126,13 @@ const FDI_DIRS: u64 = 0x1800;           // DIR_PROC + FDI_DIRS + pid: /proc/PID/
 const SYSD: u64 = 0x1400;              // DIR_PROC + SYSD + j: /proc/sys and its directories (src/lxsysctl.bastio)
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 10;              // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio, queue/logical_block_size, queue/dma_alignment
-const SY_PX: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
+const SY_SDS: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: disk device d's attribute a at d * SDA_SYS + a (src/lxsd.bastio)
+const SDA_SYS: u64 = 7;                // size, ro, removable, queue/logical_block_size, start, dev, partition
+const SY_PX: u64 = SY_SDS + SD_N * SDA_SYS;   // after the disk devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
 const SY_FI: u64 = SY_PX + NPROC * PXF_N;   // after those: /proc/P/fdinfo/FD at P * LXNFD + FD
+const TOPO_CPUS: u64 = 64;             // the processors that have a topology directory
+const TOPO_N: u64 = 256;               // TOPO_CPUS * 4 files: cpuN/topology/{thread_siblings, core_siblings, core_id, physical_package_id}
+const SY_TOPO: u64 = SY_FI + NPROC * LXNFD;   // after the fdinfo files: file f of processor c at c * 4 + f
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -470,9 +477,21 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
 fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   requires ptab_ok(procs) && n <= blen(x)
 {
+  let cf = cpu_sys_at(x, n);
+  if cf != 0 {
+    return PROC_DEV + PSYS + SY_CPU + cf - 1;
+  }
+  let tf = cpu_topo_at(x, n);
+  if tf != 0 {
+    return PROC_DEV + PSYS + SY_TOPO + tf - 1;     // a processor's topology file
+  }
   let s = loop_sys_at(x, n);
   if s != 0 {
     return PROC_DEV + PSYS + SY_LOOP + s - 1;
+  }
+  let d = sda_sys_at(x, n);
+  if d != 0 {
+    return PROC_DEV + PSYS + SY_SDS + d - 1;
   }
   if n < 6 || !xfer_is(x, 0, 5, "proc/") {
     return 0;
@@ -719,6 +738,130 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   return 0;
 }
 
+/// The /sys/devices/system/cpu file the n-byte path in x names: its index
+/// + 1 (possible, present, online, offline, kernel_max), or 0.
+fn cpu_sys_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= SY_CPU_N
+{
+  if n < 24 || !xfer_is(x, 0, 23, "sys/devices/system/cpu/") {
+    return 0;
+  }
+  if xfer_is(x, 23, n, "possible") {
+    return 1;
+  }
+  if xfer_is(x, 23, n, "present") {
+    return 2;
+  }
+  if xfer_is(x, 23, n, "online") {
+    return 3;
+  }
+  if xfer_is(x, 23, n, "offline") {
+    return 4;
+  }
+  if xfer_is(x, 23, n, "kernel_max") {
+    return 5;
+  }
+  return 0;
+}
+
+/// The /sys/devices/system/cpu/cpuC/topology file the n-byte path in x
+/// names: C * 4 + its index + 1 (thread_siblings, core_siblings, core_id,
+/// physical_package_id), or 0. C is one or two digits below TOPO_CPUS.
+fn cpu_topo_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= TOPO_N
+{
+  if n < 38 || !xfer_is(x, 0, 26, "sys/devices/system/cpu/cpu") {
+    return 0;
+  }
+  let c0 = cast[u64](bget(x, 26));
+  if c0 < 48 || c0 >= 58 {
+    return 0;
+  }
+  let mut c = c0 - 48;
+  let mut at = 27;
+  let c1 = cast[u64](bget(x, 27));
+  if c1 >= 48 && c1 < 58 {
+    c = c * 10 + (c1 - 48);
+    at = 28;
+  }
+  if c >= TOPO_CPUS || n < at + 11 || cast[u64](bget(x, at)) != 47 || !xfer_is(x, at + 1, at + 10, "topology/") {
+    return 0;
+  }
+  let base = c * 4 + 1;
+  if xfer_is(x, at + 10, n, "thread_siblings") {
+    return base;
+  }
+  if xfer_is(x, at + 10, n, "core_siblings") {
+    return base + 1;
+  }
+  if xfer_is(x, at + 10, n, "core_id") {
+    return base + 2;
+  }
+  if xfer_is(x, at + 10, n, "physical_package_id") {
+    return base + 3;
+  }
+  return 0;
+}
+
+/// The text of topology file t (C * 4 + index): each processor is a core of
+/// its own in the one package, so thread_siblings is the processor's bit,
+/// core_siblings every processor's, core_id the processor and the package 0.
+fn cpu_topo_text(k: &Kernel, t: u64, o: &mut Bytes) -> u64
+  requires kok(k) && t < TOPO_N && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let c = t / 4;
+  let f = t % 4;
+  if f == 2 {
+    return put_c(&mut o, put_n(&mut o, 0, c), 10);
+  }
+  if f == 3 {
+    return put_s(&mut o, 0, "0\n");
+  }
+  let cpus = smaller(k.cpus, TOPO_CPUS);
+  // A 64-bit mask, printed the way Linux does: 32-bit groups, comma apart.
+  let mut m = 0;
+  if f == 0 {
+    m = 1 << c;
+  } else if cpus >= 64 {
+    m = 0xFFFFFFFFFFFFFFFF;
+  } else {
+    m = (1 << cpus) - 1;
+  }
+  let hi = m / 0x100000000;
+  let lo = m % 0x100000000;
+  let mut a = 0;
+  if k.cpus > 32 {
+    a = put_h(&mut o, a, hi);
+    a = put_c(&mut o, a, 44);
+    a = put_x(&mut o, a, lo);
+  } else {
+    a = put_h(&mut o, a, lo);
+  }
+  return put_c(&mut o, a, 10);
+}
+
+/// Makes cpuN and cpuN/topology for each processor (at most TOPO_CPUS),
+/// where lscpu counts threads, cores and sockets.
+fn cpu_sysfs(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut ci = 0;
+  while ci < k.cpus && ci < TOPO_CPUS
+    invariant kok(k) && ci <= TOPO_CPUS
+  {
+    let n = bytes_put_u64(&mut k.fs.xfer, bytes_put_str(&mut k.fs.xfer, 0, "sys/devices/system/cpu/cpu"), ci);
+    if vfs_mkdir(&mut k.fs, n) {
+      let t = bytes_put_str(&mut k.fs.xfer, n, "/topology");
+      vfs_mkdir(&mut k.fs, t);
+    }
+    ci = ci + 1;
+  }
+}
+
 /// The /sys/block/loopN file the n-byte path in x names: N * LOOP_SYS +
 /// its attribute + 1, or 0. The loop/ files are there whether or not the
 /// device is bound (on Linux, only while it is).
@@ -779,6 +922,95 @@ fn loop_sys_at(x: &Bytes, n: u64) -> u64
     return base + 9;
   }
   return 0;
+}
+
+/// The /sys/block/sda file the n-byte path in x names: D * SDA_SYS + its
+/// attribute + 1, or 0, where D is 0 for "sys/block/sda/ATTR" and N for
+/// "sys/block/sda/sdaN/ATTR" (N = 1 .. 15, the way Linux lays them out).
+fn sda_sys_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= SD_N * SDA_SYS
+{
+  if n < 15 || !xfer_is(x, 0, 14, "sys/block/sda/") {
+    return 0;
+  }
+  let mut d = 0;
+  let mut at = 14;
+  if n >= 21 && xfer_is(x, 14, 17, "sda") {
+    // sdaN/ (N without a leading zero)
+    let c = cast[u64](bget(x, 17));
+    if c < 49 || c >= 58 {
+      return 0;
+    }
+    d = c - 48;
+    at = 19;
+    if cast[u64](bget(x, 18)) != 47 {
+      let e = cast[u64](bget(x, 18));
+      if e < 48 || e >= 58 || n < 22 || cast[u64](bget(x, 19)) != 47 {
+        return 0;
+      }
+      d = d * 10 + e - 48;
+      at = 20;
+    }
+    if d >= SD_N {
+      return 0;
+    }
+  }
+  if at > n || d >= SD_N {
+    return 0;
+  }
+  let base = d * SDA_SYS + 1;
+  if xfer_is(x, at, n, "size") {
+    return base;
+  }
+  if xfer_is(x, at, n, "ro") {
+    return base + 1;
+  }
+  if xfer_is(x, at, n, "removable") {
+    return base + 2;
+  }
+  if xfer_is(x, at, n, "queue/logical_block_size") {
+    return base + 3;
+  }
+  if xfer_is(x, at, n, "start") {
+    return base + 4;
+  }
+  if xfer_is(x, at, n, "dev") {
+    return base + 5;
+  }
+  if d != 0 && xfer_is(x, at, n, "partition") {
+    return base + 6;                        // only a partition has its number
+  }
+  return 0;
+}
+
+/// The text of /sys/block/sda attribute s (D * SDA_SYS + attribute): none
+/// of the files of a device that does not exist.
+fn sda_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
+  requires kok(k) && s < SD_N * SDA_SYS && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let d = s / SDA_SYS;
+  let a = s % SDA_SYS;
+  let mut v = 0;
+  if a == 0 {
+    v = sd_get(k.sdp, d, 1);                // 512-byte sectors
+  } else if a == 1 {
+    v = 1;
+  } else if a == 2 {
+    v = 0;
+  } else if a == 3 {
+    v = 512;
+  } else if a == 4 {
+    v = sd_get(k.sdp, d, 0);
+  } else if a == 5 {
+    let e = put_n(&mut o, put_s(&mut o, 0, "8:"), d);
+    return put_c(&mut o, e, 10);
+  } else {
+    v = d;
+  }
+  let e = put_n(&mut o, 0, v);
+  return put_c(&mut o, e, 10);
 }
 
 /// The text of /sys/block/loopN attribute s (N * LOOP_SYS + attribute).
@@ -2212,6 +2444,29 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     if is_um_file(f) {
       return um_text(k, pid, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
     }
+    if what >= SY_TOPO && what - SY_TOPO < TOPO_N {
+      return cpu_topo_text(k, what - SY_TOPO, &mut o);
+    }
+    if what >= SY_CPU && what < SY_CPU + SY_CPU_N {
+      // The processors the kernel runs are all the machine has: 0-N, or 0
+      // for one; none is offline.
+      let cf = what - SY_CPU;
+      if cf == 3 {
+        return put_s(&mut o, 0, "\n");
+      }
+      if cf == 4 {
+        return put_s(&mut o, 0, "511\n");
+      }
+      let mut a = put_s(&mut o, 0, "0");
+      if k.cpus > 1 {
+        a = put_s(&mut o, a, "-");
+        a = put_n(&mut o, a, smaller(k.cpus - 1, 510));
+      }
+      return put_s(&mut o, a, "\n");
+    }
+    if what >= SY_SDS && what - SY_SDS < SD_N * SDA_SYS {
+      return sda_sys_text(&mut k, what - SY_SDS, &mut o);
+    }
     if what >= SY_LOOP && what - SY_LOOP < LOOP_N * LOOP_SYS {
       return loop_sys_text(&mut k, what - SY_LOOP, &mut o);
     }
@@ -2236,6 +2491,26 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         a = put_s(&mut o, a, "   8        0 ");
         a = put_n(&mut o, a, k.fs.disk.blocks % 0x20000000000000 * 4);
         a = put_s(&mut o, a, " bastio0\n");
+      }
+      // The disk BastiOS left alone and its partitions (src/lxsd.bastio):
+      // sda, then sda1 .. sda15 that exist.
+      let mut d = 0;
+      while d < SD_N && a + 64 < PROC_OUT
+        invariant d <= SD_N && a <= PROC_OUT && blen(o) == PROC_OUT && kok(k)
+      {
+        let sec = sd_get(k.sdp, d, 1);
+        if sec > 0 {
+          a = put_s(&mut o, a, "   8 ");
+          a = put_n(&mut o, a, d);
+          a = put_s(&mut o, a, " ");
+          a = put_n(&mut o, a, sec / 2);
+          a = put_s(&mut o, a, " sda");
+          if d > 0 {
+            a = put_n(&mut o, a, d);
+          }
+          a = put_c(&mut o, a, 10);
+        }
+        d = d + 1;
       }
       return a;
     }
@@ -3920,6 +4195,9 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   }
   if t >= NPROC || !proc_peek(k.procs, pid, t) {
     return EACCES;
+  }
+  if is_ns_file(f) && state(k.procs, t) == ZOMBIE {
+    return ENOENT;                          // a zombie has left its namespaces
   }
   let mut out = balloc(PROC_OUT);
   let full = proc_text(&mut k, pid, f, &mut out);
