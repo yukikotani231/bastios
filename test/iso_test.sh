@@ -1207,7 +1207,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     end = time.time() + 10
                     while True:
                         w, h, px = screendump()
-                        r, g, b = at(w - 40, h - 80)
+                        i = ((h - 80) * w + w - 40) * 3
+                        r, g, b = px[i], px[i + 1], px[i + 2]
                         if g > b + 20 or time.time() > end:
                             break
                     good = g > b + 20
