@@ -281,6 +281,8 @@ fn lx_number(n: u64) -> u64
   if n == 439 { return LX_FACCESSAT2; }
   if n == 441 { return LX_EPOLL_PWAIT2; }
   if n == 442 { return LX_MOUNT_SETATTR; }
+  if n == 457 { return LX_STATMOUNT; }
+  if n == 458 { return LX_LISTMOUNT; }
   if n == 444 { return LX_LL_CREATE; }
   if n == 445 { return LX_LL_ADD; }
   if n == 446 { return LX_LL_RESTRICT; }

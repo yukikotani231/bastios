@@ -89,6 +89,7 @@ import "swap.bastio";
 import "oom.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
+import "lxrtc.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";
 import "lxserial.bastio";
@@ -490,7 +491,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       pset(&mut s.k.procs, p, F_FAULT_VA, bva);
       return p;
     }
-    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) {
+    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) || fault_raced(&mut s.k, p) {
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
     // Out of memory (src/oom.bastio), as src/main.bastio handles it.
@@ -588,9 +589,39 @@ fn write_raced(k: &mut Kernel, p: u64) -> bool
   return user_page_writable(&mut k.spaces, p, pget(k.procs, p, reg_word(R_FAULT)));
 }
 
+/// A translation or access-flag fault (status 0x04 to 0x0b) on a page that is
+/// mapped by the time the abort is handled: another processor mapped it, a
+/// thread of the same program having faulted on it first (an instruction
+/// fetch of freshly loaded code, a read or a write), so there is nothing to
+/// do but run the instruction again. A write needs the page writable, else
+/// copy-on-write has still to break it.
+fn fault_raced(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let esr = pget(k.procs, p, reg_word(34));
+  let st = esr % 64;
+  let ec = esr >> 26;
+  if st < 0x04 || st > 0x0b {
+    return false;
+  }
+  let va = pget(k.procs, p, reg_word(R_FAULT));
+  if va < USER_BASE || (ec != 0x20 && ec != 0x24) {
+    return false;
+  }
+  // Mapped and readable (a PROT_NONE page is hidden from the hardware, and
+  // a fault on it is the program's), and writable for a write.
+  let bits = user_page_bits(&mut k.spaces, p, (va - USER_BASE) / 4096);
+  if ec == 0x24 && ((esr >> 6) % 2) == 1 {
+    return (bits / 4) % 2 == 1;
+  }
+  return (bits / 2) % 2 == 1;
+}
+
 /// An EL0 read of an identification register (MIDR_EL1, ID_AA64ISAR0_EL1,
 /// ...: op0 3, op1 0, CRn 0, CRm 0 to 7), which the processor reports as an
-/// unknown instruction. Linux emulates these (HWCAP_CPUID), and the Go
+/// unknown instruction (class 0), or, with FEAT_IDST, as a trapped
+/// system-register access (class 0x18). Linux emulates these (HWCAP_CPUID), and the Go
 /// runtime reads ID_AA64ISAR0_EL1 when it starts. Every register reads as
 /// zero here, which says no optional feature exists, so a program falls
 /// back to the baseline instructions. Returns true if the instruction at the
@@ -599,9 +630,10 @@ fn emulate_idreg(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  if (pget(k.procs, p, reg_word(34)) >> 26) != 0 {
-    return false;                           // only the unknown-reason class
-  }
+  let ec = pget(k.procs, p, reg_word(34)) >> 26;
+  if ec != 0 && ec != 0x18 {
+    return false;                           // only the unknown-reason class, and the system-register class that
+  }                                         // processors with FEAT_IDST (Armv8.4, e.g. Neoverse N2) report instead
   let pc = pget(k.procs, p, reg_word(R_PC));
   if pc % 4 != 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, pc, &mut k.fs.xfer, 4) != 4 {
     return false;
@@ -824,7 +856,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   if nic_e1000(nic) {
     puts(&mut console, "net: e1000\r\n");
   }
-  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
+  let mut k = kernel_new(m, disk, nic, Snd::None, HwClock::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
   sd_scan(&mut k);                          // /dev/sda of a disk left alone (src/lxsd.bastio)
   let mut hi = 0;
   while hi < hw_n
@@ -860,6 +892,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   blk_free(&mut win, devs.disk, &mut s.k.mem);
   nic_free(&mut win, s.k.nic, &mut s.k.mem);
   snd_free(s.k.snd, &mut s.k.mem);
+  hw_free(s.k.hwc);
   puts(&mut s.con, "\r\nBastiOS: ");
   put_num(&mut s.con, count_free(s.k.mem.bm));
   puts(&mut s.con, " pages free at power off\r\n");
