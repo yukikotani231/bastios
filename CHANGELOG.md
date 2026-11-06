@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm`: Alt-Home, Alt-Page Up, Alt-End and Alt-Page Down put a resizable window on a quarter of the screen (top left, top right, bottom left, bottom right); Alt-Down or Alt-F10 puts it back, as for a half.
 - `bwm` has four gradient wallpapers of its own (`@green`, `@purple`, `@sunset`, `@slate`): put one on the first line of `/etc/bwm.wallpaper`, or press `w` in the System window, which goes through them before the pictures of `/usr/share/wallpapers`. No picture is added to the image.
 - Holding Alt through Alt-Tab (or Alt-Shift-Tab) shows a list of the windows in the middle of the screen, the one the switch chose lit; it goes away when Alt is let go. `bwm` draws it, with no change for programs.
 - `bwm` shows every line of `/tmp/bwm.notice`, one after another for three seconds each (up to 8 waiting), where it dropped all but the first; a line that starts with `!` is a warning on a red bar and the others are on a blue one.
