@@ -3473,7 +3473,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     a = put_n(&mut o, a, vpid_of(k, pid, p));
     a = put_c(&mut o, a, 32);
     a = put_n(&mut o, a, vpid_of(k, pid, p));
-    a = put_s(&mut o, a, " 0 -1 0 0 0 0 0 ");
+    a = put_s(&mut o, a, " 0 -1 0 ");
+    a = put_n(&mut o, a, pf_get(k, p));       // minflt
+    a = put_s(&mut o, a, " 0 0 0 ");
     a = put_n(&mut o, a, pget(k.procs, p, F_TICKS));
     let ni = nice_of(k.procs, p);
     a = put_s(&mut o, a, " 0 0 0 ");

@@ -501,6 +501,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   let mut is_bus = false;
   if v == V_ABORT {
+    pf_count(&mut s.k, p);
     let sw = swap_fault(&mut s.k, p);
     if sw == SW_OK {
       return p;

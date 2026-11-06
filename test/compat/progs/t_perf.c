@@ -6,6 +6,8 @@
 #define _GNU_SOURCE
 #include "compat.h"
 #include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -88,7 +90,25 @@ int main(void) {
     EXPECT("a context-switches counter sees the process sleep", s0 >= 0 && rd(sw) - s0 >= 10);
 
     int pf = perf_open(PERF_TYPE_SOFTWARE, SW_PAGE_FAULTS, 0, 0, 0, -1);
-    EXPECT("page-faults opens (it reads 0: not counted)", pf >= 0 && rd(pf) == 0);
+    int pfm = perf_open(PERF_TYPE_SOFTWARE, 5, 0, 0, 0, -1);
+    struct rusage ru0, ru1;
+    char *pg = mmap(0, 64 * 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    for (int i = 0; pg != MAP_FAILED && i < 64; i++) pg[i * 4096] = 1;
+    /* after pg fork the pages are shared copy-on-write: writing each takes pg fault */
+    pid_t kid = fork();
+    if (kid == 0) {
+        usleep(300000);
+        _exit(0);
+    }
+    getrusage(RUSAGE_SELF, &ru0);
+    long long p0 = rd(pf), m0 = rd(pfm);
+    for (int i = 0; pg != MAP_FAILED && i < 64; i++) pg[i * 4096] = 2;
+    getrusage(RUSAGE_SELF, &ru1);
+    waitpid(kid, 0, 0);
+    EXPECT("page-faults counts the faults of writing 64 shared pages", pf >= 0 && rd(pf) - p0 >= 32);
+    EXPECT("page-faults-min counts them too", pfm >= 0 && rd(pfm) - m0 >= 32);
+    EXPECT("getrusage ru_minflt grew by as many", ru1.ru_minflt - ru0.ru_minflt >= 32);
+    EXPECT("page-faults-maj reads 0", ({ int mj = perf_open(PERF_TYPE_SOFTWARE, 6, 0, 0, 0, -1); mj >= 0 && rd(mj) == 0; }));
 
     /* read_format: TOTAL_TIME_ENABLED | TOTAL_TIME_RUNNING | ID */
     int rf = perf_open(PERF_TYPE_SOFTWARE, SW_TASK_CLOCK, 0, 1 | 2 | 4, 0, -1);
