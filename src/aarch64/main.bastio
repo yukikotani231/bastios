@@ -735,7 +735,7 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64, ser: &Serial)
     lx_alarms(&mut s.k);
     sleepers_wake(&mut s.k);
     pump(ser, &mut s);
-    if ready_waiting(s.k.procs, s.k.pid_hi) {
+    if s.idle > 0 && ready_waiting(s.k.procs, s.k.pid_hi) {
       kick_idle(&mut s, cpu);               // the processors that sleep through their ticks
     }
   } else {
@@ -762,9 +762,9 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, s
     pump(ser, &mut s);
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, c);
-  if v == V_TIMER && ready_waiting(s.k.procs, s.k.pid_hi) {
-    kick_idle(&mut s, cpu);                 // the processors that sleep through their ticks
-  }
+  if s.idle > 0 && ready_waiting(s.k.procs, s.k.pid_hi) {
+    kick_idle(&mut s, cpu);                 // after any trap: a process this one's syscall
+  }                                         // made ready need not wait for the next tick
   return Next { job: j, from: c };
 }
 
