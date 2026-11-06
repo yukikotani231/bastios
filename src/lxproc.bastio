@@ -1188,7 +1188,7 @@ fn lx_stat(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, buf: u64, follow: bo
       if fdd.kind == K_BAD {
         return ENOENT;
       }
-      return lx_fstat(&mut k, pfd / LXNFD, pfd % LXNFD, buf);
+      return lx_fstat_to(&mut k, pfd / LXNFD, pfd % LXNFD, pid, buf);   // the buffer is the caller's
     }
   }
   let pf = proc_node(k, n);
@@ -1346,6 +1346,16 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  return lx_fstat_to(&mut k, pid, fd, pid, buf);
+}
+
+/// fstat of descriptor fd of process pid, with the struct stat written to
+/// user address buf of process out (stat on /proc/PID/fd/N: the descriptor
+/// is another process's, the buffer is the caller's).
+fn lx_fstat_to(k: &mut Kernel, pid: u64, fd: u64, out: u64, buf: u64) -> u64
+  requires kok(k) && pid < NPROC && out < NPROC
+  ensures kok(k)
+{
   let d = fd_look(k, pid, fd);
   let mut m = dev_meta(DEV_TTY);           // the console is /dev/tty
   let mh = fd_ofd(k, pid, fd);
@@ -1392,7 +1402,7 @@ fn lx_fstat(k: &mut Kernel, pid: u64, fd: u64, buf: u64) -> u64
       m = Meta { ok: true, mode: S_IFREG, size: 0, ino: 100, mtime: 0, own: 0 };
     }
   }
-  return put_stat(&mut k, pid, buf, m);
+  return put_stat(&mut k, out, buf, m);
 }
 
 /// Writes a struct stat for m to user address buf. Returns 0 or -EFAULT.
