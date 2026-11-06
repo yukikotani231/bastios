@@ -32,6 +32,8 @@ const LX_KCMP: u64 = 312;
 const LX_PIDFD_SEND_SIGNAL: u64 = 424;
 const LX_PIDFD_OPEN: u64 = 434;
 const LX_PIDFD_GETFD: u64 = 438;
+const LX_PROCESS_MADVISE: u64 = 440;
+const LX_PROCESS_MRELEASE: u64 = 448;
 const PVM_WAIT: u64 = 4611686018427387904;           // process_vm's answer: not yet (no byte count is this large)
 const PIDFD_THREAD: u64 = 128;                       // pidfd_open's flag: O_EXCL
 const PIDFD_SIGNAL_THREAD: u64 = 1;
@@ -44,7 +46,7 @@ const KCMP_EPOLL_TFD: u64 = 7;
 
 fn is_pidfd_call(n: u64) -> bool {
   return n == LX_PIDFD_OPEN || n == LX_PIDFD_SEND_SIGNAL || n == LX_PIDFD_GETFD || n == LX_KCMP
-    || n == LX_PROCESS_VM_READV || n == LX_PROCESS_VM_WRITEV;
+    || n == LX_PROCESS_VM_READV || n == LX_PROCESS_VM_WRITEV || n == LX_PROCESS_MADVISE || n == LX_PROCESS_MRELEASE;
 }
 
 fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
@@ -64,6 +66,10 @@ fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
     if r == PVM_WAIT {
       return lx_retry(&mut k, pid, n);      // the target runs on another processor: try again once it has left its space
     }
+  } else if n == LX_PROCESS_MADVISE {
+    r = process_madvise(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+  } else if n == LX_PROCESS_MRELEASE {
+    r = process_mrelease(&mut k, pid, a, b);
   } else if n == LX_KCMP {
     r = lx_kcmp(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
   }
@@ -150,6 +156,88 @@ fn pidfd_signal(k: &mut Kernel, pid: u64, fd: u64, s: u64, info: u64, flags: u64
     return EINVAL;                          // si_signo must be the signal sent
   }
   return lx_sigqueue(&mut k, pid, p, s, info);   // which refuses a forged si_code
+}
+
+/// process_madvise(pidfd, iov, vlen, advice, flags): madvise on each range
+/// of the iovec in the address space of the process the pidfd names.
+/// Only the advice that changes nothing observable is taken, as on Linux:
+/// MADV_WILLNEED (3), MADV_COLD (20) and MADV_PAGEOUT (21). Returns the
+/// bytes advised, short at the first range that fails, or -errno if none.
+fn process_madvise(k: &mut Kernel, pid: u64, fd: u64, iov: u64, vlen: u64, advice: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    return EINVAL;
+  }
+  let p = pidfd_target(k, pid, fd, false);
+  if p == EBADF {
+    return EBADF;
+  }
+  if advice != 3 && advice != 20 && advice != 21 {
+    return EINVAL;
+  }
+  let ic = iov_check(&mut k, pid, iov, vlen);
+  if ic != 0 {
+    return ic;
+  }
+  if p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
+    return ESRCH;
+  }
+  if !cred_root(k.procs, pid) && !same_ids(k.procs, pid, p) {
+    return EPERM;
+  }
+  if vlen > IOV_MAX {
+    return EINVAL;
+  }
+  let t = tgid(k.procs, p);
+  let mut done = 0;
+  let mut err = 0;
+  let mut i = 0;
+  while i < vlen && err == 0
+    invariant i <= vlen && vlen <= IOV_MAX && kok(k) && t < NPROC
+  {
+    let e = iov_entry(&mut k, pid, iov, i);
+    if e.err != 0 {
+      err = e.err;
+    } else {
+      let r = lx_madvise(&mut k, t, e.base, e.len, advice);
+      if r != 0 {
+        err = r;
+      } else {
+        done = sat_add(done, e.len);
+      }
+    }
+    i = i + 1;
+  }
+  if done == 0 && err != 0 {
+    return err;
+  }
+  return done;
+}
+
+/// process_mrelease(pidfd, flags): frees the memory of a process that is
+/// being killed. Its memory goes back when it ends here, so this only
+/// checks: -EINVAL for a process nobody is killing, -ESRCH for one whose
+/// memory is already gone, else 0.
+fn process_mrelease(k: &mut Kernel, pid: u64, fd: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags != 0 {
+    return EINVAL;
+  }
+  let p = pidfd_target(k, pid, fd, false);
+  if p == EBADF {
+    return EBADF;
+  }
+  if p >= NPROC || state(k.procs, p) == FREE || state(k.procs, p) == ZOMBIE {
+    return ESRCH;
+  }
+  if state(k.procs, p) == KILLED || state(k.procs, p) == EXITING {
+    return 0;
+  }
+  return EINVAL;
 }
 
 /// pidfd_getfd(fd, target, flags): a close-on-exec duplicate, in process
