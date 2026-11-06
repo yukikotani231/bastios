@@ -1,0 +1,30 @@
+// The battery-backed clock on AArch64: none yet, so /dev/rtc0 does not exist.
+
+enum HwClock { None }
+
+spec fn hw_ok(h: &HwClock) -> bool {
+  true
+}
+
+fn hw_present(h: &HwClock) -> bool {
+  return false;
+}
+
+fn hw_get(h: &mut HwClock) -> u64
+  requires hw_ok(h)
+  ensures hw_ok(h) && result < 5000000000
+{
+  return 0;
+}
+
+fn hw_set(h: &mut HwClock, secs: u64) -> bool
+  requires hw_ok(h)
+  ensures hw_ok(h)
+{
+  return false;
+}
+
+fn hw_free(h: HwClock)
+  requires hw_ok(h)
+{
+}

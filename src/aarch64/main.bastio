@@ -89,6 +89,7 @@ import "swap.bastio";
 import "oom.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
+import "lxrtc.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";
 import "lxserial.bastio";
@@ -855,7 +856,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   if nic_e1000(nic) {
     puts(&mut console, "net: e1000\r\n");
   }
-  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
+  let mut k = kernel_new(m, disk, nic, Snd::None, HwClock::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
   sd_scan(&mut k);                          // /dev/sda of a disk left alone (src/lxsd.bastio)
   let mut hi = 0;
   while hi < hw_n
@@ -891,6 +892,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   blk_free(&mut win, devs.disk, &mut s.k.mem);
   nic_free(&mut win, s.k.nic, &mut s.k.mem);
   snd_free(s.k.snd, &mut s.k.mem);
+  hw_free(s.k.hwc);
   puts(&mut s.con, "\r\nBastiOS: ");
   put_num(&mut s.con, count_free(s.k.mem.bm));
   puts(&mut s.con, " pages free at power off\r\n");

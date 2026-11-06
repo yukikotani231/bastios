@@ -1781,6 +1781,20 @@ t_ropivot: stat of the descriptor's path is the root directory
 t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
+t_rtc: /dev/rtc0 opens
+t_rtc: it is the character device 10:135
+t_rtc: /dev/rtc is the same clock
+t_rtc: RTC_RD_TIME reads the clock
+t_rtc: it agrees with CLOCK_REALTIME to within 20 seconds
+t_rtc: the weekday and the day of the year are right
+t_rtc: RTC_SET_TIME sets it
+t_rtc: it reads back the same, a moment later
+t_rtc: the weekday is a Friday
+t_rtc: a month of 12 is EINVAL
+t_rtc: a year before 2000 is EINVAL
+t_rtc: an unknown ioctl is ENOTTY
+t_rtc: the clock is put back
+t_rtc: an unprivileged program cannot set it
 t_rtnlev: sockets in the link group, the address group, both and none
 t_rtnlev: a veth pair is made
 t_rtnlev: the link group hears both ends
