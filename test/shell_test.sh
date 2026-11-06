@@ -549,6 +549,9 @@ steps = [
     # /dev/loop-control a character device; test/compat/progs/t_dev.c
     # binds one to a file and reads and writes through it.
     ("stat -c %F /dev/loop0 /dev/loop-control", b"block special file\r\ncharacter special file\r\n", b"\n# "),
+    # The processors, as lscpu and nproc read them: none is offline, every
+    # one is present and online, as many as /proc/cpuinfo lists.
+    ("cat /sys/devices/system/cpu/offline /sys/devices/system/cpu/kernel_max; cmp /sys/devices/system/cpu/possible /sys/devices/system/cpu/online && cmp /sys/devices/system/cpu/present /sys/devices/system/cpu/online && echo allcpus=same", [b"\r\n\r\n511\r\n", b"allcpus=same"], b"\n# "),
     # An unbound loop device's /sys/block entry: no sectors, not read-only.
     ("cat /sys/block/loop0/size /sys/block/loop0/ro", b"0\r\n0\r\n", b"\n# "),
     # The disk's directory grows past its first 64 entries (dir_grow); the

@@ -107,6 +107,8 @@ const SY_NETIF6: u64 = 80;             // /proc/net/if_inet6 (SY_SC's 32 .. 72 e
 const SY_NETV6RT: u64 = 81;            // /proc/net/ipv6_route
 const SY_SC: u64 = 32;                // 32 .. 32 + SCT_N: the plain sysctl files of src/lxsysctl.bastio
 const SY_VMSTAT: u64 = 99;             // /proc/vmstat (src/oom.bastio's counters)
+const SY_CPU: u64 = 102;               // 102 .. 106: /sys/devices/system/cpu/{possible, present, online, offline, kernel_max}
+const SY_CPU_N: u64 = 5;
 const SY_SWAPS: u64 = 100;             // /proc/swaps
 const SY_PARTS: u64 = 101;             // /proc/partitions
 const SY_NEXTID: u64 = 96;             // 96 .. 98: /proc/sys/kernel/{msg,sem,shm}_next_id, by IPC kind (src/lxipc.bastio)
@@ -472,6 +474,10 @@ fn proc_dir(procs: &Buf, x: &Bytes, n: u64) -> u64
 fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   requires ptab_ok(procs) && n <= blen(x)
 {
+  let cf = cpu_sys_at(x, n);
+  if cf != 0 {
+    return PROC_DEV + PSYS + SY_CPU + cf - 1;
+  }
   let s = loop_sys_at(x, n);
   if s != 0 {
     return PROC_DEV + PSYS + SY_LOOP + s - 1;
@@ -721,6 +727,33 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   }
   if e + 4 < n && xfer_is(x, e + 1, e + 4, "ns/") {
     return nsf_at(x, e + 4, n, p);          // a namespace link (src/lxnsk.bastio)
+  }
+  return 0;
+}
+
+/// The /sys/devices/system/cpu file the n-byte path in x names: its index
+/// + 1 (possible, present, online, offline, kernel_max), or 0.
+fn cpu_sys_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= SY_CPU_N
+{
+  if n < 24 || !xfer_is(x, 0, 23, "sys/devices/system/cpu/") {
+    return 0;
+  }
+  if xfer_is(x, 23, n, "possible") {
+    return 1;
+  }
+  if xfer_is(x, 23, n, "present") {
+    return 2;
+  }
+  if xfer_is(x, 23, n, "online") {
+    return 3;
+  }
+  if xfer_is(x, 23, n, "offline") {
+    return 4;
+  }
+  if xfer_is(x, 23, n, "kernel_max") {
+    return 5;
   }
   return 0;
 }
@@ -2301,6 +2334,23 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if is_um_file(f) {
       return um_text(k, pid, f, &mut o);         // uid_map, gid_map, setgroups (src/lxuser.bastio)
+    }
+    if what >= SY_CPU && what < SY_CPU + SY_CPU_N {
+      // The processors the kernel runs are all the machine has: 0-N, or 0
+      // for one; none is offline.
+      let cf = what - SY_CPU;
+      if cf == 3 {
+        return put_s(&mut o, 0, "\n");
+      }
+      if cf == 4 {
+        return put_s(&mut o, 0, "511\n");
+      }
+      let mut a = put_s(&mut o, 0, "0");
+      if k.cpus > 1 {
+        a = put_s(&mut o, a, "-");
+        a = put_n(&mut o, a, smaller(k.cpus - 1, 510));
+      }
+      return put_s(&mut o, a, "\n");
     }
     if what >= SY_SDS && what - SY_SDS < SD_N * SDA_SYS {
       return sda_sys_text(&mut k, what - SY_SDS, &mut o);
