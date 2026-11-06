@@ -154,6 +154,7 @@ debian: debian: coreutils, sed, grep and awk in a pipeline
 debian: debian: dpkg knows the packages
 debian: debian: find, xargs and du
 debian: debian: lscpu reads the processors from /sys
+debian: debian: lsns lists the namespaces without warnings
 debian: debian: perl
 debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: the dynamic linker through its links, by hand
@@ -1288,6 +1289,8 @@ t_nft: the table, the chain and the rules are listed
 t_nsioctl: NS_GET_NSTYPE answers on every namespace link in a chroot with its own proc
 t_nsioctl: NS_GET_NSTYPE answers on every namespace link of every process
 t_nsioctl: a PID namespace made inside another has that one as its parent
+t_nsioctl: namespace files have a device of their own (nsfs), shared by all of them
+t_nsioctl: a zombie has no namespace links to open
 t_nsioctl: a thread's directory has namespace links, /proc has none
 t_nsioctl: an inner user namespace's parent is the outer one, seen from outside only
 t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd

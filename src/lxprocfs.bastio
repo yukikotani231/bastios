@@ -4084,6 +4084,9 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   if t >= NPROC || !proc_peek(k.procs, pid, t) {
     return EACCES;
   }
+  if is_ns_file(f) && state(k.procs, t) == ZOMBIE {
+    return ENOENT;                          // a zombie has left its namespaces
+  }
   let mut out = balloc(PROC_OUT);
   let full = proc_text(&mut k, pid, f, &mut out);
   if is_exe_file(f) && full == 0 {
