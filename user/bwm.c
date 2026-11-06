@@ -718,9 +718,28 @@ static unsigned wall_le(const unsigned char *p, int n)
     return v;
 }
 
+/* The gradients bwm draws with no picture: "@name" in /etc/bwm.wallpaper picks one (the blue one is the default). */
+static const struct { const char *name; int c0[3], c1[3]; } themes[] = {
+    { "@green",  { 8, 60, 40 },  { 40, 70, 50 } },
+    { "@purple", { 40, 20, 80 }, { 60, 50, 80 } },
+    { "@sunset", { 90, 30, 50 }, { 110, 80, 20 } },
+    { "@slate",  { 30, 34, 40 }, { 30, 36, 40 } },
+};
+static int theme = -1;                   /* index in themes, or -1 for the blue gradient */
+
 /* Reads a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP and stretches it over the screen by sampling. */
 static int wall_load(const char *path)
 {
+    if (path[0] == '@') {
+        for (int i = 0; i < (int)(sizeof themes / sizeof themes[0]); i++)
+            if (strcmp(path, themes[i].name) == 0) {
+                free(wall);
+                wall = NULL;
+                theme = i;
+                return 1;
+            }
+        return 0;
+    }
     FILE *f = fopen(path, "rb");
     if (!f)
         return 0;
@@ -776,6 +795,7 @@ static int wall_load(const char *path)
     free(d);
     free(wall);
     wall = nw;
+    theme = -1;
     return 1;
 }
 
@@ -835,6 +855,7 @@ static void wall_watch(void)
     if (!line[0]) {
         free(wall);
         wall = NULL;
+        theme = -1;
     } else if (!wall_load(line)) {
         char nt[40];
         snprintf(nt, sizeof nt, "Cannot use %.24s", line);
@@ -876,7 +897,9 @@ static void draw_scene(int x0, int y0, int x1, int y1)
         if (wall)
             memcpy(&scene[y * W + clx0], &wall[y * W + clx0], (size_t)(clx1 - clx0) * 4);
         else {
-            uint32_t c = rgb(10 + y * 40 / H, 60 + y * 50 / H, 80 + y * 60 / H);
+            uint32_t c = theme < 0 ? rgb(10 + y * 40 / H, 60 + y * 50 / H, 80 + y * 60 / H)
+                : rgb(themes[theme].c0[0] + y * themes[theme].c1[0] / H, themes[theme].c0[1] + y * themes[theme].c1[1] / H,
+                      themes[theme].c0[2] + y * themes[theme].c1[2] / H);
             for (int x = clx0; x < clx1; x++)
                 scene[y * W + x] = c;
         }

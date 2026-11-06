@@ -1039,6 +1039,7 @@ const OF_PQ: u64 = 13;                // a POSIX message queue: x the queue; wor
 const OF_SIGFD: u64 = 12;             // a signalfd: word 2 the signals it takes; word 3: nonblocking (src/lxevent.bastio)
 const OF_INOTIFY: u64 = 16;           // an inotify instance: x the instance; word 3: nonblocking (src/lxinotify.bastio)
 const OF_SECCOMP: u64 = 18;           // a seccomp notifier: x the filter; word 3: nonblocking (src/lxseccomp.bastio)
+const OF_PERF: u64 = 24;              // a perf counter: word 2 its target, event, format, on/off and id; 3 the count while off, 5 the time while off, 6 when it was turned on, 8 the value it started at (src/lxperf.bastio)
 const OF_LL: u64 = 23;                // a Landlock ruleset: x its slot (src/lxlandlock.bastio)
 const LL_EXECUTE: u64 = 1;
 const LL_WRITE_FILE: u64 = 2;
@@ -1211,6 +1212,7 @@ const K_EPOLL: u64 = 10;              // x: the epoll instance
 const K_SIGFD: u64 = 11;              // x: the description (src/lxevent.bastio)
 const K_SECCOMP: u64 = 18;            // x: the filter (src/lxseccomp.bastio)
 const K_INOTIFY: u64 = 16;            // x: the instance (src/lxinotify.bastio)
+const K_PERF: u64 = 19;               // x: the description (src/lxperf.bastio)
 const K_PIDFD: u64 = 15;              // x: the process, NPROC if it is gone (src/lxpidfd.bastio)
 
 

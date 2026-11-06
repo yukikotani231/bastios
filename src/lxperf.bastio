@@ -1,0 +1,317 @@
+// perf_event_open for software counters. A program (perf stat, a profiler's
+// start-up probe, a benchmark harness) asks for a counter on a process and
+// reads it from the descriptor: CPU_CLOCK and TASK_CLOCK count the
+// nanoseconds the process's threads have run (user time from the timer
+// ticks, so in steps of 10 ms, plus the time spent in system calls) and
+// CONTEXT_SWITCHES the switches the process has had. PAGE_FAULTS and its
+// minor and major forms, CPU_MIGRATIONS, ALIGNMENT_FAULTS, EMULATION_FAULTS
+// and DUMMY are accepted and read 0: the kernel does not count those.
+// Hardware, cache, raw, tracepoint and breakpoint events are ENOENT, as on
+// a virtual machine with no performance monitoring unit; a counter that
+// samples (a sample period or frequency) is EOPNOTSUPP, as are groups
+// (group_fd and PERF_FORMAT_GROUP) and a counter for all processes on a
+// processor (pid -1).
+//
+// The counter is on a whole process (every thread of the group that holds
+// the pid; there is no inherit), by the pid or 0 for the caller's. The
+// caller needs the same user ids as the target, or root. The counter
+// starts at once unless attr.disabled is set; enable_on_exec starts it at
+// once too. PERF_EVENT_IOC_ENABLE, _DISABLE, _RESET and _ID are offered;
+// the exclude_* bits are ignored. read gives the 64-bit count, then (by
+// read_format) the time enabled, the time running (the same) and the
+// event id. A process that has been waited for keeps its final count.
+//
+// The state lives in the description (OF_PERF, with the words below).
+
+import "lxpidfd.bastio";
+
+const LX_PERF_EVENT_OPEN: u64 = 298;
+const PF_META: u64 = 2;
+const PF_ACC: u64 = 3;
+const PF_TACC: u64 = 5;
+const PF_TS: u64 = 6;
+const PF_BASE: u64 = 8;
+const PF_BIG: u64 = 0x1000000000000;  // counts stay below 2^48
+
+const PERF_SW_TASK_CLOCK: u64 = 1;
+const PERF_SW_CSW: u64 = 3;
+const PERF_SW_MAX: u64 = 9;
+const PERF_IOC_ENABLE: u64 = 0x2400;
+const PERF_IOC_DISABLE: u64 = 0x2401;
+const PERF_IOC_RESET: u64 = 0x2403;
+const PERF_IOC_ID: u64 = 0x80082407;
+const PERF_FLAG_CLOEXEC: u64 = 8;
+
+// meta: target (16 bits, NPROC once the process is gone), config (8 bits),
+// read_format (4), on (1 bit at 2^28), id (16 bits at 2^32).
+fn pf_target(m: u64) -> u64 { return m % 65536; }
+fn pf_cfg(m: u64) -> u64 { return m / 65536 % 256; }
+fn pf_fmt(m: u64) -> u64 { return m / 16777216 % 16; }
+fn pf_on(m: u64) -> u64 { return m / 268435456 % 2; }
+fn pf_id(m: u64) -> u64 { return m / 4294967296 % 65536; }
+
+fn is_perf_call(n: u64) -> bool {
+  return n == LX_PERF_EVENT_OPEN;
+}
+
+/// What the counter of config `cfg` on process t reads now.
+fn perf_now(k: &Kernel, t: u64, cfg: u64) -> u64
+  requires kok(k)
+  ensures result < PF_BIG
+{
+  if t >= NPROC {
+    return 0;
+  }
+  if cfg == 0 || cfg == PERF_SW_TASK_CLOCK {
+    let u = smaller(group_time(k.procs, k.sys, t, 0), 0x1000000000) * NS_PER_TICK;
+    let s = smaller(group_time(k.procs, k.sys, t, 1), 0xFFFFFFFFFFFF);
+    return smaller(sat_add(u, s), PF_BIG - 1);
+  }
+  if cfg == PERF_SW_CSW {
+    return smaller(sat_add(csw_get(k, t, false), csw_get(k, t, true)), PF_BIG - 1);
+  }
+  return 0;
+}
+
+/// The count of the counter in description h now.
+fn perf_value(k: &Kernel, h: u64) -> u64
+  requires kok(k) && h < OFD_N
+  ensures result < 2 * PF_BIG
+{
+  let m = of_get(k.ofd, h, PF_META);
+  let acc = smaller(of_get(k.ofd, h, PF_ACC), PF_BIG - 1);
+  if pf_on(m) == 0 {
+    return acc;
+  }
+  let c = perf_now(k, pf_target(m), pf_cfg(m));
+  let b = of_get(k.ofd, h, PF_BASE);
+  if c > b {
+    return acc + (c - b);
+  }
+  return acc;
+}
+
+/// The time the counter has been on, in ns.
+fn perf_time(k: &Kernel, h: u64) -> u64
+  requires kok(k) && h < OFD_N
+  ensures result < 2 * PF_BIG
+{
+  let m = of_get(k.ofd, h, PF_META);
+  let t = smaller(of_get(k.ofd, h, PF_TACC), PF_BIG - 1);
+  let ts = of_get(k.ofd, h, PF_TS);
+  if pf_on(m) == 1 && k.ns > ts {
+    return t + smaller(k.ns - ts, PF_BIG - 1);
+  }
+  return t;
+}
+
+/// Turns the counter in description h off, keeping what it counted.
+fn perf_stop(k: &mut Kernel, h: u64)
+  requires kok(k) && h < OFD_N
+  ensures kok(k)
+{
+  let m = of_get(k.ofd, h, PF_META);
+  if pf_on(m) == 1 && m >= 268435456 {
+    let v = perf_value(k, h);
+    let t = perf_time(k, h);
+    of_set(&mut k.ofd, h, PF_ACC, smaller(v, PF_BIG - 1));
+    of_set(&mut k.ofd, h, PF_TACC, smaller(t, PF_BIG - 1));
+    of_set(&mut k.ofd, h, PF_META, m - 268435456);
+  }
+}
+
+/// Turns the counter in description h on, from what the process has now.
+fn perf_start(k: &mut Kernel, h: u64)
+  requires kok(k) && h < OFD_N
+  ensures kok(k)
+{
+  let m = smaller(of_get(k.ofd, h, PF_META), 0xFFFFFFFFFFFF);
+  if pf_on(m) == 0 {
+    of_set(&mut k.ofd, h, PF_BASE, perf_now(k, pf_target(m), pf_cfg(m)));
+    of_set(&mut k.ofd, h, PF_TS, k.ns);
+    of_set(&mut k.ofd, h, PF_META, m + 268435456);
+  }
+}
+
+/// Process c is gone (reaped, or its slot is taken again): the counters on
+/// it keep the count they ended with.
+fn perf_gone(k: &mut Kernel, c: u64)
+  requires kok(k) && c < NPROC
+  ensures kok(k)
+{
+  let hi = smaller(k.ofd_hi, OFD_N);
+  let mut h = 0;
+  while h < hi
+    invariant h <= hi && hi <= OFD_N && kok(k)
+  {
+    if of_get(k.ofd, h, 0) == OF_PERF && pf_target(of_get(k.ofd, h, PF_META)) == c {
+      perf_stop(&mut k, h);
+      let m = smaller(of_get(k.ofd, h, PF_META), 0xFFFFFFFFFFFF);
+      of_set(&mut k.ofd, h, PF_META, m / 65536 * 65536 + NPROC);
+    }
+    h = h + 1;
+  }
+}
+
+/// perf_event_open(attr, pid, cpu, group_fd, flags).
+fn perf_open(k: &mut Kernel, pid: u64, attr: u64, tpid: u64, cpu: u64, group: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !PERF_FLAG_CLOEXEC != 0 {
+    return EINVAL;
+  }
+  if group % 0x100000000 != 0xFFFFFFFF {
+    return EOPNOTSUPP;                      // groups
+  }
+  if attr == 0 {
+    return EFAULT;
+  }
+  if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, attr, &mut k.fs.xfer, 48) != 48 {
+    return EFAULT;
+  }
+  let ty = rd32(k.fs.xfer, 0);
+  let size = rd32(k.fs.xfer, 4);
+  let cfg = load_le64(k.fs.xfer, 8);
+  let period = load_le64(k.fs.xfer, 16);
+  let rf = load_le64(k.fs.xfer, 32);
+  let af = load_le64(k.fs.xfer, 40);
+  if size < 64 {
+    return EINVAL;
+  }
+  if size > 4096 {
+    return E2BIG;
+  }
+  if ty != 1 || cfg > PERF_SW_MAX {
+    return ENOENT;                          // no hardware counters, tracepoints or breakpoints
+  }
+  if period != 0 {
+    return EOPNOTSUPP;                      // sampling
+  }
+  if rf >= 16 {
+    return EINVAL;
+  }
+  if rf / 8 % 2 == 1 {
+    return EOPNOTSUPP;                      // PERF_FORMAT_GROUP
+  }
+  let w = tpid % 0x100000000;
+  if w == 0xFFFFFFFF {
+    if cpu % 0x100000000 == 0xFFFFFFFF {
+      return EINVAL;
+    }
+    return EOPNOTSUPP;                      // every process on a processor
+  }
+  let t = sched_target(k.procs, pid, w);
+  if t >= NPROC {
+    return ESRCH;
+  }
+  if tgid(k.procs, t) != tgid(k.procs, pid) && !cred_root(k.procs, pid) && !same_ids(k.procs, pid, t) {
+    return EACCES;
+  }
+  let mut ce = false;
+  if flags & PERF_FLAG_CLOEXEC != 0 {
+    ce = true;
+  }
+  let fd = ev_install(&mut k, pid, OF_PERF, 0, 0, ce);
+  if fd >= LXNFD {
+    return fd;                              // an errno
+  }
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_PERF || d.x >= OFD_N {
+    return EBADF;
+  }
+  let h = d.x;
+  of_set(&mut k.ofd, h, PF_META, t + cfg * 65536 + rf % 8 * 16777216 + (h + 1) * 4294967296);
+  of_set(&mut k.ofd, h, PF_ACC, 0);
+  of_set(&mut k.ofd, h, PF_TACC, 0);
+  of_set(&mut k.ofd, h, PF_TS, 0);
+  of_set(&mut k.ofd, h, PF_BASE, 0);
+  if af % 2 == 0 || af / 4096 % 2 == 1 {
+    perf_start(&mut k, h);                  // not disabled, or enabled on exec
+  }
+  return fd;
+}
+
+fn lx_perf_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && 1 <= pid && pid < NPROC
+  ensures kok(k)
+{
+  let r = perf_open(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+  ret(&mut k.procs, pid, r);
+  return KEEP;
+}
+
+/// read(2) on a counter (description h): the count, and by read_format the
+/// time enabled, the time running and the id, each a u64.
+fn perf_read(k: &mut Kernel, pid: u64, h: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if h >= OFD_N {
+    return EBADF;
+  }
+  let m = of_get(k.ofd, h, PF_META);
+  let fmt = pf_fmt(m);
+  let mut need = 8;
+  if fmt % 2 == 1 {
+    need = need + 8;
+  }
+  if fmt / 2 % 2 == 1 {
+    need = need + 8;
+  }
+  if fmt / 4 % 2 == 1 {
+    need = need + 8;
+  }
+  if n < need {
+    return ENOSPC;
+  }
+  xfer_u64(&mut k.fs.xfer, 0, perf_value(k, h));
+  let mut at = 8;
+  if fmt % 2 == 1 {
+    xfer_u64(&mut k.fs.xfer, at, perf_time(k, h));
+    at = at + 8;
+  }
+  if fmt / 2 % 2 == 1 {
+    xfer_u64(&mut k.fs.xfer, at, perf_time(k, h));
+    at = at + 8;
+  }
+  if fmt / 4 % 2 == 1 {
+    xfer_u64(&mut k.fs.xfer, at, pf_id(m));
+  }
+  if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, need) != need {
+    return EFAULT;
+  }
+  return need;
+}
+
+fn perf_ioctl(k: &mut Kernel, pid: u64, h: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if h >= OFD_N {
+    return EBADF;
+  }
+  if req == PERF_IOC_ENABLE {
+    perf_start(&mut k, h);
+    return 0;
+  }
+  if req == PERF_IOC_DISABLE {
+    perf_stop(&mut k, h);
+    return 0;
+  }
+  if req == PERF_IOC_RESET {
+    let on = pf_on(of_get(k.ofd, h, PF_META));
+    perf_stop(&mut k, h);
+    of_set(&mut k.ofd, h, PF_ACC, 0);
+    of_set(&mut k.ofd, h, PF_TACC, 0);
+    if on == 1 {
+      perf_start(&mut k, h);
+    }
+    return 0;
+  }
+  if req == PERF_IOC_ID {
+    xfer_u64(&mut k.fs.xfer, 0, pf_id(of_get(k.ofd, h, PF_META)));
+    return lx_put_out(&mut k, pid, arg, 8);
+  }
+  return ENOTTY;
+}
