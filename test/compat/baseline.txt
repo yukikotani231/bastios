@@ -2412,6 +2412,7 @@ java: java: a real library (Apache Commons Codec) with its test libraries, teste
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
 t_ltp2: protection keys are not available: pkey_alloc answers ENOSPC (EINVAL for bad arguments), pkey_free EINVAL, pkey_mprotect takes key 0 or -1; memfd_secret returns a file to size and map
+t_ltp2: process_madvise advises the ranges of a pidfd's process (WILLNEED, COLD, PAGEOUT only) and returns their length; process_mrelease refuses a process nobody is killing
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
 t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them
