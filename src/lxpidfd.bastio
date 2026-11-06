@@ -32,6 +32,8 @@ const LX_KCMP: u64 = 312;
 const LX_PIDFD_SEND_SIGNAL: u64 = 424;
 const LX_PIDFD_OPEN: u64 = 434;
 const LX_PIDFD_GETFD: u64 = 438;
+const LX_MIGRATE_PAGES: u64 = 256;
+const LX_MOVE_PAGES: u64 = 279;
 const LX_PROCESS_MADVISE: u64 = 440;
 const LX_PROCESS_MRELEASE: u64 = 448;
 const PVM_WAIT: u64 = 4611686018427387904;           // process_vm's answer: not yet (no byte count is this large)
@@ -46,7 +48,8 @@ const KCMP_EPOLL_TFD: u64 = 7;
 
 fn is_pidfd_call(n: u64) -> bool {
   return n == LX_PIDFD_OPEN || n == LX_PIDFD_SEND_SIGNAL || n == LX_PIDFD_GETFD || n == LX_KCMP
-    || n == LX_PROCESS_VM_READV || n == LX_PROCESS_VM_WRITEV || n == LX_PROCESS_MADVISE || n == LX_PROCESS_MRELEASE;
+    || n == LX_PROCESS_VM_READV || n == LX_PROCESS_VM_WRITEV || n == LX_PROCESS_MADVISE || n == LX_PROCESS_MRELEASE
+    || n == LX_MIGRATE_PAGES || n == LX_MOVE_PAGES;
 }
 
 fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
@@ -68,6 +71,11 @@ fn lx_pidfd_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u6
     }
   } else if n == LX_PROCESS_MADVISE {
     r = process_madvise(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10), pget(k.procs, pid, F_REGS + R_R8));
+  } else if n == LX_MIGRATE_PAGES {
+    r = lx_migrate_pages(&mut k, pid, a);
+  } else if n == LX_MOVE_PAGES {
+    r = lx_move_pages(&mut k, pid, a, b, c, pget(k.procs, pid, F_REGS + R_R10),
+      pget(k.procs, pid, F_REGS + R_R8), pget(k.procs, pid, F_REGS + R_R9));
   } else if n == LX_PROCESS_MRELEASE {
     r = process_mrelease(&mut k, pid, a, b);
   } else if n == LX_KCMP {
@@ -238,6 +246,97 @@ fn process_mrelease(k: &mut Kernel, pid: u64, fd: u64, flags: u64) -> u64
     return 0;
   }
   return EINVAL;
+}
+
+/// The process migrate_pages and move_pages mean by `target`: the caller
+/// for 0, else that process, or -ESRCH if it is gone and -EPERM if the
+/// caller may not touch it.
+fn numa_target(k: &Kernel, pid: u64, target: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < NPROC || result == ESRCH || result == EPERM
+{
+  if target == 0 || target == pid {
+    return pid;
+  }
+  if target >= NPROC || state(k.procs, target) == FREE || state(k.procs, target) == ZOMBIE {
+    return ESRCH;
+  }
+  if !cred_root(k.procs, pid) && !same_ids(k.procs, pid, target) {
+    return EPERM;
+  }
+  return target;
+}
+
+/// migrate_pages(pid, ...): there is one memory node, so every page is
+/// already where the caller wants it and none is left to move: 0.
+fn lx_migrate_pages(k: &mut Kernel, pid: u64, target: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let t = numa_target(k, pid, target);
+  if t >= NPROC {
+    return t;
+  }
+  return 0;
+}
+
+/// move_pages(pid, count, pages, nodes, status, flags) with one memory
+/// node, node 0. status[i] is 0 for a page that is there (and wanted on
+/// node 0, or asked about with nodes NULL), -ENOENT for one nobody has
+/// touched yet, -EFAULT for an address that is not mapped, -ENODEV for a
+/// node that does not exist. Nothing moves.
+fn lx_move_pages(k: &mut Kernel, pid: u64, target: u64, count: u64, pages: u64, nodes: u64, status: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !6 != 0 {
+    return EINVAL;                          // MPOL_MF_MOVE, MPOL_MF_MOVE_ALL
+  }
+  if flags & 4 != 0 && !cred_root(k.procs, pid) {
+    return EPERM;
+  }
+  let t = numa_target(k, pid, target);
+  if t >= NPROC {
+    return t;
+  }
+  if count > 1048576 || pages >= 0x800000000000 || status >= 0x800000000000 || nodes >= 0x800000000000 {
+    return EFAULT;
+  }
+  let mut i = 0;
+  while i < count
+    invariant i <= count && count <= 1048576 && kok(k) && t < NPROC
+  {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, pages + 8 * i, &mut k.fs.xfer, 8) != 8 {
+      return EFAULT;
+    }
+    let addr = get_u64(k.fs.xfer, 0);
+    let mut node = 0;
+    if nodes != 0 {
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, nodes + 4 * i, &mut k.fs.xfer, 4) != 4 {
+        return EFAULT;
+      }
+      node = cast[u64](bget(k.fs.xfer, 0)) + 256 * cast[u64](bget(k.fs.xfer, 1)) + 65536 * cast[u64](bget(k.fs.xfer, 2)) + 16777216 * cast[u64](bget(k.fs.xfer, 3));
+    }
+    let mut st = 0;
+    if nodes != 0 && node != 0 {
+      st = ENODEV;
+    } else if addr < USER_BASE || addr - USER_BASE >= USER_SIZE {
+      st = EFAULT;
+    } else {
+      let pg = (addr - USER_BASE) / 4096;
+      if pg >= WPAGES || anon_count(&mut k, t, pg, pg + 1) != 1 {
+        st = EFAULT;
+      } else if win_op(&mut k.mem, &mut k.spaces, t, WOP_COUNT, pg, pg + 1, 0) != 1 {
+        st = ENOENT;
+      }
+    }
+    xfer_u64(&mut k.fs.xfer, 0, st % 4294967296);
+    if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, status + 4 * i, k.fs.xfer, 4) != 4 {
+      return EFAULT;
+    }
+    i = i + 1;
+  }
+  return 0;
 }
 
 /// pidfd_getfd(fd, target, flags): a close-on-exec duplicate, in process
