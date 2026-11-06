@@ -893,6 +893,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = blue(300) and blue(800)
             print(("ok  " if good else "FAIL"), f"({name}) Alt-Up makes the window fill the screen")
             fails += not good
+            # Alt-Page Down and Alt-Home put it on the bottom right and the top left quarter.
+            def snapped_at(key, y):
+                monitor(f"sendkey {key}")
+                time.sleep(1.5)
+                w, h, px = screendump()
+                return lambda x, yy=y: tuple(px[(yy * w + x) * 3:(yy * w + x) * 3 + 3]) == (40, 90, 200)
+            blue = snapped_at("alt-pgdn", 375)
+            good = blue(800) and not blue(300)
+            blue = snapped_at("alt-pgdn", 3)
+            good = good and not blue(800)
+            blue = snapped_at("alt-home", 3)
+            good = good and blue(300) and not blue(800)
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-Page Down and Alt-Home put the window on a quarter of the screen")
+            fails += not good
+            blue = snapped("alt-up")
             # A double click on the title bar of the full-screen window puts it back.
             for step in ((200, -200), (12, -200), (0, -200), (0, -146)):     # from the task bar button (88, 756) onto the title bar at (300, 10)
                 monitor(f"mouse_move {step[0]} {step[1]}")
