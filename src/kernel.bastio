@@ -230,6 +230,11 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   if !make_dir(&mut k.fs, "sys/class") || !make_dir(&mut k.fs, "sys/class/power_supply") {
     puts(&mut con, "cannot make /sys/class/power_supply\r\n");
   }
+  // /sys/devices/system/cpu holds possible, present, online, offline and
+  // kernel_max (src/lxprocfs.bastio): lscpu opens the directory first.
+  if !make_dir(&mut k.fs, "sys/devices") || !make_dir(&mut k.fs, "sys/devices/system") || !make_dir(&mut k.fs, "sys/devices/system/cpu") {
+    puts(&mut con, "cannot make /sys/devices/system/cpu\r\n");
+  }
   // The installer image's own files (initextra.bastio) live in /install.
   if NEXTRA > 0 && !make_dir(&mut k.fs, "install") {
     puts(&mut con, "cannot make /install\r\n");

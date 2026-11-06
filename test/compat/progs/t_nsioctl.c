@@ -2,6 +2,8 @@
  * NS_GET_USERNS, NS_GET_PARENT and NS_GET_OWNER_UID, and who may ask. */
 #define _GNU_SOURCE
 #include "compat.h"
+#include <dirent.h>
+#include <sys/mount.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -120,6 +122,84 @@ static int pid_nested(void) {
     return c > 0 && waitpid(c, &st, 0) == c && WIFEXITED(st) && WEXITSTATUS(st) == 0;
 }
 
+/* What lsns does: open every namespace link of every process and ask
+ * its type. Returns the number of descriptors that did not answer. */
+static int scan_all(void) {
+    DIR *d = opendir("/proc");
+    struct dirent *e;
+    static const char *names[] = { "mnt", "uts", "ipc", "pid", "net", "user", "cgroup", "time", "pid_for_children", "time_for_children" };
+    int bad = 0;
+    while (d && (e = readdir(d))) {
+        if (e->d_name[0] < '0' || e->d_name[0] > '9') continue;
+        for (int i = 0; i < 10; i++) {
+            char p[64];
+            snprintf(p, sizeof p, "/proc/%s/ns/%s", e->d_name, names[i]);
+            int f = open(p, O_RDONLY);
+            if (f < 0) continue;
+            /* lsns opens them relative to a descriptor of /proc/PID. */
+            char dp[32], rel[32];
+            snprintf(dp, sizeof dp, "/proc/%s", e->d_name);
+            snprintf(rel, sizeof rel, "ns/%s", names[i]);
+            int pd = open(dp, O_RDONLY | O_DIRECTORY);
+            int g = pd >= 0 ? openat(pd, rel, O_RDONLY) : -1;
+            if (g < 0 || ioctl(g, NS_GET_NSTYPE) < 0) { printf("# %s: openat from the /proc/PID descriptor: fd %d errno %d\n", p, g, errno); bad++; }
+            if (g >= 0) close(g);
+            if (pd >= 0) close(pd);
+            pd = open(dp, O_PATH | O_DIRECTORY);
+            g = pd >= 0 ? openat(pd, rel, O_RDONLY) : -1;
+            if (g < 0 || ioctl(g, NS_GET_NSTYPE) < 0) { printf("# %s: openat from an O_PATH /proc/PID descriptor: fd %d errno %d\n", p, g, errno); bad++; }
+            if (g >= 0) close(g);
+            if (pd >= 0) close(pd);
+            char np[64];
+            snprintf(np, sizeof np, "/proc/%s/ns", e->d_name);
+            pd = open(np, O_PATH | O_DIRECTORY);
+            g = pd >= 0 ? openat(pd, names[i], O_RDONLY) : -1;
+            if (g < 0 || ioctl(g, NS_GET_NSTYPE) < 0) { printf("# %s: openat from an O_PATH ns directory: fd %d errno %d\n", p, g, errno); bad++; }
+            if (g >= 0) close(g);
+            if (pd >= 0) close(pd);
+            long t = ioctl(f, NS_GET_NSTYPE);
+            if (t < 0) { printf("# %s: NS_GET_NSTYPE failed, errno %d\n", p, errno); bad++; }
+            /* What lsns does next: the owner of the namespace, and its type. */
+            int o = ioctl(f, NS_GET_USERNS);
+            if (o >= 0) {
+                if (ioctl(o, NS_GET_NSTYPE) != CLONE_NEWUSER) { printf("# %s: its owner has no type, errno %d\n", p, errno); bad++; }
+                close(o);
+            }
+            int par = ioctl(f, NS_GET_PARENT);
+            if (par >= 0) {
+                if (ioctl(par, NS_GET_NSTYPE) < 0) { printf("# %s: its parent has no type, errno %d\n", p, errno); bad++; }
+                close(par);
+            }
+            close(f);
+        }
+    }
+    if (d) closedir(d);
+    return bad;
+}
+
+/* A thread's own directory has namespace links too (lsns reads them). */
+static int task_ns(void) {
+    char p[96];
+    int f = open("/proc/self/task", O_RDONLY | O_DIRECTORY);
+    if (f < 0) return 0;
+    int ok = 0;
+    snprintf(p, sizeof p, "/proc/self/task/%d/ns/mnt", (int)getpid());
+    int g = open(p, O_RDONLY);
+    ok = g >= 0 && ioctl(g, NS_GET_NSTYPE) == CLONE_NEWNS;
+    if (!ok) printf("# %s: fd %d errno %d\n", p, g, errno);
+    if (g >= 0) close(g);
+    snprintf(p, sizeof p, "%d/ns/mnt", (int)getpid());
+    g = openat(f, p, O_RDONLY);
+    int ok2 = g >= 0 && ioctl(g, NS_GET_NSTYPE) == CLONE_NEWNS;
+    if (!ok2) printf("# openat(task, %s): fd %d errno %d\n", p, g, errno);
+    if (g >= 0) close(g);
+    int dd = open("/proc", O_RDONLY | O_DIRECTORY);
+    int g2 = openat(dd, "ns/mnt", O_RDONLY);
+    int ok3 = g2 < 0 && errno == ENOENT;
+    if (!ok3) printf("# openat(/proc, ns/mnt): fd %d errno %d\n", g2, errno);
+    return ok && ok2 && ok3;
+}
+
 int main(void) {
     setup();
     int uts = open("/proc/self/ns/uts", O_RDONLY);
@@ -138,6 +218,22 @@ int main(void) {
         waitpid(c, &st, 0);
         WIFEXITED(st) && WEXITSTATUS(st) == 0;
     }));
+    EXPECT("NS_GET_NSTYPE answers on every namespace link of every process", scan_all() == 0);
+    EXPECT("NS_GET_NSTYPE answers on every namespace link in a chroot with its own proc", ({
+        int st = 0;
+        mkdir("/tmp/nsr", 0755);
+        mkdir("/tmp/nsr/proc", 0755);
+        mount("proc", "/tmp/nsr/proc", "proc", 0, "");
+        pid_t c = fork();
+        if (c == 0) {
+            if (chroot("/tmp/nsr") != 0 || chdir("/") != 0) _exit(2);
+            _exit(scan_all() == 0 ? 0 : 3);
+        }
+        waitpid(c, &st, 0);
+        umount("/tmp/nsr/proc");
+        WIFEXITED(st) && WEXITSTATUS(st) == 0;
+    }));
+    EXPECT("a thread's directory has namespace links, /proc has none", task_ns());
     EXPECT("NS_GET_NSTYPE gives the CLONE_NEW* flag of the namespace",
            ioctl(uts, NS_GET_NSTYPE) == CLONE_NEWUTS && ioctl(usr, NS_GET_NSTYPE) == CLONE_NEWUSER
            && ioctl(pid, NS_GET_NSTYPE) == CLONE_NEWPID);

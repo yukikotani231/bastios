@@ -101,3 +101,7 @@ rc 1
 $ bb chroot /disk/d /bin/bash -c 'mkdir -p /mnt/a /mnt/b /mnt/e && mount --bind /mnt/a /mnt/b && mount --make-shared /mnt/b && mount --bind /mnt/b /mnt/e && findmnt -n -o PROPAGATION /mnt/e; mount --make-slave /mnt/e; findmnt -n -o PROPAGATION /mnt/e; umount /mnt/e; umount /mnt/b'
 shared
 private,slave
+
+== debian: lscpu reads the processors from /sys
+$ bb mkdir -p /disk/d/sys && bb mount -t sysfs sysfs /disk/d/sys && bb chroot /disk/d /bin/bash -c "lscpu | grep -c -E '^(Architecture|CPU\(s\)|On-line CPU\(s\) list):'"
+3

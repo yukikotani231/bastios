@@ -842,6 +842,12 @@ t_nopie: the bss covers what the kernel image would
 t_nopie: the data follows it
 t_nopie: the text is where it was linked
 t_nopie: the whole bss is usable
+t_nsioctl: NS_GET_NSTYPE answers on every namespace link in a chroot with its own proc
+t_nsioctl: NS_GET_NSTYPE answers on every namespace link of every process
+t_nsioctl: NS_GET_NSTYPE works on a ns link opened in a chroot
+t_nsioctl: NS_GET_NSTYPE works on an O_PATH descriptor of a ns link
+t_nsioctl: NS_GET_NSTYPE works on the descriptor NS_GET_USERNS returns
+t_nsioctl: a thread's directory has namespace links, /proc has none
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
 t_openat2: BENEATH through a link inside opens
