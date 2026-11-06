@@ -149,6 +149,12 @@ debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: unpack the root, chroot into it
 debian: debian: the dynamic linker through its links, by hand
 debian: debian: users and the machine
+debian: debian: a bind of a shared mount made a slave
+debian: debian: lscpu reads the processors from /sys
+debian: debian: lsns lists the namespaces without warnings
+debian: debian: mount --make-shared, findmnt shows the propagation
+debian: debian: unshare gives a mount namespace of its own
+debian: debian: util-linux mount tools see the mount table
 node: node: a hot loop is compiled and gives the right sum
 node: node: a script with arrays and JSON
 node: node: an expression
@@ -369,6 +375,8 @@ t_file: write
 t_file: writev
 t_file: a write of many unaligned blocks is not short
 t_file: two hundred attributes on one file
+t_hintdyn: after an mmap hint far below the mmap area, a large mapping still finds room
+t_hintdyn: an mmap hint far below the mmap area leaves libc's pages out of the space mmap hands out
 t_inotify: /proc/sys/fs/inotify/max_queued_events
 t_inotify: /proc/sys/fs/inotify/max_user_instances
 t_inotify: /proc/sys/fs/inotify/max_user_watches
@@ -2740,3 +2748,23 @@ t_rtnlev: the socket in both groups heard the rest
 t_rtnlev: a socket in no group heard nothing at all
 t_rtnlev: another namespace makes a pair
 t_rtnlev: it is not reported here
+t_xfrmpolev: a socket to configure with
+t_xfrmpolev: the table is flushed first
+t_xfrmpolev: root can join the policy group
+t_xfrmpolev: sockets in no group and in the SA group
+t_xfrmpolev: a policy is added
+t_xfrmpolev: NEWPOLICY is reported with its direction and selector
+t_xfrmpolev: it is replaced
+t_xfrmpolev: UPDPOLICY is reported
+t_xfrmpolev: a failed add (EEXIST) reports nothing
+t_xfrmpolev: another direction is another policy
+t_xfrmpolev: NEWPOLICY for it
+t_xfrmpolev: one is deleted
+t_xfrmpolev: DELPOLICY is reported with its direction
+t_xfrmpolev: deleting what is not there reports nothing
+t_xfrmpolev: the rest are flushed
+t_xfrmpolev: FLUSHPOLICY is reported
+t_xfrmpolev: a socket in no group heard nothing
+t_xfrmpolev: nor the SA group
+t_xfrmpolev: the child made one
+t_xfrmpolev: a policy of another namespace is not reported
