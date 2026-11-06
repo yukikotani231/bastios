@@ -35,7 +35,9 @@
 // again when it is removed at its hard limit (hard = 1). Joining needs
 // CAP_NET_ADMIN, as the message carries the key. Group 4, XFRMNLGRP_SA, hears
 // XFRM_MSG_NEWSA for an association added or replaced and XFRM_MSG_DELSA (its
-// id) for one deleted, flushed or expired.
+// id) for one deleted, flushed or expired. Group 5, XFRMNLGRP_POLICY, hears
+// XFRM_MSG_NEWPOLICY or UPDPOLICY for a policy added or replaced, DELPOLICY
+// (its id) for one deleted, and FLUSHPOLICY (a bare header) when all are.
 //
 // Not done yet: the replay state's notifications.
 
@@ -45,6 +47,7 @@ const XFRM_MSG_DELSA: u64 = 17;
 const XFRM_MSG_GETSA: u64 = 18;
 const XFRM_MSG_FLUSHSA: u64 = 28;
 const XFRM_MSG_EXPIRE: u64 = 24;
+const XFRMNLGRP_POLICY_BIT: u64 = 16;     // group 5 (XFRMNLGRP_POLICY): bit 4
 const XFRMNLGRP_SA_BIT: u64 = 8;          // group 4 (XFRMNLGRP_SA): bit 3
 const XFRMNLGRP_EXPIRE_BIT: u64 = 2;      // group 2 (XFRMNLGRP_EXPIRE) in the sockets' group masks: bit 1
 const XFRM_MSG_NEWPOLICY: u64 = 19;
@@ -982,15 +985,21 @@ fn xp_new(n: &mut Net, b: &Bytes, at: u64, end: u64, excl: bool, admin: bool) ->
   xp_set(&mut n, row, XP_TMODE, tmode);
   xp_set(&mut n, row, XP_TDST, tdst);
   xp_set(&mut n, row, XP_TSRC, tsrc);
+  let mut ek = XFRM_MSG_NEWPOLICY;
+  if !excl {
+    ek = XFRM_MSG_UPDPOLICY;
+  }
+  xp_event(&mut n, row, ns, ek);
   return 0;
 }
 
-/// Writes policy i as an XFRM_MSG_NEWPOLICY message (for a read or a dump).
-fn xp_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
+/// Writes policy i as an XFRM_MSG_NEWPOLICY message (for a read or a dump), or
+/// as `kind` (XFRM_MSG_UPDPOLICY, for an event).
+fn xp_put(n: &mut Net, i: u64, kind: u64, seq: u64, port: u64, flags: u64)
   requires net_ok(n) && i < XP_N
   ensures net_ok(n)
 {
-  nl_begin(&mut n, XFRM_MSG_NEWPOLICY, flags, seq, port);
+  nl_begin(&mut n, kind, flags, seq, port);
   xs_put_addr(&mut n, xp_get(n, i, XP_DADDR));
   xs_put_addr(&mut n, xp_get(n, i, XP_SADDR));
   xs_zeros(&mut n, 8);                    // the ports and their masks
@@ -1032,6 +1041,72 @@ fn xp_put(n: &mut Net, i: u64, seq: u64, port: u64, flags: u64)
     nl_32(&mut n, 4294967295);
   }
   nl_end(&mut n);
+}
+
+/// Writes the id of policy i (struct xfrm_userpolicy_id: its selector, index
+/// and direction) as an XFRM_MSG_DELPOLICY message.
+fn xp_put_id(n: &mut Net, i: u64)
+  requires net_ok(n) && i < XP_N
+  ensures net_ok(n)
+{
+  nl_begin(&mut n, XFRM_MSG_DELPOLICY, 0, 0, 0);
+  xs_put_addr(&mut n, xp_get(n, i, XP_DADDR));
+  xs_put_addr(&mut n, xp_get(n, i, XP_SADDR));
+  xs_zeros(&mut n, 8);                    // the ports and their masks
+  nl_16(&mut n, 2);                       // family
+  nl_b(&mut n, xp_get(n, i, XP_DPLEN) % 256);
+  nl_b(&mut n, xp_get(n, i, XP_SPLEN) % 256);
+  nl_b(&mut n, xp_get(n, i, XP_PROTO) % 256);
+  xs_zeros(&mut n, 3);
+  xs_zeros(&mut n, 8);                    // ifindex, user
+  nl_32(&mut n, xp_get(n, i, XP_IDX) % 4294967296);
+  nl_b(&mut n, xp_get(n, i, XP_DIR) % 256);
+  xs_zeros(&mut n, 3);
+  nl_end(&mut n);
+}
+
+/// Tells the NETLINK_XFRM sockets of policy i's namespace that joined
+/// XFRMNLGRP_POLICY about it: `kind` is NEWPOLICY, UPDPOLICY, DELPOLICY (its
+/// id) or FLUSHPOLICY (a bare header, for the namespace ns of the policies
+/// flushed; i is ignored then). A full queue loses the message. As in
+/// xs_event, the cursor of the request being answered is left as it was.
+fn xp_event(n: &mut Net, i: u64, ns: u64, kind: u64)
+  requires net_ok(n) && i < XP_N
+  ensures net_ok(n)
+{
+  let mut q = 0;
+  while q < NLS
+    invariant q <= NLS && net_ok(n)
+  {
+    if get(n.nls, q * NL_W + NL_USED) == 1 && get(n.nls, q * NL_W + NL_PROTO) == NETLINK_XFRM
+      && get(n.nls, q * NL_W + NL_NS) == ns && get(n.nls, q * NL_W + NL_GROUPS) / XFRMNLGRP_POLICY_BIT % 2 == 1 {
+      let at = n.nl_at;
+      let lim = n.nl_lim;
+      let full = n.nl_full;
+      let msg = n.nl_msg;
+      let base = q * NLQ;
+      let mid = at > base + smaller(get(n.nls, q * NL_W + NL_LEN), NLQ) && at <= base + NLQ && lim == base + NLQ;
+      if !mid {
+        nlw_open(&mut n, q);
+      }
+      if kind == XFRM_MSG_DELPOLICY {
+        xp_put_id(&mut n, i);
+      } else if kind == XFRM_MSG_FLUSHPOLICY {
+        nl_begin(&mut n, XFRM_MSG_FLUSHPOLICY, 0, 0, 0);
+        nl_end(&mut n);
+      } else {
+        xp_put(&mut n, i, kind, 0, 0, 0);
+      }
+      nlw_close(&mut n, q);
+      if !mid {
+        n.nl_at = at;
+        n.nl_lim = lim;
+        n.nl_full = full;
+        n.nl_msg = msg;
+      }
+    }
+    q = q + 1;
+  }
 }
 
 /// The policy a struct xfrm_userpolicy_id at b[a..) names (by index, else
@@ -1088,6 +1163,7 @@ fn xfrm_message(n: &mut Net, b: &Bytes, at: u64, end: u64, kind: u64, fl: u64, s
       }
       j = j + 1;
     }
+    xp_event(&mut n, 0, n.ns, XFRM_MSG_FLUSHPOLICY);
     return 0;
   }
   if kind == XFRM_MSG_DELPOLICY {
@@ -1095,6 +1171,7 @@ fn xfrm_message(n: &mut Net, b: &Bytes, at: u64, end: u64, kind: u64, fl: u64, s
     if j >= XP_N {
       return NE_SRCH;
     }
+    xp_event(&mut n, j, n.ns, XFRM_MSG_DELPOLICY);
     xp_clear(&mut n, j);
     return 0;
   }
@@ -1105,7 +1182,7 @@ fn xfrm_message(n: &mut Net, b: &Bytes, at: u64, end: u64, kind: u64, fl: u64, s
         invariant j <= XP_N && net_ok(n)
       {
         if xp_get(n, j, XP_USED) == 1 && xp_get(n, j, XP_NS) == n.ns {
-          xp_put(&mut n, j, seq, port, NLM_F_MULTI);
+          xp_put(&mut n, j, XFRM_MSG_NEWPOLICY, seq, port, NLM_F_MULTI);
         }
         j = j + 1;
       }
@@ -1116,7 +1193,7 @@ fn xfrm_message(n: &mut Net, b: &Bytes, at: u64, end: u64, kind: u64, fl: u64, s
     if j >= XP_N {
       return NE_SRCH;
     }
-    xp_put(&mut n, j, seq, port, 0);
+    xp_put(&mut n, j, XFRM_MSG_NEWPOLICY, seq, port, 0);
     return 0;
   }
   if kind == XFRM_MSG_FLUSHSA {
