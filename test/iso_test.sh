@@ -1013,9 +1013,12 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             print(("ok  " if good else "FAIL"), f"({name}) a line in /tmp/bwm.notice shows in the task bar ({nt!r})")
             fails += not good
             # The next line waits for its turn: a plain line is on a blue bar, a line that starts with ! on a red one.
-            time.sleep(2.5)
-            w, h, px = screendump()
-            nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 12, 1)[0]
+            time.sleep(1.5)
+            for _ in range(6):                                           # a slow host shows the first notice late: look again while the first is still up
+                w, h, px = screendump()
+                nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 12, 1)[0]
+                if nt == "Tests passed":
+                    break
             at = ((h - 24 + 12) * w + 64 + 12 * 8 + 8) * 3                      # on the bar, right of the text
             bar = tuple(px[at:at + 3])
             good = nt == "Tests passed" and bar == (40, 80, 150)
