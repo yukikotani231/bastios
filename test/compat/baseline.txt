@@ -2905,6 +2905,26 @@ t_xfrmlife: they did not use up the limit: three real datagrams pass
 t_xfrmlife: two more datagrams: the counters add up
 t_xfrmlife: unused for four seconds, it still carries a datagram
 t_xfrmlife: without IPsec the datagram is echoed
+t_xfrmpolev: a socket to configure with
+t_xfrmpolev: the table is flushed first
+t_xfrmpolev: root can join the policy group
+t_xfrmpolev: sockets in no group and in the SA group
+t_xfrmpolev: a policy is added
+t_xfrmpolev: NEWPOLICY is reported with its direction and selector
+t_xfrmpolev: it is replaced
+t_xfrmpolev: UPDPOLICY is reported
+t_xfrmpolev: a failed add (EEXIST) reports nothing
+t_xfrmpolev: another direction is another policy
+t_xfrmpolev: NEWPOLICY for it
+t_xfrmpolev: one is deleted
+t_xfrmpolev: DELPOLICY is reported with its direction
+t_xfrmpolev: deleting what is not there reports nothing
+t_xfrmpolev: the rest are flushed
+t_xfrmpolev: FLUSHPOLICY is reported
+t_xfrmpolev: a socket in no group heard nothing
+t_xfrmpolev: nor the SA group
+t_xfrmpolev: the child made one
+t_xfrmpolev: a policy of another namespace is not reported
 t_landlock: a restricted child is held to its rules
 t_landlock: a rule below a directory
 t_landlock: a ruleset is made
