@@ -227,6 +227,14 @@ fn sfd_one(k: &mut Kernel, pid: u64, s: u64, va: u64) -> bool
   if nsk_of(k, NSK_PID, pid) != 0 {
     xfer_u64(&mut k.fs.xfer, 12, vpid_of(k, pid, word % SW_PID) % 0x100000000);   // and ssi_uid (below) is set after
   }
+  if word < FAULT_MARK && word / CHLD_MARK % 2 == 1 {
+    // A child's change of state: script(1) and other programs that wait
+    // through a signalfd read the reason (CLD_EXITED .. CLD_CONTINUED) and
+    // the status here instead of in a handler's siginfo.
+    bset(&mut k.fs.xfer, 8, cast[u8](word / CHLD_CODE % 8));              // ssi_code
+    xfer_u64(&mut k.fs.xfer, 40, word / SW_VAL % 65536);                   // ssi_status (and ssi_int, zero)
+    return va <= VA_LAST && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, SFD_INFO) == SFD_INFO;
+  }
   if word / SW_QUEUE % 2 == 1 {
     let v = wget(k.sigsave, value_at(pid, s));
     let mut i = 0;
