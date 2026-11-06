@@ -110,3 +110,8 @@ $ bb mkdir -p /disk/d/sys && bb mount -t sysfs sysfs /disk/d/sys && bb chroot /d
 $ bb mkdir -p /disk/d/proc; bb mount -t proc proc /disk/d/proc; bb chroot /disk/d /bin/bash -c "lsns 2>&1 | grep -c -i -E 'unsupported|warn'; lsns -t pid -n | wc -l"
 0
 1
+
+== debian: lscpu counts threads, cores and sockets from the topology
+$ bb mkdir -p /disk/d/sys && bb mount -t sysfs sysfs /disk/d/sys && bb chroot /disk/d /bin/bash -c "lscpu | grep -E '^(Thread\(s\) per core|Socket\(s\)):' | tr -s ' '"
+Thread(s) per core: 1
+Socket(s): 1
