@@ -368,7 +368,7 @@ class Guest:
         self.out = b""
         if self.arch == "aarch64":
             # The kernel powers off through PSCI (no debug-exit device).
-            cmd = ["qemu-system-aarch64", "-M", "virt,gic-version=3", "-cpu", "cortex-a72", "-kernel", self.kernel,
+            cmd = ["qemu-system-aarch64", "-M", "virt,gic-version=3", "-cpu", os.environ.get("COMPAT_CPU", "cortex-a72"), "-kernel", self.kernel,
                    "-m", self.mem, "-smp", "2", "-nographic", "-no-reboot", "-serial", "stdio", "-monitor", "none",
                    "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-device,drive=vd",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-device,netdev=n0"]
