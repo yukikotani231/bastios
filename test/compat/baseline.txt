@@ -2260,6 +2260,7 @@ x11: x11: a media player, VLC, draws its window on the X screen
 x11b: x11b: unpack the server and the client roots
 x11b: x11b: an image editor, GIMP, draws its window on the X screen
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
+x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
