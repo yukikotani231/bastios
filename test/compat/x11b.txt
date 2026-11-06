@@ -17,9 +17,18 @@ alive
 
 == x11b: an office suite, LibreOffice Writer, draws its window on the X screen
 # timeout 900
-$ bb mkdir -p /disk/lo/tmp; bb tar -xf /disk/libreoffice.tar -C /disk/lo && bb rm /disk/libreoffice.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/lo/tmp/.passwd; echo root:x:0: >/disk/lo/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb23.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/lo -d 3 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/soffice --norestore --nologo --writer >/disk/lo.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb23.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb23.out 2>/dev/null || { bb tail -n 12 /disk/lo.out | bb cut -c1-200; }; bb cat /disk/fb23.out; bb ps | bb grep -q 'soffice' && echo alive || bb cat /disk/lo.out
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/lo/tmp; bb tar -xf /disk/libreoffice.tar -C /disk/lo && bb rm /disk/libreoffice.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/lo/tmp/.passwd; echo root:x:0: >/disk/lo/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb23.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/lo -d 3 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/soffice --norestore --nologo --writer >/disk/lo.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb23.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb23.out 2>/dev/null || { bb tail -n 12 /disk/lo.out | bb cut -c1-200; }; bb cat /disk/fb23.out; bb ps | bb grep -q 'soffice' && echo alive || bb cat /disk/lo.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :3
+fakebwm: pixels drawn
+fakebwm: typed
+alive
+
+== x11b: a vector graphics editor, Inkscape, draws its window on the X screen
+# timeout 900
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/ik/tmp; bb tar -xf /disk/inkscape.tar -C /disk/ik && bb rm /disk/inkscape.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/ik/tmp/.passwd; echo root:x:0: >/disk/ik/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb24.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/ik -d 4 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/inkscape >/disk/ik.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb24.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb24.out 2>/dev/null || { bb tail -n 12 /disk/ik.out | bb cut -c1-200; }; bb cat /disk/fb24.out; bb ps | bb grep -q 'inkscape' && echo alive || bb cat /disk/ik.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :4
 fakebwm: pixels drawn
 fakebwm: typed
 alive
