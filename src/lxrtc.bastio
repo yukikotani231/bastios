@@ -1,0 +1,81 @@
+// The battery-backed clock for Linux programs: /dev/rtc0 (also named by
+// /dev/rtc and /dev/misc/rtc, which busybox's hwclock tries), with the
+// ioctls hwclock uses. RTC_RD_TIME gives the struct rtc_time (nine ints:
+// seconds, minutes, hours, day of the month, month 0 to 11, years since
+// 1900, day of the week 0 to 6 from Sunday, day of the year, and 0 for
+// daylight saving) for the time the clock says, in UTC. RTC_SET_TIME writes
+// it, for a program that holds CAP_SYS_TIME. A read, the alarm and the
+// periodic and update interrupts are not offered (ENOTTY or EINVAL, as for
+// a clock with no interrupt line). Without a clock (AArch64 today) the
+// device does not open (ENOENT).
+
+import "linux.bastio";
+
+const RTC_RD_TIME: u64 = 0x80247009;      // _IOR('p', 9, struct rtc_time)
+const RTC_SET_TIME: u64 = 0x4024700A;     // _IOW('p', 10, struct rtc_time)
+const RTC_TM_SIZE: u64 = 36;
+
+/// Stores v as a 32-bit little-endian int at byte `at` of the transfer buffer.
+fn rtc_tm_put(k: &mut Kernel, at: u64, v: u64)
+  requires kok(k) && at + 4 <= XFER
+  ensures kok(k)
+{
+  store_le32(&mut k.fs.xfer, at, cast[u32](v % 4294967296));
+}
+
+fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == RTC_RD_TIME {
+    let t = hw_get(&mut k.hwc);
+    if t == 0 {
+      return EINVAL;                      // the clock says nothing sensible
+    }
+    let days = t / 86400;
+    let rest = t % 86400;
+    if days < 10957 || days > 47500 {
+      return EINVAL;
+    }
+    let c = civil_from_days(days);
+    if c.year < 2000 || c.year > 2099 {
+      return EINVAL;
+    }
+    xfer_zero(&mut k, RTC_TM_SIZE);
+    rtc_tm_put(&mut k, 0, rest % 60);
+    rtc_tm_put(&mut k, 4, rest / 60 % 60);
+    rtc_tm_put(&mut k, 8, rest / 3600);
+    rtc_tm_put(&mut k, 12, c.day);
+    rtc_tm_put(&mut k, 16, c.month - 1);
+    rtc_tm_put(&mut k, 20, c.year - 1900);
+    rtc_tm_put(&mut k, 24, (days + 4) % 7);
+    let jan1 = days_from_civil(c.year, 1, 1);
+    if days >= jan1 {
+      rtc_tm_put(&mut k, 28, days - jan1);
+    }
+    return lx_put_out(&mut k, pid, arg, RTC_TM_SIZE);
+  }
+  if req == RTC_SET_TIME {
+    if !cap_has(k, pid, CAP_SYS_TIME) {
+      return EPERM;
+    }
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, RTC_TM_SIZE) != RTC_TM_SIZE {
+      return EFAULT;
+    }
+    let sec = rd32(k.fs.xfer, 0);
+    let min = rd32(k.fs.xfer, 4);
+    let hour = rd32(k.fs.xfer, 8);
+    let day = rd32(k.fs.xfer, 12);
+    let mon = rd32(k.fs.xfer, 16);
+    let yr = rd32(k.fs.xfer, 20);
+    if sec > 59 || min > 59 || hour > 23 || day < 1 || day > 31 || mon > 11 || yr < 100 || yr > 199 {
+      return EINVAL;
+    }
+    let secs = days_from_civil(yr + 1900, mon + 1, day) * 86400 + hour * 3600 + min * 60 + sec;
+    if !hw_set(&mut k.hwc, secs) {
+      return EINVAL;
+    }
+    return 0;
+  }
+  return ENOTTY;
+}

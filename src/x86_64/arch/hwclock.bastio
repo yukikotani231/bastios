@@ -1,0 +1,59 @@
+// The battery-backed clock on x86-64: the CMOS RTC (src/rtc.bastio), whose
+// ports the kernel keeps after boot so that /dev/rtc0 can read and set it.
+
+import "rtc.bastio";
+
+enum HwClock { None, Cmos(Rtc) }
+
+spec fn hw_ok(h: &HwClock) -> bool {
+  h is HwClock::Cmos ==> rtc_ok(h.Cmos)
+}
+
+fn hw_present(h: &HwClock) -> bool {
+  match h {
+    HwClock::None => { return false; },
+    HwClock::Cmos(r) => { return true; },
+  }
+}
+
+/// The time the clock says, in seconds since 1970-01-01 (0 if it makes no sense).
+fn hw_get(h: &mut HwClock) -> u64
+  requires hw_ok(h)
+  ensures hw_ok(h) && result < 5000000000
+{
+  let mut t = 0;
+  match h {
+    HwClock::None => { h = HwClock::None; },
+    HwClock::Cmos(mut r) => {
+      t = rtc_seconds(&mut r);
+      h = HwClock::Cmos(r);
+    },
+  }
+  return t;
+}
+
+/// Sets the clock; false if it cannot be set to that time.
+fn hw_set(h: &mut HwClock, secs: u64) -> bool
+  requires hw_ok(h)
+  ensures hw_ok(h)
+{
+  let mut ok = false;
+  match h {
+    HwClock::None => { h = HwClock::None; },
+    HwClock::Cmos(mut r) => {
+      ok = rtc_set_seconds(&mut r, secs);
+      h = HwClock::Cmos(r);
+    },
+  }
+  return ok;
+}
+
+/// Gives the clock's ports back at power off.
+fn hw_free(ports: &mut Ports, h: HwClock)
+  requires hw_ok(h)
+{
+  match h {
+    HwClock::None => {},
+    HwClock::Cmos(r) => { port_release(&mut ports, r.io); },
+  }
+}
