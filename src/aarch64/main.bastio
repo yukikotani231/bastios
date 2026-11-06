@@ -490,7 +490,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       pset(&mut s.k.procs, p, F_FAULT_VA, bva);
       return p;
     }
-    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) {
+    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) || fault_raced(&mut s.k, p) {
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
     // Out of memory (src/oom.bastio), as src/main.bastio handles it.
@@ -586,6 +586,35 @@ fn write_raced(k: &mut Kernel, p: u64) -> bool
     return false;
   }
   return user_page_writable(&mut k.spaces, p, pget(k.procs, p, reg_word(R_FAULT)));
+}
+
+/// A translation or access-flag fault (status 0x04 to 0x0b) on a page that is
+/// mapped by the time the abort is handled: another processor mapped it, a
+/// thread of the same program having faulted on it first (an instruction
+/// fetch of freshly loaded code, a read or a write), so there is nothing to
+/// do but run the instruction again. A write needs the page writable, else
+/// copy-on-write has still to break it.
+fn fault_raced(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let esr = pget(k.procs, p, reg_word(34));
+  let st = esr % 64;
+  let ec = esr >> 26;
+  if st < 0x04 || st > 0x0b {
+    return false;
+  }
+  let va = pget(k.procs, p, reg_word(R_FAULT));
+  if va < USER_BASE || (ec != 0x20 && ec != 0x24) {
+    return false;
+  }
+  // Mapped and readable (a PROT_NONE page is hidden from the hardware, and
+  // a fault on it is the program's), and writable for a write.
+  let bits = user_page_bits(&mut k.spaces, p, (va - USER_BASE) / 4096);
+  if ec == 0x24 && ((esr >> 6) % 2) == 1 {
+    return (bits / 4) % 2 == 1;
+  }
+  return (bits / 2) % 2 == 1;
 }
 
 /// An EL0 read of an identification register (MIDR_EL1, ID_AA64ISAR0_EL1,
