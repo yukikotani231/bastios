@@ -1124,6 +1124,9 @@ fn lx_open(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, flags: u64, mode: u6
     return lx_open_nsfile(&mut k, pid, ne, flags);   // a file bound to a namespace (src/lxns.bastio)
   }
   let pf = proc_node(k, n);
+  if is_ns_file(pf) && state(k.procs, nsf_proc(pf)) == ZOMBIE {
+    return ENOENT;                          // a zombie has left its namespaces: lsns skips it on that
+  }
   if is_exe_file(pf) && flags & LO_PATH == 0 && flags % 4 == 0 {
     // /proc/PID/exe is a link to the program: open that (src/lxopen2.bastio).
     n = exe_name(&mut k, pf);
