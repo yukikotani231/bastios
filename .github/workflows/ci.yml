@@ -87,7 +87,7 @@ jobs:
           path: bastiolang
       - uses: ./.github/actions/apt-install
         with:
-          packages: z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools xorriso dosfstools mtools ovmf xvfb xclip
+          packages: z3 qemu-system-x86 qemu-system-arm qemu-efi-aarch64 gcc-aarch64-linux-gnu musl-tools xorriso dosfstools mtools ovmf xvfb xclip xdotool xterm x11-utils
       - name: Tool versions
         run: |
           echo "bastiolang $(git -C bastiolang rev-parse HEAD)"
@@ -154,7 +154,7 @@ jobs:
           path: bastiolang
       - uses: ./.github/actions/apt-install
         with:
-          packages: z3 qemu-system-x86 qemu-system-arm gcc-aarch64-linux-gnu musl-tools xvfb xclip
+          packages: z3 qemu-system-x86 qemu-system-arm gcc-aarch64-linux-gnu musl-tools xvfb xclip xdotool xterm x11-utils
       - run: cd bastiolang/stage0 && cargo build --release --locked
       - name: Restore the proof cache
         uses: actions/cache/restore@v4
