@@ -958,6 +958,13 @@ fn lx_mlock_call(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// Whether the key argument of pkey_mprotect (an int, in the low 32 bits)
+/// is one this kernel accepts: the default key 0 and -1, "none". The CPU
+/// has no protection keys here, so no other key was ever allocated.
+fn pkey_default(v: u64) -> bool {
+  return v % 4294967296 == 0 || v % 4294967296 == 4294967295;
+}
+
 /// The last of lx_misc_call's calls (split off so the solver proves each half).
 fn lx_misc_tail(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r0: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -976,6 +983,18 @@ fn lx_misc_tail(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64, r0: u6
     r = lx_mlockall(&mut k, pid, a);
   } else if n == LX_MUNLOCKALL {
     r = lx_munlockall(&mut k, pid);
+  } else if n == LX_PKEY_MPROTECT {
+    r = EINVAL;                             // a key other than 0 and -1 was never allocated
+  } else if n == LX_PKEY_ALLOC {
+    // pkey_alloc(flags, access_rights): EINVAL for a bad argument, else
+    // ENOSPC, which is what Linux answers on a CPU without protection keys.
+    if a % 4294967296 != 0 || b % 4294967296 > 3 {
+      r = EINVAL;
+    } else {
+      r = ENOSPC;
+    }
+  } else if n == LX_PKEY_FREE {
+    r = EINVAL;                             // no key was ever allocated
   } else if n == LX_GETRANDOM {
     // GRND_NONBLOCK, GRND_RANDOM and GRND_INSECURE; the last two not together.
     if c % 0x100000000 > 7 || c % 8 == 6 {
@@ -1099,27 +1118,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_mremap_locked(&mut k, pid, a, b, c, r10, pget(k.procs, pid, F_REGS + R_R8));
   } else if n == LX_MUNMAP {
     r = lx_munmap_locked(&mut k, pid, a, b);
-  } else if n == LX_MPROTECT {
+  } else if n == LX_MPROTECT || (n == LX_PKEY_MPROTECT && pkey_default(r10)) {
     r = lx_mprotect(&mut k, pid, a, b, c);
-  } else if n == LX_PKEY_MPROTECT {
-    // The CPU has no protection keys here: a key was never allocated, so
-    // only the default key 0 and -1 (which means "none") are valid.
-    let pkey = r10 % 4294967296;
-    if pkey == 0 || pkey == 4294967295 {
-      r = lx_mprotect(&mut k, pid, a, b, c);
-    } else {
-      r = EINVAL;
-    }
-  } else if n == LX_PKEY_ALLOC {
-    // pkey_alloc(flags, access_rights): EINVAL for a bad argument, else
-    // ENOSPC, which is what Linux answers on a CPU without protection keys.
-    if a % 4294967296 != 0 || b % 4294967296 > 3 {
-      r = EINVAL;
-    } else {
-      r = ENOSPC;
-    }
-  } else if n == LX_PKEY_FREE {
-    r = EINVAL;                             // no key was ever allocated
   } else if n == LX_MADVISE {
     r = lx_madvise(&mut k, pid, a, b, c);
     assert kok(k);
