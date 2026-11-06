@@ -371,6 +371,8 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = sfd_read(&mut k, pid, d.x, va, cnt);
   } else if d.kind == K_INOTIFY && d.x < INO_N {
     r = ino_read(&mut k, pid, d.x, va, cnt);   // src/lxinotify.bastio
+  } else if d.kind == K_PERF && d.x < OFD_N {
+    r = perf_read(&mut k, pid, d.x, va, cnt);  // src/lxperf.bastio
   } else if d.kind == K_DEV && d.x >= PROC_DEV {
     r = proc_read(&mut k, pid, a, d.x, va, cnt);
   } else if d.kind == K_DEV && is_loop(d.x) {
@@ -612,6 +614,9 @@ fn linux_syscall(con: &mut Con, k: &mut Kernel, mmu: &Mmu, pid: u64) -> u64
   }
   if is_inotify_call(n) {
     return lx_inotify_call(&mut k, pid, n, a, b, c);   // src/lxinotify.bastio
+  }
+  if is_perf_call(n) {
+    return lx_perf_call(&mut k, pid, n, a, b, c);   // src/lxperf.bastio
   }
   if is_pidfd_call(n) {
     return lx_pidfd_call(&mut k, pid, n, a, b, c);   // src/lxpidfd.bastio
@@ -1280,6 +1285,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if d.kind == K_SECCOMP && d.x < SC_N {
     return sc_ioctl(&mut k, pid, d.x, pipe_nonblock(k, pid, fd), req % 0x100000000, arg);   // src/lxseccomp.bastio
+  }
+  if d.kind == K_PERF && d.x < OFD_N {
+    return perf_ioctl(&mut k, pid, d.x, req % 0x100000000, arg);   // src/lxperf.bastio
   }
   if d.kind == K_PIDFD {
     return pidfd_ioctl(&mut k, pid, smaller(d.x, NPROC), req % 0x100000000, arg);   // src/lxpidfd.bastio

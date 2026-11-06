@@ -492,6 +492,7 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   ensures result.kind == K_EVENT ==> result.x < OFD_N
   ensures result.kind == K_TIMER ==> result.x < TFD_N
   ensures result.kind == K_EPOLL ==> result.x < EP_N
+  ensures result.kind == K_PERF ==> result.x < OFD_N
 {
   let v = fd_get(k.lxfd, pid, fd) % FD_CLOEXEC;
   if v == FD_CONSOLE {
@@ -538,6 +539,9 @@ fn fd_look(k: &Kernel, pid: u64, fd: u64) -> Fd
   }
   if kind == OF_INOTIFY && x < INO_N {
     return Fd { kind: K_INOTIFY, x: x };
+  }
+  if kind == OF_PERF {
+    return Fd { kind: K_PERF, x: h };       // the counter lives in the description (src/lxperf.bastio)
   }
   if kind == OF_SECCOMP && x < SC_N {
     return Fd { kind: K_SECCOMP, x: x };

@@ -1519,6 +1519,35 @@ t_path: mknod makes device and socket nodes; a device node opens its device
 t_path: paths are read up to PATH_MAX
 t_path: pread and pwrite take no negative offset
 t_path: sendfile checks its descriptors and offset; statx its flags
+t_perf: a task-clock counter on this process opens
+t_perf: it counts the time the process runs (150 ms of work)
+t_perf: a cpu-clock counter opens
+t_perf: it counts too
+t_perf: a disabled counter reads 0
+t_perf: IOC_ENABLE starts it
+t_perf: it counts from then
+t_perf: IOC_DISABLE stops it
+t_perf: it keeps its count
+t_perf: IOC_RESET zeroes it
+t_perf: a context-switches counter sees the process sleep
+t_perf: page-faults opens (it reads 0: not counted)
+t_perf: a read with the time and id formats gives 32 bytes
+t_perf: the time enabled is the time running, and about 30 ms
+t_perf: IOC_ID gives the id the read had
+t_perf: a buffer too small is ENOSPC
+t_perf: a counter on a child opens
+t_perf: the child's count is kept after it is waited for
+t_perf: and does not change
+t_perf: a hardware event is ENOENT
+t_perf: an unknown software event is ENOENT
+t_perf: sampling is EOPNOTSUPP
+t_perf: all processes on a cpu is EOPNOTSUPP
+t_perf: pid and cpu both -1 is EINVAL
+t_perf: a process that does not exist is ESRCH
+t_perf: an attr size under 64 is EINVAL
+t_perf: an unknown flag is EINVAL
+t_perf: an unknown ioctl is ENOTTY
+t_perf: an unprivileged program cannot count init
 t_perm: a new file belongs to its maker
 t_perm: a path needs search permission on its directories
 t_perm: a set-group-ID directory passes on its group

@@ -618,6 +618,7 @@ fn tm_reap(k: &mut Kernel, parent: u64, c: u64)
   requires kok(k) && parent < NPROC && c < NPROC
   ensures kok(k)
 {
+  perf_gone(&mut k, c);                     // perf counters on it keep their count (src/lxperf.bastio)
   let u = sat_add(group_time(k.procs, k.sys, c, 0), tm_get(k, c, 1));
   let s = sat_add(group_time(k.procs, k.sys, c, 1), tm_get(k, c, 2));
   tm_set(&mut k, parent, 1, sat_add(tm_get(k, parent, 1), u));
