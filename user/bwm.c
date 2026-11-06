@@ -122,9 +122,39 @@ static void touch_bar(void);
 static void touch_all(void);
 static long long now_ms(void);
 static char notice[40];                  /* a short message in the task bar (no room for a window, say) */
+static int notice_warn;                  /* it is a warning: red, not blue */
 static long long notice_due;             /* when it goes; 0 when none shows */
 #define NOTICE_MS 3000
-#define NOTICE_FILE "/tmp/bwm.notice"   /* a line written here is shown in the task bar for a few seconds */
+#define NOTICE_FILE "/tmp/bwm.notice"   /* the lines written here are shown in the task bar, one after another, a few seconds each */
+#define NOTICE_Q 8
+static char notice_q[NOTICE_Q][40];      /* the ones waiting for their turn */
+static unsigned char notice_qwarn[NOTICE_Q];
+static int notice_nq;
+
+/* Shows a notice now when none shows, else lines it up behind the others (at most NOTICE_Q; the rest are dropped). */
+static void notice_post(const char *text, int warn, long long now)
+{
+    if (!notice_due) {
+        snprintf(notice, sizeof notice, "%s", text);
+        notice_warn = warn;
+        notice_due = now + NOTICE_MS;
+    } else if (notice_nq < NOTICE_Q) {
+        snprintf(notice_q[notice_nq], sizeof notice_q[0], "%s", text);
+        notice_qwarn[notice_nq++] = (unsigned char)warn;
+    }
+}
+
+/* The shown notice has had its time: the next one in line takes its place. */
+static void notice_expire(long long now)
+{
+    notice_due = 0;
+    if (notice_nq > 0) {
+        notice_post(notice_q[0], notice_qwarn[0], now);
+        memmove(notice_q[0], notice_q[1], sizeof notice_q[0] * (size_t)(notice_nq - 1));
+        memmove(notice_qwarn, notice_qwarn + 1, (size_t)(notice_nq - 1));
+        notice_nq--;
+    }
+}
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
@@ -524,10 +554,10 @@ static void draw_bar(void)
         text(scene, ix + 4, y0 + 4, im, rgb(255, 255, 255));
     }
     if (notice_due && now_ms() >= notice_due)
-        notice_due = 0;
+        notice_expire(now_ms());
     if (notice_due && !run_on) {                          /* the notice covers the window buttons too */
         int x0 = BTN_X0, x1 = (int)W - MENU_W - 12 - CLOCK_W - (ime_on == 3 ? IME_W_KANJI : ime_on ? IME_W : 0) - 4;
-        fill(scene, x0, y0 + 3, x1, H - 3, rgb(150, 60, 40));
+        fill(scene, x0, y0 + 3, x1, H - 3, notice_warn ? rgb(150, 60, 40) : rgb(40, 80, 150));
         char nb[40];
         snprintf(nb, sizeof nb, "%.*s", (x1 - x0 - 8) / CELL_W > 0 ? (x1 - x0 - 8) / CELL_W : 0, notice);
         text(scene, x0 + 4, y0 + 4, nb, rgb(255, 255, 255));
@@ -806,8 +836,9 @@ static void wall_watch(void)
         free(wall);
         wall = NULL;
     } else if (!wall_load(line)) {
-        snprintf(notice, sizeof notice, "Cannot use %.24s", line);
-        notice_due = now_ms() + NOTICE_MS;
+        char nt[40];
+        snprintf(nt, sizeof nt, "Cannot use %.24s", line);
+        notice_post(nt, 1, now_ms());
         touch_bar();
         return;
     }
@@ -1176,8 +1207,9 @@ static void message(int i, uint32_t type, const unsigned char *p, uint32_t len)
         if (py > (int)H - BAR_H - (c.h + TITLE_H + BORDER)) py = (int)H - BAR_H - (c.h + TITLE_H + BORDER);
         struct win *w = win_new(px < 0 ? 0 : px, py < 0 ? 0 : py, c.w, c.h, c.title, i);
         if (!w) {
-            snprintf(notice, sizeof notice, "No room for another window (%d)", MAXWIN);
-            notice_due = now_ms() + NOTICE_MS;
+            char nt[40];
+            snprintf(nt, sizeof nt, "No room for another window (%d)", MAXWIN);
+            notice_post(nt, 1, now_ms());
             touch_bar();
             printf("bwm: no room for a window\n");
             fflush(stdout);
@@ -2240,7 +2272,7 @@ int main(int argc, char **argv)
             if (wait < 0 || d < wait)
                 wait = d < 0 ? 0 : (int)d;
             if (d <= 0) {
-                notice_due = 0;
+                notice_expire(now_ms());
                 touch_bar();
             }
         }
@@ -2278,18 +2310,30 @@ int main(int argc, char **argv)
                 if (nf) {
                     char line[sizeof notice];
                     int got = 0;
-                    if (fgets(line, sizeof line, nf)) {      /* an empty file is a writer that has not finished: look again */
+                    while (fgets(line, sizeof line, nf)) {   /* an empty file is a writer that has not finished: look again */
+                        int long_line = !strchr(line, '\n') && !feof(nf);
                         line[strcspn(line, "\r\n")] = 0;
-                        if (line[0]) {
-                            snprintf(notice, sizeof notice, "%s", line);
-                            notice_due = now + NOTICE_MS;
-                            touch_bar();
+                        if (long_line) {                     /* a line too long for the bar is cut; skip the rest of it */
+                            int c;
+                            while ((c = fgetc(nf)) != EOF && c != '\n')
+                                ;
+                        }
+                        const char *text = line;
+                        int warn = 0;
+                        if (text[0] == '!') {                /* a leading ! makes it a warning (red) */
+                            warn = 1;
+                            text++;
+                        }
+                        if (text[0]) {
+                            notice_post(text, warn, now);
                             got = 1;
                         }
                     }
                     fclose(nf);
-                    if (got)
+                    if (got) {
+                        touch_bar();
                         unlink(NOTICE_FILE);
+                    }
                 }
             }
         }
