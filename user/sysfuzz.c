@@ -699,6 +699,10 @@ u64 elf_main(u64 *sp) {
         }
         else if (n == 56 || n == 57 || n == 58 || n == 435) {
             if (n == 56) a[1] = 0;                    /* clone: the child keeps our stack */
+            /* A child that ends with a stop signal as its exit signal stops
+             * the fuzzer (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU), as on Linux,
+             * and the shell waits for a program nobody continues. */
+            if (n == 56 && (a[0] & 0xff) >= 19 && (a[0] & 0xff) <= 22) a[0] = (a[0] & ~0xffUL) | 17;
             lx_fork(n, a[0], a[1], a[2], a[3], a[4]);
         } else lx(n, a[0], a[1], a[2], a[3], a[4], a[5]);
         done++;
