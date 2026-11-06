@@ -1641,6 +1641,28 @@ static void snap_win(struct win *w, int side)
     touch_win(w);
 }
 
+/* Alt-Home, Alt-Page Up, Alt-End and Alt-Page Down: a quarter of the screen above the task bar (right 0 or 1, bottom 0 or 1). */
+static void snap_quarter(struct win *w, int right, int bottom)
+{
+    touch_win(w);
+    w->keep_r_on = w->keep_b_on = 0;
+    if (!w->maxed) {
+        w->sx = w->x; w->sy = w->y; w->sw = w->w; w->sh = w->h;
+        w->maxed = 1;
+    }
+    int avail = (int)H - BAR_H;
+    int half = right ? (int)W - (int)W / 2 : (int)W / 2;
+    int top = bottom ? avail / 2 : 0;
+    w->x = right ? (int)W / 2 : 0;
+    w->y = top;
+    w->want_cw = half - 2 * BORDER;
+    w->want_ch = (bottom ? avail - avail / 2 : avail / 2) - TITLE_H - BORDER;
+    if (w->cli >= 0 && w->pend)
+        w->again = 1;
+    request_size(w);
+    touch_win(w);
+}
+
 /* Starts /bin/IMAGE with argv[0] NAME (bfiles is bterm run under that name). */
 static void launch_program(const char *name, const char *image)
 {
@@ -2582,6 +2604,13 @@ int main(int argc, char **argv)
                         if (t && t->resizable) {
                             raise_win(t);
                             snap_win(t, code == 103 ? 0 : code == 106 ? 1 : -1);
+                            touch_all();
+                        }
+                    } else if ((code == 102 || code == 104 || code == 107 || code == 109) && down && k_alt && !k_shift) {
+                        struct win *t = focus();                    /* Alt-Home, Alt-Page Up, Alt-End, Alt-Page Down: a quarter of the screen */
+                        if (t && t->resizable) {
+                            raise_win(t);
+                            snap_quarter(t, code == 104 || code == 109, code == 107 || code == 109);
                             touch_all();
                         }
                     } else if (code == 67 && down && k_alt) {      /* Alt-F9: minimize the focused window */
