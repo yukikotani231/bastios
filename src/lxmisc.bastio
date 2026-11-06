@@ -13,6 +13,8 @@ const LX_FTRUNCATE: u64 = 77;
 const LX_SCHED_YIELD: u64 = 24;
 const LX_MREMAP: u64 = 25;
 const LX_MADVISE: u64 = 28;
+const LX_PKEY_ALLOC: u64 = 330;
+const LX_PKEY_FREE: u64 = 331;
 const LX_FSYNC: u64 = 74;
 const LX_FDATASYNC: u64 = 75;
 const LX_CHMOD: u64 = 90;
@@ -849,7 +851,7 @@ fn lx_syslog(k: &mut Kernel, pid: u64, t: u64, buf: u64, len: u64) -> u64
 
 fn is_misc_call(n: u64) -> bool {
   return n == LX_TRUNCATE || n == LX_FTRUNCATE || n == LX_PREAD64 || n == LX_PWRITE64 || n == LX_SCHED_YIELD || n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MSYNC
-    || n == LX_MADVISE || n == LX_FSYNC || n == LX_FDATASYNC || n == LX_CHMOD || n == LX_FCHMOD
+    || n == LX_PKEY_MPROTECT || n == LX_PKEY_ALLOC || n == LX_PKEY_FREE || n == LX_MADVISE || n == LX_FSYNC || n == LX_FDATASYNC || n == LX_CHMOD || n == LX_FCHMOD
     || n == LX_CHOWN || n == LX_FCHOWN || n == LX_LCHOWN || n == LX_UMASK || n == LX_GETRLIMIT
     || n == LX_GETRUSAGE || n == LX_SYSINFO || n == LX_SETPGID
     || n == LX_GETPGRP || n == LX_SETSID
@@ -1085,7 +1087,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     ret(&mut k.procs, pid, 0);
     return SWITCH;
   }
-  if (n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT || n == LX_MADVISE) && !win_quiet(&mut k, pid) {
+  if (n == LX_MREMAP || n == LX_MUNMAP || n == LX_MPROTECT || n == LX_PKEY_MPROTECT || n == LX_MADVISE) && !win_quiet(&mut k, pid) {
     return lx_retry(&mut k, pid, n);      // another thread of pid runs on a processor
   }
   let mut r = 0;
@@ -1099,6 +1101,25 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
     r = lx_munmap_locked(&mut k, pid, a, b);
   } else if n == LX_MPROTECT {
     r = lx_mprotect(&mut k, pid, a, b, c);
+  } else if n == LX_PKEY_MPROTECT {
+    // The CPU has no protection keys here: a key was never allocated, so
+    // only the default key 0 and -1 (which means "none") are valid.
+    let pkey = r10 % 4294967296;
+    if pkey == 0 || pkey == 4294967295 {
+      r = lx_mprotect(&mut k, pid, a, b, c);
+    } else {
+      r = EINVAL;
+    }
+  } else if n == LX_PKEY_ALLOC {
+    // pkey_alloc(flags, access_rights): EINVAL for a bad argument, else
+    // ENOSPC, which is what Linux answers on a CPU without protection keys.
+    if a % 4294967296 != 0 || b % 4294967296 > 3 {
+      r = EINVAL;
+    } else {
+      r = ENOSPC;
+    }
+  } else if n == LX_PKEY_FREE {
+    r = EINVAL;                             // no key was ever allocated
   } else if n == LX_MADVISE {
     r = lx_madvise(&mut k, pid, a, b, c);
     assert kok(k);

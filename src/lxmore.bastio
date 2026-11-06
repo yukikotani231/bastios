@@ -19,6 +19,8 @@ const LX_GETCPU: u64 = 309;
 const LX_MEMFD_CREATE: u64 = 319;
 const LX_COPY_FILE_RANGE: u64 = 326;
 const LX_STATX: u64 = 332;
+const LX_MEMFD_SECRET: u64 = 447;
+const O_CLOEXEC_BIT: u64 = 0x80000;       // memfd_secret's only flag
 const STATX_SIZE: u64 = 256;              // struct statx
 const STATX_BASIC: u64 = 0x7FF;           // STATX_BASIC_STATS: what statx fills in
 const LOCK_SH: u64 = 1;
@@ -31,7 +33,7 @@ const ENODEV: u64 = 18446744073709551597;     // 2^64 - 19
 
 fn is_more_call(n: u64) -> bool {
   return n == LX_SENDFILE || n == LX_FLOCK || n == LX_FADVISE64 || n == LX_FALLOCATE || n == LX_PREADV
-    || n == LX_PWRITEV || n == LX_GETCPU || n == LX_MEMFD_CREATE || n == LX_COPY_FILE_RANGE || n == LX_STATX;
+    || n == LX_PWRITEV || n == LX_GETCPU || n == LX_MEMFD_CREATE || n == LX_COPY_FILE_RANGE || n == LX_STATX || n == LX_MEMFD_SECRET;
 }
 
 /// Puts the first n transfer bytes into pipe p from the kernel side (no
@@ -555,8 +557,31 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
   if flags / 4 != 0 {
     return EINVAL;                          // MFD_CLOEXEC (1) and MFD_ALLOW_SEALING (2), alone or together; nothing else
   }
+  return memfd_new(&mut k, pid, flags % 2 == MFD_CLOEXEC, flags / 2 % 2 == 1);
+}
+
+/// memfd_secret(flags): the only flag is O_CLOEXEC. A file in memory like a
+/// memfd's, to be sized with ftruncate and mapped; the kernel does not take
+/// its pages out of its own direct map, so they are not hidden from it as
+/// on Linux (the trusted base is not shrunk by this).
+fn lx_memfd_secret(k: &mut Kernel, pid: u64, flags: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if flags & !O_CLOEXEC_BIT != 0 {
+    return EINVAL;
+  }
+  return memfd_new(&mut k, pid, flags != 0, false);
+}
+
+/// A new unnamed file in /tmp for memfd_create and memfd_secret; sealing
+/// says whether it may be sealed.
+fn memfd_new(k: &mut Kernel, pid: u64, cloexec: bool, sealing: bool) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   let mut oflags = LO_RDWR + LO_CREAT + LO_EXCL;
-  if flags % 2 == MFD_CLOEXEC {
+  if cloexec {
     oflags = oflags + LO_CLOEXEC;
   }
   let mut tries = 0;
@@ -567,7 +592,7 @@ fn lx_memfd(k: &mut Kernel, pid: u64, name: u64, flags: u64) -> u64
     let n = memfd_name(&mut k, pid, sat_add(k.ns, tries));
     let fd = lx_open_n(&mut k, pid, n, oflags, 511);   // 0777, as Linux: a memfd may be executed
     if fd < LXNFD {
-      seal_new(&mut k, pid, fd, flags / 2 % 2 == 1);
+      seal_new(&mut k, pid, fd, sealing);
       let n2 = memfd_name(&mut k, pid, sat_add(k.ns, tries));
       vfs_unlink(&mut k.fs, &mut k.mem, n2);
       return fd;
@@ -871,6 +896,8 @@ fn lx_more_result(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u6
     }
   } else if n == LX_MEMFD_CREATE {
     r = lx_memfd(&mut k, pid, a, b);
+  } else if n == LX_MEMFD_SECRET {
+    r = lx_memfd_secret(&mut k, pid, a);
   }
   return r;
 }
