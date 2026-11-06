@@ -1196,12 +1196,21 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = until(b"bsys: keyboard " + lay, mark) and until(b"bwm: keyboard " + lay, mark)
             print(("ok  " if good else "FAIL"), f"({name}) k in the System window cycles the keyboard layout")
             fails += not good
-            # w puts the next picture of /usr/share/wallpapers in /etc/bwm.wallpaper (a.ppm, b.ppm, then none).
-            for want in (b"a.ppm", b"b.ppm", b"none"):
+            # w goes through the gradients bwm draws itself (@green, @purple, @sunset, @slate), then the
+            # pictures of /usr/share/wallpapers in /etc/bwm.wallpaper (a.ppm, b.ppm), then none.
+            for want in (b"@green", b"@purple", b"@sunset", b"@slate", b"a.ppm", b"b.ppm", b"none"):
                 if not good:
                     break
                 monitor("sendkey w")
                 good = until(b"bsys: wallpaper " + want, mark)
+                if good and want == b"@green":          # the green gradient: more green than blue low on the screen
+                    end = time.time() + 10
+                    while True:
+                        w, h, px = screendump()
+                        r, g, b = at(w - 40, h - 80)
+                        if g > b + 20 or time.time() > end:
+                            break
+                    good = g > b + 20
             print(("ok  " if good else "FAIL"), f"({name}) w in the System window cycles the wallpaper")
             fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
