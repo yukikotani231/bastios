@@ -51,3 +51,12 @@ pdf
 # timeout 600
 $ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape|wireshark/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 3; echo '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#336699"/><text x="4" y="40" font-size="24">Hi</text></svg>' > /disk/ik/tmp/t.svg; bb chroot /disk/ik /usr/bin/env HOME=/tmp /usr/bin/inkscape --export-png=/tmp/o.png /tmp/t.svg >/disk/ik.png.out 2>&1; bb sleep 1; [ -s /disk/ik/tmp/o.png ] && bb od -An -c -N 4 /disk/ik/tmp/o.png | bb grep -q "P   N   G" && echo png || { bb ls -l /disk/ik/tmp/o.png; bb od -An -c -N 8 /disk/ik/tmp/o.png; bb tail -n 8 /disk/ik.png.out | bb cut -c1-200; }
 png
+
+== x11b: a partition editor, GParted, draws its window on the X screen
+# timeout 900
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape|wireshark|gparted/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/gp/tmp; bb tar -xf /disk/gparted.tar -C /disk/gp && bb rm /disk/gparted.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/gp/tmp/.passwd; echo root:x:0: >/disk/gp/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb26.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/gp -d 6 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/sbin/gparted >/disk/gp.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb26.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb26.out 2>/dev/null || { bb tail -n 12 /disk/gp.out | bb cut -c1-200; }; bb cat /disk/fb26.out; bb ps | bb grep -q 'gparted' && echo alive || bb cat /disk/gp.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :6
+fakebwm: pixels drawn
+fakebwm: typed
+alive
