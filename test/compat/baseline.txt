@@ -156,6 +156,7 @@ debian: debian: find, xargs and du
 debian: debian: lscpu reads the processors from /sys
 debian: debian: lscpu counts threads, cores and sockets from the topology
 debian: debian: lsmem lists the memory blocks from /sys
+debian: debian: lsblk runs on a machine of loop devices
 debian: debian: script(1) ends when its command does
 debian: debian: lslocks lists a held flock
 debian: debian: lsns lists the namespaces without warnings
@@ -1540,7 +1541,6 @@ t_perf: IOC_DISABLE stops it
 t_perf: it keeps its count
 t_perf: IOC_RESET zeroes it
 t_perf: a context-switches counter sees the process sleep
-t_perf: page-faults opens (it reads 0: not counted)
 t_perf: a read with the time and id formats gives 32 bytes
 t_perf: the time enabled is the time running, and about 30 ms
 t_perf: IOC_ID gives the id the read had
@@ -1559,6 +1559,10 @@ t_perf: an unknown flag is EINVAL
 t_perf: splice into a counter is EINVAL (it has no splice_write)
 t_perf: an unknown ioctl is ENOTTY
 t_perf: an unprivileged program cannot count init
+t_perf: getrusage ru_minflt grew by as many
+t_perf: page-faults counts the faults of writing 64 shared pages
+t_perf: page-faults-maj reads 0
+t_perf: page-faults-min counts them too
 t_perm: a new file belongs to its maker
 t_perm: a path needs search permission on its directories
 t_perm: a set-group-ID directory passes on its group
@@ -2311,6 +2315,7 @@ x11: x11: a media player, VLC, draws its window on the X screen
 x11b: x11b: unpack the server and the client roots
 x11b: x11b: an image editor, GIMP, draws its window on the X screen
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
+x11b: x11b: LibreOffice Writer opens its Open dialog on Ctrl+O
 x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
 x11b: x11b: a network protocol analyser, Wireshark, draws its window on the X screen
 x11b: x11b: LibreOffice turns a text file into a PDF, fonts and all

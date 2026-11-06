@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- Page faults are counted per thread: `perf_event_open` `PAGE_FAULTS` and `PAGE_FAULTS_MIN` (they read 0 before), `getrusage` `ru_minflt` and `/proc/PID/stat` `minflt` (`test/compat/progs/t_perf.c`). Every fault is counted as minor; `PAGE_FAULTS_MAJ` still reads 0.
 - `bwm` shows a calendar of the month, today lit, when the clock in the task bar is clicked or Alt-C is pressed; a click anywhere or Escape closes it. It follows the time zone the clock uses.
 - A TCP connection that has been reset or closed now polls as writable as well as readable and hung up, as on Linux, so a `poll` loop waiting for `POLLOUT` on it wakes and sees the write fail instead of stalling (`test/compat/progs/t_tcprst.c`; `msoak` has a 16-connection step).
 - `bwm`: Alt-Home, Alt-Page Up, Alt-End and Alt-Page Down put a resizable window on a quarter of the screen (top left, top right, bottom left, bottom right); Alt-Down or Alt-F10 puts it back, as for a half.
@@ -269,7 +270,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 - The compat suite's `x11` lane runs a GTK 3 program, PuTTY, and two Qt 5 programs, MediaInfo and KeePassXC, a Java Swing one, the JDownloader installer, a wxWidgets one, Audacity, and a Python one with PyQt 5, dupeGuru, and puddletag, QDirStat, a Qt 5 disk usage viewer, FileZilla, a GTK 3 FTP client, Avidemux, a Qt 5 video editor, HandBrake, a GTK 3 video transcoder, MKVToolNix, a Qt 5 Matroska tool, Czkawka, a GTK 4 duplicate finder, tsMuxeR, a Qt 5 transport stream muxer, FileBot, a Java media renamer, and FreeFileSync, a GTK folder synchroniser, Krusader, a Qt file manager, Evince, a GTK PDF viewer, and VLC, a media player, on the X screen as well as xterm (`jlesage/putty`, `jlesage/mediainfo`, `jlesage/keepassxc`, `jlesage/jdownloader-2`, `jlesage/audacity`, `jlesage/dupeguru`, `jlesage/puddletag`, `jlesage/qdirstat`, `jlesage/filezilla`, `jlesage/avidemux`, `jlesage/handbrake`, `jlesage/mkvtoolnix`, `jlesage/czkawka`, `jlesage/tsmuxer`, `jlesage/filebot`, `jlesage/freefilesync`, `jlesage/krusader`, `jess/evince`, `jess/vlc`, pinned in images.mk; the image's own tools under `opt/` are left off the disk).
 
-- The compat suite has a second X11 lane, `x11b`, on a disk of its own (a BastiOS disk holds 262144 entries, which the first X11 disk's roots nearly fill). It runs the GIMP image editor LibreOffice Writer, Inkscape, Wireshark, GParted and OpenSCAD.
+- The compat suite has a second X11 lane, `x11b`, on a disk of its own (a BastiOS disk holds 262144 entries, which the first X11 disk's roots nearly fill). It runs the GIMP image editor LibreOffice Writer, Inkscape, Wireshark, GParted and OpenSCAD. The compat `fakebwm` can click and press Ctrl-keys, and one case checks that LibreOffice Writer opens its file dialog on Ctrl+O.
 
 - `test/compat/bastio.txt` runs bastiolang's `bastiofmt` (the formatter) and `bastio-lsp` (the language server) on BastiOS: the formatter on a line and on the compiler's parser, the language server over its standard input and output for hover, go to definition, formatting and a diagnostic from `bastioc1`.
 

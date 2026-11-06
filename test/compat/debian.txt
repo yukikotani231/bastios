@@ -112,6 +112,10 @@ Memory block size
 Total online memory
 online no
 
+== debian: lsblk runs on a machine of loop devices
+$ bb mkdir -p /disk/d/sys && bb mount -t sysfs sysfs /disk/d/sys && bb chroot /disk/d /bin/bash -c "lsblk >/dev/null 2>&1; echo rc=\$?"
+rc=0
+
 == debian: lsns lists the namespaces without warnings
 $ bb mkdir -p /disk/d/proc; bb mount -t proc proc /disk/d/proc; bb chroot /disk/d /bin/bash -c "lsns 2>&1 | grep -c -i -E 'unsupported|warn'; lsns -t pid -n | wc -l"
 0

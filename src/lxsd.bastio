@@ -116,15 +116,17 @@ fn sd_put_dir(x: &mut Bytes, d: u64) -> u64
 /// src/lxprocfs.bastio): /sys/block/sda and /sys/block/sda/sdaN with their
 /// queue directories, and in /sys/dev/block a link "8:N" to each, which
 /// is how lsblk and udev-less programs find the devices by number and
-/// their names. Nothing is made without a disk left alone.
+/// their names. The directories are made without a disk too.
 fn sd_sysfs(k: &mut Kernel)
   requires kok(k)
   ensures kok(k)
 {
+  // The directories are there with no disk too (a machine of loop devices
+  // only): lsblk stops with an error when /sys/dev/block is missing.
+  make_dir(&mut k.fs, "sys/block");
+  make_dir(&mut k.fs, "sys/dev");
+  make_dir(&mut k.fs, "sys/dev/block");
   if sd_get(k.sdp, 0, 1) == 0 {
-    return;
-  }
-  if !make_dir(&mut k.fs, "sys/block") || !make_dir(&mut k.fs, "sys/dev") || !make_dir(&mut k.fs, "sys/dev/block") {
     return;
   }
   let mut d = 0;

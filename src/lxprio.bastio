@@ -411,6 +411,21 @@ fn io_get(k: &Kernel, p: u64, i: u64) -> u64
   return get(k.sys, SYS_IO + 4 * p + i);
 }
 
+/// Thread p had a page fault (counted for perf_event_open, getrusage and /proc/PID/stat).
+fn pf_count(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_PF + p, sat_add(get(k.sys, SYS_PF + p), 1));
+}
+
+/// The page faults thread p has had.
+fn pf_get(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+{
+  return get(k.sys, SYS_PF + p);
+}
+
 /// Thread p's count of voluntary (involuntary false) or involuntary switches.
 fn csw_get(k: &Kernel, p: u64, involuntary: bool) -> u64
   requires kok(k) && p < NPROC

@@ -778,6 +778,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
   }
   let mut is_bus = false;
   if v == 14 {
+    pf_count(&mut s.k, p);
     // A swapped page (src/swap.bastio) is a page there but with no access: nothing below may see it first.
     let sw = swap_fault(&mut s.k, p);
     if sw == SW_OK {
@@ -1143,6 +1144,7 @@ fn fault_fast(s: &mut Sys, cpu: &Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, vpid: u
   if swap_count(s.k, tgid_) != 0 || !(anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p)) {
     return Fast::Back(fpu);
   }
+  pf_count(&mut s.k, p);                // (the slow path counts the faults this hands back)
   pset(&mut s.k.procs, p, F_FAULT_RIP, 0);
   match take_space(&mut s.k.spaces, p) {
     Space::Empty => {
