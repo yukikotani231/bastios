@@ -866,6 +866,42 @@ static void wall_watch(void)
     touch_all();
 }
 
+/* The calendar: a click on the clock in the task bar (or Alt-C) opens a month above it, today lit; a click anywhere or Esc closes it. */
+static int cal_on;
+#define CAL_W 196
+#define CAL_H 146
+static void draw_calendar(void)
+{
+    if (!cal_on)
+        return;
+    static const char *const months[] = { "January", "February", "March", "April", "May", "June", "July", "August", "September",
+                                          "October", "November", "December" };
+    time_t t = (time_t)clock_local_min() * 60;
+    struct tm g;
+    gmtime_r(&t, &g);
+    int year = g.tm_year + 1900, mon = g.tm_mon, today = g.tm_mday;
+    static const int mdays[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+    int nd = mdays[mon] + (mon == 1 && (year % 4 == 0 && (year % 100 != 0 || year % 400 == 0)));
+    int first = ((g.tm_wday - (today - 1)) % 7 + 7) % 7;             /* the weekday of the 1st, 0 for Sunday */
+    int x0 = (int)W - 4 - CAL_W, y0 = (int)H - BAR_H - 2 - CAL_H;
+    fill(scene, x0 - 1, y0 - 1, x0 + CAL_W + 1, y0 + CAL_H + 1, rgb(200, 200, 210));
+    fill(scene, x0, y0, x0 + CAL_W, y0 + CAL_H, rgb(45, 45, 60));
+    char head[40];
+    snprintf(head, sizeof head, "%s %d", months[mon], year);
+    text(scene, x0 + 10, y0 + 6, head, rgb(255, 255, 255));
+    static const char *const days[] = { "Su", "Mo", "Tu", "We", "Th", "Fr", "Sa" };
+    for (int i = 0; i < 7; i++)
+        text(scene, x0 + 10 + i * 25, y0 + 24, days[i], rgb(150, 150, 170));
+    for (int d = 1; d <= nd; d++) {
+        int cell = first + d - 1, cx = x0 + 10 + (cell % 7) * 25, cy = y0 + 42 + (cell / 7) * 16;
+        char s[4];
+        snprintf(s, sizeof s, "%2d", d);
+        if (d == today)
+            fill(scene, cx - 3, cy - 3, cx + 19, cy + 11, rgb(40, 90, 200));
+        text(scene, cx, cy, s, rgb(255, 255, 255));
+    }
+}
+
 /* The window list shown while Alt-Tab is held: the top window (the one the
  * switch chose) is lit, the others follow in stacking order. */
 static int switch_on;                    /* Alt-Tab is being held: the window list is shown */
@@ -910,6 +946,7 @@ static void draw_scene(int x0, int y0, int x1, int y1)
             draw_win(z[i], z[i] == focus());
     draw_bar();
     draw_menu();
+    draw_calendar();
     draw_switcher();
 }
 
@@ -2562,6 +2599,12 @@ int main(int argc, char **argv)
                         run_buf[0] = 0;
                         menu_open = 0;
                         touch_all();
+                    } else if (cal_on && down && code == 1) {        /* Esc closes the calendar */
+                        cal_on = 0;
+                        touch_all();
+                    } else if (code == 46 && down && k_alt) {      /* Alt-C: the calendar */
+                        cal_on = !cal_on;
+                        touch_all();
                     } else if (menu_open && down) {                /* the open menu takes the keys: Up and Down move, Enter chooses, Esc closes */
                         int it = menu_sel;
                         if (code == 103 || code == 108) {
@@ -2765,6 +2808,13 @@ int main(int argc, char **argv)
                     touch_all();
                     if (launch_entry(it))
                         running = 0;
+                    buttons = m[0];
+                    continue;
+                }
+                if (down && !(buttons & 1) && !menu_open && (cal_on || (in_bar && mx >= (int)W - MENU_W - 12 - CLOCK_W && mx < (int)W - MENU_W - 12))) {
+                    int on_clock = in_bar && mx >= (int)W - MENU_W - 12 - CLOCK_W && mx < (int)W - MENU_W - 12;
+                    cal_on = on_clock && !cal_on;       /* the clock opens or closes the calendar; a click elsewhere closes it and goes no further */
+                    touch_all();
                     buttons = m[0];
                     continue;
                 }
