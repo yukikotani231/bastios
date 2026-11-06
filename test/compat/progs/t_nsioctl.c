@@ -200,6 +200,30 @@ static int task_ns(void) {
     return ok && ok2 && ok3;
 }
 
+static int zombie_ns(void) {
+    pid_t c = fork();
+    if (c == 0) _exit(0);
+    usleep(100000);
+    char b[64];
+    snprintf(b, sizeof b, "/proc/%d/ns/pid", c);
+    int fd = open(b, O_RDONLY);
+    int e = errno;
+    char l[64];
+    snprintf(b, sizeof b, "/proc/%d/ns/uts", c);
+    ssize_t n = readlink(b, l, sizeof l);
+    int e2 = errno;
+    if (fd >= 0) {
+        struct stat st;
+        fstat(fd, &st);
+        printf("zombie ns: open ok fd=%d mode=%o\n", fd, st.st_mode);
+    }
+    printf("zombie ns: open e=%d readlink n=%zd e=%d\n", e, n, e2);
+    waitpid(c, 0, 0);
+    int code = fd < 0 ? (e == ENOENT ? 1 : 100 + e) : 2 + (n < 0 ? 10 + e2 : 0);
+    errno = code;
+    return code == 1;
+}
+
 int main(void) {
     setup();
     int uts = open("/proc/self/ns/uts", O_RDONLY);
@@ -233,6 +257,13 @@ int main(void) {
         umount("/tmp/nsr/proc");
         WIFEXITED(st) && WEXITSTATUS(st) == 0;
     }));
+    EXPECT("namespace files have a device of their own (nsfs), shared by all of them",
+           ({ struct stat a, b, c, r;
+              stat("/proc/self/ns/pid", &a) == 0 && stat("/proc/self/ns/net", &b) == 0
+              && stat("/proc", &c) == 0 && stat("/", &r) == 0
+              && a.st_dev != 0 && a.st_dev == b.st_dev && a.st_dev != c.st_dev && a.st_dev != r.st_dev
+              && fstat(open("/proc", O_RDONLY), &c) == 0 && a.st_dev != c.st_dev; }));
+    EXPECT("a zombie has no namespace links to open", zombie_ns() == 1);
     EXPECT("a thread's directory has namespace links, /proc has none", task_ns());
     EXPECT("NS_GET_NSTYPE gives the CLONE_NEW* flag of the namespace",
            ioctl(uts, NS_GET_NSTYPE) == CLONE_NEWUTS && ioctl(usr, NS_GET_NSTYPE) == CLONE_NEWUSER

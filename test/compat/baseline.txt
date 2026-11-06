@@ -154,6 +154,7 @@ debian: debian: coreutils, sed, grep and awk in a pipeline
 debian: debian: dpkg knows the packages
 debian: debian: find, xargs and du
 debian: debian: lscpu reads the processors from /sys
+debian: debian: lsns lists the namespaces without warnings
 debian: debian: perl
 debian: debian: tar and gzip (GNU tar makes its archive with creat)
 debian: debian: the dynamic linker through its links, by hand
@@ -1288,6 +1289,8 @@ t_nft: the table, the chain and the rules are listed
 t_nsioctl: NS_GET_NSTYPE answers on every namespace link in a chroot with its own proc
 t_nsioctl: NS_GET_NSTYPE answers on every namespace link of every process
 t_nsioctl: a PID namespace made inside another has that one as its parent
+t_nsioctl: namespace files have a device of their own (nsfs), shared by all of them
+t_nsioctl: a zombie has no namespace links to open
 t_nsioctl: a thread's directory has namespace links, /proc has none
 t_nsioctl: an inner user namespace's parent is the outer one, seen from outside only
 t_pidapi: clone with CLONE_VM|CLONE_VFORK|CLONE_PIDFD stores a pidfd
@@ -2260,6 +2263,7 @@ x11: x11: a media player, VLC, draws its window on the X screen
 x11b: x11b: unpack the server and the client roots
 x11b: x11b: an image editor, GIMP, draws its window on the X screen
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
+x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
@@ -2406,6 +2410,7 @@ java: java: Eclipse JDT LS, the language server, finds a type error and answers 
 java: java: a real library (Apache Commons Codec) with its test libraries, tested with the JUnit console launcher
 alpine: nvim: the LSP client talks to TypeScript's language server and gets a hover and a type error
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
+t_ltp2: protection keys are not available: pkey_alloc answers ENOSPC (EINVAL for bad arguments), pkey_free EINVAL, pkey_mprotect takes key 0 or -1; memfd_secret returns a file to size and map
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
 t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them

@@ -1401,6 +1401,9 @@ fn put_stat(k: &mut Kernel, pid: u64, buf: u64, mo: Meta) -> u64
     nlink = vfs_nlink(&mut k.fs, m.ino - INO_FILES);   // a file and its hard links
   }
   lx_fill(&mut k, 0, STAT_SIZE);
+  if m.mode == 0x8124 && m.ino >= 0xEFFFFFFB {   // an nsfs file (S_IFREG_NS, inodes from NS_INO0 up: src/lxnsk.bastio)
+    xfer_u64(&mut k.fs.xfer, 0, 4);         // st_dev: the nsfs device, which tools such as lsns tell from other files by
+  }
   xfer_u64(&mut k.fs.xfer, 8, m.ino);         // st_ino
   let uid = id_out(k, pid, 0, m.own % 0x100000000);   // as the reader's user namespace sees them (src/lxuser.bastio)
   let gid = id_out(k, pid, 1, m.own / 0x100000000 % 0x100000000);
