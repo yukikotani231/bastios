@@ -253,7 +253,7 @@ static const unsigned short linux_calls[] = {
     269, 270, 271, 272, 273, 274, 275, 276, 277, 278, 280, 281, 282, 283, 284, 285, 286, 287,
     288, 289, 290, 291, 292, 293, 294, 295, 296, 297, 299, 300, 301, 302, 303, 304, 305, 306, 307, 308, 309, 310, 311, 312,
     314, 315, 316, 317, 318, 319, 321, 322, 324, 325, 326, 327, 328, 329, 330, 331, 332, 334, 424, 425, 426, 427, 428, 429, 430, 431, 432, 433, 434, 435, 437, 438,
-    439, 441, 442, 444, 445, 447, 449, 451, 452, 20819,
+    439, 441, 442, 457, 458, 444, 445, 447, 449, 451, 452, 20819,
 };
 #define NLINUX (sizeof linux_calls / sizeof linux_calls[0])
 
@@ -699,6 +699,10 @@ u64 elf_main(u64 *sp) {
         }
         else if (n == 56 || n == 57 || n == 58 || n == 435) {
             if (n == 56) a[1] = 0;                    /* clone: the child keeps our stack */
+            /* A child that ends with a stop signal as its exit signal stops
+             * the fuzzer (SIGSTOP, SIGTSTP, SIGTTIN, SIGTTOU), as on Linux,
+             * and the shell waits for a program nobody continues. */
+            if (n == 56 && (a[0] & 0xff) >= 19 && (a[0] & 0xff) <= 22) a[0] = (a[0] & ~0xffUL) | 17;
             lx_fork(n, a[0], a[1], a[2], a[3], a[4]);
         } else lx(n, a[0], a[1], a[2], a[3], a[4], a[5]);
         done++;

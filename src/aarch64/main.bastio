@@ -89,6 +89,7 @@ import "swap.bastio";
 import "oom.bastio";
 import "lxcow.bastio";
 import "lxsnd.bastio";
+import "lxrtc.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";
 import "lxserial.bastio";
@@ -100,6 +101,7 @@ import "lxnum.bastio";
 const V_TIMER: u64 = 32;
 const V_LTIMER: u64 = 48;     // the tick of a processor other than the boot one
 const V_WAKE: u64 = 50;       // another processor's wake-up (an SGI): look for work
+const MAX_IDLE: u64 = 1024;   // more than there are processors
 const INFO_POLL: u64 = 13;    // not a query: while idle, wake every i microseconds (0: only at ticks), to find a finished I/O
 const POLL_US: u64 = 500;
 const INFO_KICK: u64 = 12;    // not a query: sends the wake-up to the other processors (the answer is 0)
@@ -125,7 +127,11 @@ fn tick(t: u64) -> u64 {
 }
 
 // The kernel's state and the console devices, which one processor owns.
-struct Sys { k: Kernel, con: Con, stop: bool }
+// `idle` counts the processors that found nothing to run and have not come
+// back for more: an idle application processor sleeps through its own ticks
+// (boot/aarch64/platform.c, bst_cpu_wait), and the boot processor's tick wakes
+// them if a process is ready (or the kernel stops).
+struct Sys { k: Kernel, con: Con, stop: bool, idle: u64 }
   invariant kok(k) && con_ok(con);
 
 spec fn sys_ok(s: &Sys) -> bool {
@@ -221,6 +227,57 @@ fn io_waiting(k: &Kernel) -> bool
   return false;
 }
 
+/// Under the lock: this processor has nothing to run.
+fn go_idle(s: &mut Sys) -> Job
+  requires sys_ok(s)
+  ensures sys_ok(s) && result is Job::Idle
+{
+  if s.idle < MAX_IDLE {
+    s.idle = s.idle + 1;
+  }
+  return Job::Idle;
+}
+
+/// The same, while a disk or network request is pending.
+fn go_poll(s: &mut Sys) -> Job
+  requires sys_ok(s)
+  ensures sys_ok(s) && result is Job::Poll
+{
+  if s.idle < MAX_IDLE {
+    s.idle = s.idle + 1;
+  }
+  return Job::Poll;
+}
+
+/// Is any process READY (waiting for a processor)?
+fn ready_waiting(procs: &Buf, hi: u64) -> bool
+  requires ptab_ok(procs)
+{
+  let cap = smaller(len(procs) / STRIDE, hi);     // past it, every process is FREE
+  let mut p = 1;
+  while p < cap
+    invariant 1 <= p && cap <= NPROC
+  {
+    if state(procs, p) == READY {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
+}
+
+/// Under the lock: wakes the other processors if one of them is idle. An idle
+/// application processor sleeps up to a second, so the kernel's stop, and a
+/// process left ready, must reach it by a wake-up.
+fn kick_idle(s: &mut Sys, cpu: &Cpu)
+  requires sys_ok(s)
+  ensures sys_ok(s)
+{
+  if s.idle > 0 {
+    let woke = boot_info(cpu, INFO_KICK, 0);
+  }
+}
+
 /// What the processor does next. Starting at `from` (round robin), takes
 /// the next READY process out, with its registers loaded into `cpu`, and
 /// marks it RUNNING.
@@ -246,29 +303,30 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64) -> Job
   if p == 0 {
     if live_count(s.k.procs, s.k.pid_hi) == 0 {
       s.stop = true;
+      kick_idle(&mut s, cpu);
       return Job::Stop;
     }
     if io_waiting(s.k) {
-      return Job::Poll;
+      return go_poll(&mut s);
     }
-    return Job::Idle;
+    return go_idle(&mut s);
   }
   group_take(&mut s.k, mmu, p);                 // a thread gets its group's space
   if !lx_deliver(&mut s.k, mmu, p) {
-    return Job::Idle;                       // a signal ended it
+    return go_idle(&mut s);                // a signal ended it
   }
   match take_space(&mut s.k.spaces, p) {
     Space::Empty => {
       // A READY process always has a space; end it rather than spin on it.
       terminate(&mut s.k, mmu, p, 139);
-      return Job::Idle;
+      return go_idle(&mut s);
     },
     Space::Mapped(root) => {
       match take_fpu(&mut s.k.fpus, p) {
         Fpu::None => {
           put_space(&mut s.k.spaces, p, Space::Mapped(root));
           terminate(&mut s.k, mmu, p, 139);
-          return Job::Idle;
+          return go_idle(&mut s);
         },
         Fpu::State(f) => {
           let mut sp = root;
@@ -397,6 +455,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     }
     if what == POWEROFF || what == REBOOT {
       s.stop = true;
+      kick_idle(&mut s, cpu);
     }
     sock_wake(&mut s.k);
     if get(s.k.sys, SYS_KICK) != 0 {
@@ -408,6 +467,14 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
     }
     if disk_hold(&mut s.k, p, EIO) || what == SWITCH || ino_pressed(s.k) {
+      if what == SWITCH {
+        // A call that is over but gives up the processor (it unblocked a
+        // signal, signalled itself, yielded) still has its stop after the
+        // call; pt_sys_exit leaves out one that waits or ended the process.
+        // Without it a tracer took the next call's entry for its exit.
+        // The same as src/main.bastio.
+        let stopped = pt_sys_exit(&mut s.k, p);
+      }
       return (p + 1) % NPROC;
     }
     if what == KEEP && pt_sys_exit(&mut s.k, p) {
@@ -420,6 +487,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     let what = syscall(&mut s.con, &mut s.k, mmu, p);
     if what == POWEROFF || what == REBOOT {
       s.stop = true;
+      kick_idle(&mut s, cpu);
     }
     sock_wake(&mut s.k);
     if disk_hold(&mut s.k, p, NO_RESULT) {
@@ -482,7 +550,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       pset(&mut s.k.procs, p, F_FAULT_VA, bva);
       return p;
     }
-    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) {
+    if lz != LZ_NO || anon_fault(&mut s.k, p) || cow_fault(&mut s.k, p) || stack_fault(&mut s.k, p) || write_raced(&mut s.k, p) || fault_raced(&mut s.k, p) {
       return p;                             // code read, a page mapped or copied, or the stack grew: run the instruction again
     }
     // Out of memory (src/oom.bastio), as src/main.bastio handles it.
@@ -580,9 +648,39 @@ fn write_raced(k: &mut Kernel, p: u64) -> bool
   return user_page_writable(&mut k.spaces, p, pget(k.procs, p, reg_word(R_FAULT)));
 }
 
+/// A translation or access-flag fault (status 0x04 to 0x0b) on a page that is
+/// mapped by the time the abort is handled: another processor mapped it, a
+/// thread of the same program having faulted on it first (an instruction
+/// fetch of freshly loaded code, a read or a write), so there is nothing to
+/// do but run the instruction again. A write needs the page writable, else
+/// copy-on-write has still to break it.
+fn fault_raced(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let esr = pget(k.procs, p, reg_word(34));
+  let st = esr % 64;
+  let ec = esr >> 26;
+  if st < 0x04 || st > 0x0b {
+    return false;
+  }
+  let va = pget(k.procs, p, reg_word(R_FAULT));
+  if va < USER_BASE || (ec != 0x20 && ec != 0x24) {
+    return false;
+  }
+  // Mapped and readable (a PROT_NONE page is hidden from the hardware, and
+  // a fault on it is the program's), and writable for a write.
+  let bits = user_page_bits(&mut k.spaces, p, (va - USER_BASE) / 4096);
+  if ec == 0x24 && ((esr >> 6) % 2) == 1 {
+    return (bits / 4) % 2 == 1;
+  }
+  return (bits / 2) % 2 == 1;
+}
+
 /// An EL0 read of an identification register (MIDR_EL1, ID_AA64ISAR0_EL1,
 /// ...: op0 3, op1 0, CRn 0, CRm 0 to 7), which the processor reports as an
-/// unknown instruction. Linux emulates these (HWCAP_CPUID), and the Go
+/// unknown instruction (class 0), or, with FEAT_IDST, as a trapped
+/// system-register access (class 0x18). Linux emulates these (HWCAP_CPUID), and the Go
 /// runtime reads ID_AA64ISAR0_EL1 when it starts. Every register reads as
 /// zero here, which says no optional feature exists, so a program falls
 /// back to the baseline instructions. Returns true if the instruction at the
@@ -591,9 +689,10 @@ fn emulate_idreg(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  if (pget(k.procs, p, reg_word(34)) >> 26) != 0 {
-    return false;                           // only the unknown-reason class
-  }
+  let ec = pget(k.procs, p, reg_word(34)) >> 26;
+  if ec != 0 && ec != 0x18 {
+    return false;                           // only the unknown-reason class, and the system-register class that
+  }                                         // processors with FEAT_IDST (Armv8.4, e.g. Neoverse N2) report instead
   let pc = pget(k.procs, p, reg_word(R_PC));
   if pc % 4 != 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, pc, &mut k.fs.xfer, 4) != 4 {
     return false;
@@ -626,6 +725,9 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64, ser: &Serial)
   requires sys_ok(s)
   ensures sys_ok(s)
 {
+  if s.idle > 0 {
+    s.idle = s.idle - 1;                    // this processor is back
+  }
   if v == V_TIMER {
     s.k.ticks = tick(s.k.ticks);
     set_clock(&mut s, cpu);
@@ -633,6 +735,9 @@ fn idled(s: &mut Sys, cpu: &Cpu, v: u64, ser: &Serial)
     lx_alarms(&mut s.k);
     sleepers_wake(&mut s.k);
     pump(ser, &mut s);
+    if ready_waiting(s.k.procs, s.k.pid_hi) {
+      kick_idle(&mut s, cpu);               // the processors that sleep through their ticks
+    }
   } else {
     sleepers_wake(&mut s.k);
   }
@@ -657,6 +762,9 @@ fn turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, fpu: Frame, v: u64, s
     pump(ser, &mut s);
   }
   let j = next_job(&mut s, &mut cpu, &mut mmu, c);
+  if v == V_TIMER && ready_waiting(s.k.procs, s.k.pid_hi) {
+    kick_idle(&mut s, cpu);                 // the processors that sleep through their ticks
+  }
   return Next { job: j, from: c };
 }
 
@@ -816,7 +924,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   if nic_e1000(nic) {
     puts(&mut console, "net: e1000\r\n");
   }
-  let mut k = kernel_new(m, disk, nic, Snd::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
+  let mut k = kernel_new(m, disk, nic, Snd::None, HwClock::None, mice_new(false), tsc, 0, wall * 1000000000, cpu_count(cpu));
   sd_scan(&mut k);                          // /dev/sda of a disk left alone (src/lxsd.bastio)
   let mut hi = 0;
   while hi < hw_n
@@ -830,7 +938,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   if spawn(&mut k, 0, 0) == 0 {
     puts(&mut console, "cannot start the shell\r\n");
   }
-  let mut s0 = Sys { k: k, con: console, stop: false };
+  let mut s0 = Sys { k: k, con: console, stop: false, idle: 0 };
   pump(con, &mut s0);
   // Every processor runs the scheduler until the kernel stops; then they
   // are all parked again and the state is this one's.
@@ -852,6 +960,7 @@ fn main(con: &mut Serial, pool: &mut Pool, win: &mut MmioSpace, mmu: &mut Mmu, c
   blk_free(&mut win, devs.disk, &mut s.k.mem);
   nic_free(&mut win, s.k.nic, &mut s.k.mem);
   snd_free(s.k.snd, &mut s.k.mem);
+  hw_free(s.k.hwc);
   puts(&mut s.con, "\r\nBastiOS: ");
   put_num(&mut s.con, count_free(s.k.mem.bm));
   puts(&mut s.con, " pages free at power off\r\n");

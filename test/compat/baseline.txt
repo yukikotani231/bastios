@@ -1781,6 +1781,20 @@ t_ropivot: stat of the descriptor's path is the root directory
 t_ropivot: before the remount a file can be created
 t_ropivot: remount the descriptor's path read-only
 t_ropivot: after it, creating a file is EROFS
+t_rtc: /dev/rtc0 opens
+t_rtc: it is the character device 10:135
+t_rtc: /dev/rtc is the same clock
+t_rtc: RTC_RD_TIME reads the clock
+t_rtc: it agrees with CLOCK_REALTIME to within 20 seconds
+t_rtc: the weekday and the day of the year are right
+t_rtc: RTC_SET_TIME sets it
+t_rtc: it reads back the same, a moment later
+t_rtc: the weekday is a Friday
+t_rtc: a month of 12 is EINVAL
+t_rtc: a year before 2000 is EINVAL
+t_rtc: an unknown ioctl is ENOTTY
+t_rtc: the clock is put back
+t_rtc: an unprivileged program cannot set it
 t_rtnlev: sockets in the link group, the address group, both and none
 t_rtnlev: a veth pair is made
 t_rtnlev: the link group hears both ends
@@ -1950,6 +1964,39 @@ t_sock2: 56 or more AF_UNIX socketpairs at once, each with its own byte; the 65t
 t_sock2: at least 28 AF_UNIX listeners, each accepting a connection; the 33rd is refused
 t_sock2: 24 bound AF_UNIX datagram sockets send around a ring and name their senders
 t_sock2: a seqpacket message sent from three buffers with a descriptor comes in whole over two, as Firefox's sandbox asks for files
+t_statmount: MNT_BASIC alone leaves out the strings
+t_statmount: a small buffer is EOVERFLOW
+t_statmount: an unknown mount is ENOENT
+t_statmount: bind it
+t_statmount: bind the shared mount
+t_statmount: flags are EINVAL
+t_statmount: it is gone
+t_statmount: it is private
+t_statmount: its file system type is tmpfs
+t_statmount: its id is its own
+t_statmount: its magic number is tmpfs's
+t_statmount: its mask has the fields asked for
+t_statmount: its root is /
+t_statmount: listmount holds to the room it is given
+t_statmount: listmount in reverse starts with the newest
+t_statmount: listmount lists the mounts
+t_statmount: listmount starts after the last id
+t_statmount: make it shared
+t_statmount: make the copy a slave
+t_statmount: mount tmpfs
+t_statmount: nosuid and nodev show
+t_statmount: remount read-only
+t_statmount: statmount shows ro
+t_statmount: statmount shows shared and a peer group
+t_statmount: statmount shows the master
+t_statmount: the bind mount has an id of its own
+t_statmount: the ids are ascending
+t_statmount: the new mount is found by its mount point
+t_statmount: the size covers the strings
+t_statmount: the tmpfs is gone
+t_statmount: unmount
+t_statmount: unmount the bind mount
+t_statmount: unmount the slave
 t_sys: a cgroup namespace roots the tree
 t_sys: cpuset.cpus and cpuset.mems keep what a runtime writes and refuse a processor that is not there
 t_sys: pids.events counts the forks pids.max refused
@@ -2202,6 +2249,10 @@ x11: x11: a Qt 5 transport stream muxer, tsMuxeR, draws its window on the X scre
 x11: x11: a Java media renamer, FileBot, draws its window on the X screen
 x11: x11: a GTK folder synchroniser, FreeFileSync, draws its window on the X screen
 x11: x11: a Qt file manager, Krusader, draws its window on the X screen
+x11: x11: a GTK PDF viewer, Evince, draws its window on the X screen
+x11: x11: a media player, VLC, draws its window on the X screen
+x11b: x11b: unpack the server and the client roots
+x11b: x11b: an image editor, GIMP, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
@@ -2904,6 +2955,26 @@ t_xfrmlife: they did not use up the limit: three real datagrams pass
 t_xfrmlife: two more datagrams: the counters add up
 t_xfrmlife: unused for four seconds, it still carries a datagram
 t_xfrmlife: without IPsec the datagram is echoed
+t_xfrmpolev: a socket to configure with
+t_xfrmpolev: the table is flushed first
+t_xfrmpolev: root can join the policy group
+t_xfrmpolev: sockets in no group and in the SA group
+t_xfrmpolev: a policy is added
+t_xfrmpolev: NEWPOLICY is reported with its direction and selector
+t_xfrmpolev: it is replaced
+t_xfrmpolev: UPDPOLICY is reported
+t_xfrmpolev: a failed add (EEXIST) reports nothing
+t_xfrmpolev: another direction is another policy
+t_xfrmpolev: NEWPOLICY for it
+t_xfrmpolev: one is deleted
+t_xfrmpolev: DELPOLICY is reported with its direction
+t_xfrmpolev: deleting what is not there reports nothing
+t_xfrmpolev: the rest are flushed
+t_xfrmpolev: FLUSHPOLICY is reported
+t_xfrmpolev: a socket in no group heard nothing
+t_xfrmpolev: nor the SA group
+t_xfrmpolev: the child made one
+t_xfrmpolev: a policy of another namespace is not reported
 t_landlock: a restricted child is held to its rules
 t_landlock: a rule below a directory
 t_landlock: a ruleset is made

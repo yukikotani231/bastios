@@ -1262,6 +1262,39 @@ t_sock2: signalfd carries a sigqueue value
 t_sock2: signalfd sees a blocked SIGCHLD
 t_sock2: sigqueue carries a value
 t_sock2: write after SHUT_WR is EPIPE
+t_statmount: MNT_BASIC alone leaves out the strings
+t_statmount: a small buffer is EOVERFLOW
+t_statmount: an unknown mount is ENOENT
+t_statmount: bind it
+t_statmount: bind the shared mount
+t_statmount: flags are EINVAL
+t_statmount: it is gone
+t_statmount: it is private
+t_statmount: its file system type is tmpfs
+t_statmount: its id is its own
+t_statmount: its magic number is tmpfs's
+t_statmount: its mask has the fields asked for
+t_statmount: its root is /
+t_statmount: listmount holds to the room it is given
+t_statmount: listmount in reverse starts with the newest
+t_statmount: listmount lists the mounts
+t_statmount: listmount starts after the last id
+t_statmount: make it shared
+t_statmount: make the copy a slave
+t_statmount: mount tmpfs
+t_statmount: nosuid and nodev show
+t_statmount: remount read-only
+t_statmount: statmount shows ro
+t_statmount: statmount shows shared and a peer group
+t_statmount: statmount shows the master
+t_statmount: the bind mount has an id of its own
+t_statmount: the ids are ascending
+t_statmount: the new mount is found by its mount point
+t_statmount: the size covers the strings
+t_statmount: the tmpfs is gone
+t_statmount: unmount
+t_statmount: unmount the bind mount
+t_statmount: unmount the slave
 t_sys: a cgroup namespace roots the tree
 t_sys: adjtimex reads and sets
 t_sys: clock_settime moves CLOCK_REALTIME
@@ -2643,3 +2676,59 @@ t_xfrmlife: two more datagrams: the counters add up
 t_xfrmlife: unused for four seconds, it still carries a datagram
 t_xfrmlife: without IPsec the datagram is echoed
 t_ltp2: a signal reaches a thread running on another processor without waiting for its tick
+t_xfrmev: a socket to configure with
+t_xfrmev: the table is flushed first
+t_xfrmev: root can join the SA group
+t_xfrmev: sockets in no group and in the expire group
+t_xfrmev: an association is added
+t_xfrmev: NEWSA is reported with its SPI
+t_xfrmev: an association is deleted
+t_xfrmev: DELSA is reported with its SPI
+t_xfrmev: two associations are added
+t_xfrmev: both NEWSA are reported
+t_xfrmev: they are flushed
+t_xfrmev: a DELSA for each
+t_xfrmev: a failed add reports nothing
+t_xfrmev: only the first add is reported
+t_xfrmev: an association with a hard limit
+t_xfrmev: NEWSA
+t_xfrmev: its expiry is a DELSA too
+t_xfrmev: a socket in no group heard nothing
+t_xfrmev: nor the expire group, which hears its own message
+t_xfrmev: the child made one
+t_xfrmev: an association of another namespace is not reported
+t_mountprop: mount_setattr sets MS_SHARED through an open_tree descriptor
+t_mountprop: and MS_PRIVATE
+t_mountprop: in a chroot too
+t_mountprop: clean up after mount_setattr
+t_mountprop: rootfs: the helper becomes a slave of everything
+t_mountprop: rootfs: bind it on itself and the volume below
+t_mountprop: rootfs: remount for the options keeps the group
+t_mountprop: rootfs: rshared on it
+t_mountprop: rootfs: a mount on the host reaches it
+t_mountprop: rootfs: a proc below it
+t_mountprop: rootfs: pivot_root into it
+t_mountprop: rootfs: the volume is a mount after pivot_root
+t_mountprop: rootfs: the volume is shared after pivot_root
+t_mountprop: rootfs: the volume is a slave after pivot_root
+t_mountprop: rootfs: a mount made in the container reaches its peers
+t_rtnlev: sockets in the link group, the address group, both and none
+t_rtnlev: a veth pair is made
+t_rtnlev: the link group hears both ends
+t_rtnlev: a socket in both groups hears them too
+t_rtnlev: the address group and no group hear nothing of it
+t_rtnlev: the link has an index
+t_rtnlev: an address is added
+t_rtnlev: the address group hears RTM_NEWADDR with it
+t_rtnlev: the link group does not
+t_rtnlev: the link is set up
+t_rtnlev: the link group hears RTM_NEWLINK for it
+t_rtnlev: the address group does not
+t_rtnlev: the address is removed
+t_rtnlev: the address group hears RTM_DELADDR
+t_rtnlev: the link is removed
+t_rtnlev: the link group hears RTM_DELLINK for both ends
+t_rtnlev: the socket in both groups heard the rest
+t_rtnlev: a socket in no group heard nothing at all
+t_rtnlev: another namespace makes a pair
+t_rtnlev: it is not reported here
