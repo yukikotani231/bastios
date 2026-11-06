@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `bwm` has four gradient wallpapers of its own (`@green`, `@purple`, `@sunset`, `@slate`): put one on the first line of `/etc/bwm.wallpaper`, or press `w` in the System window, which goes through them before the pictures of `/usr/share/wallpapers`. No picture is added to the image.
 - Holding Alt through Alt-Tab (or Alt-Shift-Tab) shows a list of the windows in the middle of the screen, the one the switch chose lit; it goes away when Alt is let go. `bwm` draws it, with no change for programs.
 - `bwm` shows every line of `/tmp/bwm.notice`, one after another for three seconds each (up to 8 waiting), where it dropped all but the first; a line that starts with `!` is a warning on a red bar and the others are on a blue one.
 - The clipboard is shared with X11 programs: `bx11` offers the text in `/tmp/bwm.clip` (what a `bterm` window selected, or the editor cut) as the X CLIPBOARD and PRIMARY selections, and a selection an X program takes goes into `/tmp/bwm.clip`, so a copy in either world pastes in the other. It needs the XFIXES extension (Xvfb has it); text up to 60000 bytes, UTF-8. `test/bx11_clip_test.sh` runs the real `bx11` against Xvfb and `xclip` on the host.
