@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- A TCP connection that has been reset or closed now polls as writable as well as readable and hung up, as on Linux, so a `poll` loop waiting for `POLLOUT` on it wakes and sees the write fail instead of stalling (`test/compat/progs/t_tcprst.c`; `msoak` has a 16-connection step).
 - `bwm`: Alt-Home, Alt-Page Up, Alt-End and Alt-Page Down put a resizable window on a quarter of the screen (top left, top right, bottom left, bottom right); Alt-Down or Alt-F10 puts it back, as for a half.
 - `perf_event_open` for software counters (`src/lxperf.bastio`, `test/compat/progs/t_perf.c`): `TASK_CLOCK` and `CPU_CLOCK` count the time a process has run and `CONTEXT_SWITCHES` its switches, read from the descriptor with `PERF_FORMAT_TOTAL_TIME_ENABLED`, `_RUNNING` and `_ID`, and turned on, off and zeroed with `PERF_EVENT_IOC_ENABLE`, `_DISABLE` and `_RESET`. A counter on a process keeps its count after the process has been waited for. Hardware, cache and tracepoint events are `ENOENT` (no PMU), sampling, groups and counters for every process are `EOPNOTSUPP`.
 - `bwm` has four gradient wallpapers of its own (`@green`, `@purple`, `@sunset`, `@slate`): put one on the first line of `/etc/bwm.wallpaper`, or press `w` in the System window, which goes through them before the pictures of `/usr/share/wallpapers`. No picture is added to the image.
