@@ -535,6 +535,28 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             monitor("sendkey alt-shift-tab")
             settle(lambda px: px == before)
+            # Alt-C opens a calendar of the month above the clock, Esc closes it.
+            import datetime
+            today = datetime.datetime.now(datetime.timezone.utc)
+            month_year = today.strftime("%B %Y")
+            def cal_title():
+                w, h, px = screendump()
+                return screen_text_at(px, w, w - 4 - 196 + 10, h - 24 - 2 - 146 + 6, 16, 1)[0].strip()
+            monitor("sendkey alt-c")
+            end = time.time() + 10
+            got = cal_title()
+            while got != month_year and time.time() < end:
+                got = cal_title()
+            monitor("sendkey esc")
+            end = time.time() + 10
+            gone = cal_title()
+            while gone == month_year and time.time() < end:
+                gone = cal_title()
+            good = got == month_year and gone != month_year
+            if not good:
+                print("     calendar title", repr(got), "after Esc", repr(gone), "wanted", repr(month_year))
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-C opens a calendar of this month and Esc closes it")
+            fails += not good
             # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
             # a step the other way undoes it, and three in one direction go all the way round.
             monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar
