@@ -94,6 +94,7 @@ int main(int argc, char **argv)
                 }
                 continue;
             } else if (e == 's') {
+                sleep(2);
                 unsigned long d = 0;
                 for (size_t i = 0; i < npix; i++)
                     d += pix[i] != before[i];
@@ -135,7 +136,6 @@ int main(int argc, char **argv)
         bwm_send(c, BWM_KEY, &kk, sizeof kk);
         usleep(150000);
     }
-    sleep(2);
     puts("fakebwm: typed");
     fflush(stdout);
     sleep(2);
