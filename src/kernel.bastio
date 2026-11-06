@@ -235,6 +235,7 @@ fn install_files(con: &mut Con, k: &mut Kernel)
   if !make_dir(&mut k.fs, "sys/devices") || !make_dir(&mut k.fs, "sys/devices/system") || !make_dir(&mut k.fs, "sys/devices/system/cpu") {
     puts(&mut con, "cannot make /sys/devices/system/cpu\r\n");
   }
+  sd_sysfs(&mut k);                         // /sys/block/sda and /sys/dev/block (src/lxsd.bastio)
   // The installer image's own files (initextra.bastio) live in /install.
   if NEXTRA > 0 && !make_dir(&mut k.fs, "install") {
     puts(&mut con, "cannot make /install\r\n");
