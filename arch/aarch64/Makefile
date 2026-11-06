@@ -218,7 +218,7 @@ $(COMPAT_BINS): $(B)/compat/%: test/compat/progs/%.c test/compat/progs/compat.h 
 
 # Applets the Alpine, Debian and Node cases run from /disk/busybox (the x86-64
 # suite uses Alpine's own BusyBox for them).
-COMPAT_BB_MORE := CONFIG_CHROOT CONFIG_MKNOD CONFIG_MOUNT CONFIG_UMOUNT CONFIG_CHOWN CONFIG_SU CONFIG_USE_BB_CRYPT
+COMPAT_BB_MORE := CONFIG_FEATURE_SEAMLESS_GZ CONFIG_FEATURE_FANCY_HEAD CONFIG_FEATURE_TAR_GNU_EXTENSIONS CONFIG_CHROOT CONFIG_MKNOD CONFIG_MOUNT CONFIG_UMOUNT CONFIG_CHOWN CONFIG_SU CONFIG_USE_BB_CRYPT
 
 $(B)/compat/busybox: $(B)/busybox/Makefile test/compat/busybox.config | $(B)/compat $(B)/user/ash.elf
 	rm -rf $(B)/compat/bb && cp -r $(B)/busybox $(B)/compat/bb

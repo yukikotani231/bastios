@@ -718,9 +718,28 @@ static unsigned wall_le(const unsigned char *p, int n)
     return v;
 }
 
+/* The gradients bwm draws with no picture: "@name" in /etc/bwm.wallpaper picks one (the blue one is the default). */
+static const struct { const char *name; int c0[3], c1[3]; } themes[] = {
+    { "@green",  { 8, 60, 40 },  { 40, 70, 50 } },
+    { "@purple", { 40, 20, 80 }, { 60, 50, 80 } },
+    { "@sunset", { 90, 30, 50 }, { 110, 80, 20 } },
+    { "@slate",  { 30, 34, 40 }, { 30, 36, 40 } },
+};
+static int theme = -1;                   /* index in themes, or -1 for the blue gradient */
+
 /* Reads a PPM (P6, 8 bits) or an uncompressed 24 or 32 bit BMP and stretches it over the screen by sampling. */
 static int wall_load(const char *path)
 {
+    if (path[0] == '@') {
+        for (int i = 0; i < (int)(sizeof themes / sizeof themes[0]); i++)
+            if (strcmp(path, themes[i].name) == 0) {
+                free(wall);
+                wall = NULL;
+                theme = i;
+                return 1;
+            }
+        return 0;
+    }
     FILE *f = fopen(path, "rb");
     if (!f)
         return 0;
@@ -776,6 +795,7 @@ static int wall_load(const char *path)
     free(d);
     free(wall);
     wall = nw;
+    theme = -1;
     return 1;
 }
 
@@ -835,6 +855,7 @@ static void wall_watch(void)
     if (!line[0]) {
         free(wall);
         wall = NULL;
+        theme = -1;
     } else if (!wall_load(line)) {
         char nt[40];
         snprintf(nt, sizeof nt, "Cannot use %.24s", line);
@@ -843,6 +864,26 @@ static void wall_watch(void)
         return;
     }
     touch_all();
+}
+
+/* The window list shown while Alt-Tab is held: the top window (the one the
+ * switch chose) is lit, the others follow in stacking order. */
+static int switch_on;                    /* Alt-Tab is being held: the window list is shown */
+#define SW_ROW 24
+#define SW_W 260
+static void draw_switcher(void)
+{
+    if (!switch_on || nz < 1)
+        return;
+    int n = nz > 12 ? 12 : nz;
+    int x0 = ((int)W - SW_W) / 2, y0 = ((int)H - n * SW_ROW) / 2;
+    fill(scene, x0 - 3, y0 - 3, x0 + SW_W + 3, y0 + n * SW_ROW + 3, rgb(200, 200, 210));
+    for (int i = 0; i < n; i++) {
+        struct win *w = z[nz - 1 - i];
+        int y = y0 + i * SW_ROW;
+        fill(scene, x0, y, x0 + SW_W, y + SW_ROW, i == 0 ? rgb(40, 90, 200) : rgb(45, 45, 60));
+        text(scene, x0 + 10, y + 4, w->title[0] ? w->title : "(untitled)", rgb(255, 255, 255));
+    }
 }
 
 /* Paints the rectangle of the screen that changed. */
@@ -856,7 +897,9 @@ static void draw_scene(int x0, int y0, int x1, int y1)
         if (wall)
             memcpy(&scene[y * W + clx0], &wall[y * W + clx0], (size_t)(clx1 - clx0) * 4);
         else {
-            uint32_t c = rgb(10 + y * 40 / H, 60 + y * 50 / H, 80 + y * 60 / H);
+            uint32_t c = theme < 0 ? rgb(10 + y * 40 / H, 60 + y * 50 / H, 80 + y * 60 / H)
+                : rgb(themes[theme].c0[0] + y * themes[theme].c1[0] / H, themes[theme].c0[1] + y * themes[theme].c1[1] / H,
+                      themes[theme].c0[2] + y * themes[theme].c1[2] / H);
             for (int x = clx0; x < clx1; x++)
                 scene[y * W + x] = c;
         }
@@ -867,6 +910,7 @@ static void draw_scene(int x0, int y0, int x1, int y1)
             draw_win(z[i], z[i] == focus());
     draw_bar();
     draw_menu();
+    draw_switcher();
 }
 
 /* The pointer: '#' black outline, '.' white fill. */
@@ -2377,6 +2421,10 @@ int main(int argc, char **argv)
                         k_ctrl = down;
                     } else if (code == 56 || code == 100) {
                         k_alt = down;
+                        if (!down && switch_on) {
+                            switch_on = 0;
+                            touch_all();
+                        }
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
@@ -2510,6 +2558,8 @@ int main(int argc, char **argv)
                         touch_all();
                     } else if (code == 15 && down && k_alt) {      /* Alt-Tab: the window at the bottom comes up */
                         cycle_windows(k_shift);
+                        switch_on = nz >= 2;
+                        touch_all();
                     } else if ((code == 105 || code == 106 || code == 103 || code == 108) && down && k_alt && k_ctrl && !k_shift) {
                         struct win *t = focus();                    /* Ctrl-Alt-arrows: grow or shrink a resizable window by 16 pixels */
                         if (t && t->resizable) {

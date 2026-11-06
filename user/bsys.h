@@ -237,11 +237,15 @@ static int bs_wall_cmp(const void *a, const void *b) { return strcmp((const char
 
 static void bs_next_wall(void)
 {
-    static char names[16][64];
+    static char names[24][64];
+    static const char *const themes[] = { "@green", "@purple", "@sunset", "@slate" };   /* drawn by bwm, no file */
     int n = 0;
+    for (; n < 4; n++)
+        strcpy(names[n], themes[n]);
+    int nfiles0 = n;
     DIR *d = opendir(BS_WALL_DIR);
     struct dirent *e;
-    while (d && (e = readdir(d)) && n < 16) {
+    while (d && (e = readdir(d)) && n < 24) {
         size_t l = strlen(e->d_name);
         if (l < 5 || l >= sizeof names[0] || (strcmp(e->d_name + l - 4, ".ppm") && strcmp(e->d_name + l - 4, ".bmp")))
             continue;
@@ -249,12 +253,7 @@ static void bs_next_wall(void)
     }
     if (d)
         closedir(d);
-    if (n == 0) {
-        puts("bsys: no wallpapers in " BS_WALL_DIR);
-        fflush(stdout);
-        return;
-    }
-    qsort(names, (size_t)n, sizeof names[0], bs_wall_cmp);
+    qsort(names + nfiles0, (size_t)(n - nfiles0), sizeof names[0], bs_wall_cmp);
     char cur[160] = "";
     FILE *f = fopen(BS_WALL_FILE, "r");
     if (f) {
@@ -265,13 +264,16 @@ static void bs_next_wall(void)
     int next = 0;                                           /* the first one, when the current is none or not in the list */
     for (int i = 0; i < n; i++) {
         char full[160];
-        snprintf(full, sizeof full, BS_WALL_DIR "/%s", names[i]);
+        if (names[i][0] == '@')
+            snprintf(full, sizeof full, "%.63s", names[i]);
+        else
+            snprintf(full, sizeof full, BS_WALL_DIR "/%s", names[i]);
         if (strcmp(cur, full) == 0)
             next = i + 1;
     }
     char line[160] = "";
     if (next < n)
-        snprintf(line, sizeof line, BS_WALL_DIR "/%s", names[next]);
+        snprintf(line, sizeof line, names[next][0] == '@' ? "%.63s" : BS_WALL_DIR "/%.63s", names[next]);
     if ((f = fopen(BS_WALL_FILE, "w"))) {
         fprintf(f, "%s\n", line);
         fclose(f);

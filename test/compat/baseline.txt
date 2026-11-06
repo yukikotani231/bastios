@@ -154,6 +154,8 @@ debian: debian: coreutils, sed, grep and awk in a pipeline
 debian: debian: dpkg knows the packages
 debian: debian: find, xargs and du
 debian: debian: lscpu reads the processors from /sys
+debian: debian: lscpu counts threads, cores and sockets from the topology
+debian: debian: script(1) ends when its command does
 debian: debian: lsns lists the namespaces without warnings
 debian: debian: perl
 debian: debian: tar and gzip (GNU tar makes its archive with creat)
@@ -2294,6 +2296,7 @@ x11b: x11b: unpack the server and the client roots
 x11b: x11b: an image editor, GIMP, draws its window on the X screen
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
 x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
+x11b: x11b: a network protocol analyser, Wireshark, draws its window on the X screen
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
@@ -2426,6 +2429,21 @@ t_pty: erasing a two-byte character takes back one cell
 t_pty: with IUTF8 erase takes whole characters
 t_pty: IUTF8 can be cleared
 t_pty: without IUTF8 erase takes one byte
+t_pty: SIGCHLD of a child made with CLONE_CHILD_CLEARTID reaches a signalfd
+t_pty: TIOCGPTPEER gives the slave
+t_pty: a ^D written to the master is accepted
+t_pty: a child's exit reaches a signalfd polled beside the master (script)
+t_pty: a negative fd in a poll set is ignored: the wait runs its course
+t_pty: a poll set of one negative fd just sleeps
+t_pty: a sleeping poll wakes when a child exits and its SIGCHLD is on a signalfd
+t_pty: and it is the slave of that master
+t_pty: and waitpid reaps it
+t_pty: poll on a master says it can be written (script waits for it)
+t_pty: poll on an idle slave times out
+t_pty: script's loop reads the shell's output
+t_pty: script's loop reaps its shell
+t_pty: the signalfd record of a child's exit says CLD_EXITED, its pid and status
+t_pty: waitpid reaps a child made with CLONE_CHILD_CLEARTID
 tty: utf-8: erase takes back a whole character on the console
 alpine-tty: nvim: Japanese text is typed in, edited by character and saved as UTF-8
 alpine-tty: nvim: it counts characters and cells of Japanese text
@@ -2442,6 +2460,7 @@ alpine: nvim: the LSP client talks to TypeScript's language server and gets a ho
 alpine: nvim: the LSP client talks to the JSON language server under node and gets a diagnostic and a formatted file
 t_ltp2: protection keys are not available: pkey_alloc answers ENOSPC (EINVAL for bad arguments), pkey_free EINVAL, pkey_mprotect takes key 0 or -1; memfd_secret returns a file to size and map
 t_ltp2: process_madvise advises the ranges of a pidfd's process (WILLNEED, COLD, PAGEOUT only) and returns their length; process_mrelease refuses a process nobody is killing
+t_ltp2: move_pages reports the one memory node: 0 for a touched page, ENOENT for an untouched one, EFAULT for an unmapped address, ENODEV for another node; migrate_pages has nothing to move
 t_ltp2: a built-in program under /bin opens and reads as the ELF file exec runs
 alpine: nvim: the LSP client talks to the Bash language server under node and finds a function's definition
 t_ltp2: a tmpfs mounted nosuid, nodev and noexec reports them, refuses to run a program or open a device node, and remount clears them
