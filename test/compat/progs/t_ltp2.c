@@ -1300,6 +1300,22 @@ int main(void) {
            ok = ok && syscall(448, 999, 0) < 0 && errno == EBADF;
            if (me >= 0) close(me);
            ok; }));
+    EXPECT("move_pages reports the one memory node: 0 for a touched page, ENOENT for an untouched one, EFAULT for an unmapped address, ENODEV for another node; migrate_pages has nothing to move", ({
+           char *mp = mmap(0, 8192, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+           int ok = mp != MAP_FAILED;
+           if (ok) mp[0] = 1;
+           void *pgs[3] = { mp, mp + 4096, (void *)0x1000 };
+           int st[3] = { 7, 7, 7 };
+           ok = ok && syscall(279, 0, 3, pgs, 0, st, 0) == 0 && st[0] == 0 && st[1] == -ENOENT && st[2] == -EFAULT;
+           int nd[3] = { 0, 0, 0 };
+           st[0] = st[1] = st[2] = 7;
+           ok = ok && syscall(279, 0, 3, pgs, nd, st, 2) == 0 && st[0] == 0 && st[1] == -ENOENT && st[2] == -EFAULT;
+           nd[0] = 1;
+           ok = ok && syscall(279, 0, 1, pgs, nd, st, 2) == 0 && st[0] == -ENODEV;
+           ok = ok && syscall(279, 0, 1, pgs, 0, st, 1) < 0 && errno == EINVAL;
+           ok = ok && syscall(279, 99999, 1, pgs, 0, st, 0) < 0 && errno == ESRCH;
+           ok = ok && syscall(256, 0, 8, 0, 0) == 0;
+           ok; }));
     EXPECT("a built-in program under /bin opens and reads as the ELF file exec runs", ({
            struct stat st;
            int fd = open("/bin/cat", O_RDONLY);
