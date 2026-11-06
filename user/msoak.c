@@ -478,6 +478,195 @@ static void do_tcp(void)
     }
 }
 
+/* Many TCP connections at once: one server process polls NCONN echo
+ * connections while that many client processes send a patterned stream
+ * (whose bytes depend on the connection and the offset) and check what
+ * comes back; every eighth client resets its connection half way instead. */
+#ifndef NCONN
+#define NCONN 16
+#endif
+#define TCPM_TOTAL (192 * 1024)
+#define TCPM_CHUNK 3000
+
+static unsigned char pat(int id, long off)
+{
+    return (unsigned char)(id * 31 + off * 7 + (off >> 8));
+}
+
+static int tcpmany_client(struct sockaddr_in *a, int id)
+{
+    int s = socket(AF_INET, SOCK_STREAM, 0);
+    if (s < 0 || connect(s, (struct sockaddr *)a, sizeof *a) < 0)
+        return 1;
+    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+    int reset = id % 8 == 7;
+    long sent = 0, got = 0, total = reset ? TCPM_TOTAL / 2 : TCPM_TOTAL;
+    int wr_done = 0;
+    unsigned char buf[4096];
+    while (got < total || !wr_done) {
+        struct pollfd p = {s, POLLIN | (sent < total ? POLLOUT : 0), 0};
+        if (poll(&p, 1, 20000) <= 0)
+            return 2;
+        if (p.revents & POLLOUT) {
+            long n = total - sent < TCPM_CHUNK ? total - sent : TCPM_CHUNK;
+            for (long i = 0; i < n; i++)
+                buf[i] = pat(id, sent + i);
+            ssize_t w = write(s, buf, n);
+            if (w > 0)
+                sent += w;
+            else if (w < 0 && errno != EAGAIN)
+                return 3;
+            if (sent == total && !reset) {
+                shutdown(s, SHUT_WR);
+                wr_done = 1;
+            }
+            if (sent == total && reset)
+                wr_done = 1;
+        }
+        if (p.revents & POLLIN) {
+            ssize_t r = read(s, buf, sizeof buf);
+            if (r < 0 && errno != EAGAIN)
+                return 4;
+            if (r == 0)
+                break;
+            for (ssize_t i = 0; i < r; i++)
+                if (buf[i] != pat(id, got + i))
+                    return 5;
+            got += r;
+        }
+        if (reset && sent >= total && got >= total / 4)
+            break;
+    }
+    if (reset) {
+        struct linger lg = {1, 0};
+        setsockopt(s, SOL_SOCKET, SO_LINGER, &lg, sizeof lg);
+        close(s);
+        return 0;
+    }
+    return got == total ? 0 : 6;
+}
+
+static void do_tcpmany(void)
+{
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    CHECK(ls >= 0, "tcpmany: socket");
+    struct sockaddr_in a = {0};
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    int one = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
+    CHECK(bind(ls, (struct sockaddr *)&a, sizeof a) == 0, "tcpmany: bind");
+    socklen_t l = sizeof a;
+    CHECK(getsockname(ls, (struct sockaddr *)&a, &l) == 0, "tcpmany: getsockname");
+    CHECK(listen(ls, NCONN) == 0, "tcpmany: listen");
+    pid_t kids[NCONN];
+    signal(SIGPIPE, SIG_IGN);               /* a client that resets leaves the server a broken pipe to write to */
+    for (int i = 0; i < NCONN; i++) {
+        kids[i] = fork();
+        CHECK(kids[i] >= 0, "tcpmany: fork");
+        if (kids[i] == 0) {
+            close(ls);
+            _exit(tcpmany_client(&a, i));
+        }
+    }
+    struct { int fd; unsigned char buf[8192]; int len, off, eof; } c[NCONN];
+    memset(c, 0, sizeof c);
+    for (int i = 0; i < NCONN; i++)
+        c[i].fd = -1;
+    int accepted = 0, done = 0;
+    time_t t0 = time(NULL);
+    while (done < NCONN) {
+        struct pollfd p[NCONN + 1];
+        int np = 0, map[NCONN + 1];
+        if (accepted < NCONN) {
+            p[np].fd = ls;
+            p[np].events = POLLIN;
+            map[np++] = -1;
+        }
+        for (int i = 0; i < NCONN; i++) {
+            if (c[i].fd < 0)
+                continue;
+            p[np].fd = c[i].fd;
+            p[np].events = (c[i].len == c[i].off && !c[i].eof ? POLLIN : 0) | (c[i].len > c[i].off ? POLLOUT : 0);
+            map[np++] = i;
+        }
+        if (time(NULL) - t0 >= 120) {
+            printf("soak: tcpmany stalled: accepted %d done %d\n", accepted, done);
+            for (int i = 0; i < NCONN; i++)
+                if (c[i].fd >= 0)
+                {
+                    struct pollfd q = {c[i].fd, POLLIN | POLLOUT, 0};
+                    int pr2 = poll(&q, 1, 0);
+                    ssize_t w = write(c[i].fd, c[i].buf + c[i].off, c[i].len - c[i].off);
+                    int we = errno;
+                    printf("soak:   conn %d fd %d len %d off %d eof %d poll %d revents %x write %ld errno %d\n", i, c[i].fd, c[i].len, c[i].off, c[i].eof, pr2, q.revents, (long)w, w < 0 ? we : 0);
+                }
+            for (int i = 0; i < NCONN; i++) {
+                int st = 0;
+                pid_t w = waitpid(kids[i], &st, WNOHANG);
+                printf("soak:   client %d %s status %d\n", i, w == kids[i] ? "ended" : "running", st >> 8);
+            }
+            fflush(stdout);
+        }
+        CHECK(time(NULL) - t0 < 120, "tcpmany: stalled");
+        int pr = poll(p, np, 5000);
+        CHECK(pr >= 0, "tcpmany: poll");
+        for (int j = 0; j < np; j++) {
+            if (!p[j].revents)
+                continue;
+            if (map[j] < 0) {
+                int s = accept(ls, 0, 0);
+                if (s >= 0) {
+                    fcntl(s, F_SETFL, fcntl(s, F_GETFL) | O_NONBLOCK);
+                    for (int i = 0; i < NCONN; i++)
+                        if (c[i].fd < 0) {
+                            c[i].fd = s;
+                            c[i].len = c[i].off = c[i].eof = 0;
+                            break;
+                        }
+                    accepted++;
+                }
+                continue;
+            }
+            int i = map[j];
+            if (p[j].revents & (POLLOUT | POLLERR | POLLHUP) && c[i].len > c[i].off) {
+                ssize_t w = write(c[i].fd, c[i].buf + c[i].off, c[i].len - c[i].off);
+                if (w > 0)
+                    c[i].off += w;
+                else if (w < 0 && errno != EAGAIN)
+                    c[i].eof = 1, c[i].off = c[i].len;
+                if (c[i].off == c[i].len)
+                    c[i].off = c[i].len = 0;
+            }
+            if ((p[j].revents & (POLLIN | POLLERR | POLLHUP)) && c[i].len == c[i].off && !c[i].eof) {
+                ssize_t r = read(c[i].fd, c[i].buf, sizeof c[i].buf);
+                if (r > 0) {
+                    c[i].len = r;
+                    c[i].off = 0;
+                } else if (r == 0 || errno != EAGAIN) {
+                    c[i].eof = 1;
+                }
+            }
+            if (c[i].eof && c[i].off == c[i].len) {
+                close(c[i].fd);
+                c[i].fd = -1;
+                done++;
+            }
+        }
+    }
+    close(ls);
+    int bad = 0;
+    for (int i = 0; i < NCONN; i++) {
+        int st = 0;
+        if (waitpid(kids[i], &st, 0) != kids[i] || !WIFEXITED(st) || WEXITSTATUS(st) != 0) {
+            printf("soak: tcpmany client %d status %d\n", i, st);
+            bad = 1;
+        }
+    }
+    CHECK(!bad, "tcpmany: a client failed");
+    ops += NCONN;
+}
+
 static void do_udp(void)
 {
     int a = socket(AF_INET, SOCK_DGRAM, 0), b = socket(AF_INET, SOCK_DGRAM, 0);
@@ -809,7 +998,7 @@ static const struct { const char *name; step fn; } steps[] = {
     {"fork", do_fork}, {"exec", do_exec}, {"swarm", do_swarm}, {"die", do_die},
     {"mmap", do_mmap}, {"filemap", do_filemap}, {"pressure", do_pressure},
     {"files", do_files}, {"pipes", do_pipes}, {"threads", do_threads},
-    {"unix", do_unix}, {"tcp", do_tcp}, {"udp", do_udp}, {"epoll", do_epoll},
+    {"unix", do_unix}, {"tcp", do_tcp}, {"tcpmany", do_tcpmany}, {"udp", do_udp}, {"epoll", do_epoll},
     {"signals", do_signals}, {"container", do_container}, {"mounts", do_mounts},
     {"cgroup", do_cgroup}, {"ipc", do_ipc}, {"notify", do_notify}, {"pty", do_pty},
 };

@@ -606,7 +606,10 @@ fn tcb_poll_bits(n: &Net, t: u64, listener: bool) -> u64
     return 0;
   }
   if tw(n, t, W_RESET) == 1 || st == T_CLOSED {
-    return POLLIN | POLLERR | POLLHUP;
+    // As Linux: a connection that has ended is readable (end of file or the
+    // error), writable (a write fails at once) and hung up, so a program that
+    // asks only for POLLOUT is woken too.
+    return POLLIN | POLLOUT | POLLERR | POLLHUP | POLLRDHUP;
   }
   let mut b = 0;
   if tw(n, t, W_RXLEN) > 0 {
