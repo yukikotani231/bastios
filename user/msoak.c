@@ -832,6 +832,8 @@ int main(int argc, char **argv)
         printf("soak: FAIL mkdir %s (errno %d)\n", dir, errno);
         return 1;
     }
+    struct timespec last_mono = t0, last_real;
+    clock_gettime(CLOCK_REALTIME, &last_real);
     for (int r = 1; r <= rounds && !failed; r++) {
         struct timespec t1;
         clock_gettime(CLOCK_MONOTONIC, &t1);
@@ -857,6 +859,20 @@ int main(int argc, char **argv)
         }
         if (failed)
             break;
+        /* Neither clock may run backwards (nothing here sets the time). */
+        struct timespec m, w;
+        clock_gettime(CLOCK_MONOTONIC, &m);
+        clock_gettime(CLOCK_REALTIME, &w);
+        if (m.tv_sec < last_mono.tv_sec || (m.tv_sec == last_mono.tv_sec && m.tv_nsec < last_mono.tv_nsec) ||
+            w.tv_sec < last_real.tv_sec || (w.tv_sec == last_real.tv_sec && w.tv_nsec < last_real.tv_nsec)) {
+            printf("soak: FAIL clock went backwards in round %d (mono %ld.%09ld after %ld.%09ld, real %ld.%09ld after %ld.%09ld)\n",
+                   r, (long)m.tv_sec, m.tv_nsec, (long)last_mono.tv_sec, last_mono.tv_nsec,
+                   (long)w.tv_sec, w.tv_nsec, (long)last_real.tv_sec, last_real.tv_nsec);
+            failed = 1;
+            break;
+        }
+        last_mono = m;
+        last_real = w;
         printf("soak: round %d ok ops=%ld free=%ld cached=%ld fds=%d procs=%d\n", r, ops,
                kb_of("MemFree"), kb_of("Cached"), count_dir("/proc/self/fd", 0), count_dir("/proc", 1));
         fflush(stdout);
