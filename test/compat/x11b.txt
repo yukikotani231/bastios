@@ -41,3 +41,13 @@ fakebwm: window 800x600 X11 :5
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11b: LibreOffice turns a text file into a PDF, fonts and all
+# timeout 600
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape|wireshark/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 3; echo "Hello from BastiOS" > /disk/lo/tmp/t.txt; bb chroot /disk/lo /usr/bin/env HOME=/tmp /usr/bin/soffice --headless --convert-to pdf --outdir /tmp /tmp/t.txt >/disk/lo.pdf.out 2>&1; bb grep -q "^%PDF" /disk/lo/tmp/t.pdf && [ "$(bb wc -c < /disk/lo/tmp/t.pdf)" -gt 1000 ] && echo pdf || bb tail -n 8 /disk/lo.pdf.out | bb cut -c1-200
+pdf
+
+== x11b: Inkscape exports an SVG drawing as a PNG
+# timeout 600
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape|wireshark/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 3; echo '<svg xmlns="http://www.w3.org/2000/svg" width="64" height="64"><rect width="64" height="64" fill="#336699"/><text x="4" y="40" font-size="24">Hi</text></svg>' > /disk/ik/tmp/t.svg; bb chroot /disk/ik /usr/bin/env HOME=/tmp /usr/bin/inkscape --export-png=/tmp/o.png /tmp/t.svg >/disk/ik.png.out 2>&1; bb grep -q PNG /disk/ik/tmp/o.png && echo png || bb tail -n 8 /disk/ik.png.out | bb cut -c1-200
+png

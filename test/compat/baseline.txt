@@ -2297,6 +2297,8 @@ x11b: x11b: an image editor, GIMP, draws its window on the X screen
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
 x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
 x11b: x11b: a network protocol analyser, Wireshark, draws its window on the X screen
+x11b: x11b: LibreOffice turns a text file into a PDF, fonts and all
+x11b: x11b: Inkscape exports an SVG drawing as a PNG
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
