@@ -23,6 +23,7 @@ const LX_CLOSE: u64 = 3;
 const LX_LSEEK: u64 = 8;
 const LX_MMAP: u64 = 9;
 const LX_MPROTECT: u64 = 10;
+const LX_PKEY_MPROTECT: u64 = 329;       // protection keys: no CPU feature here, so only key 0 (and -1, "none") work (src/lxmisc.bastio)
 const LX_MUNMAP: u64 = 11;
 const LX_BRK: u64 = 12;
 const LX_IOCTL: u64 = 16;

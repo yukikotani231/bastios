@@ -127,7 +127,7 @@ const SYSD: u64 = 0x1400;              // DIR_PROC + SYSD + j: /proc/sys and its
 const NET_DIR: u64 = 0x1000;            // DIR_PROC + NET_DIR: /proc/net
 const LOOP_SYS: u64 = 10;              // size, ro, backing_file, offset, sizelimit, autoclear, partscan, dio, queue/logical_block_size, queue/dma_alignment
 const SY_SDS: u64 = SY_LOOP + LOOP_N * LOOP_SYS;   // after the loop devices: disk device d's attribute a at d * SDA_SYS + a (src/lxsd.bastio)
-const SDA_SYS: u64 = 6;                // size, ro, removable, queue/logical_block_size, start, dev
+const SDA_SYS: u64 = 7;                // size, ro, removable, queue/logical_block_size, start, dev, partition
 const SY_PX: u64 = SY_SDS + SD_N * SDA_SYS;   // after the disk devices: /proc/P/ file w at P * PXF_N + w (src/lxsysctl.bastio)
 const SY_FI: u64 = SY_PX + NPROC * PXF_N;   // after those: /proc/P/fdinfo/FD at P * LXNFD + FD
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
@@ -874,6 +874,9 @@ fn sda_sys_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, at, n, "dev") {
     return base + 5;
   }
+  if d != 0 && xfer_is(x, at, n, "partition") {
+    return base + 6;                        // only a partition has its number
+  }
   return 0;
 }
 
@@ -896,9 +899,11 @@ fn sda_sys_text(k: &mut Kernel, s: u64, o: &mut Bytes) -> u64
     v = 512;
   } else if a == 4 {
     v = sd_get(k.sdp, d, 0);
-  } else {
+  } else if a == 5 {
     let e = put_n(&mut o, put_s(&mut o, 0, "8:"), d);
     return put_c(&mut o, e, 10);
+  } else {
+    v = d;
   }
   let e = put_n(&mut o, 0, v);
   return put_c(&mut o, e, 10);
@@ -4083,6 +4088,9 @@ fn lx_readlink(k: &mut Kernel, pid: u64, dirfd: u64, path: u64, va: u64, size: u
   }
   if t >= NPROC || !proc_peek(k.procs, pid, t) {
     return EACCES;
+  }
+  if is_ns_file(f) && state(k.procs, t) == ZOMBIE {
+    return ENOENT;                          // a zombie has left its namespaces
   }
   let mut out = balloc(PROC_OUT);
   let full = proc_text(&mut k, pid, f, &mut out);

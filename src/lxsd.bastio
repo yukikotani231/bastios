@@ -18,8 +18,12 @@
 // Mounting: `dd if=/dev/sda2 of=img` and a loop device make the image
 // available to the file system readers (src/lxmount.bastio).
 //
+// /sys/block/sda and /sys/block/sda/sdaN are directories made at boot
+// (sd_sysfs), with a link "8:N" to each in /sys/dev/block, so lsblk finds
+// the devices and their partitions.
+//
 // Not done: writing, a second disk (a USB stick that is not the boot disk),
-// logical MBR partitions, listing the /sys/block/sda directories.
+// logical MBR partitions, the loop devices in /sys/dev/block.
 
 /// Word f of device n, at most PLO_MAX (sd_scan stores nothing larger).
 fn sd_get(t: &Buf, n: u64, f: u64) -> u64
@@ -80,6 +84,70 @@ fn sd_part(k: &mut Kernel, i: u64, first: u64, count: u64, total: u64)
   }
   sd_set(&mut k.sdp, i, 0, first);
   sd_set(&mut k.sdp, i, 1, count);
+}
+
+/// "sda" or "sdaN" at x[at..]: device d of the disk (0 is the whole disk).
+fn sd_put_name(x: &mut Bytes, at: u64, d: u64) -> u64
+  requires at <= blen(x)
+  ensures blen(x) == blen(old(x)) && at <= result && result <= blen(x)
+{
+  let a = bytes_put_str(&mut x, at, "sda");
+  if d == 0 {
+    return a;
+  }
+  return bytes_put_u64(&mut x, a, d);
+}
+
+/// The path of device d's directory in the transfer buffer:
+/// "sys/block/sda" or "sys/block/sda/sdaN". Returns its length.
+fn sd_put_dir(x: &mut Bytes, d: u64) -> u64
+  requires blen(x) == XBUF
+  ensures blen(x) == XBUF && result <= XBUF
+{
+  let a = bytes_put_str(&mut x, 0, "sys/block/sda");
+  if d == 0 {
+    return a;
+  }
+  return sd_put_name(&mut x, bytes_put_str(&mut x, a, "/"), d);
+}
+
+/// The directories lsblk walks for the disk and its partitions, made once
+/// at boot (the attribute files in them are virtual, see
+/// src/lxprocfs.bastio): /sys/block/sda and /sys/block/sda/sdaN with their
+/// queue directories, and in /sys/dev/block a link "8:N" to each, which
+/// is how lsblk and udev-less programs find the devices by number and
+/// their names. Nothing is made without a disk left alone.
+fn sd_sysfs(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  if sd_get(k.sdp, 0, 1) == 0 {
+    return;
+  }
+  if !make_dir(&mut k.fs, "sys/block") || !make_dir(&mut k.fs, "sys/dev") || !make_dir(&mut k.fs, "sys/dev/block") {
+    return;
+  }
+  let mut d = 0;
+  while d < SD_N
+    invariant d <= SD_N && kok(k)
+  {
+    if sd_get(k.sdp, d, 1) != 0 {
+      let n = sd_put_dir(&mut k.fs.xfer, d);
+      if vfs_mkdir(&mut k.fs, n) {
+        let q = bytes_put_str(&mut k.fs.xfer, n, "/queue");
+        vfs_mkdir(&mut k.fs, q);
+      }
+      // The link's name is "sys/dev/block/8:N", its target "../../block/sda[/sdaN]".
+      let a = bytes_put_u64(&mut k.fs.xfer, bytes_put_str(&mut k.fs.xfer, 0, "sys/dev/block/8:"), d);
+      let t = bytes_put_str(&mut k.fs.xfer, a, "../../block/");
+      let mut e = sd_put_name(&mut k.fs.xfer, t, 0);
+      if d != 0 {
+        e = sd_put_name(&mut k.fs.xfer, bytes_put_str(&mut k.fs.xfer, e, "/"), d);
+      }
+      vfs_symlink(&mut k.fs, &mut k.mem, a, e - a);
+    }
+    d = d + 1;
+  }
 }
 
 /// Finds the devices of a disk that BastiOS did not take (see above). Does

@@ -847,6 +847,8 @@ t_nsioctl: NS_GET_NSTYPE answers on every namespace link of every process
 t_nsioctl: NS_GET_NSTYPE works on a ns link opened in a chroot
 t_nsioctl: NS_GET_NSTYPE works on an O_PATH descriptor of a ns link
 t_nsioctl: NS_GET_NSTYPE works on the descriptor NS_GET_USERNS returns
+t_nsioctl: namespace files have a device of their own (nsfs), shared by all of them
+t_nsioctl: a zombie has no namespace links to open
 t_nsioctl: a thread's directory has namespace links, /proc has none
 t_openat2: /proc/self/exe opens the program
 t_openat2: BENEATH inside opens
