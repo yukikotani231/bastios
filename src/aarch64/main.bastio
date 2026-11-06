@@ -619,7 +619,8 @@ fn fault_raced(k: &mut Kernel, p: u64) -> bool
 
 /// An EL0 read of an identification register (MIDR_EL1, ID_AA64ISAR0_EL1,
 /// ...: op0 3, op1 0, CRn 0, CRm 0 to 7), which the processor reports as an
-/// unknown instruction. Linux emulates these (HWCAP_CPUID), and the Go
+/// unknown instruction (class 0), or, with FEAT_IDST, as a trapped
+/// system-register access (class 0x18). Linux emulates these (HWCAP_CPUID), and the Go
 /// runtime reads ID_AA64ISAR0_EL1 when it starts. Every register reads as
 /// zero here, which says no optional feature exists, so a program falls
 /// back to the baseline instructions. Returns true if the instruction at the
@@ -628,9 +629,10 @@ fn emulate_idreg(k: &mut Kernel, p: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  if (pget(k.procs, p, reg_word(34)) >> 26) != 0 {
-    return false;                           // only the unknown-reason class
-  }
+  let ec = pget(k.procs, p, reg_word(34)) >> 26;
+  if ec != 0 && ec != 0x18 {
+    return false;                           // only the unknown-reason class, and the system-register class that
+  }                                         // processors with FEAT_IDST (Armv8.4, e.g. Neoverse N2) report instead
   let pc = pget(k.procs, p, reg_word(R_PC));
   if pc % 4 != 0 || copy_from_user(&mut k.spaces, &mut k.mem, k.anon, p, pc, &mut k.fs.xfer, 4) != 4 {
     return false;

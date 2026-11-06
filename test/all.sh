@@ -40,6 +40,7 @@ tests=(
   "aarch64|d|test/aarch64_test.sh --build"
   "aarch64 64 cpus|d|BOOT_ONLY=1 SMP=64 TIMEOUT=900 test/aarch64_test.sh"
   "aarch64 gicv2|d|GIC=2 SMP=2 test/aarch64_test.sh"
+  "aarch64 neoverse-n2|d|CPU=neoverse-n2 SMP=2 test/aarch64_test.sh"
   "aarch64 el2|d|VIRT=,virtualization=on SMP=2 test/aarch64_test.sh"
   "aarch64 mem|d|MEM=2500M SMP=2 test/aarch64_test.sh"
   "aarch64 nvme|d|NVME=1 SMP=2 test/aarch64_test.sh"
