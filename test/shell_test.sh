@@ -558,6 +558,8 @@ steps = [
     # The memory blocks, as lsmem reads them: a hex block size, a directory
     # per block with its state, and as many blocks as the RAM fills.
     ("m=/sys/devices/system/memory; n=0; for b in $m/memory[0-9]*; do n=$((n+1)); done; [ $n -ge 1 ] && echo blocks=ok; cat $m/memory0/state $m/memory0/removable $m/memory0/valid_zones; [ \"$(cat $m/block_size_bytes)\" = 8000000 ] && echo size=ok", [b"blocks=ok\r\n", b"online\r\n0\r\nNormal\r\n", b"size=ok\r\n"], b"\n# "),
+    # lsblk walks /sys/dev/block, which exists with no disk too.
+    ("[ -d /sys/dev/block ] && [ -d /sys/block ] && echo blockdirs", b"blockdirs\r\n", b"\n# "),
     # An unbound loop device's /sys/block entry: no sectors, not read-only.
     ("cat /sys/block/loop0/size /sys/block/loop0/ro", b"0\r\n0\r\n", b"\n# "),
     # The disk's directory grows past its first 64 entries (dir_grow); the
