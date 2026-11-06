@@ -295,6 +295,8 @@ t_fanotify: the event's descriptor reads the file
 t_fdlock: 200 descriptors, dup2 to 200 and F_DUPFD from 100
 t_fdlock: memfd_create takes MFD_ALLOW_SEALING without MFD_CLOEXEC
 t_fdlock: 200 separate byte-range locks on one file
+t_fdlock: stat follows /proc/PID/fd/N for a pipe and a device
+t_fdlock: /proc/locks lists record and flock locks and drops them on unlock
 t_fdlock: F_GETLK reports the conflicting lock that starts first
 t_fdlock: F_SETLEASE and F_GETLEASE
 t_fdlock: F_SETOWN, F_SETOWN_EX and F_SETSIG set a description's owner
@@ -1373,6 +1375,16 @@ t_sysv: queue permissions follow the ids
 t_sysv: semop, SETALL, GETALL, GETPID, errors
 t_sysv: shmat, a second view, fork, IPC_RMID
 t_sysv: shmget and shmat errors
+t_tcprst: a connected pair
+t_tcprst: a peer that closed after sending: POLLOUT is still ready
+t_tcprst: a poll for POLLOUT alone returns
+t_tcprst: a poll for POLLRDHUP sees the peer's end
+t_tcprst: a read gives the error or end of file
+t_tcprst: a write fails with EPIPE or ECONNRESET
+t_tcprst: another pair
+t_tcprst: its data is still read
+t_tcprst: then end of file
+t_tcprst: with POLLOUT, POLLERR and POLLHUP
 t_thread: /proc/self/stat and status count the threads
 t_thread: /proc/self/task lists the threads, and /proc/self/task/TID has their files
 t_thread: /proc/self/task/TID/fd/N and ns/ are the process's
