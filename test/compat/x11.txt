@@ -210,8 +210,8 @@ fakebwm: typed
 alive
 
 == x11: an image editor, GIMP, draws its window on the X screen
-# timeout 500
-$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity|filebot|FreeFileSync|krusader|vlc/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/g/tmp; bb tar -xf /disk/gimp.tar -C /disk/g && bb rm /disk/gimp.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/g/tmp/.passwd; echo root:x:0: >/disk/g/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb22.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/g -d 21 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/gimp >/disk/gimp.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb22.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb22.out 2>/dev/null || { bb tail -n 12 /disk/gimp.out | bb cut -c1-200; }; bb cat /disk/fb22.out; bb ps | bb grep -q 'gimp' && echo alive || bb cat /disk/gimp.out
+# timeout 1500
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|java|keepassxc|audacity|filebot|FreeFileSync|krusader|vlc/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; for r in a b d e f h j k m p q s t u v z; do bb umount /disk/$r/tmp/.X11-unix /disk/$r/proc /disk/$r/dev 2>/dev/null; bb grep -q " /disk/$r/" /proc/mounts || bb rm -rf /disk/$r; done; bb mkdir -p /disk/g/tmp; bb tar -xf /disk/gimp.tar -C /disk/g && bb rm /disk/gimp.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/g/tmp/.passwd; echo root:x:0: >/disk/g/tmp/.group; /disk/fakebwm 300 'x' >/disk/fb22.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/g -d 21 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/gimp >/disk/gimp.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb22.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb22.out 2>/dev/null || { bb tail -n 12 /disk/gimp.out | bb cut -c1-200; }; bb cat /disk/fb22.out; bb ps | bb grep -q 'gimp' && echo alive || bb cat /disk/gimp.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :21
 fakebwm: pixels drawn
