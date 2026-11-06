@@ -535,8 +535,8 @@ jobs:
             lanes: alpine,alpine2,alpine3,alpine4,alpine5,go
             disks: alpine.img go.img
           - part: toolchains
-            lanes: debian,node,java,ruby,x11,rust,podman,gitsuite
-            disks: alpine.img debian.img node.img jdk.img ruby.img x11.img rust.img podman.img gitsuite.tar
+            lanes: debian,node,java,ruby,x11,x11b,rust,podman,gitsuite
+            disks: alpine.img debian.img node.img jdk.img ruby.img x11.img x11b.img rust.img podman.img gitsuite.tar
           # The Python lane alone takes longer than all of the above (its
           # test suites run for 25 minutes under emulation), so it has
           # runners of its own, three: python2 and python3 repeat the set-up;

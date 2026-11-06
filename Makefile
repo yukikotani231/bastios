@@ -1039,6 +1039,11 @@ build/compat/fakebwm: test/compat/x11/fakebwm.c user/bwmlib.h user/bwmproto.h | 
 build/compat/x11.img: test/compat/x11/x11start.sh test/compat/x11disk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/bx11 build/compat/fakebwm
 	test/compat/x11disk.py $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GTK_IMAGE) $(X11_QT_IMAGE) $(X11_QT2_IMAGE) $(X11_JAVA_IMAGE) $(X11_WX_IMAGE) $(X11_PY_IMAGE) $(X11_TAG_IMAGE) $(X11_DIRSTAT_IMAGE) $(X11_FILEZILLA_IMAGE) $(X11_AVIDEMUX_IMAGE) $(X11_HANDBRAKE_IMAGE) $(X11_MKV_IMAGE) $(X11_CZKAWKA_IMAGE) $(X11_TSMUXER_IMAGE) $(X11_FILEBOT_IMAGE) $(X11_FFS_IMAGE) $(X11_KRUSADER_IMAGE) $(X11_EVINCE_IMAGE) $(X11_VLC_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
 
+# The second X11 disk (lane x11b): a BastiOS disk holds 262144 entries, which
+# the first one's roots nearly fill, so newer apps go on a disk of their own.
+build/compat/x11b.img: test/compat/x11/x11start.sh test/compat/x11disk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/bx11 build/compat/fakebwm
+	test/compat/x11disk.py --part2 $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GIMP_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
+
 # Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
 # Java disk as /opt/jdtls.
 build/compat/jdtls.tgz: | build/compat/src
@@ -1084,7 +1089,7 @@ build/compat/docker.img: test/compat/dockerdisk.py test/compat/alpinedisk.py tes
 # made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
 # COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
 # and run a part of the suite: the images of its lanes, and those lanes.
-COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/ruby.img build/compat/x11.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/docker.img build/compat/gitsuite.tar
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/ruby.img build/compat/x11.img build/compat/x11b.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/docker.img build/compat/gitsuite.tar
 
 GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
@@ -1097,11 +1102,11 @@ build/compat/oss: test/compat/ossrepos.sh
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
 compat: build/bastios.elf $(COMPAT_DISKS) build/compat/oss
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests

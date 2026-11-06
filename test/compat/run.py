@@ -855,6 +855,7 @@ def main():
     ap.add_argument("--oss-dir", help="the git repositories of real projects (ossrepos.sh), served at HOSTURL/oss")
     ap.add_argument("--tcc-src", help="the tcc checkout alpine.txt's abuild case builds a package from")
     ap.add_argument("--jdk-disk", help="the JDK disk (the JDK of the eclipse-temurin image) for java.txt")
+    ap.add_argument("--x11b-disk", help="the second X11 disk (Xvfb and xterm roots, GIMP) for x11b.txt")
     ap.add_argument("--x11-disk", help="the X11 disk (Xvfb and xterm roots, bx11) for x11.txt")
     ap.add_argument("--ruby-disk", help="the Ruby disk (the root of the ruby:alpine image) for ruby.txt")
     ap.add_argument("--rust-disk", help="the Rust disk (the toolchain of the rust image) for rust.txt")
@@ -873,7 +874,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "ruby", "x11", "rust", "python", "python2", "python3", "podman", "docker", "gitsuite"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "python2", "python3", "podman", "docker", "gitsuite"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -920,6 +921,7 @@ def main():
     java = load_applets(os.path.join(HERE, "java.txt"))
     ruby = load_applets(os.path.join(HERE, "ruby.txt"))
     x11 = load_applets(os.path.join(HERE, "x11.txt"))
+    x11b = load_applets(os.path.join(HERE, "x11b.txt"))
     rust = load_applets(os.path.join(HERE, "rust.txt"))
     podman = load_applets(os.path.join(HERE, "podman.txt"))
     docker = load_applets(os.path.join(HERE, "docker.txt"))
@@ -1168,6 +1170,11 @@ def main():
         disk = os.path.join(args.out, "x11-run.img")
         disk_copy(args.x11_disk, disk)
         lanes.append(("x11", disk, [("x11", "X11", applets_lane(x11, 900))], "1G"))
+    if args.x11b_disk and lane_chosen("x11b"):
+        # The second X11 disk: the server and client roots again, and GIMP's.
+        disk = os.path.join(args.out, "x11b-run.img")
+        disk_copy(args.x11b_disk, disk)
+        lanes.append(("x11b", disk, [("x11b", "X11 (second disk)", applets_lane(x11b, 900))], "1G"))
     if args.rust_disk and lane_chosen("rust"):
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.
@@ -1240,7 +1247,7 @@ def main():
                 if c["name"] not in merged or python_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["python"] = sorted(merged.values(), key=lambda c: py_at.get(c["name"], len(py_at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "ruby", "x11", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
