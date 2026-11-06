@@ -1619,8 +1619,10 @@ posix-pthread_cleanup_push_1-1
 posix-pthread_cleanup_push_1-2
 posix-pthread_cleanup_push_1-3
 posix-pthread_cond_broadcast_1-1
+posix-pthread_cond_broadcast_1-2
 posix-pthread_cond_broadcast_2-1
 posix-pthread_cond_broadcast_2-2
+posix-pthread_cond_broadcast_2-3
 posix-pthread_cond_broadcast_4-1
 posix-pthread_cond_broadcast_4-2
 posix-pthread_cond_destroy_1-1
@@ -1784,6 +1786,7 @@ posix-pthread_once_1-2
 posix-pthread_once_1-3
 posix-pthread_once_2-1
 posix-pthread_once_3-1
+posix-pthread_once_6-1
 posix-pthread_rwlock_destroy_1-1
 posix-pthread_rwlock_destroy_3-1
 posix-pthread_rwlock_init_1-1
