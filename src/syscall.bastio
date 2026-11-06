@@ -858,6 +858,7 @@ fn net_wake(k: &mut Kernel)
   ensures kok(k)
 {
   nic_tick(&mut k.nic, k.ticks);
+  nic_rt_poll(&mut k.nic);
   wg_pass(&mut k);
   if nic_dns_take(&mut k.nic) {
     write_resolv(&mut k, nic_info(k.nic, 4), nic_v6_state(k.nic, 5), nic_v6_state(k.nic, 6));

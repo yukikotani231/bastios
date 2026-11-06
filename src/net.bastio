@@ -250,6 +250,11 @@ struct Net {
   dhcp_end: u64,
   dns: u64,           // the name server DHCP named (0: none)
   dns_new: bool,      // ... not yet written to /etc/resolv.conf (nic_dns_take)
+  ev_ip: u64,         // the card's address, its mask size, gateway, IPv6 prefix and router
+  ev_span: u64,       // ... as netlink listeners last heard them (nic_rt_poll in src/rtnl.bastio)
+  ev_gw: u64,
+  ev_pfx: u64,
+  ev_rtr: u64,
   now: u64,           // the tick count at the last nic_tick
   ping_state: u64,
   ping_pid: u64,      // who asked
@@ -2341,7 +2346,7 @@ fn net_up(d: Card) -> Nic
 {
   let mut n = Net { dev: d, pkt: balloc(NET_BUF), out: balloc(NET_BUF), ip: 0, gw: 0, span: 1,
     arp: alloc(ARP_N * 3), arp_next: 0, icmp_sec: 0, icmp_n: 0, held: balloc(HELD_N * RX_BUF), held_len: alloc(HELD_N), held_hop: alloc(HELD_N), held_n: 0,
-    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, now: 0,
+    dhcp_state: DHCP_OFF, dhcp_xid: 0, dhcp_offer: 0, dhcp_server: 0, dhcp_tries: 0, dhcp_until: 0, dhcp_t1: 0, dhcp_t2: 0, dhcp_end: 0, dns: 0, dns_new: false, ev_ip: 0, ev_span: 0, ev_gw: 0, ev_pfx: 0, ev_rtr: 0, now: 0,
     ping_state: PING_IDLE, ping_pid: 0, ping_ip: 0, ping_hop: 0, ping_until: 0, seq: 0, rx: 0, tx: 0,
     socks: alloc(SOCKS * SOCK_FIELDS), ucap: 0, dq: balloc(0), dm: alloc(0), cork: balloc(0), eph: 0,
     tcbs: alloc(TCB0 * TCB_W), rb: rings_new(), iss: 0, sec: 0,

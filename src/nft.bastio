@@ -1825,7 +1825,7 @@ fn nf_request(n: &mut Net, q: u64, b: &Bytes, len: u64, admin: bool) -> u64
       }
     }
   }
-  nlw_close(&mut n, q);
+  nlw_end(&mut n, q);
   n.ns = was;
   return at;
 }
