@@ -816,30 +816,51 @@ fn cpu_topo_at(x: &Bytes, n: u64) -> u64
   return 0;
 }
 
+/// Whether live process p has open file description h on a descriptor.
+fn ofd_held_by(k: &Kernel, p: u64, h: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  if state(k.procs, p) == FREE {
+    return false;
+  }
+  let mut fd = 0;
+  while fd < LXNFD
+    invariant fd <= LXNFD && p < NPROC && kok(k)
+  {
+    if fd_ofd(k, p, fd) == h {
+      return true;
+    }
+    fd = fd + 1;
+  }
+  return false;
+}
+
 /// A live process that holds open file description h, or NPROC: the one a
-/// flock or open-file-description lock is listed under.
+/// flock or open-file-description lock is listed under. Of the processes
+/// that hold it, the first whose parent does not (flock(1) and the command
+/// it runs share the description: the command is flock's child, and flock
+/// is the one that took the lock).
 fn ofd_holder(k: &Kernel, h: u64) -> u64
   requires kok(k)
   ensures result <= NPROC
 {
+  let mut first = NPROC;
   let mut p = 0;
   while p < NPROC
-    invariant p <= NPROC && kok(k)
+    invariant p <= NPROC && first <= NPROC && kok(k)
   {
-    if state(k.procs, p) != FREE {
-      let mut fd = 0;
-      while fd < LXNFD
-        invariant fd <= LXNFD && p < NPROC && kok(k)
-      {
-        if fd_ofd(k, p, fd) == h {
-          return p;
-        }
-        fd = fd + 1;
+    if ofd_held_by(k, p, h) {
+      if first == NPROC {
+        first = p;
+      }
+      let par = smaller(pget(k.procs, p, F_PARENT), NPROC - 1);
+      if !ofd_held_by(k, par, h) {
+        return p;
       }
     }
     p = p + 1;
   }
-  return NPROC;
+  return first;
 }
 
 /// Appends the line for lock-table entry i (numbered n), as process obs
