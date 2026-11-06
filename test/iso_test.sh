@@ -145,7 +145,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             "-drive", f"file={disk},format=raw,if=none,id=vd",
             "-device", "nvme,serial=bastios,drive=vd" if nvme else "virtio-blk-pci,drive=vd",
             "-netdev", "user,id=n0", "-device", "virtio-net-pci,netdev=n0",
-            "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait"]
+            "-serial", "stdio", "-monitor", f"unix:{mon_path},server,nowait",
+            "-qmp", f"unix:{qmp_path},server,nowait"]
     if stick:
         devs += ["-drive", f"file={stick},format=raw,if=none,id=st",
                  "-device", "qemu-xhci,id=xh", "-device", "usb-storage,bus=xh.0,drive=st,bootindex=0"]
@@ -155,8 +156,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
     if usb:
         if not stick:
             devs += ["-device", "qemu-xhci,id=xh"]
-        devs += ["-machine", "pc,i8042=off", "-device", "usb-kbd,bus=xh.0",
-                 "-qmp", f"unix:{qmp_path},server,nowait"]
+        devs += ["-machine", "pc,i8042=off", "-device", "usb-kbd,bus=xh.0"]
     q = subprocess.Popen(["qemu-system-x86_64"] + firmware + devs,
                          stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
     out = b""
@@ -503,20 +503,34 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             # Alt held: the window list is on the screen, the chosen window lit;
             # when Alt comes up it goes away.
-            monitor("sendkey alt-tab 4000")
-            w, h, px = screendump()
-            sx, sy = (w - 260) // 2 + 255, (h - 3 * 24) // 2 + 12
-            end = time.time() + 3
-            while at(sx, sy) != (40, 90, 200) and time.time() < end:
+            def lit_rows():
                 w, h, px = screendump()
-            during = at(sx, sy) == (40, 90, 200)
-            time.sleep(4)
+                sx = (w - 260) // 2 + 255
+                return [y for y in range(h // 2 - 160, h // 2 + 160) if tuple(px[(y * w + sx) * 3:(y * w + sx) * 3 + 3]) == (40, 90, 200)]
+            def qkeys(*evs):                     # (down, key) pairs through QMP: a key can be held there
+                qs = socket.socket(socket.AF_UNIX)
+                qs.connect(qmp_path)
+                qf = qs.makefile("rw")
+                qf.readline()
+                for c in [{"execute": "qmp_capabilities"}] + [{"execute": "input-send-event", "arguments": {"events": [
+                        {"type": "key", "data": {"down": d, "key": {"type": "qcode", "data": k}}}]}} for d, k in evs]:
+                    qf.write(json.dumps(c) + "\n"); qf.flush()
+                    qf.readline()
+                qs.close()
+            idle = lit_rows()
+            qkeys((True, "alt"), (True, "tab"), (False, "tab"))
+            during = lit_rows()
+            end = time.time() + 5
+            while len(during) - len(idle) != 24 and time.time() < end:
+                during = lit_rows()
+            qkeys((False, "alt"))
             end = time.time() + 10
-            while True:
-                w, h, px = screendump()
-                if at(sx, sy) != (40, 90, 200) or time.time() > end:
-                    break
-            good = during and at(sx, sy) != (40, 90, 200)
+            after = lit_rows()
+            while len(after) != len(idle) and time.time() < end:
+                after = lit_rows()
+            good = len(during) - len(idle) == 24 and len(after) == len(idle)
+            if not good:
+                print("     lit rows idle", len(idle), "during", len(during), "after", len(after))
             print(("ok  " if good else "FAIL"), f"({name}) holding Alt-Tab shows the window list, letting go hides it")
             fails += not good
             monitor("sendkey alt-shift-tab")
