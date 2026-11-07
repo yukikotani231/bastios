@@ -1293,6 +1293,24 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 good = hx is not None
                 if good:
                     tx, ty = hx + 100, hy - 10                  # the Wallpaper row is the one above the hint
+                    # Where the pointer is now (the later steps move it relative to this): move it 30 right and see which
+                    # pixels change; the arrow's tip is the top left of what changed.
+                    monitor("mouse_move 30 0")
+                    time.sleep(0.4)
+                    w2, h2, px2 = screendump()
+                    monitor("mouse_move -30 0")
+                    time.sleep(0.4)
+                    ptx = pty = None
+                    for yy in range(h):
+                        if px[yy * w * 3:(yy + 1) * w * 3] != px2[yy * w * 3:(yy + 1) * w * 3]:
+                            pty = yy
+                            for xx in range(w):
+                                if px[(yy * w + xx) * 3:(yy * w + xx) * 3 + 3] != px2[(yy * w + xx) * 3:(yy * w + xx) * 3 + 3]:
+                                    ptx = xx
+                                    break
+                            break
+                    good = ptx is not None
+                if good:
                     monitor(*["mouse_move -250 -250"] * 8)
                     monitor(*["mouse_move 250 0"] * (tx // 250), "mouse_move %d 0" % (tx % 250))
                     monitor(*["mouse_move 0 250"] * (ty // 250), "mouse_move 0 %d" % (ty % 250))
@@ -1303,6 +1321,10 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     for _ in range(6):
                         monitor("sendkey w")
                         time.sleep(0.3)
+                    monitor(*["mouse_move -250 -250"] * 8)         # and the pointer goes back where it was
+                    monitor(*["mouse_move 250 0"] * (ptx // 250), "mouse_move %d 0" % (ptx % 250))
+                    monitor(*["mouse_move 0 250"] * (pty // 250), "mouse_move 0 %d" % (pty % 250))
+                    time.sleep(0.3)
             print(("ok  " if good else "FAIL"), f"({name}) a click on the Wallpaper row of the System window cycles the wallpaper")
             fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
