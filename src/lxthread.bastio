@@ -148,7 +148,8 @@ fn group_free(k: &mut Kernel, p: u64) -> bool
   return holder(&mut k, g) != 0;
 }
 
-/// pick (src/proc.bastio) for processor `me`, skipping threads whose group
+/// pick (src/proc.bastio) for processor `me`: a real-time thread first, by
+/// priority (rt_pick). Skips threads whose group
 /// cannot run now and threads whose mask leaves this processor out
 /// (aff_ok). A thread that owes for its nice value is passed over, paying
 /// a SLICE of it (nice_debtor, src/lxprio.bastio), unless no other thread
@@ -162,17 +163,29 @@ fn lx_pick(k: &mut Kernel, from: u64, me: u64) -> u64
     return 0;
   }
   let base = from % cap;
+  // Real-time threads first (rt_pick, src/lxprio.bastio), unless they have
+  // used their share: then the others go first, and a real-time thread
+  // runs only when no other can.
+  let mut rt = 0;
+  let mut skip_rt = false;
+  if get(k.sys, SYS_RTON) != 0 {
+    rt = rt_pick(&mut k, base, cap, me);
+    if rt != 0 && !rt_throttled(k, me) {
+      return rt;
+    }
+    skip_rt = rt != 0;
+  }
   let mut passed = 0;
   let mut i = 0;
   while i < cap
-    invariant i <= cap && 0 < cap && cap <= NPROC && base < cap && passed < NPROC && kok(k)
+    invariant i <= cap && 0 < cap && cap <= NPROC && base < cap && passed < NPROC && rt < NPROC && kok(k)
   {
     // base + i < 2 * cap: one subtraction wraps it, with no division per slot.
     let mut p = base + i;
     if p >= cap {
       p = p - cap;
     }
-    if p != 0 && state(k.procs, p) == READY && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
+    if p != 0 && state(k.procs, p) == READY && !(skip_rt && rt_prio(k.procs, p) != 0 && pget(k.procs, p, F_RESTART) == 0) && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
       if !nice_debtor(&mut k, p) {
         return p;
       }
@@ -181,6 +194,9 @@ fn lx_pick(k: &mut Kernel, from: u64, me: u64) -> u64
       }
     }
     i = i + 1;
+  }
+  if passed == 0 {
+    return rt;
   }
   return passed;
 }
