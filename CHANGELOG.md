@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `/proc/PID/maps` and `smaps` name the file each mapping comes from, with its offset and inode, as Linux does: the program and its interpreter as `execve` loaded them, and every `mmap` of a file (`src/lxfname.bastio`). The names follow `munmap`, mappings made over them, `mremap` and `fork`; a mapping keeps its file in place after its name is removed, as on Linux. `maps` and `smaps` longer than 4 KiB now read whole, a piece at a time (they were cut at 4 KiB), and code `execve` has not read yet shows as the read-only mapping it is. Limits: 64 file mappings per process are named (more are listed without a name), a removed file's line has no name (Linux writes `(deleted)` after the old one), and devices such as `/dev/zero` are not named (`test/compat/progs/t_proc.c`).
 - `/sys/class/net/lo` and `/sys/class/net/eth0` with `address`, `operstate`, `mtu`, `carrier`, `ifindex`, `type`, `flags` and `tx_queue_len` (`test/compat/progs/t_sysnet.c`), for scripts and tools that read an interface's state from sysfs. Interfaces made at run time (veth, bridge, tunnel) have no directory yet.
 - Page faults are counted per thread: `perf_event_open` `PAGE_FAULTS` and `PAGE_FAULTS_MIN` (they read 0 before), `getrusage` `ru_minflt` and `/proc/PID/stat` `minflt` (`test/compat/progs/t_perf.c`). Every fault is counted as minor; `PAGE_FAULTS_MAJ` still reads 0.
 - A click on the Time, Keyboard, Next mode or Wallpaper row of the System window changes it, like t, k, m and w do.

@@ -973,7 +973,10 @@ const PT_N: u64 = 4;                 // POSIX timers per process
 const PT_W: u64 = 4;                 // words per timer: deadline, interval, state, overruns
 const MAP_N: u64 = 64;               // MAP_SHARED file mappings per process
 const MAP_W: u64 = 4;                // words per mapping: first page + 1, pages, description, offset
-const MAPS_LEN: u64 = NPROC * MAP_N * MAP_W;
+const FN_N: u64 = 64;                // file mappings per process whose name /proc/PID/maps gives (src/lxfname.bastio)
+const FN_W: u64 = 4;                 // words per name record: first page + 1, pages, the file (fn_src), file offset
+const MP_ROW: u64 = MAP_N * MAP_W + FN_N * FN_W;   // one process's words in k.maps: its MAP_SHARED records, then its name records
+const MAPS_LEN: u64 = NPROC * MP_ROW;
 
 // k.maps starts with PGROW processes' records and grows with the process
 // table (new_pid); records of a process beyond its length read as 0.
@@ -1610,6 +1613,7 @@ fn spawn_as(k: &mut Kernel, prog: u64, parent: u64, name: Str) -> u64
   put_space(&mut k.spaces, pid, sp);
   hole_clear(&mut k, pid);
   anon_clear(&mut k, pid);
+  fn_clear(&mut k, pid);
   if !ok {
     give_page(&mut k.mem, fpu);
     return 0;
@@ -1843,7 +1847,7 @@ fn new_pid_from(k: &mut Kernel, round: bool) -> u64
   // The process table last: its length is how many rows every table has.
   if !zgrow(&mut k.sigact, n * SIGACT_ROW) || !zgrow(&mut k.cwd, n * CWD_STRIDE)
      || !zgrow(&mut k.croot, n * CWD_STRIDE) || !zgrow(&mut k.lxfd, n * LXNFD)
-     || !zgrow(&mut k.fs.ftab, (FD_POOL + n * NFD) * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.maps, n * MAP_N * MAP_W) || !zgrow(&mut k.procs, n * STRIDE) {
+     || !zgrow(&mut k.fs.ftab, (FD_POOL + n * NFD) * FD_STRIDE) || !zgrow(&mut k.sigsave, n * SIGSAVE_ROW) || !zgrow(&mut k.maps, n * MP_ROW) || !zgrow(&mut k.procs, n * STRIDE) {
     return 0;
   }
   let grown = free_pid(k.procs, cap, k.pid_hi);
@@ -1907,6 +1911,29 @@ fn start_env(args: &mut Bytes, from: u64) -> u64
   return from + n;
 }
 
+/// The interpreter of the program parsed in e, from isrc, as exec places
+/// it: at the top of the first segment, below INTERP_TOP, moved down by
+/// the layout's random distance if there is room above the program. Not
+/// ok if it is not a PIE without an interpreter of its own, or does not fit.
+fn interp_elf(v: &mut Vfs, e: Elf, isrc: Src, rn: Rnd) -> Elf
+  requires vfs_ok(v) && rnd_ok(rn)
+  ensures vfs_ok(v) && elf_fits(isrc.size, result)
+{
+  let probe = elf_parse_at(&mut v, isrc, 0);
+  if e.end > INTERP_TOP {
+    return bad_elf();
+  }
+  let low = (e.end + 4095) / 4096 * 4096;
+  if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > INTERP_TOP || probe.end > INTERP_TOP - low {
+    return bad_elf();
+  }
+  let mut place = (INTERP_TOP - probe.end) / 4096 * 4096;
+  if place >= low + rn.mmap_pg * 4096 {
+    place = place - rn.mmap_pg * 4096;      // moved down, if there is room above the program
+  }
+  return elf_parse_at(&mut v, isrc, place);
+}
+
 /// Builds the address space for program `prog`, with the argument strings
 /// in the first `alen` bytes of `args` and the environment strings from
 /// there to `total` (each ending in a NUL), and the interpreter execve
@@ -1953,16 +1980,7 @@ fn load_image(m: &mut Mem, txt: &mut Store, v: &mut Vfs, procs: &mut Buf, rn: Rn
       if !isrc.file && isrc.prog >= NPROGS {
         return Space::Empty;
       }
-      let probe = elf_parse_at(&mut v, isrc, 0);
-      let low = (e.end + 4095) / 4096 * 4096;
-      if !probe.ok || probe.bias != USER_BASE || probe.ilen != 0 || low > INTERP_TOP || probe.end > INTERP_TOP - low {
-        return Space::Empty;
-      }
-      let mut place = (INTERP_TOP - probe.end) / 4096 * 4096;
-      if place >= low + rn.mmap_pg * 4096 {
-        place = place - rn.mmap_pg * 4096;      // moved down, if there is room above the program
-      }
-      ie = elf_parse_at(&mut v, isrc, place);
+      ie = interp_elf(&mut v, e, isrc, rn);
       if !ie.ok {
         return Space::Empty;
       }

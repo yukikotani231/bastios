@@ -84,6 +84,7 @@ import "lxopen2.bastio";
 import "lxhandle.bastio";
 import "lxinotify.bastio";
 import "lazy.bastio";
+import "lxfname.bastio";
 import "lxanon.bastio";
 import "swap.bastio";
 import "oom.bastio";

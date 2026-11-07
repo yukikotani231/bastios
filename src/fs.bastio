@@ -709,6 +709,39 @@ fn vfs_hold_dup(v: &mut Vfs, i: u64)
   }
 }
 
+/// A reference on file handle h like vfs_hold's, from the hold that is
+/// already on h if there is one (vfs_hold_dup), so that the files many
+/// processes map (a shared library) take one hold each. HOLD_N if h is no
+/// such file or every hold is taken.
+fn vfs_hold_share(v: &mut Vfs, h: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && result <= HOLD_N
+{
+  let mut fs = 0;
+  let mut node = 0;
+  if h < NFILES {
+    fs = FS_RAM;
+    node = h;
+  } else if h < NFILES + DSLOTS {
+    fs = FS_DISK;
+    node = h - NFILES;
+  } else {
+    return HOLD_N;
+  }
+  let mut i = 0;
+  while i < HOLD_N
+    invariant i <= HOLD_N && vfs_ok(v)
+  {
+    if get(v.holds, i * FD_STRIDE + FD_FS) == fs && get(v.holds, i * FD_STRIDE + FD_NODE) == node
+      && get(v.holds, i * FD_STRIDE + FD_OFF) != 0 && get(v.holds, i * FD_STRIDE + FD_OFF) < 4294967296 {
+      vfs_hold_dup(&mut v, i);
+      return i;
+    }
+    i = i + 1;
+  }
+  return vfs_hold(&mut v, h);
+}
+
 /// The file handle hold i is on, or NO_FILE.
 fn vfs_held(v: &Vfs, i: u64) -> u64
   requires vfs_ok(v)

@@ -1344,8 +1344,10 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   // space than its size.
   if from * 4096 == low && low <= STACK_FIRST * 4096 && brk <= low && extra * 4096 <= low - brk && extra <= from {
     let at = from - extra;
+    let names = fn_take(&mut k, pid, from, oend);   // the files the pages map move with them
     map_forget(&mut k, pid, from, oend, false);
     if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
+      fn_put(&mut k, pid, names, from, from);
       return ENOMEM;
     }
     pset(&mut k.procs, pid, F_MMAP, at * 4096);
@@ -1355,8 +1357,10 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
       if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, at, at + have, from) <= WPAGES {
         pset(&mut k.procs, pid, F_MMAP, low);
       }
+      fn_put(&mut k, pid, names, from, from);
       return ENOMEM;
     }
+    fn_put(&mut k, pid, names, from, at);
     return USER_BASE + at * 4096;
   }
   // Elsewhere it moves: to a hole munmap or an earlier move left if one
@@ -1381,10 +1385,13 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
     }
     return ENOMEM;
   }
+  let names = fn_take(&mut k, pid, from, oend);
   map_forget(&mut k, pid, from, oend, false);
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
+    fn_put(&mut k, pid, names, from, from);
     return ENOMEM;
   }
+  fn_put(&mut k, pid, names, from, at);
   if fresh {
     pset(&mut k.procs, pid, F_MMAP, at * 4096);
   }
@@ -1516,9 +1523,13 @@ fn remap_shared(k: &mut Kernel, pid: u64, ri: u64, from: u64, oend: u64, want: u
   if !w {
     win_op(&mut k.mem, &mut k.spaces, pid, WOP_PROTECT, at + have, at + want, 0);
   }
+  let names = fn_take(&mut k, pid, from, oend);
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, oend, at) > WPAGES {
+    fn_put(&mut k, pid, names, from, from);
     return ENOMEM;
   }
+  fn_put(&mut k, pid, names, from, at);
+  fn_add(&mut k, pid, at + have, want - have, f, off + have * 4096);   // the new tail maps the file too
   wset(&mut k.maps, mp_at(pid, ri, 0), at + 1);
   wset(&mut k.maps, mp_at(pid, ri, 1), want);
   if fresh {
@@ -1564,11 +1575,20 @@ fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
       return ENOMEM;
     }
   }
+  let names = fn_take(&mut k, pid, from, from + keep);
   map_forget(&mut k, pid, from, from + keep, false);
   if win_op(&mut k.mem, &mut k.spaces, pid, WOP_MOVE, from, from + keep, at) > WPAGES {
+    fn_put(&mut k, pid, names, from, from);
     return ENOMEM;
   }
+  fn_put(&mut k, pid, names, from, at);
   fixed_taken(&mut k, pid, at, at + want);
+  // Where the pages were is free address space again (a hole), as after
+  // munmap: else it would read as a PROT_NONE reservation, which a later
+  // mremap of it moves (remap_reservable) where Linux says EFAULT.
+  if from >= pget(k.procs, pid, F_MMAP) / 4096 {
+    hole_add(&mut k, pid, from, oend);
+  }
   return to_addr;
 }
 
@@ -1595,7 +1615,7 @@ fn mp_at(p: u64, i: u64, f: u64) -> u64
   requires p < NPROC && i < MAP_N && f < MAP_W
   ensures result < MAPS_LEN
 {
-  return (p * MAP_N + i) * MAP_W + f;
+  return p * MP_ROW + i * MAP_W + f;
 }
 
 /// Whether a shared mapping recorded for process pid in window pages
@@ -2188,6 +2208,7 @@ fn map_forget(k: &mut Kernel, pid: u64, from: u64, to: u64, wait: bool) -> u64
   }
   lazy_forget(&mut k, pid, from, to);       // code not read yet stays unread
   anon_forget(&mut k, pid, from, to);       // as does memory not touched yet
+  fn_forget(&mut k, pid, from, to);         // and the pages no longer map a file (src/lxfname.bastio)
   return 0;
 }
 
