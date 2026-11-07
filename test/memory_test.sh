@@ -102,8 +102,8 @@ BIG, SMALL, TOUCH_BIG, TOUCH_ADJ = F * 11 // 20, F // 5, F * 2 // 5, F * 7 // 20
 OVER, HOLD, SECOND, HUGE = F * 7 // 5, F * 3 // 5, F * 19 // 20, F * 4
 # The swap file holds what a program needs beyond memory and a margin. It is
 # no bigger than that because the native kernel's heap is small on this
-# machine (the swap table takes 16 bytes of it for each slot).
-SWAP_MB = max(F * 2 // 3, 8)
+# machine (the swap table takes 16 bytes of it for each slot, in one piece).
+SWAP_MB = max(F * 3 // 5, 8)
 SWAP_KB = SWAP_MB * 1024 - 4
 
 # The kernel's heap is a fixed arena (8 MiB) plus an extension carved out of
