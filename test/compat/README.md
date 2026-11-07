@@ -98,7 +98,9 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   an HD Audio card (QEMU's `intel-hda`, its output discarded). Ubuntu 24.04's
   alsa-utils and alsa-lib (glibc), unpacked from `.deb`s pinned by SHA-256 and
   entered with `chroot`: `aplay` on the hardware device and through a `plug`
-  device, `amixer` and `speaker-test`. The samples that reach the card are
+  device, `amixer`, `speaker-test` and an SDL2 program (`progs/sdlbeep.c`, built
+  with the host compiler against Ubuntu's libSDL2) that plays through SDL's ALSA
+  backend. The samples that reach the card are
   checked by `test/shell_test.sh`.
 - `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
   case unpacks Debian's root file system (the `debian:stable-slim` image,

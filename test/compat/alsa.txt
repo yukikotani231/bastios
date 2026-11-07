@@ -47,3 +47,9 @@ numid=1,iface=MIXER,name='PCM Playback Volume'
 $ bb chroot /disk/s /usr/bin/speaker-test -t sine -f 1000 -l 1 -c 2 2>&1 | bb grep -c 'Front'; bb chroot /disk/s /usr/bin/speaker-test -t sine -f 1000 -l 1 -c 2 >/dev/null 2>&1; echo status $?
 2
 status 0
+
+== alsa: SDL2 plays through its ALSA backend
+$ SDL_AUDIODRIVER=alsa bb chroot /disk/s /usr/bin/sdlbeep 2>&1; echo status $?
+sdlbeep: driver alsa, 48000 Hz, 2 channels
+sdlbeep: ok
+status 0

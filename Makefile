@@ -964,7 +964,7 @@ build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py tes
 # entered with chroot and playing on the guest's HD Audio card. The
 # .debs are pinned by SHA-256 in alsadisk.py and kept in ALPINE_CACHE.
 
-build/compat/alsa.img: test/compat/alsadisk.py test/compat/mkdisk.py
+build/compat/alsa.img: test/compat/alsadisk.py test/compat/mkdisk.py test/compat/progs/sdlbeep.c
 	test/compat/alsadisk.py $@ --cache $(ALPINE_CACHE)
 
 # Modules of CPython's own regression tests (Lib/test of the source the python
