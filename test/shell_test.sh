@@ -2710,6 +2710,9 @@ fails += not good
 good = ok and "mtone: ok, 96000 bytes" in text
 print(("ok  " if good else "FAIL"), "(sound) mtone writes half a second to /dev/dsp")
 fails += not good
+good = ok and "mtone: converted ok" in text
+print(("ok  " if good else "FAIL"), "(sound) a second format is accepted mid-stream")
+fails += not good
 runs = []
 try:
     w = wave.open(wav)
@@ -2724,8 +2727,11 @@ try:
                 runs.append([v, 1])
 except (OSError, EOFError, wave.Error):
     pass
-good = len(runs) == 1000 and all(n == 24 and v == (8000 if i % 2 == 0 else -8000) for i, (v, n) in enumerate(runs))
+good = len(runs) == 1500 and all(n == 24 and v == (8000 if i % 2 == 0 else -8000) for i, (v, n) in enumerate(runs[:1000]))
 print(("ok  " if good else "FAIL"), f"(sound) QEMU played the square wave whole ({len(runs)} half periods)")
+fails += not good
+good = len(runs) == 1500 and all(n == 24 and v == (8192 if i % 2 == 0 else -8192) for i, (v, n) in enumerate(runs[1000:]))
+print(("ok  " if good else "FAIL"), "(sound) 8-bit mono 24 kHz is widened and resampled to the same pitch")
 fails += not good
 booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
 off = re.search(r"BastiOS: (\d+) pages free at power off", text)
