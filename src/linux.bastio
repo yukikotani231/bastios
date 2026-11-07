@@ -1150,6 +1150,8 @@ const TCSETSF: u64 = 0x5404;              // TCSETSW (0x5403) lies between
 const TIOCGWINSZ: u64 = 0x5413;
 const TIOCSWINSZ: u64 = 0x5414;
 const FIONREAD: u64 = 0x541B;
+const INQ_NONE: u64 = 18446744073709551615;      // sock_inq (src/lxtcp.bastio): no byte count for this kind of socket
+const INQ_LISTENER: u64 = 18446744073709551614;  // sock_inq: a listening socket
 const FIONBIO: u64 = 0x5421;
 const FIONCLEX: u64 = 0x5450;
 const FIOCLEX: u64 = 0x5451;
@@ -1306,6 +1308,19 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     }
     let r = lx_fcntl(&mut k, pid, fd, F_SETFD, on);
     return r;
+  }
+  if req == FIONREAD && d.kind == K_SOCK {
+    // The bytes waiting to be read on a stream socket, as an int (the Dart VM
+    // sizes its reads by it); a datagram socket still answers ENOTTY.
+    let n = sock_inq(k, pid, fd);
+    if n == INQ_NONE {
+      return ENOTTY;
+    }
+    if n == INQ_LISTENER {
+      return EINVAL;                        // as Linux: a listening socket has nothing to count
+    }
+    xfer_u64(&mut k.fs.xfer, 0, n);
+    return lx_put_out(&mut k, pid, arg, 4);
   }
   if req == FIONREAD && (d.kind == K_PIPE_R || d.kind == K_PIPE_W) {
     // The bytes waiting in the pipe, as an int.
