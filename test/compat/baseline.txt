@@ -2383,6 +2383,7 @@ x11b: x11b: a partition editor, GParted, draws its window on the X screen
 x11b: x11b: a 3D modeller, OpenSCAD, draws its window on the X screen
 x11b: x11b: a web browser, Firefox, draws its window on the X screen
 x11b: x11b: a mail client, Thunderbird, draws its window on the X screen
+x11b: x11b: a PDF viewer, Evince, opens a PDF and its Open dialog
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program
