@@ -1037,11 +1037,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             # The next line waits for its turn: a plain line is on a blue bar, a line that starts with ! on a red one.
             time.sleep(1.5)
-            for _ in range(6):                                           # a slow host shows the first notice late: look again while the first is still up
+            end = time.time() + 12
+            while True:                                                  # a slow host shows the first notice late, so the second is late too: look until it is up
                 w, h, px = screendump()
                 nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 12, 1)[0]
-                if nt == "Tests passed":
+                if nt == "Tests passed" or time.time() > end:
                     break
+                time.sleep(0.3)
             at = ((h - 24 + 12) * w + 64 + 12 * 8 + 8) * 3                      # on the bar, right of the text
             bar = tuple(px[at:at + 3])
             good = nt == "Tests passed" and bar == (40, 80, 150)
