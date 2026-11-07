@@ -1277,6 +1277,57 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     good = g > b + 20
             print(("ok  " if good else "FAIL"), f"({name}) w in the System window cycles the wallpaper")
             fails += not good
+            # A click on the Wallpaper row does what w does. The window is found by its hint line (the only text in
+            # that grey), the pointer is brought to the corner first, and 6 more w presses go round to "none" again.
+            if good:
+                w, h, px = screendump()
+                hx = hy = None
+                for yy in range(h):
+                    row = px[yy * w * 3:(yy + 1) * w * 3]
+                    for xx in range(w):
+                        if row[xx * 3] == 0x80 and row[xx * 3 + 1] == 0x80 and row[xx * 3 + 2] == 0x90:
+                            hx = xx if hx is None else min(hx, xx)
+                            hy = yy if hy is None else hy
+                    if hy is not None and yy > hy + 16:
+                        break
+                good = hx is not None
+                if good:
+                    tx, ty = hx + 100, hy - 10                  # the Wallpaper row is the one above the hint
+                    # Where the pointer is now (the later steps move it relative to this): move it 30 right and see which
+                    # pixels change; the arrow's tip is the top left of what changed.
+                    monitor("mouse_move 30 0")
+                    time.sleep(0.4)
+                    w2, h2, px2 = screendump()
+                    monitor("mouse_move -30 0")
+                    time.sleep(0.4)
+                    ptx = pty = None
+                    for yy in range(h):               # (the window redraws itself too: only the arrow's black outline counts)
+                        if px[yy * w * 3:(yy + 1) * w * 3] != px2[yy * w * 3:(yy + 1) * w * 3]:
+                            for xx in range(w):
+                                a, b = (yy * w + xx) * 3, (yy * w + xx) * 3 + 3
+                                if px[a:b] == b"\0\0\0" and px2[a:b] != b"\0\0\0":
+                                    pty, ptx = yy, xx
+                                    break
+                            if ptx is not None:
+                                break
+                    good = ptx is not None
+                if good:
+                    monitor(*["mouse_move -250 -250"] * 8)
+                    monitor(*["mouse_move 250 0"] * (tx // 250), "mouse_move %d 0" % (tx % 250))
+                    monitor(*["mouse_move 0 250"] * (ty // 250), "mouse_move 0 %d" % (ty % 250))
+                    time.sleep(0.3)
+                    mark_click = len(out)
+                    monitor("mouse_button 1", "mouse_button 0")
+                    good = until(b"bsys: wallpaper @green", mark_click)
+                    for _ in range(6):
+                        monitor("sendkey w")
+                        time.sleep(0.3)
+                    monitor(*["mouse_move -250 -250"] * 8)         # and the pointer goes back where it was
+                    monitor(*["mouse_move 250 0"] * (ptx // 250), "mouse_move %d 0" % (ptx % 250))
+                    monitor(*["mouse_move 0 250"] * (pty // 250), "mouse_move 0 %d" % (pty % 250))
+                    time.sleep(0.3)
+            print(("ok  " if good else "FAIL"), f"({name}) a click on the Wallpaper row of the System window cycles the wallpaper")
+            fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
             monitor("sendkey p")

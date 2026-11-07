@@ -137,6 +137,9 @@ const SY_TOPO: u64 = SY_FI + NPROC * LXNFD;   // after the fdinfo files: file f 
 const MEM_BLOCKS: u64 = 64;            // the memory blocks that have a directory in /sys/devices/system/memory
 const MEM_N: u64 = 193;                // block_size_bytes, then MEM_BLOCKS * 3 files: memoryN/{state, removable, valid_zones}
 const SY_MEM: u64 = SY_TOPO + TOPO_N;  // after the topology files: file f at 0 (block_size_bytes) or 1 + N * 3 + f
+const NET_A: u64 = 8;                  // the files of an interface in /sys/class/net/NAME: address, operstate, mtu, carrier, ifindex, type, flags, tx_queue_len
+const NET_N: u64 = 16;                 // lo and eth0, NET_A files each
+const SY_NET: u64 = SY_MEM + MEM_N;    // after the memory files: file a of lo at a, of eth0 at NET_A + a
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -492,6 +495,10 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   let mf = mem_sys_at(x, n);
   if mf != 0 {
     return PROC_DEV + PSYS + SY_MEM + mf - 1;      // a memory block's file
+  }
+  let nf = net_sys_at(x, n);
+  if nf != 0 {
+    return PROC_DEV + PSYS + SY_NET + nf - 1;      // an interface's file
   }
   let s = loop_sys_at(x, n);
   if s != 0 {
@@ -1015,6 +1022,157 @@ fn cpu_sysfs(k: &mut Kernel)
     }
     ci = ci + 1;
   }
+}
+
+/// The /sys/class/net file the n-byte path in x names: its index + 1 (lo's
+/// files are 1 .. NET_A, eth0's NET_A + 1 .. 2 * NET_A), or 0.
+fn net_sys_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= NET_N
+{
+  if n < 17 || !xfer_is(x, 0, 14, "sys/class/net/") {
+    return 0;
+  }
+  let mut base = 0;
+  let mut at = 0;
+  if xfer_is(x, 14, 17, "lo/") {
+    at = 17;
+  } else if n > 19 && xfer_is(x, 14, 19, "eth0/") {
+    base = NET_A;
+    at = 19;
+  } else {
+    return 0;
+  }
+  if xfer_is(x, at, n, "address") {
+    return base + 1;
+  }
+  if xfer_is(x, at, n, "operstate") {
+    return base + 2;
+  }
+  if xfer_is(x, at, n, "mtu") {
+    return base + 3;
+  }
+  if xfer_is(x, at, n, "carrier") {
+    return base + 4;
+  }
+  if xfer_is(x, at, n, "ifindex") {
+    return base + 5;
+  }
+  if xfer_is(x, at, n, "type") {
+    return base + 6;
+  }
+  if xfer_is(x, at, n, "flags") {
+    return base + 7;
+  }
+  if xfer_is(x, at, n, "tx_queue_len") {
+    return base + 8;
+  }
+  return 0;
+}
+
+/// Appends the byte v as two lower-case hex digits.
+fn put_b2(o: &mut Bytes, at: u64, v: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let hi = v / 16 % 16;
+  let lo = v % 16;
+  let mut a = at;
+  if hi < 10 {
+    a = put_c(&mut o, a, cast[u8](48 + hi));
+  } else {
+    a = put_c(&mut o, a, cast[u8](87 + hi));
+  }
+  if lo < 10 {
+    a = put_c(&mut o, a, cast[u8](48 + lo));
+  } else {
+    a = put_c(&mut o, a, cast[u8](87 + lo));
+  }
+  return a;
+}
+
+/// The text of /sys/class/net file t (see NET_N) as the reader sees it: an
+/// empty file when the interface is not in the reader's network namespace.
+/// This is the interface's state in the namespace of the card (lo and eth0
+/// are there; a veth, bridge or tunnel has no directory).
+fn net_sys_text(k: &Kernel, pid: u64, t: u64, o: &mut Bytes) -> u64
+  requires kok(k) && pid < NPROC && t < NET_N && blen(o) == PROC_OUT
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let i = t / NET_A;
+  let a = t % NET_A;
+  if i >= IFN || !nic_if_in(k.nic, net_ns(k, pid), i) {
+    return 0;
+  }
+  let fl = nic_if_flags(k.nic, i);
+  let lo = i == 0;
+  if a == 0 {
+    let m = nic_if_mac(k.nic, i);
+    let mut b = 0;
+    let mut p = 0;
+    while b < 6
+      invariant b <= 6 && p <= PROC_OUT && blen(o) == PROC_OUT
+    {
+      let sh = 5 - b;
+      let mut d = m;
+      let mut s = 0;
+      while s < sh
+        invariant s <= sh && sh <= 5
+      {
+        d = d / 256;
+        s = s + 1;
+      }
+      p = put_b2(&mut o, p, d % 256);
+      if b < 5 {
+        p = put_c(&mut o, p, 58);
+      }
+      b = b + 1;
+    }
+    return put_c(&mut o, p, 10);
+  }
+  if a == 1 {
+    if lo {
+      return put_s(&mut o, 0, "unknown\n");
+    }
+    if fl % 2 == 1 {
+      return put_s(&mut o, 0, "up\n");
+    }
+    return put_s(&mut o, 0, "down\n");
+  }
+  if a == 2 {
+    return put_c(&mut o, put_n(&mut o, 0, nic_if_mtu(k.nic, i)), 10);
+  }
+  if a == 3 {
+    if fl % 2 == 1 {
+      return put_s(&mut o, 0, "1\n");
+    }
+    return put_s(&mut o, 0, "0\n");
+  }
+  if a == 4 {
+    return put_c(&mut o, put_n(&mut o, 0, nic_if_index(k.nic, i)), 10);
+  }
+  if a == 5 {
+    if lo {
+      return put_s(&mut o, 0, "772\n");
+    }
+    return put_s(&mut o, 0, "1\n");
+  }
+  if a == 6 {
+    return put_c(&mut o, put_h(&mut o, put_s(&mut o, 0, "0x"), fl), 10);
+  }
+  return put_s(&mut o, 0, "1000\n");
+}
+
+/// Makes /sys/class/net/lo and /sys/class/net/eth0, whose files
+/// (net_sys_text) say what ip link shows for them.
+fn net_sysfs(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  make_dir(&mut k.fs, "sys/class");
+  make_dir(&mut k.fs, "sys/class/net");
+  make_dir(&mut k.fs, "sys/class/net/lo");
+  make_dir(&mut k.fs, "sys/class/net/eth0");
 }
 
 /// The /sys/devices/system/memory file the n-byte path in x names: its
@@ -2858,6 +3016,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if what >= SY_MEM && what - SY_MEM < MEM_N {
       return mem_text(k, what - SY_MEM, &mut o);
+    }
+    if what >= SY_NET && what - SY_NET < NET_N {
+      return net_sys_text(k, pid, what - SY_NET, &mut o);
     }
     if what >= SY_TOPO && what - SY_TOPO < TOPO_N {
       return cpu_topo_text(k, what - SY_TOPO, &mut o);
