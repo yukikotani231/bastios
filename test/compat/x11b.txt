@@ -110,3 +110,14 @@ fakebwm: window 800x600 X11 :11
 fakebwm: pixels drawn
 fakebwm: typed
 alive
+
+== x11b: a PDF viewer, Evince, opens a PDF and its Open dialog
+# timeout 600
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape|wireshark|gparted|openscad|firefox|thunderbird|evince/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; bb mkdir -p /disk/ev/tmp; bb tar -xf /disk/evince.tar -C /disk/ev && bb rm /disk/evince.tar; echo root:x:0:0:root:/root:/bin/sh >/disk/ev/tmp/.passwd; echo root:x:0: >/disk/ev/tmp/.group; { echo '%PDF-1.1'; echo '1 0 obj<</Type/Catalog/Pages 2 0 R>>endobj'; echo '2 0 obj<</Type/Pages/Kids[3 0 R]/Count 1>>endobj'; echo '3 0 obj<</Type/Page/Parent 2 0 R/MediaBox[0 0 300 200]>>endobj'; echo 'trailer<</Root 1 0 R>>'; echo '%%EOF'; } >/disk/ev/tmp/a.pdf; /disk/fakebwm 300 '\w60;\s;\co\w20;\s;' >/disk/fb30.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/ev -d 12 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/evince /tmp/a.pdf >/disk/evp.out 2>&1 & n=0; while [ $n -lt 500 ] && ! bb grep -q typed /disk/fb30.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb30.out 2>/dev/null || { bb tail -n 12 /disk/evp.out | bb cut -c1-200; }; bb cat /disk/fb30.out; bb ps | bb grep -q 'evince' && echo alive || bb cat /disk/evp.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :12
+fakebwm: pixels drawn
+fakebwm: shot changed
+fakebwm: shot changed
+fakebwm: typed
+alive
