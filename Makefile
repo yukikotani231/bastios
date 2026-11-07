@@ -1042,7 +1042,7 @@ build/compat/x11.img: test/compat/x11/x11start.sh test/compat/x11disk.py test/co
 # The second X11 disk (lane x11b): a BastiOS disk holds 262144 entries, which
 # the first one's roots nearly fill, so newer apps go on a disk of their own.
 build/compat/x11b.img: test/compat/x11/x11start.sh test/compat/x11disk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img build/compat/bx11 build/compat/fakebwm
-	test/compat/x11disk.py --part2 $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GIMP_IMAGE) $(X11_LIBREOFFICE_IMAGE) $(X11_INKSCAPE_IMAGE) $(X11_WIRESHARK_IMAGE) $(X11_GPARTED_IMAGE) $(X11_OPENSCAD_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
+	test/compat/x11disk.py --part2 $@ $(X11_SERVER_IMAGE) $(X11_CLIENT_IMAGE) $(X11_GIMP_IMAGE) $(X11_LIBREOFFICE_IMAGE) $(X11_INKSCAPE_IMAGE) $(X11_WIRESHARK_IMAGE) $(X11_GPARTED_IMAGE) $(X11_OPENSCAD_IMAGE) $(X11_FIREFOX_IMAGE) $(X11_THUNDERBIRD_IMAGE) build/compat/alpine/disk/busybox build/compat/bx11 build/compat/fakebwm test/compat/x11/x11start.sh --cache $(ALPINE_CACHE)
 
 # Eclipse JDT LS, the Java language server, pinned by SHA-256: it goes onto the
 # Java disk as /opt/jdtls.
