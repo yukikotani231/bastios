@@ -1613,3 +1613,27 @@ fn ux_poll_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   }
   return b;
 }
+
+/// FIONREAD on a stream socket: the bytes waiting to be read, INQ_LISTENER
+/// for a listener, INQ_NONE for a datagram socket or any other kind.
+fn sock_inq(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if is_tcp(k, pid, fd) {
+    return tcp_inq(k, pid, fd);
+  }
+  if is_unix(k, pid, fd) {
+    let u = ux_look(k, pid, fd);
+    if u.err != 0 || u.dg {
+      return INQ_NONE;
+    }
+    if u.mode == UM_LISTEN {
+      return INQ_LISTENER;
+    }
+    if u.mode != UM_CONN {
+      return 0;
+    }
+    return smaller(uc_get(k, u.x % UX_N, 1), 2147483647);
+  }
+  return INQ_NONE;
+}

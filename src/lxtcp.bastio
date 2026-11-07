@@ -626,3 +626,34 @@ fn tcb_poll_bits(n: &Net, t: u64, listener: bool) -> u64
   }
   return b;
 }
+
+
+/// FIONREAD on a TCP socket: the bytes waiting to be read, INQ_LISTENER
+/// for a listener, INQ_NONE for any other kind of socket (sock_inq,
+/// src/lxunix.bastio, asks the unix ones).
+fn tcp_inq(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+{
+  if !is_tcp(k, pid, fd) {
+    return INQ_NONE;
+  }
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 {
+    return INQ_NONE;
+  }
+  if tk.mode == TM_LISTEN {
+    return INQ_LISTENER;
+  }
+  if tk.mode != TM_CONN {
+    return 0;
+  }
+  match k.nic {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if !tcb_held(n, tk.t) {
+        return 0;
+      }
+      return smaller(tw(n, tk.t, W_RXLEN), 2147483647);
+    },
+  }
+}

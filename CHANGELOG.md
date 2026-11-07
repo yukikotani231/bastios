@@ -15,6 +15,8 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
+- `ioctl(FIONREAD)` on TCP connections and unix stream sockets returns the bytes waiting to be read (a listener answers `EINVAL`, a datagram socket still `ENOTTY`). The Dart VM sizes its reads by it and read one byte at a time when it failed.
+- An edge-triggered epoll entry on a TCP connection is reported once per edge (data or the peer's FIN arrived, an acknowledgement freed send buffer room, the state changed), not on every `epoll_wait` as a level-triggered one would be. The Dart VM counts events against a token budget and stopped listening to a socket that kept flooding it, so a `dart:io` echo over loopback never finished (`test/compat/progs/t_etsock.c`).
 - `setsockopt(SO_PASSCRED)` on a Unix socket: `recvmsg` then returns an `SCM_CREDENTIALS` message with the pid, uid and gid of the process at the other end (as `SO_PEERCRED` reports them). Chromium's crash handler needs it. Credentials are not set per message, so `sendmsg` with its own `SCM_CREDENTIALS` is ignored.
 
 - ALSA playback: `/dev/snd/controlC0` and `/dev/snd/pcmC0D0p` with the ioctls alsa-lib's `hw` plugin uses (`HW_REFINE`, `HW_PARAMS`, `SW_PARAMS`, `PREPARE`, `WRITEI_FRAMES`, `DRAIN`, `STATUS`, `DELAY`, `SYNC_PTR`, `CHANNEL_INFO`, and mmap of the data pages), a "PCM Playback Volume" control, `/dev/snd/timer` and a default device that is `plughw:0,0`, for aplay, SDL and the like; checked by `malsa` against QEMU's WAV output (`test/shell_test.sh`)

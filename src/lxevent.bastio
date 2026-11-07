@@ -22,10 +22,15 @@
 // or the eventfd, the last one reported kept in the entry's events word,
 // ET_GEN), so a program that leaves a wake-up eventfd unread, as mio's
 // waker does, sleeps until the next write instead of being told of it
-// again and again. Edge-triggered entries on other kinds (sockets,
-// timerfds, ...) are still reported like level-triggered ones, which a
-// program that reads until EAGAIN, as EPOLLET requires, does not notice
-// but for the extra wake-ups. The mount tables are the exception: they
+// again and again. The same holds for a TCP connection, whose count is a
+// sum of the counters that only grow when data or the peer's FIN arrives,
+// an acknowledgement frees send buffer room, or the state changes
+// (tcp_et_gen): a runtime that counts events against a budget, as the Dart
+// VM's does with tokens, is not flooded by a socket that stays writable.
+// Edge-triggered entries on other kinds (listeners, unix sockets, timerfds,
+// ...) are still reported like level-triggered ones, which a program that
+// reads until EAGAIN, as EPOLLET requires, does not notice but for the
+// extra wake-ups. The mount tables are the exception: they
 // are always readable, and reading never drains them, so an edge-triggered
 // entry on one is reported once after it is added and then once after each
 // change of the mount table (EP_ETDONE), as on Linux; libmount's monitor
@@ -758,7 +763,38 @@ fn et_gen(k: &Kernel, pid: u64, fd: u64) -> u64
   if (f.kind == K_PIPE_R || f.kind == K_PIPE_W) && f.x < NPIPES {
     return pi_get(k.pipes, f.x, 8) % (ET_GENS - 1) + 1;
   }
+  if f.kind == K_SOCK && is_tcp(k, pid, fd) {
+    return tcp_et_gen(k, pid, fd);
+  }
   return 0;
+}
+
+/// For an edge-triggered entry on a TCP connection: 1 + a sum, modulo
+/// ET_GENS - 1, of the counters that only grow when something happens to
+/// the connection that Linux would wake an edge-triggered waiter for: the
+/// next byte expected (data, or the peer's FIN, arrived), the oldest byte
+/// not yet acknowledged (send buffer room), the connection's state and its
+/// two FINs and reset. 0 for a listener or a connection that is not there.
+fn tcp_et_gen(k: &Kernel, pid: u64, fd: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < ET_GENS
+{
+  let tk = tk_look(k, pid, fd);
+  if tk.err != 0 || tk.mode != TM_CONN {
+    return 0;
+  }
+  match k.nic {
+    Nic::None => { return 0; },
+    Nic::Up(n) => {
+      if !tcb_held(n, tk.t) {
+        return 0;
+      }
+      let m = ET_GENS - 1;
+      let s = tw(n, tk.t, W_RCV) % m + tw(n, tk.t, W_UNA) % m + tw(n, tk.t, W_STATE) % m * 5
+        + tw(n, tk.t, W_FIN) % 4 * 7 + tw(n, tk.t, W_PEERFIN) % 2 * 11 + tw(n, tk.t, W_RESET) % 2 * 13;
+      return s % m + 1;
+    },
+  }
 }
 
 // Epoll instances can watch each other. An entry for one is ready when

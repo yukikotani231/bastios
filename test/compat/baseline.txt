@@ -415,6 +415,17 @@ t_dns: name server binds UDP port 53
 t_dns: point resolv.conf at it
 t_dns: resolv.conf names a server
 t_dns: resolv.conf put back
+t_etsock: EPOLLIN arrives for data followed by a close (edge-triggered, with EPOLLRDHUP)
+t_etsock: EPOLLIN arrives for data followed by a close (level-triggered)
+t_etsock: EPOLL_CTL_MOD of an edge-triggered socket reports data that is already there
+t_etsock: the same when the peer has closed after writing
+t_etsock: a thread asleep in epoll_wait is woken by data and a close (edge-triggered)
+t_etsock: the same when the interest was changed with EPOLL_CTL_MOD
+t_etsock: data written before shutdown(SHUT_WR) arrives, then the end of file
+t_etsock: an edge-triggered TCP socket is reported once per edge, not on every wait
+t_etsock: FIONREAD on a TCP connection counts the bytes waiting
+t_etsock: FIONREAD on a unix stream socket counts the bytes waiting
+t_etsock: FIONREAD on a listening socket fails with EINVAL
 t_dockerd: a mapping past the end of a growing file sees pwrite (tmpfs)
 t_dockerd: a peer's shutdown(SHUT_WR) is POLLRDHUP, not POLLHUP, and this end can still write
 t_dockerd: inotify_add_watch on /proc/self/status succeeds
