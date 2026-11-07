@@ -1857,6 +1857,11 @@ t_rtc: a year before 2000 is EINVAL
 t_rtc: an unknown ioctl is ENOTTY
 t_rtc: the clock is put back
 t_rtc: an unprivileged program cannot set it
+t_rtc: sysfs: the name is rtc_cmos
+t_rtc: sysfs: since_epoch is the time the clock says
+t_rtc: sysfs: date is the UTC date of since_epoch
+t_rtc: sysfs: time is the UTC time of since_epoch
+t_rtc: sysfs: max_user_freq is a number
 t_rtnlev: sockets in the link group, the address group, both and none
 t_rtnlev: a veth pair is made
 t_rtnlev: the link group hears both ends
