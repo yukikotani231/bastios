@@ -148,8 +148,12 @@ fn group_free(k: &mut Kernel, p: u64) -> bool
   return holder(&mut k, g) != 0;
 }
 
-/// pick (src/proc.bastio), skipping threads whose group cannot run now.
-fn lx_pick(k: &mut Kernel, from: u64) -> u64
+/// pick (src/proc.bastio) for processor `me`, skipping threads whose group
+/// cannot run now and threads whose mask leaves this processor out
+/// (aff_ok). A thread that owes for its nice value is passed over, paying
+/// a SLICE of it (nice_debtor, src/lxprio.bastio), unless no other thread
+/// can run here: then the first one passed over runs.
+fn lx_pick(k: &mut Kernel, from: u64, me: u64) -> u64
   requires kok(k)
   ensures kok(k) && result < NPROC
 {
@@ -158,21 +162,27 @@ fn lx_pick(k: &mut Kernel, from: u64) -> u64
     return 0;
   }
   let base = from % cap;
+  let mut passed = 0;
   let mut i = 0;
   while i < cap
-    invariant i <= cap && 0 < cap && cap <= NPROC && base < cap && kok(k)
+    invariant i <= cap && 0 < cap && cap <= NPROC && base < cap && passed < NPROC && kok(k)
   {
     // base + i < 2 * cap: one subtraction wraps it, with no division per slot.
     let mut p = base + i;
     if p >= cap {
       p = p - cap;
     }
-    if p != 0 && state(k.procs, p) == READY && !cg_held(k, p) && group_free(&mut k, p) {
-      return p;
+    if p != 0 && state(k.procs, p) == READY && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
+      if !nice_debtor(&mut k, p) {
+        return p;
+      }
+      if passed == 0 {
+        passed = p;
+      }
     }
     i = i + 1;
   }
-  return 0;
+  return passed;
 }
 
 /// Swaps n words at a and b of buffer t.
