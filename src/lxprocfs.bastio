@@ -3861,14 +3861,17 @@ fn mem_io(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64, write: boo
         c = XFER;
       }
       if write {
+        // The page is read in (pt_fill, which reads through k.fs.xfer) and
+        // made the process's own (in the holder's space, fd_row) before the
+        // bytes to write are put in k.fs.xfer.
+        pt_fill(&mut k, p, at);
+        own_touch(&mut k.mem, &mut k.spaces, tp, (at - USER_BASE) / 4096, true);
         if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va + done, &mut k.fs.xfer, c) != c {
           go = false;
           if done == 0 {
             return EFAULT;
           }
         } else {
-          pt_fill(&mut k, p, at);
-          own_touch(&mut k.mem, &mut k.spaces, g, (at - USER_BASE) / 4096, true);
           if at >= USER_BASE && copy_to_user(&mut k.spaces, &mut k.mem, k.anon, tp, at, k.fs.xfer, c) != c && force_to_user(&mut k.spaces, tp, at, k.fs.xfer, c) != c {
             go = false;
           } else if at < USER_BASE {

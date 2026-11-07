@@ -604,9 +604,11 @@ fn pt_fill(k: &mut Kernel, c: u64, addr: u64)
   ensures kok(k)
 {
   if addr >= USER_BASE && addr < 0x8000000000000000 {
-    let g = tgid(k.procs, c);
-    let first = lazy_read(&mut k, g, (addr - USER_BASE) / 4096, true);
-    let second = lazy_read(&mut k, g, (addr + 7 - USER_BASE) / 4096, true);
+    // The lazy records go with the space, to the thread that holds it
+    // (group_move), which need not be the first.
+    let h = fd_row(&mut k, tgid(k.procs, c));
+    let first = lazy_read(&mut k, h, (addr - USER_BASE) / 4096, true);
+    let second = lazy_read(&mut k, h, (addr + 7 - USER_BASE) / 4096, true);
   }
 }
 
@@ -664,10 +666,11 @@ fn pt_poke(k: &mut Kernel, c: u64, req: u64, addr: u64, data: u64) -> u64
   pt_fill(&mut k, c, addr);
   if addr >= USER_BASE && addr < 0x8000000000000000 {
     // Shared program text is read-only for everyone: the tracee gets a copy of
-    // the pages the word is on, to hold what the tracer writes there.
-    let g = tgid(k.procs, c);
-    let first = own_touch(&mut k.mem, &mut k.spaces, g, (addr - USER_BASE) / 4096, true);
-    let second = own_touch(&mut k.mem, &mut k.spaces, g, (addr + 7 - USER_BASE) / 4096, true);
+    // the pages the word is on, to hold what the tracer writes there, in
+    // the space of the thread that holds it (fd_row), not always the first.
+    let h = fd_row(&mut k, tgid(k.procs, c));
+    let first = own_touch(&mut k.mem, &mut k.spaces, h, (addr - USER_BASE) / 4096, true);
+    let second = own_touch(&mut k.mem, &mut k.spaces, h, (addr + 7 - USER_BASE) / 4096, true);
   }
   let tp = fd_row(&mut k, tgid(k.procs, c));
   xfer_u64(&mut k.fs.xfer, 0, data);
