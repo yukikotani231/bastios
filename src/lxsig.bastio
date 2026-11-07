@@ -969,10 +969,16 @@ fn lx_sigprocmask(k: &mut Kernel, pid: u64, how: u64, setp: u64, oset: u64) -> u
 
 /// Whether pid may send a signal to p (Linux's kill_ok_by_cred): root may,
 /// and so may a sender whose real or effective uid is p's real or saved
-/// uid; SIGCONT also reaches the sender's own session.
+/// uid; SIGCONT also reaches the sender's own session. A thread may always
+/// signal one of its own thread group, whatever their ids: Go's setuid
+/// changes the ids thread by thread, and signals the threads that are still
+/// root from the one that already is not.
 fn may_signal(k: &Kernel, pid: u64, p: u64, s: u64) -> bool
   requires kok(k) && pid < NPROC && p < NPROC
 {
+  if tgid(k.procs, pid) == tgid(k.procs, p) {
+    return true;
+  }
   let ruid = id_get(k.procs, pid, F_UID, false);
   let euid = id_get(k.procs, pid, F_UID, true);
   if euid == 0 || (s == 18 && sid_of(k.procs, pid) == sid_of(k.procs, p)) {
