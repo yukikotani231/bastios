@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `/sys/class/net/lo` and `/sys/class/net/eth0` with `address`, `operstate`, `mtu`, `carrier`, `ifindex`, `type`, `flags` and `tx_queue_len` (`test/compat/progs/t_sysnet.c`), for scripts and tools that read an interface's state from sysfs. Interfaces made at run time (veth, bridge, tunnel) have no directory yet.
 - Page faults are counted per thread: `perf_event_open` `PAGE_FAULTS` and `PAGE_FAULTS_MIN` (they read 0 before), `getrusage` `ru_minflt` and `/proc/PID/stat` `minflt` (`test/compat/progs/t_perf.c`). Every fault is counted as minor; `PAGE_FAULTS_MAJ` still reads 0.
 - `bwm` locks the screen on Alt-L: the desktop is covered, the pointer and keys do nothing but feed a password prompt, and Enter with the account's password from `/etc/shadow` (or just Enter when it has none) unlocks. It is a cover for an unattended screen, not a defence against someone with the console or a USB keyboard at boot; programs keep running.
 - `bwm` shows a calendar of the month, today lit, when the clock in the task bar is clicked or Alt-C is pressed; a click anywhere or Escape closes it. It follows the time zone the clock uses.
