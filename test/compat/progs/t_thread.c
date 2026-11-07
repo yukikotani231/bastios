@@ -506,6 +506,96 @@ static int oom_score_of_threads(void) {
     return w == c && WIFEXITED(st) && WEXITSTATUS(st) == 0 && r == (void *)1;
 }
 
+
+/* Nice values and processor masks: threads that spin on a processor they
+ * are pinned to, with the nice value each one sets for itself. */
+static pthread_barrier_t spin_bar;
+static volatile int spin_stop;
+struct spin { int cpu, nice, away; pthread_t t; };
+
+static void *spinner(void *a) {
+    struct spin *s = a;
+    cpu_set_t c;
+    CPU_ZERO(&c);
+    CPU_SET(s->cpu, &c);
+    if (sched_setaffinity(0, sizeof c, &c) != 0 || setpriority(PRIO_PROCESS, 0, s->nice) != 0) s->away = -1;
+    pthread_barrier_wait(&spin_bar);
+    while (!spin_stop)
+        if (sched_getcpu() != s->cpu && s->away >= 0) s->away++;
+    return 0;
+}
+
+static double thread_secs(pthread_t t) {
+    clockid_t c;
+    struct timespec ts;
+    if (pthread_getcpuclockid(t, &c) != 0 || clock_gettime(c, &ts) != 0) return -1;
+    return ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+/* Runs two spinners for `secs` seconds; their CPU times in a[0], a[1], and
+ * the seconds that passed. 0 if a thread could not start or pin itself, or
+ * ran on a processor its mask leaves out. */
+static int spin_two(struct spin *s, double secs, double *a, double *wall) {
+    spin_stop = 0;
+    pthread_barrier_init(&spin_bar, 0, 3);
+    for (int i = 0; i < 2; i++) {
+        s[i].away = 0;
+        if (pthread_create(&s[i].t, 0, spinner, &s[i]) != 0) return 0;
+    }
+    pthread_barrier_wait(&spin_bar);
+    struct timespec t0, t1;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    double b0 = thread_secs(s[0].t), b1 = thread_secs(s[1].t);
+    usleep((useconds_t)(secs * 1e6));
+    a[0] = thread_secs(s[0].t) - b0;
+    a[1] = thread_secs(s[1].t) - b1;
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    spin_stop = 1;
+    pthread_join(s[0].t, 0);
+    pthread_join(s[1].t, 0);
+    pthread_barrier_destroy(&spin_bar);
+    *wall = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    return s[0].away == 0 && s[1].away == 0;
+}
+
+/* The last processor the mask allows, the way LTP's nice05 picks one. */
+static int last_cpu(void) {
+    cpu_set_t c;
+    int n = -1;
+    if (sched_getaffinity(0, sizeof c, &c) != 0) return -1;
+    for (int i = 0; i < CPU_SETSIZE; i++) if (CPU_ISSET(i, &c)) n = i;
+    return n;
+}
+
+/* Two threads pinned to one processor share it: their CPU times add up to
+ * no more than the time that passed, and each gets about half. */
+static int pinned_share(void) {
+    int c = last_cpu();
+    struct spin s[2] = { { c, 0, 0, 0 }, { c, 0, 0, 0 } };
+    double a[2], w;
+    if (c < 0 || !spin_two(s, 1.5, a, &w)) return 0;
+    if (a[0] + a[1] > w * 1.15 || a[0] < w * 0.25 || a[1] < w * 0.25) {
+        printf("  cpu %d: %.3f s and %.3f s of %.3f s\n", c, a[0], a[1], w);
+        return 0;
+    }
+    return 1;
+}
+
+/* Two threads pinned to one processor, at nice 0 and nice 5: the nice-0
+ * one weighs 1024 to the other's 335 (Linux's weights), so it gets about
+ * three times the time, and the other still runs. */
+static int nice_share(void) {
+    int c = last_cpu();
+    struct spin s[2] = { { c, 0, 0, 0 }, { c, 5, 0, 0 } };
+    double a[2], w;
+    if (c < 0 || !spin_two(s, 2.0, a, &w)) return 0;
+    if (a[0] < a[1] * 2 || a[1] < a[0] * 0.15) {
+        printf("  nice 0: %.3f s, nice 5: %.3f s of %.3f s\n", a[0], a[1], w);
+        return 0;
+    }
+    return 1;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -549,6 +639,8 @@ int main(void) {
         int r = fork_snapshot();
         if (r == 1) pass(); else if (r == 0) fail("mmap, pthread_create, fork or waitpid failed");
     }
+    EXPECT("two threads pinned to one processor run only there and share it", pinned_share());
+    EXPECT("a nice-5 thread gets about a third of the time of a nice-0 one on the same processor", nice_share());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");

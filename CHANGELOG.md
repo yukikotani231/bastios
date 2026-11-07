@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- The scheduler honours nice values and `SCHED_IDLE` with Linux's weights (nice 0 weighs 1024, each step 1.25 times less), so of two threads on one processor a nice-0 one gets about three times the time of a nice-5 one, and honours `sched_setaffinity`: a thread runs only on the processors its mask names. `getcpu` names the processor the thread last ran on (`test/compat/progs/t_thread.c`). The real-time policies are still kept but not given priority.
 - `/sys/class/rtc/rtc0/wakealarm`, readable and writable (`+N`, an epoch time or `0`), the same alarm as `RTC_WKALM_SET` (`test/compat/progs/t_rtc.c`)
 - `/dev/rtc0` alarm: `RTC_ALM_SET`/`RTC_ALM_READ`, `RTC_WKALM_SET`/`RTC_WKALM_RD`, `RTC_AIE_ON`/`RTC_AIE_OFF`, and a `read`/`poll` that wait for it (`test/compat/progs/t_rtc.c`)
 - `/dev/dsp` accepts unsigned 8-bit and signed 16-bit samples, mono or stereo, at 4 kHz to 96 kHz, and converts them to the card's 48 kHz 16-bit stereo (`test/shell_test.sh`, sound section)
