@@ -239,6 +239,29 @@ static int bview_main(int argc, char **argv)
         if (t < 0 || t == BWM_CLOSE)
             break;
         unsigned c;
+        if (t == BWM_DROP) {                                 /* a file dragged here (from bfiles): show it, if it is an image */
+            struct bwm_drop *dr = (struct bwm_drop *)buf;
+            dr->path[sizeof dr->path - 1] = 0;
+            unsigned char *nd;
+            size_t nn;
+            struct bv_img nm;
+            if ((nd = bv_read(dr->path, &nn)) && bv_open(&nm, nd, nn)) {
+                free(d);
+                d = nd;
+                m = nm;
+                snprintf(path, sizeof path, "%s", dr->path);
+                bv_fit(&m, ww, wh, &bn, &bd);
+                ze = 0;
+                panx = pany = 0;
+                bv_draw(&m, bn, bd, ze, ww, wh, &panx, &pany, 0, 0);
+                bf_shared ? bwm_damage(fd, id, 0, 0, ww, wh) : bwm_draw(fd, id, bf_pix, ww, 0, 0, ww, wh);
+                printf("bview: show %s\n", path);
+                fflush(stdout);
+            } else {
+                free(nd);
+            }
+            continue;
+        }
         if (t == BWM_KEY) {
             c = ((struct bwm_key *)buf)->ch;
         } else if (t == BWM_MOUSE) {                         /* the wheel zooms: up in, down out */
