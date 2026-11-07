@@ -3048,6 +3048,22 @@ int main(int argc, char **argv)
                             to_client(tgt->cli, BWM_MOUSE, &ev, sizeof ev);
                     }
                 }
+                if (!(m[0] & 1) && (buttons & 1) && grab_cli >= 0) {
+                    /* A drag that began in one window ends over another: the path its program left in BWM_DROP_FILE goes to that window. */
+                    FILE *df = fopen(BWM_DROP_FILE, "r");
+                    if (df) {
+                        struct bwm_drop dr = { 0, "" };
+                        if (under && under->cli >= 0 && my >= under->y + TITLE_H && (under->cli != grab_cli || (uint32_t)under->id != grab_id)
+                            && fgets(dr.path, sizeof dr.path, df)) {
+                            dr.path[strcspn(dr.path, "\r\n")] = 0;
+                            dr.id = (uint32_t)under->id;
+                            if (dr.path[0])
+                                to_client(under->cli, BWM_DROP, &dr, sizeof dr);
+                        }
+                        fclose(df);
+                        unlink(BWM_DROP_FILE);
+                    }
+                }
                 if (!(m[0] & 1))
                     grab_cli = -1;
                 else if (!(buttons & 1) && under && under->cli >= 0 && my >= under->y + TITLE_H && !drag && !sizing)
