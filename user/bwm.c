@@ -1262,7 +1262,9 @@ static void to_client(int cli, uint32_t type, const void *p, uint32_t len)
 {
     if (cli < 0 || clis[cli].fd < 0)
         return;
-    unsigned char b[sizeof(struct bwm_hdr) + 32];
+    unsigned char b[sizeof(struct bwm_hdr) + sizeof(struct bwm_drop)];      /* the largest event is a drop */
+    if (len > sizeof(struct bwm_drop))
+        return;
     struct bwm_hdr h = { type, len };
     memcpy(b, &h, sizeof h);
     memcpy(b + sizeof h, p, len);
@@ -3046,6 +3048,22 @@ int main(int argc, char **argv)
                         struct bwm_mouse ev = { (uint32_t)tgt->id, (uint32_t)(mx - tgt->x - BORDER), (uint32_t)(my - tgt->y - TITLE_H), (m[0] & 7u) | ((uint32_t)(wheel & 0xFF) << 8) };
                         if (tgt == focus() || wheel)
                             to_client(tgt->cli, BWM_MOUSE, &ev, sizeof ev);
+                    }
+                }
+                if (!(m[0] & 1) && (buttons & 1) && grab_cli >= 0) {
+                    /* A drag that began in one window ends over another: the path its program left in BWM_DROP_FILE goes to that window. */
+                    FILE *df = fopen(BWM_DROP_FILE, "r");
+                    if (df) {
+                        struct bwm_drop dr = { 0, "" };
+                        if (under && under->cli >= 0 && my >= under->y + TITLE_H && (under->cli != grab_cli || (uint32_t)under->id != grab_id)
+                            && fgets(dr.path, sizeof dr.path, df)) {
+                            dr.path[strcspn(dr.path, "\r\n")] = 0;
+                            dr.id = (uint32_t)under->id;
+                            if (dr.path[0])
+                                to_client(under->cli, BWM_DROP, &dr, sizeof dr);
+                        }
+                        fclose(df);
+                        unlink(BWM_DROP_FILE);
                     }
                 }
                 if (!(m[0] & 1))

@@ -1,14 +1,20 @@
 // /dev/dsp for Linux programs: the Open Sound System's playback device on
-// the sound card (src/hda.bastio). It plays one format, 48 kHz 16-bit
-// little-endian stereo, and the ioctls that would change it answer with
-// that format, as OSS lets a driver do. A write queues what fits and
-// returns how much that was; a write to a full queue waits for room.
+// the sound card (src/hda.bastio). The card plays 48 kHz 16-bit
+// little-endian stereo. A program may ask for 8-bit unsigned or 16-bit
+// signed samples, one or two channels, and any rate from 4 kHz to 96 kHz;
+// the kernel converts what is written (a rate by taking the nearest
+// frame, no filter). Each open starts at the card's own format. A write
+// queues what fits and returns how much that was; a write to a full queue
+// waits for room.
 // Reading (recording) is not supported. Without a sound card, opening
 // /dev/dsp fails with ENODEV.
 
 import "linux.bastio";
 
+const AFMT_U8: u64 = 0x8;
 const AFMT_S16_LE: u64 = 0x10;
+const DSP_MIN_RATE: u64 = 4000;
+const DSP_MAX_RATE: u64 = 96000;
 const DSP_RATE: u64 = 48000;
 const DSP_FRAG: u64 = 4096;
 
@@ -23,8 +29,51 @@ const SNDCTL_DSP_CHANNELS: u64 = 0xC0045006;
 const SNDCTL_DSP_GETFMTS: u64 = 0x8004500B;
 const SNDCTL_DSP_GETOSPACE: u64 = 0x8010500C;
 
-/// write(2) on /dev/dsp: queues up to n bytes (whole frames) from va.
-/// Returns the count, -EFAULT, -ENODEV, or EAGAIN when the queue is full.
+/// A new open: the card's own format.
+fn dsp_reset(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_DSP, 0);
+  k.sys = set(k.sys, SYS_DSP + 1, 0);
+  k.sys = set(k.sys, SYS_DSP + 2, 0);
+}
+
+fn dsp_rate(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result >= DSP_MIN_RATE && result <= DSP_MAX_RATE
+{
+  let r = get(k.sys, SYS_DSP);
+  if r < DSP_MIN_RATE || r > DSP_MAX_RATE {
+    return DSP_RATE;
+  }
+  return r;
+}
+
+fn dsp_chans(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result == 1 || result == 2
+{
+  if get(k.sys, SYS_DSP + 1) == 1 {
+    return 1;
+  }
+  return 2;
+}
+
+/// Bytes per sample: 1 for AFMT_U8, 2 for AFMT_S16_LE.
+fn dsp_width(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result == 1 || result == 2
+{
+  if get(k.sys, SYS_DSP + 2) == AFMT_U8 {
+    return 1;
+  }
+  return 2;
+}
+
+/// write(2) on /dev/dsp: queues the whole frames of up to n bytes from va,
+/// converted to the card's format. Returns the bytes taken, -EFAULT,
+/// -ENODEV, or EAGAIN when the queue is full.
 fn dsp_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
@@ -32,36 +81,136 @@ fn dsp_write(k: &mut Kernel, pid: u64, va: u64, n: u64) -> u64
   if !snd_live(k.snd) {
     return ENODEV;
   }
-  if n < 4 {
+  let rate = dsp_rate(k);
+  let ch = dsp_chans(k);
+  let w = dsp_width(k);
+  let fb = ch * w;                      // bytes per frame as written
+  if n < fb {
     return n;                           // less than a frame: nothing to play
   }
-  let want = smaller(n, XFER);
-  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
-  if got == NO_RESULT || got == 0 {
-    return EFAULT;
+  if rate == DSP_RATE && fb == 4 {
+    let want = smaller(n, XFER);
+    let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, want);
+    if got == NO_RESULT || got == 0 {
+      return EFAULT;
+    }
+    let put = snd_put(&mut k.snd, k.fs.xfer, got);
+    if put == 0 {
+      return EAGAIN;
+    }
+    return put;
   }
-  let put = snd_put(&mut k.snd, k.fs.xfer, got);
-  if put == 0 {
+  // Input goes to xfer[0..2048], converted frames to xfer[4096..8192].
+  let room = smaller(snd_room(k.snd) / 4, 1024);
+  if room == 0 {
     return EAGAIN;
   }
-  return put;
+  let mut fin = smaller(n, 2048) / fb;
+  let fit = room * rate / DSP_RATE;
+  if fit < fin {
+    fin = fit;
+  }
+  if fin == 0 {
+    return EAGAIN;
+  }
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, &mut k.fs.xfer, fin * fb);
+  if got == NO_RESULT || got < fin * fb {
+    return EFAULT;
+  }
+  let fout = fin * DSP_RATE / rate;
+  if fout == 0 {
+    return fin * fb;                    // too little to make a frame at this rate: dropped
+  }
+  let mut j = 0;
+  while j < fout
+    invariant j <= fout && fout <= 1024 && fin <= 2048 && fb <= 4 && fb >= 1 && blen(k.fs.xfer) == XBUF && kok(k)
+  {
+    let mut i = j * rate / DSP_RATE;
+    if i >= fin {
+      i = fin - 1;
+    }
+    let at = i * fb;
+    let mut l = 0;
+    let mut r = 0;
+    if w == 1 {
+      l = (cast[u64](bget(k.fs.xfer, at)) ^ 128) * 256;
+      r = l;
+      if ch == 2 {
+        r = (cast[u64](bget(k.fs.xfer, at + 1)) ^ 128) * 256;
+      }
+    } else {
+      l = cast[u64](bget(k.fs.xfer, at)) + 256 * cast[u64](bget(k.fs.xfer, at + 1));
+      r = l;
+      if ch == 2 {
+        r = cast[u64](bget(k.fs.xfer, at + 2)) + 256 * cast[u64](bget(k.fs.xfer, at + 3));
+      }
+    }
+    let o = 4096 + j * 4;
+    bset(&mut k.fs.xfer, o, cast[u8](l % 256));
+    bset(&mut k.fs.xfer, o + 1, cast[u8](l / 256 % 256));
+    bset(&mut k.fs.xfer, o + 2, cast[u8](r % 256));
+    bset(&mut k.fs.xfer, o + 3, cast[u8](r / 256 % 256));
+    j = j + 1;
+  }
+  xfer_shift(&mut k.fs.xfer, 4096, fout * 4);
+  let put = snd_put(&mut k.snd, k.fs.xfer, fout * 4);
+  if put < fout * 4 {
+    // The queue took less than it had room for (it cannot, but the proof
+    // does not know): report what was written as played.
+    return fin * fb;
+  }
+  return fin * fb;
 }
 
-/// The int an OSS "set" request answers with: the one format played.
-fn dsp_answer(req: u64) -> u64 {
+/// Sets one of the format words from an OSS "set" request's int and
+/// returns the value that is now in force.
+fn dsp_set(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let got = copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, 4);
+  if got != 4 {
+    return NO_RESULT;
+  }
+  let v = cast[u64](load_le32(k.fs.xfer, 0));
   if req == SNDCTL_DSP_SPEED {
-    return DSP_RATE;
+    let mut r = v;
+    if r < DSP_MIN_RATE {
+      r = DSP_MIN_RATE;
+    }
+    if r > DSP_MAX_RATE {
+      r = DSP_MAX_RATE;
+    }
+    k.sys = set(k.sys, SYS_DSP, r);
+    return r;
   }
   if req == SNDCTL_DSP_STEREO {
-    return 1;
+    // STEREO takes 0 for mono and 1 for stereo.
+    let mut want = 2;
+    if v == 0 {
+      want = 1;
+    }
+    k.sys = set(k.sys, SYS_DSP + 1, want);
+    return v % 2;
   }
   if req == SNDCTL_DSP_CHANNELS {
-    return 2;
+    let mut c = 2;
+    if v == 1 {
+      c = 1;
+    }
+    k.sys = set(k.sys, SYS_DSP + 1, c);
+    return c;
   }
-  if req == SNDCTL_DSP_GETBLKSIZE {
-    return DSP_FRAG;
+  // SNDCTL_DSP_SETFMT: AFMT_QUERY (0) reads, anything unknown gets 16-bit.
+  if v == AFMT_U8 {
+    k.sys = set(k.sys, SYS_DSP + 2, AFMT_U8);
+    return AFMT_U8;
   }
-  return AFMT_S16_LE;                   // SETFMT and GETFMTS
+  if v != 0 {
+    k.sys = set(k.sys, SYS_DSP + 2, AFMT_S16_LE);
+    return AFMT_S16_LE;
+  }
+  return get(k.sys, SYS_DSP + 2);
 }
 
 /// ioctl(2) on /dev/dsp.
@@ -72,9 +221,20 @@ fn dsp_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   if req == SNDCTL_DSP_RESET || req == SNDCTL_DSP_SYNC {
     return 0;                           // what is queued plays out either way
   }
-  if req == SNDCTL_DSP_SPEED || req == SNDCTL_DSP_STEREO || req == SNDCTL_DSP_GETBLKSIZE || req == SNDCTL_DSP_SETFMT
-    || req == SNDCTL_DSP_CHANNELS || req == SNDCTL_DSP_GETFMTS {
-    xfer_u64(&mut k.fs.xfer, 0, dsp_answer(req));
+  if req == SNDCTL_DSP_SPEED || req == SNDCTL_DSP_STEREO || req == SNDCTL_DSP_SETFMT || req == SNDCTL_DSP_CHANNELS {
+    let v = dsp_set(&mut k, pid, req, arg);
+    if v == NO_RESULT {
+      return EFAULT;
+    }
+    xfer_u64(&mut k.fs.xfer, 0, v);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == SNDCTL_DSP_GETBLKSIZE {
+    xfer_u64(&mut k.fs.xfer, 0, DSP_FRAG);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == SNDCTL_DSP_GETFMTS {
+    xfer_u64(&mut k.fs.xfer, 0, AFMT_S16_LE + AFMT_U8);
     return lx_put_out(&mut k, pid, arg, 4);
   }
   if req == SNDCTL_DSP_GETOSPACE {

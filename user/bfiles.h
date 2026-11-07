@@ -1662,6 +1662,21 @@ static void bf_edit_selected(void)
     be_start();
 }
 
+/* A press on an entry leaves its path where bwm will find it if the button goes up over another window (a terminal types it). */
+static void bf_drag_offer(int row)
+{
+    unlink(BWM_DROP_FILE);
+    if (row < 1 || bf_viewing || bf_top + row - 1 < 1 || bf_top + row - 1 >= bf_nent)
+        return;
+    char p[PATH_MAX];
+    bf_path_of(bf_ents[bf_top + row - 1].name, p, sizeof p);
+    FILE *f = fopen(BWM_DROP_FILE, "w");
+    if (f) {
+        fprintf(f, "%s\n", p);
+        fclose(f);
+    }
+}
+
 /* A press on one entry and a release on a directory entry moves the first into the directory
  * (never over a name that is taken). */
 static void bf_drag_move(int from, int to)
@@ -2006,8 +2021,10 @@ dispatch:;
                 if (!pressed)
                     continue;
                 be_click((int)m->y, (int)m->x, 0);
-            } else if (pressed)
-                press_row = (int)m->y < 0 ? -1 : (int)m->y / BF_CH;              /* the list acts on the release: a click opens, a drag moves */
+            } else if (pressed) {
+                press_row = (int)m->y < 0 ? -1 : (int)m->y / BF_CH;
+                bf_drag_offer(press_row);
+            }              /* the list acts on the release: a click opens, a drag moves */
             else if (released && press_row >= 0) {
                 int row = (int)m->y < 0 ? -1 : (int)m->y / BF_CH, from = press_row;
                 press_row = -1;

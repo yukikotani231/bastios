@@ -2602,6 +2602,44 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"moved2", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the dragged file is in the directory and gone from the old place")
             fails += not good
+        # Dragging a file from bfiles over a terminal window types its path there (nothing is run). The terminal comes
+        # from the t key of bfiles, so it opens just right and below the bfiles window; the file is dragged from the
+        # strip of the list left of it to the part of the terminal right of the (raised) bfiles window.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/dn; echo x > /tmp/dn/f; bwm -n -c bfiles /tmp/dn\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor("sendkey t")
+            time.sleep(2.5)
+            monitor("sendkey e", "sendkey c", "sendkey h", "sendkey o", "sendkey spc")
+            time.sleep(0.5)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 85 130")
+            time.sleep(0.3)
+            monitor("mouse_button 1")
+            time.sleep(0.7)
+            monitor("mouse_move 280 85", "mouse_move 285 85")
+            time.sleep(0.3)
+            monitor("mouse_button 0")
+            time.sleep(0.7)
+            monitor("mouse_button 1", "mouse_button 0")          # a click in the terminal gives it the keys again
+            time.sleep(0.3)
+            monitor("sendkey ret")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            lines = screen_text_at(px, w, 102, 120, 80, 24)
+            good = any("echo /tmp/dn/f" in l for l in lines) and any(l.strip() == "/tmp/dn/f" for l in lines)
+            if not good:
+                print("\n".join(l for l in lines if l))
+        print(("ok  " if good else "FAIL"), f"({name}) a file dragged from bfiles onto a terminal window types its path there")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # bwm -m asks the display for a smaller mode; the boot mode is back when bwm ends.
         mark = len(out)
         q.stdin.write(b"bwm -n -m 800x600\r"); q.stdin.flush()
