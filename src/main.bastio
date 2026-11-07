@@ -97,6 +97,7 @@ import "oom.bastio";
 import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
+import "lxalsa.bastio";
 import "lxrtc.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";

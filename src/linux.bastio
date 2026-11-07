@@ -1325,6 +1325,12 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   if d.kind == K_DEV && is_ns_file(d.x) && req % 0x100000000 >= NS_GET_USERNS && req % 0x100000000 <= NS_GET_OWNER_UID {
     return ns_ioctl(&mut k, pid, fd, d.x, req % 0x100000000, arg);   // src/lxnsk.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_PCM {
+    return pcm_ioctl(&mut k, pid, fd, req % 0x100000000, arg);   // src/lxalsa.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_SNDC {
+    return snd_ctl_ioctl(&mut k, pid, req % 0x100000000, arg);
+  }
   if d.kind == K_DEV && d.x == DEV_DSP {
     return dsp_ioctl(&mut k, pid, req % 0x100000000, arg);   // src/lxsnd.bastio
   }
@@ -3052,6 +3058,12 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     }
   }
   let r = lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+  if flags / MAP_ANONYMOUS % 2 == 0 && r >= USER_BASE && r - USER_BASE < USER_SIZE {
+    let pd = fd_look(k, pid, fd);
+    if pd.kind == K_DEV && pd.x == DEV_PCM {
+      pcm_mapped(&mut k, r);
+    }
+  }
   if flags / MAP_ANONYMOUS % 2 == 0 && r >= USER_BASE && r - USER_BASE < USER_SIZE && n <= USER_SIZE {
     fn_mmap(&mut k, pid, fd, (r - USER_BASE) / 4096, (n + 4095) / 4096, o);   // its name, for /proc/PID/maps (src/lxfname.bastio)
   }
@@ -3071,7 +3083,9 @@ fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u
   let mut zero = false;
   if !anon {
     let z = fd_look(k, pid, fd);
-    zero = z.kind == K_DEV && z.x == 2;     // /dev/zero (DEV_ZERO): fresh zero pages
+    // /dev/zero (DEV_ZERO): fresh zero pages; so are the data pages of the
+    // ALSA PCM device (src/lxalsa.bastio), which copies from them.
+    zero = z.kind == K_DEV && (z.x == 2 || (z.x == DEV_PCM && off == 0));
     anon = zero;
   }
   let mut f = NO_FILE;
