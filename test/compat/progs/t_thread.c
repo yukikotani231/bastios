@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <sys/resource.h>
+#include <sys/time.h>
 #include <time.h>
 
 static int counter;
@@ -646,6 +647,36 @@ static int rt_share(void) {
     return 1;
 }
 
+/* ITIMER_PROF is the process's: set by a thread that then waits, it runs
+ * down with another thread's time and signals while that one spins. */
+static volatile sig_atomic_t prof_fired;
+static void on_prof(int s) { (void)s; prof_fired = 1; }
+static void *prof_spin(void *a) {
+    (void)a;
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    do clock_gettime(CLOCK_MONOTONIC, &t);
+    while (!prof_fired && t.tv_sec - t0.tv_sec < 5);
+    return 0;
+}
+static void *prof_setter(void *a) {
+    (void)a;
+    struct itimerval it = { { 0, 0 }, { 0, 100000 } };
+    pthread_t sp;
+    if (setitimer(ITIMER_PROF, &it, 0) != 0 || pthread_create(&sp, 0, prof_spin, 0) != 0) return 0;
+    pthread_join(sp, 0);
+    return (void *)1;
+}
+static int prof_other_thread(void) {
+    pthread_t t;
+    void *r = 0;
+    prof_fired = 0;
+    signal(SIGPROF, on_prof);
+    if (pthread_create(&t, 0, prof_setter, 0) != 0 || pthread_join(t, &r) != 0 || r != (void *)1) return 0;
+    signal(SIGPROF, SIG_DFL);
+    return prof_fired;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -694,6 +725,7 @@ int main(void) {
     EXPECT("a SCHED_FIFO thread of priority 20 keeps one of priority 10 on its processor from running", fifo_order());
     EXPECT("two SCHED_RR threads of one priority take turns on one processor", rr_share());
     EXPECT("a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent", rt_share());
+    EXPECT("ITIMER_PROF set by one thread runs down with another thread's time", prof_other_thread());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");

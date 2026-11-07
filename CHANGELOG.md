@@ -234,6 +234,10 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - `/dev/input/event0` (`src/lxkeyev.bastio`) gives the PS/2 keyboard's key events as Linux's evdev does: 24-byte `input_event` records, an `EV_KEY` for each press (value 1) and release (value 0) with the key's Linux code, each followed by an `EV_SYN`. Shift, Ctrl and Alt are reported as keys of their own. There is no auto-repeat, no `EVIOCG*` ioctl answer and no USB keyboard yet.
 - `mount -t ext4 IMAGE DIR` (also `ext2` and `ext3` images without a journal to replay) reads an ext4 image, a file anywhere (on the disk too) or a loop device, into a read-only mount on an empty in-memory directory (`src/ext4.bastio`, `docs/design/ext4-readonly.md`). Files, directories, symbolic links, hard links, device nodes, pipes, modes, owners and times are shown; extents and classic block maps are read; holes stay holes. It is a snapshot held in memory: at most 32768 nodes, paths up to 255 bytes and files up to 1 GiB (the mount fails with `ENOSPC`, `ENAMETOOLONG` or `EFBIG` otherwise), and an image with a journal to replay, inline data or encryption is refused with `EINVAL`. `test/ext4img.py` makes images with `mke2fs -d` and `user/mext4.c` checks them in `make test`.
 
+
+### Fixed
+
+- `setitimer(ITIMER_PROF)` and `ITIMER_VIRTUAL` count the time of every thread in the process, as on Linux, wherever they were set from. They used to be kept in the row of the thread that set them, so they only ran down while that thread ran. A thread that set one and then waited for another thread never got its signal; that hung the Open POSIX test `pthread_create` 1-6. The signal goes to the thread that was running when the timer ran out, unless that thread blocks it (`test/compat/progs/t_thread.c`).
 ### Documentation
 
 - A documentation website for BastiOS at <https://yukikotani231.github.io/bastios/>, built from `docs/` with mdBook (`site/build.sh`) and published by GitHub Actions on every push to `main`.

@@ -2181,6 +2181,7 @@ t_thread: a nice-5 thread gets about a third of the time of a nice-0 one on the 
 t_thread: a SCHED_FIFO thread of priority 20 keeps one of priority 10 on its processor from running
 t_thread: two SCHED_RR threads of one priority take turns on one processor
 t_thread: a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent
+t_thread: ITIMER_PROF set by one thread runs down with another thread's time
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
 t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
