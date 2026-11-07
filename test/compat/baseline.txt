@@ -2173,6 +2173,9 @@ t_thread: a thread reads the leader's maps, cmdline, auxv and statm and finds th
 t_thread: thread-local storage
 t_thread: two threads pinned to one processor run only there and share it
 t_thread: a nice-5 thread gets about a third of the time of a nice-0 one on the same processor
+t_thread: a SCHED_FIFO thread of priority 20 keeps one of priority 10 on its processor from running
+t_thread: two SCHED_RR threads of one priority take turns on one processor
+t_thread: a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
 t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
@@ -2439,6 +2442,9 @@ t_threadsig: signal 33 reaches a thread in nanosleep
 t_threadsig: signal 33 reaches a thread blocked in read
 t_threadsig: signal 33 reaches a thread that is running
 t_threadsig: a thread that has dropped root signals a sibling that has not
+t_jitmap: code written through a writable view of a memfd runs through an executable one
+t_jitmap: the same with the executable view mapped first
+t_jitmap: the same with 16 MiB views (a JIT code area: the Erlang VM's)
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input

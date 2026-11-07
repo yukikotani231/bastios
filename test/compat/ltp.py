@@ -61,7 +61,10 @@ def load_tests(ltp, only, skip, suites=(), libctest=None):
     names = ["syscalls", *(s for s in suites if s not in ("posix", "libctest"))]
     for suite in names:
         sdir = {"mm": "mem", "dio": "io", "fs_perms_simple": "fs"}.get(suite, suite)   # these runtest files list programs built in another directory
-        for base in (os.path.join(ltp, "testcases", "kernel", sdir), os.path.join(ltp, "testcases", sdir)):
+        bases = [os.path.join(ltp, "testcases", "kernel", sdir), os.path.join(ltp, "testcases", sdir)]
+        if suite == "sched":
+            bases.append(os.path.join(ltp, "testcases", "realtime", "func"))   # sched_football is built there
+        for base in bases:
             for root, _, files in os.walk(base):
                 for f in sorted(files):
                     p = os.path.join(root, f)

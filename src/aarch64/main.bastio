@@ -415,7 +415,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // its own code, so it is not charged CPU time.
     let mut keep = false;
     if pget(s.k.procs, p, F_RESTART) == 0 {
-      keep = nice_tick(&mut s.k, p);        // nice values, as src/main.bastio
+      keep = sched_tick(&mut s.k, p, boot_info(cpu, INFO_CPUNO, 0));        // nice values and real-time policies, as src/main.bastio
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
       cpu_timers_tick(&mut s.k, p);
       cg_cpu_tick(&mut s.k, p);             // cpu.max and cpu.weight (src/lxcgroup.bastio)
