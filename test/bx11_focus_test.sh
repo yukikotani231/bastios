@@ -58,5 +58,24 @@ sleep 1.5
 # bx11 as a click in the bwm window 10 seconds after the first window drew
 sleep 7
 check "bx11 is still running" "alive" "$(kill -0 "${pids[2]}" 2>/dev/null && echo alive)"
+# A window that was already mapped when bx11 starts gets the focus too (QueryTree at the start).
+for p in "${pids[@]}"; do kill "$p" 2>/dev/null; done
+wait 2>/dev/null
+pids=()
+rm -f /tmp/bwm.sock /tmp/.X11-unix/X96 /tmp/.X96-lock
+rm -rf "$work/fb"; mkdir "$work/fb"
+Xvfb $DISP -screen 0 640x480x24 -fbdir "$work/fb" >"$work/xvfb2.log" 2>&1 &
+pids+=($!)
+for _ in $(seq 50); do [ -S /tmp/.X11-unix/X96 ] && [ -f "$work/fb/Xvfb_screen0" ] && break; sleep 0.2; done
+xterm -T early -geometry 20x5+0+0 -e sleep 300 &
+pids+=($!)
+sleep 1.5
+"$work/fakebwm" 30 '\w120;' >"$work/fakebwm2.log" 2>&1 &
+pids+=($!)
+for _ in $(seq 50); do grep -q listening "$work/fakebwm2.log" && break; sleep 0.1; done
+"$work/bx11" -f "$work/fb/Xvfb_screen0" -s /tmp/.X11-unix/X96 >"$work/bx11b.log" 2>&1 &
+pids+=($!)
+for _ in $(seq 50); do grep -q "bx11: window" "$work/bx11b.log" && break; sleep 0.2; done
+check "a window mapped before bx11 started has the focus" "early" "$(focused)"
 [ $fails -eq 0 ] && echo "bx11 focus: all passed" || { echo "bx11 focus: $fails failed"; cat "$work/fakebwm.log" "$work/bx11.log"; }
 exit $((fails != 0))

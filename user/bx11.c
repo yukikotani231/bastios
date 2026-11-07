@@ -360,6 +360,38 @@ static void focus_init(void)
     put32(q + 12, 1u << 19);
     xseq++;
     xwrite(q, sizeof q);
+    /* Windows that were mapped before bx11 started are not announced: ask for them (QueryTree lists the children bottom to
+     * top) and, in that order, take the viewable ones that are not menus; the topmost ends up focused. */
+    memset(q, 0, sizeof q);
+    q[0] = 15;                           /* QueryTree */
+    q[2] = 2;
+    put32(q + 4, xroot);
+    xseq++;
+    if (xwrite(q, 8) != 0)
+        return;
+    unsigned char *r = xreply(xseq);
+    if (!r)
+        return;
+    unsigned n = rd16(r + 16);
+    for (unsigned i = 0; i < n && i < 256; i++) {
+        uint32_t w = rd32(r + 32 + 4 * i);
+        unsigned char g[8];
+        memset(g, 0, sizeof g);
+        g[0] = 3;                        /* GetWindowAttributes */
+        g[2] = 2;
+        put32(g + 4, w);
+        xseq++;
+        if (xwrite(g, sizeof g) != 0)
+            break;
+        unsigned char *a = xreply(xseq);
+        if (!a)
+            continue;
+        int viewable = a[26] == 2, override = a[27];
+        free(a);
+        if (viewable && !override)
+            top_focus(w);
+    }
+    free(r);
 }
 
 /* The top-level window under the pointer, or 0. */
