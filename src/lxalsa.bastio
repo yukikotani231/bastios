@@ -5,9 +5,13 @@
 // or signed 16-bit samples, one or two channels, 4 to 96 kHz, and hands
 // the frames to the converter of /dev/dsp (src/lxsnd.bastio).
 //
-// Only read/write transfers are offered (SNDRV_PCM_ACCESS_RW_INTERLEAVED,
-// snd_pcm_writei): there is no mmap of the status, control or data pages,
-// so alsa-lib falls back to SNDRV_PCM_IOCTL_SYNC_PTR for the pointers.
+// Two ways to transfer are offered: SNDRV_PCM_ACCESS_RW_INTERLEAVED
+// (snd_pcm_writei) and MMAP_INTERLEAVED. For the second, mmap of the data
+// at offset 0 gives the program plain shared memory (as /dev/zero does),
+// whose address is remembered; SNDRV_PCM_IOCTL_SYNC_PTR then copies the
+// frames the program has committed (appl_ptr) from that memory to the card,
+// as room allows. The status and control pages are not mapped (mmap fails
+// at their offsets), so alsa-lib uses SYNC_PTR for the pointers.
 // A blocking write that cannot finish sleeps and runs again, as other
 // blocking calls do. Recording is not offered. Without a sound card the
 // devices do not open (ENODEV). There is one stream, and its state lives in
@@ -44,6 +48,7 @@ const IVF_INTEGER: u64 = 4;
 const IVF_EMPTY: u64 = 8;
 const FMT_U8: u64 = 2;                  // bit 1 of the format mask
 const FMT_S16: u64 = 4;                 // bit 2
+const ACC_MMAP_IL: u64 = 1;             // bit 0: SNDRV_PCM_ACCESS_MMAP_INTERLEAVED
 const ACC_RW_IL: u64 = 8;               // bit 3: SNDRV_PCM_ACCESS_RW_INTERLEAVED
 const PCM_MIN_PERIOD: u64 = 32;
 const PCM_MAX_PERIOD: u64 = 2048;
@@ -72,6 +77,7 @@ const PCM_DRAIN: u64 = 0x4144;
 const PCM_PAUSE: u64 = 0x40044145;
 const PCM_RESUME: u64 = 0x4147;
 const PCM_XRUN: u64 = 0x4148;
+const PCM_CHANNEL_INFO: u64 = 0x80184132;
 const PCM_WRITEI: u64 = 0x40184150;
 const CTL_PVERSION: u64 = 0x80045500;
 const CTL_CARD_INFO: u64 = 0x81785501;
@@ -88,20 +94,21 @@ const ST_PREPARED: u64 = 2;
 const ST_RUNNING: u64 = 3;
 
 /// A stream word: 0 state, 1 rate, 2 channels, 3 bits per sample, 4 period
-/// frames, 5 buffer frames, 6 frames written, 7 frames of the write in
-/// progress already taken.
+/// frames, 5 buffer frames, 6 frames given to the card, 7 frames of the
+/// write in progress already taken, 8 frames the program committed through
+/// mmap (appl_ptr), 9 the address of its mapping, 10 the access (1 = mmap).
 fn pcm_w(k: &Kernel, i: u64) -> u64
-  requires kok(k) && i < 8
-  ensures result <= 0x4000000000000 && (i != 6 ==> result <= 0x40000000)
+  requires kok(k) && i < 11
+  ensures result <= 0x4000000000000 && ((i != 6 && i != 8 && i != 9) ==> result <= 0x40000000)
 {
-  if i == 6 {
-    return smaller(get(k.sys, SYS_ALSA + i), 0x4000000000000);   // frames written: 2^50 at most
+  if i == 6 || i == 8 || i == 9 {
+    return smaller(get(k.sys, SYS_ALSA + i), 0x4000000000000);   // frames: 2^50 at most
   }
   return smaller(get(k.sys, SYS_ALSA + i), 0x40000000);
 }
 
 fn pcm_set(k: &mut Kernel, i: u64, v: u64)
-  requires kok(k) && i < 8
+  requires kok(k) && i < 11
   ensures kok(k)
 {
   k.sys = set(k.sys, SYS_ALSA + i, v);
@@ -285,7 +292,8 @@ fn pcm_refine(k: &mut Kernel) -> bool
   requires kok(k)
   ensures kok(k)
 {
-  store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](rd32(k.fs.xfer, HP_ACCESS) / 8 % 2 * ACC_RW_IL));
+  let ac = rd32(k.fs.xfer, HP_ACCESS);
+  store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](ac % 2 * ACC_MMAP_IL + ac / 8 % 2 * ACC_RW_IL));
   store_le32(&mut k.fs.xfer, HP_ACCESS + 4, 0);
   let fm = rd32(k.fs.xfer, HP_FORMAT);
   store_le32(&mut k.fs.xfer, HP_FORMAT, cast[u32](fm / 2 % 2 * FMT_U8 + fm / 4 % 2 * FMT_S16));
@@ -322,7 +330,7 @@ fn pcm_refine(k: &mut Kernel) -> bool
     store_le32(&mut k.fs.xfer, HP_IV + 12 * i + 8, cast[u32](fl));
     i = i + 1;
   }
-  store_le32(&mut k.fs.xfer, HP_INFO, 0x10100);          // BLOCK_TRANSFER | INTERLEAVED
+  store_le32(&mut k.fs.xfer, HP_INFO, 0x10103);          // BLOCK_TRANSFER | INTERLEAVED | MMAP | MMAP_VALID
   if iv_min(k, IV_SBITS) == iv_max(k, IV_SBITS) {
     store_le32(&mut k.fs.xfer, HP_MSBITS, cast[u32](iv_min(k, IV_SBITS)));
   }
@@ -339,6 +347,11 @@ fn pcm_choose(k: &mut Kernel) -> bool
   requires kok(k)
   ensures kok(k)
 {
+  if rd32(k.fs.xfer, HP_ACCESS) / 8 % 2 == 1 {
+    store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](ACC_RW_IL));
+  } else {
+    store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](ACC_MMAP_IL));
+  }
   let fm = rd32(k.fs.xfer, HP_FORMAT);
   if fm / 4 % 2 == 1 {
     store_le32(&mut k.fs.xfer, HP_FORMAT, cast[u32](FMT_S16));
@@ -367,6 +380,17 @@ fn pcm_choose(k: &mut Kernel) -> bool
   return iv_min(k, IV_BSIZE) == iv_max(k, IV_BSIZE) && iv_min(k, IV_RATE) == iv_max(k, IV_RATE);
 }
 
+/// The program's appl_ptr: frames it committed through mmap, or written.
+fn pcm_appl(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= 0x4000000000000
+{
+  if pcm_w(k, 10) == 1 {
+    return pcm_w(k, 8);
+  }
+  return pcm_w(k, 6);
+}
+
 /// Frames of the stream the card still holds, counted in the program's
 /// frames (the card plays 48 kHz).
 fn pcm_queued(k: &Kernel) -> u64
@@ -384,13 +408,17 @@ fn pcm_put_status(k: &mut Kernel, at: u64)
   ensures kok(k)
 {
   let q = pcm_queued(k);
-  let appl = smaller(pcm_w(k, 6), 1048576 * 1048576);
+  let appl = smaller(pcm_appl(k), 1048576 * 1048576);
+  let g = smaller(pcm_w(k, 6), appl);
+  let sq = smaller(q, g);
+  let hw = g - sq;
+  let pend = appl - g;
   store_le32(&mut k.fs.xfer, at, cast[u32](pcm_w(k, 0) % 256));
   xfer_u64(&mut k.fs.xfer, at + 40, appl);
-  xfer_u64(&mut k.fs.xfer, at + 48, appl - smaller(q, appl));
-  xfer_u64(&mut k.fs.xfer, at + 56, q);
+  xfer_u64(&mut k.fs.xfer, at + 48, hw);
+  xfer_u64(&mut k.fs.xfer, at + 56, sq + pend);
   let bs = pcm_w(k, 5);
-  xfer_u64(&mut k.fs.xfer, at + 64, bs - smaller(q, bs));
+  xfer_u64(&mut k.fs.xfer, at + 64, bs - smaller(sq + pend, bs));
   xfer_u64(&mut k.fs.xfer, at + 72, bs);
 }
 
@@ -436,8 +464,8 @@ fn pcm_open_reset(k: &mut Kernel)
   ensures kok(k)
 {
   let mut i = 0;
-  while i < 8
-    invariant i <= 8 && kok(k)
+  while i < 11
+    invariant i <= 11 && kok(k)
   {
     pcm_set(&mut k, i, 0);
     i = i + 1;
@@ -458,6 +486,47 @@ fn pcm_to_dsp(k: &mut Kernel)
   }
 }
 
+/// Moves the frames the program committed through mmap (appl_ptr) from its
+/// mapping to the card, as far as the card has room, in the card's format
+/// by way of /dev/dsp's converter. Frames the card could not take yet stay
+/// where they are; the caller is woken (pcm_bits) when there is room.
+fn pcm_pump(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let base = smaller(pcm_w(k, 9), 0x7FFFFFFFFFFF);
+  let bs = larger(pcm_w(k, 5), 1);
+  let fb = larger(smaller(pcm_w(k, 2) * pcm_w(k, 3) / 8, 4), 1);
+  if pcm_w(k, 10) != 1 || base == 0 || (pcm_w(k, 0) != ST_PREPARED && pcm_w(k, 0) != ST_RUNNING) {
+    return;
+  }
+  pcm_to_dsp(&mut k);
+  let mut rounds = 0;
+  let mut more = true;
+  while more && rounds < 6
+    invariant rounds <= 6 && fb >= 1 && fb <= 4 && bs >= 1 && bs <= 0x40000000 && kok(k)
+  {
+    let t = pcm_w(k, 6);
+    let a = pcm_w(k, 8);
+    if t >= a {
+      more = false;
+    } else {
+      let pos = t % bs;
+      let chunk = smaller(smaller(a - t, bs - pos), 2048);
+      let r = dsp_write(&mut k, pid, base + pos * fb, chunk * fb);
+      if r == EAGAIN {
+        more = false;
+      } else if r >= 0x100000000 {
+        pcm_set(&mut k, 6, a);          // unreadable memory: dropped
+        more = false;
+      } else {
+        pcm_set(&mut k, 6, t + smaller(r / fb, chunk));
+      }
+    }
+    rounds = rounds + 1;
+  }
+}
+
 /// snd_pcm_writei: struct snd_xferi { long result; void *buf; unsigned
 /// long frames; }. Takes what the card has room for and waits for the rest
 /// (or reports what it took on a non-blocking descriptor).
@@ -466,7 +535,7 @@ fn pcm_writei(k: &mut Kernel, pid: u64, fd: u64, arg: u64) -> u64
   ensures kok(k)
 {
   let st = pcm_w(k, 0);
-  if st != ST_PREPARED && st != ST_RUNNING {
+  if (st != ST_PREPARED && st != ST_RUNNING) || pcm_w(k, 10) == 1 {
     return EBADFD;
   }
   let e = pcm_in(&mut k, pid, arg, 24);
@@ -559,10 +628,14 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     pcm_set(&mut k, 0, ST_SETUP);
     pcm_set(&mut k, 6, 0);
     pcm_set(&mut k, 7, 0);
+    pcm_set(&mut k, 8, 0);
+    pcm_set(&mut k, 9, 0);
+    pcm_set(&mut k, 10, rd32(k.fs.xfer, HP_ACCESS) % 2);
     return pcm_out(&mut k, pid, arg, HP_SIZE);
   }
   if req == PCM_HW_FREE {
     pcm_set(&mut k, 0, ST_OPEN);
+    pcm_set(&mut k, 9, 0);
     return 0;
   }
   if req == PCM_SW_PARAMS {
@@ -590,6 +663,7 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     pcm_set(&mut k, 0, ST_PREPARED);
     pcm_set(&mut k, 6, 0);
     pcm_set(&mut k, 7, 0);
+    pcm_set(&mut k, 8, 0);
     pcm_to_dsp(&mut k);
     return 0;
   }
@@ -598,7 +672,25 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
       return EBADFD;
     }
     pcm_set(&mut k, 0, ST_RUNNING);
+    pcm_pump(&mut k, pid);
     return 0;
+  }
+  if req == PCM_CHANNEL_INFO {
+    // struct snd_pcm_channel_info { unsigned int channel; long offset; unsigned int first, step; }:
+    // interleaved, the whole buffer at mmap offset 0.
+    let e = pcm_in(&mut k, pid, arg, 24);
+    if e != 0 {
+      return e;
+    }
+    let ch = rd32(k.fs.xfer, 0);
+    if ch >= pcm_w(k, 2) {
+      return EINVAL;
+    }
+    xfer_u64(&mut k.fs.xfer, 8, 0);
+    let sb = smaller(pcm_w(k, 3), 64);
+    store_le32(&mut k.fs.xfer, 16, cast[u32](smaller(ch, 2) * sb));
+    store_le32(&mut k.fs.xfer, 20, cast[u32](smaller(pcm_w(k, 2), 2) * sb));
+    return pcm_out(&mut k, pid, arg, 24);
   }
   if req == PCM_DROP {
     if pcm_w(k, 0) != ST_OPEN {
@@ -610,7 +702,8 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     if pcm_w(k, 0) == ST_OPEN {
       return EBADFD;
     }
-    if snd_queued(k.snd) != 0 && snd_live(k.snd) {
+    pcm_pump(&mut k, pid);
+    if (snd_queued(k.snd) != 0 || pcm_w(k, 6) < pcm_appl(k)) && snd_live(k.snd) {
       return SC_WAIT;                   // until the card has played it all
     }
     pcm_set(&mut k, 0, ST_SETUP);
@@ -630,11 +723,25 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if req == PCM_SYNC_PTR {
     // struct snd_pcm_sync_ptr { flags; status at 8: state, hw_ptr at 16; control at 72: appl_ptr, avail_min }
+    let e = pcm_in(&mut k, pid, arg, 136);
+    if e != 0 {
+      return e;
+    }
+    // SNDRV_PCM_SYNC_PTR_APPL (2): the program's new appl_ptr, which may
+    // advance by up to a buffer.
+    let flags = rd32(k.fs.xfer, 0);
+    let newa = smaller(load_le64(k.fs.xfer, 72), 0x4000000000000);
+    let olda = pcm_w(k, 8);
+    if flags / 2 % 2 == 1 && pcm_w(k, 10) == 1 && newa >= olda && newa - olda <= pcm_w(k, 5) {
+      pcm_set(&mut k, 8, newa);
+    }
+    pcm_pump(&mut k, pid);
     xfer_zero(&mut k, 136);
     let q = pcm_queued(k);
-    let appl = smaller(pcm_w(k, 6), 1048576 * 1048576);
+    let appl = smaller(pcm_appl(k), 1048576 * 1048576);
+    let given = smaller(pcm_w(k, 6), appl);
     store_le32(&mut k.fs.xfer, 8, cast[u32](pcm_w(k, 0) % 256));
-    xfer_u64(&mut k.fs.xfer, 16, appl - smaller(q, appl));
+    xfer_u64(&mut k.fs.xfer, 16, given - smaller(q, given));
     xfer_u64(&mut k.fs.xfer, 72, appl);
     xfer_u64(&mut k.fs.xfer, 80, 1);
     return pcm_out(&mut k, pid, arg, 136);
@@ -709,8 +816,37 @@ fn pcm_bits(k: &Kernel) -> u64
   }
   let rate = larger(smaller(pcm_w(k, 1), DSP_MAX_RATE), 1);
   let room = smaller(snd_room(k.snd), 1048576) / 4 * rate / DSP_RATE;
-  if room >= larger(smaller(pcm_w(k, 4), PCM_MAX_PERIOD), 1) || pcm_w(k, 0) < ST_PREPARED {
+  if pcm_w(k, 0) < ST_PREPARED {
+    return POLLOUT;
+  }
+  if pcm_w(k, 10) == 1 {
+    // mmap: frames committed but not yet given to the card go as soon as
+    // there is room (the program's next SYNC_PTR does it); otherwise the
+    // buffer must have a period free.
+    let a8 = pcm_w(k, 8);
+    let g8 = smaller(pcm_w(k, 6), a8);
+    let pend = a8 - g8;
+    if pend > 0 && room > 0 {
+      return POLLOUT;
+    }
+    let used = smaller(pend, 0x40000000) + smaller(pcm_queued(k), 0x40000000);
+    let bs = pcm_w(k, 5);
+    if bs - smaller(used, bs) >= larger(smaller(pcm_w(k, 4), PCM_MAX_PERIOD), 1) {
+      return POLLOUT;
+    }
+    return 0;
+  }
+  if room >= larger(smaller(pcm_w(k, 4), PCM_MAX_PERIOD), 1) {
     return POLLOUT;
   }
   return 0;
+}
+
+/// mmap(2) of /dev/snd/pcmC0D0p returned `at` (a user address): the data
+/// pages, which the program writes and SYNC_PTR then copies to the card.
+fn pcm_mapped(k: &mut Kernel, at: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  pcm_set(&mut k, 9, smaller(at, 0x7FFFFFFFFFFF));
 }

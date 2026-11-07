@@ -16,7 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
-- ALSA playback: `/dev/snd/controlC0` and `/dev/snd/pcmC0D0p` with the ioctls alsa-lib's `hw` plugin uses (`HW_REFINE`, `HW_PARAMS`, `SW_PARAMS`, `PREPARE`, `WRITEI_FRAMES`, `DRAIN`, `STATUS`, `DELAY`, `SYNC_PTR`), for aplay, SDL and the like; checked by `malsa` against QEMU's WAV output (`test/shell_test.sh`)
+- ALSA playback: `/dev/snd/controlC0` and `/dev/snd/pcmC0D0p` with the ioctls alsa-lib's `hw` plugin uses (`HW_REFINE`, `HW_PARAMS`, `SW_PARAMS`, `PREPARE`, `WRITEI_FRAMES`, `DRAIN`, `STATUS`, `DELAY`, `SYNC_PTR`, `CHANNEL_INFO`, and mmap of the data pages), for aplay, SDL and the like; checked by `malsa` against QEMU's WAV output (`test/shell_test.sh`)
 - `/sys/class/rtc/rtc0/wakealarm`, readable and writable (`+N`, an epoch time or `0`), the same alarm as `RTC_WKALM_SET` (`test/compat/progs/t_rtc.c`)
 - `/dev/rtc0` alarm: `RTC_ALM_SET`/`RTC_ALM_READ`, `RTC_WKALM_SET`/`RTC_WKALM_RD`, `RTC_AIE_ON`/`RTC_AIE_OFF`, and a `read`/`poll` that wait for it (`test/compat/progs/t_rtc.c`)
 - `/dev/dsp` accepts unsigned 8-bit and signed 16-bit samples, mono or stereo, at 4 kHz to 96 kHz, and converts them to the card's 48 kHz 16-bit stereo (`test/shell_test.sh`, sound section)

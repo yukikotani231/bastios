@@ -11,6 +11,7 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/mman.h>
 #include <string.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
@@ -23,6 +24,9 @@
 #define PCM_STATUS     0x80984120u
 #define PCM_DELAY      0x80084121u
 #define PCM_SYNC_PTR   0xC0884123u
+#define PCM_HW_FREE    0x4112u
+#define PCM_CHANNEL_INFO 0x80184132u
+#define PCM_START      0x4142u
 #define PCM_PREPARE    0x4140u
 #define PCM_DRAIN      0x4144u
 #define PCM_WRITEI     0x40184150u
@@ -62,7 +66,67 @@ static void fix(struct hw_params *p, int i, uint32_t v)
 
 static short wave[24000 / 2];           /* half a second of mono 24 kHz */
 
-int main(void)
+/* Negotiates 24 kHz mono S16_LE the way aplay does with the given access
+ * (1 << 3 is RW_INTERLEAVED, 1 << 0 MMAP_INTERLEAVED), applies the hardware
+ * and software parameters and prepares the stream. */
+static int setup(int fd, uint32_t access)
+{
+    int ver = 0;
+    (void)ver;
+    struct hw_params hw;
+    any(&hw);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
+        printf("malsa: refine of everything: errno %d\n", errno);
+        return -1;
+    }
+    if (hw.intervals[RATE].min != 4000 || hw.intervals[RATE].max != 96000 || hw.intervals[CH].max != 2
+        || !(hw.masks[1].bits[0] & (1u << 2))) {
+        printf("malsa: refine: rate %u..%u channels ..%u\n", hw.intervals[RATE].min, hw.intervals[RATE].max, hw.intervals[CH].max);
+        return -1;
+    }
+    /* what aplay does: access, format, channels, rate, buffer time, period time */
+    memset(&hw.masks[0], 0, sizeof hw.masks[0]);
+    hw.masks[0].bits[0] = access;
+    memset(&hw.masks[1], 0, sizeof hw.masks[1]);
+    hw.masks[1].bits[0] = 1u << 2;                        /* S16_LE */
+    fix(&hw, CH, 1);
+    fix(&hw, RATE, 24000);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
+        printf("malsa: refine to 24 kHz mono: errno %d\n", errno);
+        return -1;
+    }
+    fix(&hw, BTIME, 100000);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0 || hw.intervals[BSIZE].min != 2400 || hw.intervals[BSIZE].max != 2400) {
+        printf("malsa: buffer time: errno %d, size %u..%u\n", errno, hw.intervals[BSIZE].min, hw.intervals[BSIZE].max);
+        return -1;
+    }
+    fix(&hw, PTIME, 25000);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0 || hw.intervals[PSIZE].min != 600 || hw.intervals[PERIODS].min != 4
+        || hw.intervals[PBYTES].min != 1200 || hw.intervals[FBITS].min != 16) {
+        printf("malsa: period time: errno %d, size %u..%u periods %u\n", errno, hw.intervals[PSIZE].min,
+               hw.intervals[PSIZE].max, hw.intervals[PERIODS].min);
+        return -1;
+    }
+    if (ioctl(fd, PCM_HW_PARAMS, &hw) != 0) {
+        printf("malsa: hw_params: errno %d\n", errno);
+        return -1;
+    }
+    unsigned long sw[17];                                 /* struct snd_pcm_sw_params, 136 bytes */
+    memset(sw, 0, sizeof sw);
+    sw[2] = 600;                                          /* avail_min at 16 */
+    sw[4] = 1;                                            /* start_threshold at 32 */
+    if (ioctl(fd, PCM_SW_PARAMS, sw) != 0 || sw[8] < 2400) {   /* boundary at 64 */
+        printf("malsa: sw_params: errno %d, boundary %lu\n", errno, sw[8]);
+        return -1;
+    }
+    if (ioctl(fd, PCM_PREPARE, 0) != 0) {
+        printf("malsa: prepare: errno %d\n", errno);
+        return -1;
+    }
+    return 0;
+}
+
+int main(int argc, char **argv)
 {
     int ctl = open("/dev/snd/controlC0", O_RDWR);
     if (ctl < 0 && errno == ENODEV) {
@@ -95,56 +159,8 @@ int main(void)
         return 1;
     }
 
-    struct hw_params hw;
-    any(&hw);
-    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
-        printf("malsa: refine of everything: errno %d\n", errno);
+    if (setup(fd, 1u << 3) != 0)
         return 1;
-    }
-    if (hw.intervals[RATE].min != 4000 || hw.intervals[RATE].max != 96000 || hw.intervals[CH].max != 2
-        || !(hw.masks[1].bits[0] & (1u << 2))) {
-        printf("malsa: refine: rate %u..%u channels ..%u\n", hw.intervals[RATE].min, hw.intervals[RATE].max, hw.intervals[CH].max);
-        return 1;
-    }
-    /* what aplay does: access, format, channels, rate, buffer time, period time */
-    memset(&hw.masks[0], 0, sizeof hw.masks[0]);
-    hw.masks[0].bits[0] = 1u << 3;                        /* RW_INTERLEAVED */
-    memset(&hw.masks[1], 0, sizeof hw.masks[1]);
-    hw.masks[1].bits[0] = 1u << 2;                        /* S16_LE */
-    fix(&hw, CH, 1);
-    fix(&hw, RATE, 24000);
-    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
-        printf("malsa: refine to 24 kHz mono: errno %d\n", errno);
-        return 1;
-    }
-    fix(&hw, BTIME, 100000);
-    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0 || hw.intervals[BSIZE].min != 2400 || hw.intervals[BSIZE].max != 2400) {
-        printf("malsa: buffer time: errno %d, size %u..%u\n", errno, hw.intervals[BSIZE].min, hw.intervals[BSIZE].max);
-        return 1;
-    }
-    fix(&hw, PTIME, 25000);
-    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0 || hw.intervals[PSIZE].min != 600 || hw.intervals[PERIODS].min != 4
-        || hw.intervals[PBYTES].min != 1200 || hw.intervals[FBITS].min != 16) {
-        printf("malsa: period time: errno %d, size %u..%u periods %u\n", errno, hw.intervals[PSIZE].min,
-               hw.intervals[PSIZE].max, hw.intervals[PERIODS].min);
-        return 1;
-    }
-    if (ioctl(fd, PCM_HW_PARAMS, &hw) != 0) {
-        printf("malsa: hw_params: errno %d\n", errno);
-        return 1;
-    }
-    unsigned long sw[17];                                 /* struct snd_pcm_sw_params, 136 bytes */
-    memset(sw, 0, sizeof sw);
-    sw[2] = 600;                                          /* avail_min at 16 */
-    sw[4] = 1;                                            /* start_threshold at 32 */
-    if (ioctl(fd, PCM_SW_PARAMS, sw) != 0 || sw[8] < 2400) {   /* boundary at 64 */
-        printf("malsa: sw_params: errno %d, boundary %lu\n", errno, sw[8]);
-        return 1;
-    }
-    if (ioctl(fd, PCM_PREPARE, 0) != 0) {
-        printf("malsa: prepare: errno %d\n", errno);
-        return 1;
-    }
     for (int i = 0; i < 12000; i++)
         wave[i] = (i / 12) % 2 ? -8000 : 8000;            /* 1 kHz at 24 kHz: 12 up, 12 down */
     size_t frames = 0;
@@ -177,6 +193,69 @@ int main(void)
         printf("malsa: state after drain %u\n", (unsigned)status[0]);
         return 1;
     }
+    (void)argv;
+    if (argc > 1)
+        goto done;                                        /* "malsa rw": the write path alone */
+    usleep(1200000);                                      /* let the card stop (src/hda.bastio) */
+    /* The same wave through mmap: the data pages at offset 0 (the status and
+     * control pages cannot be mapped, so alsa-lib uses SYNC_PTR), committed
+     * with SYNC_PTR as mmap writers do, and started once data is there. */
+    unsigned char ci[24];
+    memset(ci, 0, sizeof ci);
+    if (ioctl(fd, PCM_HW_FREE, 0) != 0 || setup(fd, 1u << 0) != 0) {
+        printf("malsa: mmap parameters: errno %d\n", errno);
+        return 1;
+    }
+    if (ioctl(fd, PCM_CHANNEL_INFO, ci) != 0 || *(uint32_t *)(ci + 20) != 16) {
+        printf("malsa: channel info: errno %d\n", errno);
+        return 1;
+    }
+    short *map = mmap(NULL, 2400 * 2, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (map == MAP_FAILED || mmap(NULL, 4096, PROT_READ, MAP_SHARED, fd, 0x80000000L) != MAP_FAILED) {
+        printf("malsa: mmap of the data pages: errno %d\n", errno);
+        return 1;
+    }
+    uint64_t appl = 0;
+    int spins = 0;
+    while (appl < 12000 && spins < 4000) {
+        memset(sync, 0, sizeof sync);
+        if (ioctl(fd, PCM_SYNC_PTR, sync) != 0) {
+            printf("malsa: sync_ptr: errno %d\n", errno);
+            return 1;
+        }
+        uint64_t hw = *(uint64_t *)(sync + 16);
+        if (2400 - (appl - hw) < 600) {
+            usleep(5000);
+            spins++;
+            continue;
+        }
+        for (int i = 0; i < 600; i++)
+            map[(appl + i) % 2400] = wave[appl + i];
+        appl += 600;
+        memset(sync, 0, sizeof sync);
+        *(uint32_t *)sync = 2;                            /* SNDRV_PCM_SYNC_PTR_APPL */
+        *(uint64_t *)(sync + 72) = appl;
+        if (ioctl(fd, PCM_SYNC_PTR, sync) != 0) {
+            printf("malsa: sync_ptr commit: errno %d\n", errno);
+            return 1;
+        }
+        if (*(uint32_t *)(sync + 8) == 2 && ioctl(fd, PCM_START, 0) != 0) {   /* PREPARED */
+            printf("malsa: start: errno %d\n", errno);
+            return 1;
+        }
+    }
+    for (spins = 0; spins < 4000; spins++) {                 /* until the card has taken it all */
+        memset(sync, 0, sizeof sync);
+        if (ioctl(fd, PCM_SYNC_PTR, sync) != 0 || *(uint64_t *)(sync + 16) == 12000)
+            break;
+        usleep(5000);
+    }
+    if (appl != 12000 || ioctl(fd, PCM_DRAIN, 0) != 0 || ioctl(fd, PCM_STATUS, status) != 0 || (uint32_t)status[0] != 1) {
+        printf("malsa: mmap drain: committed %lu, errno %d\n", (unsigned long)appl, errno);
+        return 1;
+    }
+    frames += appl;
+done:
     close(fd);
     close(ctl);
     usleep(300000);
