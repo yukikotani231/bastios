@@ -1879,6 +1879,15 @@ t_rtc: a disarmed nonblocking read is EAGAIN
 t_rtc: a blocking read with no alarm armed is EIO, not a hang
 t_rtc: an alarm in the past is refused
 t_rtc: a short read is EINVAL
+t_rtc: wakealarm opens for writing
+t_rtc: it is empty while no alarm is armed
+t_rtc: +30 arms an alarm 30 seconds on
+t_rtc: RTC_WKALM_RD sees it
+t_rtc: reading it gives that time
+t_rtc: 0 disarms it
+t_rtc: an absolute time arms it
+t_rtc: a time in the past is EINVAL
+t_rtc: so is text
 t_rtnlev: sockets in the link group, the address group, both and none
 t_rtnlev: a veth pair is made
 t_rtnlev: the link group hears both ends
