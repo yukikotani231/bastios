@@ -1548,6 +1548,9 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   if hv >= OFD_N {
     return ENFILE;
   }
+  if dev == DEV_RTC {
+    of_set(&mut k.ofd, hv, 3, flags / LO_NONBLOCK % 2);   // O_NONBLOCK, for rtc_read
+  }
   if dev == DEV_PTSDIR {
     dpath_keep(&mut k.dpath, &mut k.dpathx, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
   }
@@ -1852,6 +1855,10 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
     // other flag (O_APPEND) can.
     if pipe || sock {
       of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
+    }
+    let rd = fd_look(k, pid, fd);
+    if rd.kind == K_DEV && rd.x == DEV_RTC && h < OFD_N {
+      of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);   // /dev/rtc0 blocks for its alarm (src/lxrtc.bastio)
     }
     if h < OFD_N {
       set_async(&mut k, h, arg / LO_ASYNC % 2 == 1);   // src/lxowner.bastio

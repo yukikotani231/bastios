@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- `/dev/rtc0` alarm: `RTC_ALM_SET`/`RTC_ALM_READ`, `RTC_WKALM_SET`/`RTC_WKALM_RD`, `RTC_AIE_ON`/`RTC_AIE_OFF`, and a `read`/`poll` that wait for it (`test/compat/progs/t_rtc.c`)
 - `/dev/dsp` accepts unsigned 8-bit and signed 16-bit samples, mono or stereo, at 4 kHz to 96 kHz, and converts them to the card's 48 kHz 16-bit stereo (`test/shell_test.sh`, sound section)
 - `/sys/class/rtc/rtc0` with `name`, `date`, `time`, `since_epoch` and `max_user_freq`, read from the same clock as `/dev/rtc0` (`test/compat/progs/t_rtc.c`). Empty on AArch64, which has no clock yet.
 - `/proc/PID/maps` and `smaps` name the file each mapping comes from, with its offset and inode, as Linux does: the program and its interpreter as `execve` loaded them, and every `mmap` of a file (`src/lxfname.bastio`). The names follow `munmap`, mappings made over them, `mremap` and `fork`; a mapping keeps its file in place after its name is removed, as on Linux. `maps` and `smaps` longer than 4 KiB now read whole, a piece at a time (they were cut at 4 KiB), and code `execve` has not read yet shows as the read-only mapping it is. Limits: 64 file mappings per process are named (more are listed without a name), a removed file's line has no name (Linux writes `(deleted)` after the old one), and devices such as `/dev/zero` are not named (`test/compat/progs/t_proc.c`).

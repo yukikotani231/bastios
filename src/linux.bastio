@@ -358,6 +358,9 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if d.kind == K_DEV && (d.x | 4) == DEV_SER {   // DEV_MICE or DEV_SER
     return mice_read(&mut k, pid, n, a, va, cnt);   // src/lxmouse.bastio; the serial port too
   }
+  if d.kind == K_DEV && d.x == DEV_RTC {
+    return rtc_read(&mut k, pid, n, a, va, cnt);    // src/lxrtc.bastio
+  }
   if d.kind == K_DEV && d.x == DEV_KEYEV {
     return keyev_read(&mut k, pid, n, a, va, cnt);  // src/lxkeyev.bastio
   }
