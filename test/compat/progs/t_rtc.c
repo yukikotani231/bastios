@@ -62,6 +62,36 @@ int main(void) {
     struct rtc_time restore = {.sec = bt.tm_sec, .min = bt.tm_min, .hour = bt.tm_hour, .mday = bt.tm_mday, .mon = bt.tm_mon, .year = bt.tm_year};
     EXPECT("the clock is put back", ioctl(fd, RTC_SET_TIME, &restore) == 0);
 
+    {
+        /* /sys/class/rtc/rtc0 says the same */
+        char nm[64] = "", dt[64] = "", tm_[64] = "", ep[64] = "", fq[64] = "";
+        const char *names[] = {"name", "date", "time", "since_epoch", "max_user_freq"};
+        char *dst[] = {nm, dt, tm_, ep, fq};
+        for (int i = 0; i < 5; i++) {
+            char p[96];
+            snprintf(p, sizeof p, "/sys/class/rtc/rtc0/%s", names[i]);
+            int f = open(p, O_RDONLY);
+            if (f >= 0) {
+                int r = read(f, dst[i], 63);
+                dst[i][r > 0 ? r : 0] = 0;
+                close(f);
+            }
+        }
+        time_t now = time(NULL);
+        long e = atol(ep);
+        EXPECT("sysfs: the name is rtc_cmos", !strncmp(nm, "rtc_cmos", 8));
+        EXPECT("sysfs: since_epoch is the time the clock says", e > 1000000000 && e - now >= -5 && e - now <= 5);
+        struct tm gt;
+        time_t et = e;
+        gmtime_r(&et, &gt);
+        char want[32];
+        strftime(want, sizeof want, "%Y-%m-%d\n", &gt);
+        EXPECT("sysfs: date is the UTC date of since_epoch", !strcmp(dt, want));
+        strftime(want, sizeof want, "%H:%M:%S\n", &gt);
+        EXPECT("sysfs: time is the UTC time of since_epoch", !strcmp(tm_, want));
+        EXPECT("sysfs: max_user_freq is a number", atoi(fq) > 0);
+    }
+
     EXPECT("an unprivileged program cannot set it", ({
         int ok = 0;
         pid_t c = fork();

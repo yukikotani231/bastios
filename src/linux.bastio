@@ -3048,7 +3048,11 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
       }
     }
   }
-  return lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+  let r = lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+  if flags / MAP_ANONYMOUS % 2 == 0 && r >= USER_BASE && r - USER_BASE < USER_SIZE && n <= USER_SIZE {
+    fn_mmap(&mut k, pid, fd, (r - USER_BASE) / 4096, (n + 4095) / 4096, o);   // its name, for /proc/PID/maps (src/lxfname.bastio)
+  }
+  return r;
 }
 
 fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, fd: u64, off: u64) -> u64

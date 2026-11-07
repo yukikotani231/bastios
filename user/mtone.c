@@ -15,6 +15,7 @@
 #define SNDCTL_DSP_CHANNELS  0xC0045006
 #define SNDCTL_DSP_GETOSPACE 0x8010500C
 #define SNDCTL_DSP_SYNC      0x5001
+#define AFMT_U8              0x8
 #define AFMT_S16_LE          0x10
 
 static short wave[48000 / 2 * 2];       /* half a second, two channels */
@@ -31,10 +32,12 @@ int main(void)
         return 1;
     }
     int fmt = AFMT_S16_LE, ch = 2, rate = 44100;
+    static unsigned char small[6000];    /* 0.25 s of mono U8 at 24 kHz */
     struct { int fragments, fragstotal, fragsize, bytes; } space;
     if (ioctl(fd, SNDCTL_DSP_SETFMT, &fmt) != 0 || fmt != AFMT_S16_LE
         || ioctl(fd, SNDCTL_DSP_CHANNELS, &ch) != 0 || ch != 2
-        || ioctl(fd, SNDCTL_DSP_SPEED, &rate) != 0 || rate != 48000
+        || ioctl(fd, SNDCTL_DSP_SPEED, &rate) != 0 || rate != 44100
+        || (rate = 48000, ioctl(fd, SNDCTL_DSP_SPEED, &rate)) != 0 || rate != 48000
         || ioctl(fd, SNDCTL_DSP_GETOSPACE, &space) != 0 || space.fragsize != 4096 || space.bytes <= 0) {
         printf("mtone: ioctl: fmt %#x ch %d rate %d\n", fmt, ch, rate);
         return 1;
@@ -52,9 +55,31 @@ int main(void)
         }
         done += n;
     }
+    /* Straight after it, the same pitch in another format: unsigned 8-bit
+     * mono at 24 kHz, which the kernel widens to the card's. 160 and 96 are
+     * +-32 around the middle, +-8192 once widened. */
+    fmt = AFMT_U8; ch = 1; rate = 24000;
+    if (ioctl(fd, SNDCTL_DSP_SETFMT, &fmt) != 0 || fmt != AFMT_U8
+        || ioctl(fd, SNDCTL_DSP_CHANNELS, &ch) != 0 || ch != 1
+        || ioctl(fd, SNDCTL_DSP_SPEED, &rate) != 0 || rate != 24000) {
+        printf("mtone: convert ioctl: fmt %#x ch %d rate %d\n", fmt, ch, rate);
+        return 1;
+    }
+    for (int i = 0; i < 6000; i++)
+        small[i] = (i / 12) % 2 ? 96 : 160;
+    done = 0;
+    while (done < sizeof small) {
+        ssize_t n = write(fd, small + done, sizeof small - done);
+        if (n <= 0) {
+            printf("mtone: write 8-bit: %zd, errno %d\n", n, errno);
+            return 1;
+        }
+        done += n;
+    }
+    puts("mtone: converted ok");
     ioctl(fd, SNDCTL_DSP_SYNC, 0);
     close(fd);
     usleep(300000);                     /* what is queued plays out */
-    printf("mtone: ok, %zu bytes\n", done);
+    printf("mtone: ok, %zu bytes\n", sizeof wave);
     return 0;
 }

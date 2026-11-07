@@ -6,7 +6,7 @@
  * says "bsys: refreshed"; p swaps them for the list of processes (with the memory each holds, newest
  * first; j and k or the Up and Down keys move along it and say
  * "bsys: select PID NAME" and "bsys: resident KB", x asks the selected one to end with SIGTERM and
- * says "bsys: terminated PID", p goes back); the close box ends it. Says "bsys: window ID" when
+ * says "bsys: terminated PID", p goes back); a click on the Time, Keyboard, Next mode or Wallpaper row changes it like t, k, m or w; the close box ends it. Says "bsys: window ID" when
  * the window is open. It is part of the bterm program, which runs it when
  * started as "bsys", so it adds no image to the kernel. */
 #include <dirent.h>
@@ -432,6 +432,28 @@ static int bsys_main(void)
                 if (bf_send(fd, id, BS_ROWS * BF_CH) != 0)
                     break;
             }
+            continue;
+        }
+        if (t == BWM_MOUSE && !bs_tasks) {                     /* a click on the Time, Keyboard, Next mode or Wallpaper row does what t, k, m or w does */
+            struct bwm_mouse *mo = (struct bwm_mouse *)buf;
+            static int was;
+            int press = (mo->buttons & 1) && !was;
+            was = mo->buttons & 1;
+            int row = (int)mo->y / BF_CH;
+            if (!press || (int)mo->y < 0 || (row != 9 && row != 12 && row != 13 && row != 14))
+                continue;
+            if (row == 9)
+                bs_next_zone();
+            else if (row == 12)
+                bs_next_keymap();
+            else if (row == 13)
+                bs_next_mode();
+            else
+                bs_next_wall();
+            bs_paint(sw, sh);
+            fflush(stdout);
+            if (bf_send(fd, id, BS_ROWS * BF_CH) != 0)
+                break;
             continue;
         }
         if (t != BWM_KEY)

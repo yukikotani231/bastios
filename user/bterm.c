@@ -878,6 +878,33 @@ static void paste(int m)
     close(f);
 }
 
+/* A file dragged here from another window (bwm sends BWM_DROP): its path is typed at the cursor, quoted for the shell when it needs it,
+ * followed by a blank, and nothing is run. */
+static void drop_path(int m, const char *path)
+{
+    char out[1100];
+    size_t n = 0;
+    int plain = path[0] != 0;
+    for (const char *c = path; *c; c++)
+        if (!((*c >= 'a' && *c <= 'z') || (*c >= 'A' && *c <= 'Z') || (*c >= '0' && *c <= '9') || strchr("/._-+,@:%~", *c)))
+            plain = 0;
+    if (!plain)
+        out[n++] = '\'';
+    for (const char *c = path; *c && n < sizeof out - 8; c++) {
+        if ((unsigned char)*c < 32 || *c == 127)
+            continue;
+        if (*c == '\'' && !plain) {
+            memcpy(out + n, "'\\''", 4);
+            n += 4;
+        } else
+            out[n++] = *c;
+    }
+    if (!plain)
+        out[n++] = '\'';
+    out[n++] = ' ';
+    (void)!write(m, out, n);
+}
+
 /* Tells the program on the pty about the pointer, in xterm's encoding (CODE: 0 left, 1 middle, 2 right,
  * 64 and 65 the wheel, plus 32 for a move, 3 for a release without the SGR encoding). */
 static void mouse_emit(int m, int code, int press, int r, int c)
@@ -1137,6 +1164,10 @@ int main(int argc, char **argv)
                     paste(m);
                 else if (write(m, &c, 1) != 1)
                     break;
+            } else if (t == BWM_DROP) {
+                struct bwm_drop *d = (struct bwm_drop *)buf;
+                d->path[sizeof d->path - 1] = 0;
+                drop_path(m, d->path);
             } else if (t == BWM_MOUSE) {
                 struct bwm_mouse *e = (struct bwm_mouse *)buf;
                 if (mouse_mode) {                /* the program asked for the pointer: no selection, no scrolling back */

@@ -1,0 +1,394 @@
+// The files a process maps, for /proc/PID/maps.
+//
+// /proc/PID/maps names the file each mapping comes from, with its offset
+// and inode, as Linux does: debuggers, profilers, sanitizers, JITs and
+// crash reporters find a program's libraries by reading it, and some
+// programs look for their own code there. The page tables say nothing of
+// files, so each process keeps FN_N name records in its part of k.maps,
+// after its MAP_SHARED records (MP_ROW): the first window page + 1 (0:
+// free), how many pages, the file (fn_src) and the file offset of the
+// first page. mmap of a file adds one (lx_mmap), and so does execve for
+// each loaded segment of the program and of its interpreter (fn_exec);
+// munmap and mappings over the pages cut them (map_forget), mremap moves
+// them with the pages (fn_take, fn_put), fork copies them and a new thread
+// starts with none (the group's stay with its holder, src/lxthread.bastio).
+//
+// A record holds the file (vfs_hold_share), as Linux's mapping holds its
+// inode, so the handle never comes to name another file while the record
+// is there. A file on the loop mount cannot be held; its record keeps the
+// handle alone, and should the file go and another take its handle while
+// the mapping stays, its line would give that file's name.
+//
+// Not done: a process with more than FN_N file mappings (one more than a
+// record can merge with) has the rest listed without a name; a file whose
+// name is gone has its line without one (Linux writes "(deleted)" after
+// its old name); /dev/zero and other devices are not named.
+//
+// What is trusted: nothing new.
+
+import "linux.bastio";
+
+/// Where word f of name record i of process p is in k.maps.
+fn fn_at(p: u64, i: u64, f: u64) -> u64
+  requires p < NPROC && i < FN_N && f < FN_W
+  ensures result < MAPS_LEN
+{
+  return p * MP_ROW + MAP_N * MAP_W + i * FN_W + f;
+}
+
+/// The file a record's word 2 names: a hold (below HOLD_N), or a file
+/// handle that is not held, as HOLD_N + the handle.
+fn fn_file(k: &Kernel, w: u64) -> u64
+  requires kok(k)
+{
+  if w < HOLD_N {
+    return vfs_held(k.fs, w);
+  }
+  if w - HOLD_N < HFILES {
+    return w - HOLD_N;
+  }
+  return NO_FILE;
+}
+
+/// One more reference on what word w of a record holds.
+fn fn_ref(k: &mut Kernel, w: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if w < HOLD_N {
+    vfs_hold_dup(&mut k.fs, w);
+  }
+}
+
+/// One reference fewer.
+fn fn_unref(k: &mut Kernel, w: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  if w < HOLD_N {
+    vfs_unhold(&mut k.fs, &mut k.mem, w);
+  }
+}
+
+/// Records window pages first .. first + pages of process pid as mapping
+/// file word w (fn_file) from offset off, taking the reference the caller
+/// has on w: a record that ends at first with the file's bytes just
+/// before off grows instead, and with no free record the reference goes.
+fn fn_insert(k: &mut Kernel, pid: u64, first: u64, pages: u64, w: u64, off: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if pages == 0 || first >= WPAGES || pages > WPAGES - first || off % 4096 != 0 {
+    fn_unref(&mut k, w);
+    return;
+  }
+  let f = fn_file(k, w);
+  let mut free = FN_N;
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N && free <= FN_N && kok(k) && pid < NPROC
+  {
+    let first1 = wget(k.maps, fn_at(pid, i, 0));
+    let n = wget(k.maps, fn_at(pid, i, 1));
+    let ro = wget(k.maps, fn_at(pid, i, 3));
+    if first1 == 0 {
+      if free == FN_N {
+        free = i;
+      }
+    } else if first1 - 1 < first && n == first - (first1 - 1) && fn_file(k, wget(k.maps, fn_at(pid, i, 2))) == f
+      && ro <= 0xFFFFFFFFFFFF && n <= 0xFFFFFFFF && ro + n * 4096 == off && n + pages <= WPAGES {
+      wset(&mut k.maps, fn_at(pid, i, 1), n + pages);
+      fn_unref(&mut k, w);
+      return;
+    }
+    i = i + 1;
+  }
+  if free >= FN_N {
+    fn_unref(&mut k, w);
+    return;
+  }
+  wset(&mut k.maps, fn_at(pid, free, 0), first + 1);
+  wset(&mut k.maps, fn_at(pid, free, 1), pages);
+  wset(&mut k.maps, fn_at(pid, free, 2), w);
+  wset(&mut k.maps, fn_at(pid, free, 3), off);
+}
+
+/// Window pages first .. first + pages of process pid now map file handle
+/// f from offset off.
+fn fn_add(k: &mut Kernel, pid: u64, first: u64, pages: u64, f: u64, off: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if f >= HFILES {
+    return;
+  }
+  let mut w = vfs_hold_share(&mut k.fs, f);
+  if w >= HOLD_N {
+    w = HOLD_N + f;                         // not a file a hold can keep (the loop mount's)
+  }
+  fn_insert(&mut k, pid, first, pages, w, off);
+}
+
+/// mmap gave window pages first .. first + pages of process pid to the
+/// file open as descriptor fd, from offset off: they are recorded if it is
+/// a file.
+fn fn_mmap(k: &mut Kernel, pid: u64, fd: u64, first: u64, pages: u64, off: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let d = fd_look(k, pid, fd);
+  if d.kind != K_FILE || d.x >= FD_ROWS {
+    return;
+  }
+  fn_add(&mut k, pid, first, pages, row_file(k.fs, d.x), off);
+}
+
+/// Window pages from .. to of process pid are going away or being replaced
+/// (map_forget): no name record covers them any more. A record cut in two
+/// keeps its left part, and the right part takes a free record with a
+/// reference of its own (with none, it has no name).
+fn fn_forget(k: &mut Kernel, pid: u64, from: u64, to: u64)
+  requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
+  ensures kok(k)
+{
+  if from == to {
+    return;
+  }
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N && kok(k) && pid < NPROC && from <= to && to <= WPAGES
+  {
+    let first1 = wget(k.maps, fn_at(pid, i, 0));
+    let pages = wget(k.maps, fn_at(pid, i, 1));
+    let w = wget(k.maps, fn_at(pid, i, 2));
+    let off = wget(k.maps, fn_at(pid, i, 3));
+    if first1 != 0 && first1 - 1 <= WPAGES && pages <= WPAGES - (first1 - 1) && off <= 0xFFFFFFFFFFFF {
+      let first = first1 - 1;
+      let end = first + pages;
+      if to <= first || end <= from {
+        // none of it
+      } else if from <= first && end <= to {
+        wset(&mut k.maps, fn_at(pid, i, 0), 0);          // all of it
+        fn_unref(&mut k, w);
+      } else if from <= first {
+        wset(&mut k.maps, fn_at(pid, i, 0), to + 1);     // the head goes
+        wset(&mut k.maps, fn_at(pid, i, 1), end - to);
+        wset(&mut k.maps, fn_at(pid, i, 3), off + (to - first) * 4096);
+      } else if end <= to {
+        wset(&mut k.maps, fn_at(pid, i, 1), from - first);   // the tail goes
+      } else {
+        // A hole in the middle.
+        wset(&mut k.maps, fn_at(pid, i, 1), from - first);
+        fn_ref(&mut k, w);
+        fn_insert(&mut k, pid, to, end - to, w, off + (to - first) * 4096);
+      }
+    }
+    i = i + 1;
+  }
+}
+
+/// fork: the child's window is a copy of the parent's, so it gets the
+/// records too, each with a reference of its own.
+fn fn_fork(k: &mut Kernel, pid: u64, c: u64)
+  requires kok(k) && pid < NPROC && c < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N && kok(k) && pid < NPROC && c < NPROC
+  {
+    let first1 = wget(k.maps, fn_at(pid, i, 0));
+    let w = wget(k.maps, fn_at(pid, i, 2));
+    wset(&mut k.maps, fn_at(c, i, 0), first1);
+    wset(&mut k.maps, fn_at(c, i, 1), wget(k.maps, fn_at(pid, i, 1)));
+    wset(&mut k.maps, fn_at(c, i, 2), w);
+    wset(&mut k.maps, fn_at(c, i, 3), wget(k.maps, fn_at(pid, i, 3)));
+    if first1 != 0 {
+      fn_ref(&mut k, w);
+    }
+    i = i + 1;
+  }
+}
+
+/// A new thread's row, or a row with a new window whose old records went
+/// with map_drop_all: no records (and no references to drop).
+fn fn_clear(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N && kok(k) && pid < NPROC
+  {
+    wset(&mut k.maps, fn_at(pid, i, 0), 0);
+    i = i + 1;
+  }
+}
+
+/// mremap is moving window pages from .. to of process pid: their records
+/// come out (fn_forget), as a list for fn_put that holds their references.
+fn fn_take(k: &mut Kernel, pid: u64, from: u64, to: u64) -> Buf
+  requires kok(k) && pid < NPROC && from <= to && to <= WPAGES
+  ensures kok(k) && len(result) == FN_N * FN_W
+{
+  let mut out = alloc(FN_N * FN_W);
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N && kok(k) && pid < NPROC && from <= to && to <= WPAGES && len(out) == FN_N * FN_W
+  {
+    let first1 = wget(k.maps, fn_at(pid, i, 0));
+    let pages = wget(k.maps, fn_at(pid, i, 1));
+    let w = wget(k.maps, fn_at(pid, i, 2));
+    let off = wget(k.maps, fn_at(pid, i, 3));
+    if first1 != 0 && first1 - 1 <= WPAGES && pages <= WPAGES - (first1 - 1) && off <= 0xFFFFFFFFFFFF {
+      let a = larger(first1 - 1, from);
+      let b = smaller(first1 - 1 + pages, to);
+      if a < b {
+        out = set(out, i * FN_W, a + 1);
+        out = set(out, i * FN_W + 1, b - a);
+        out = set(out, i * FN_W + 2, w);
+        out = set(out, i * FN_W + 3, off + (a - (first1 - 1)) * 4096);
+        fn_ref(&mut k, w);
+      }
+    }
+    i = i + 1;
+  }
+  fn_forget(&mut k, pid, from, to);
+  return out;
+}
+
+/// The pages fn_take was given moved from page `from` to page `at` (or
+/// stayed, at == from): their records go in again there, and t is freed.
+fn fn_put(k: &mut Kernel, pid: u64, t: Buf, from: u64, at: u64)
+  requires kok(k) && pid < NPROC && len(t) == FN_N * FN_W
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N && kok(k) && pid < NPROC && len(t) == FN_N * FN_W
+  {
+    let a1 = get(t, i * FN_W);
+    if a1 != 0 {
+      let w = get(t, i * FN_W + 2);
+      if a1 - 1 >= from && a1 - 1 - from <= WPAGES && at <= WPAGES {
+        fn_insert(&mut k, pid, a1 - 1 - from + at, get(t, i * FN_W + 1), w, get(t, i * FN_W + 3));
+      } else {
+        fn_unref(&mut k, w);
+      }
+    }
+    i = i + 1;
+  }
+  free(t);
+}
+
+/// The name record of process pid that covers window page q, or FN_N.
+fn fn_find(k: &Kernel, pid: u64, q: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= FN_N
+{
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N
+  {
+    let first1 = wget(k.maps, fn_at(pid, i, 0));
+    if first1 != 0 && first1 - 1 <= q && q - (first1 - 1) < wget(k.maps, fn_at(pid, i, 1)) {
+      return i;
+    }
+    i = i + 1;
+  }
+  return FN_N;
+}
+
+/// The first page above q where a name record of process pid starts or
+/// ends (WPAGES if none), so a line of maps never runs across one.
+fn fn_edge(k: &Kernel, pid: u64, q: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result <= WPAGES
+{
+  let mut best = WPAGES;
+  let mut i = 0;
+  while i < FN_N
+    invariant i <= FN_N && best <= WPAGES
+  {
+    let first1 = wget(k.maps, fn_at(pid, i, 0));
+    let pages = wget(k.maps, fn_at(pid, i, 1));
+    if first1 != 0 && first1 - 1 <= WPAGES && pages <= WPAGES - (first1 - 1) {
+      if first1 - 1 > q && first1 - 1 < best {
+        best = first1 - 1;
+      }
+      if first1 - 1 + pages > q && first1 - 1 + pages < best {
+        best = first1 - 1 + pages;
+      }
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
+/// The file handle record i of process pid names, or NO_FILE.
+fn fn_rec_file(k: &Kernel, pid: u64, i: u64) -> u64
+  requires kok(k) && pid < NPROC && i < FN_N
+{
+  if wget(k.maps, fn_at(pid, i, 0)) == 0 {
+    return NO_FILE;
+  }
+  return fn_file(k, wget(k.maps, fn_at(pid, i, 2)));
+}
+
+/// The file offset of window page q, which record i of process pid covers.
+fn fn_rec_off(k: &Kernel, pid: u64, i: u64, q: u64) -> u64
+  requires kok(k) && pid < NPROC && i < FN_N
+{
+  let first1 = wget(k.maps, fn_at(pid, i, 0));
+  let off = wget(k.maps, fn_at(pid, i, 3));
+  if first1 == 0 || q < first1 - 1 || q - (first1 - 1) > 0xFFFFFFFFFF || off > 0xFFFFFFFFFFFF {
+    return 0;
+  }
+  return off + (q - (first1 - 1)) * 4096;
+}
+
+/// execve installed the program from src (laid out as rn says) and, when
+/// it has one, the interpreter from isrc: each segment's pages that hold
+/// the file's bytes are recorded as mapping it, as Linux's loader maps
+/// them.
+fn fn_exec(k: &mut Kernel, pid: u64, src: Src, isrc: Src, rn: Rnd)
+  requires kok(k) && pid < NPROC && rnd_ok(rn)
+  ensures kok(k)
+{
+  if !src.file {
+    return;
+  }
+  let e = elf_parse_rnd(&mut k.fs, src, rn);
+  if !e.ok {
+    return;
+  }
+  fn_segs(&mut k, pid, src, e);
+  if e.ilen != 0 && isrc.file {
+    let ie = interp_elf(&mut k.fs, e, isrc, rn);
+    if ie.ok {
+      fn_segs(&mut k, pid, isrc, ie);
+    }
+  }
+}
+
+/// The loaded segments of src, as parsed in e.
+fn fn_segs(k: &mut Kernel, pid: u64, src: Src, e: Elf)
+  requires kok(k) && pid < NPROC && e.ok && elf_fits(src.size, e)
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < e.phnum
+    invariant i <= e.phnum && e.phnum <= PH_MAX && kok(k) && pid < NPROC
+  {
+    let s = seg(&mut k.fs, src, e.phoff, i, e.bias);
+    if s.kind == SEG_BAD {
+      return;
+    }
+    if s.kind == SEG_LOAD && s.filesz > 0 && s.from >= s.off % 4096 {
+      let first = s.off / 4096;
+      let end = (s.off + s.filesz + 4095) / 4096;
+      fn_add(&mut k, pid, first, end - first, src.f, s.from - s.off % 4096);
+    }
+    i = i + 1;
+  }
+}

@@ -1666,6 +1666,13 @@ t_proc: maps shows a PROT_NONE page with no permissions
 t_proc: maps has a [heap] after brk grows
 t_proc: maps has [stack] and [vdso]
 t_proc: maps lines end at column 74 for names
+t_proc: maps names the program's own file at its code
+t_proc: maps names a mapped file, with its offset and inode, after its descriptor is closed
+t_proc: munmap of a file mapping's first page leaves the rest named, at the next offset
+t_proc: mremap moves a file mapping's name with its pages
+t_proc: a forked child's maps names the same file
+t_proc: maps longer than 4 KiB reads whole, in pieces
+t_proc: maps read in pieces while mappings before the place reached go away has whole lines
 t_proc: readlink of /proc/self is the caller's id
 t_proc: auxv carries AT_HWCAP and AT_HWCAP2 (a C library's ifuncs read them before it has a thread pointer), AT_PAGESZ, and ends in AT_NULL
 t_proc: getauxval finds AT_HWCAP without setting errno
@@ -1850,6 +1857,11 @@ t_rtc: a year before 2000 is EINVAL
 t_rtc: an unknown ioctl is ENOTTY
 t_rtc: the clock is put back
 t_rtc: an unprivileged program cannot set it
+t_rtc: sysfs: the name is rtc_cmos
+t_rtc: sysfs: since_epoch is the time the clock says
+t_rtc: sysfs: date is the UTC date of since_epoch
+t_rtc: sysfs: time is the UTC time of since_epoch
+t_rtc: sysfs: max_user_freq is a number
 t_rtnlev: sockets in the link group, the address group, both and none
 t_rtnlev: a veth pair is made
 t_rtnlev: the link group hears both ends
@@ -2065,6 +2077,21 @@ t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
+t_sysnet: lo's address is all zeros
+t_sysnet: lo's operstate is unknown, as on Linux
+t_sysnet: lo's mtu is 65536
+t_sysnet: lo's ifindex is 1
+t_sysnet: lo's type is ARPHRD_LOOPBACK (772)
+t_sysnet: lo's flags are up and loopback
+t_sysnet: lo has a carrier
+t_sysnet: lo's tx_queue_len is a number
+t_sysnet: an unknown file is ENOENT
+t_sysnet: an unknown interface is ENOENT
+t_sysnet: eth0's ifindex agrees with SIOCGIFINDEX
+t_sysnet: eth0's address agrees with SIOCGIFHWADDR
+t_sysnet: eth0's type is ARPHRD_ETHER (1)
+t_sysnet: eth0's mtu is 1500
+t_sysnet: eth0 is up
 t_sysv: shmat over its own address with SHM_REMAP replaces the attachment
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
@@ -2320,7 +2347,8 @@ x11: x11: a media player, VLC, draws its window on the X screen
 x11b: x11b: unpack the server and the client roots
 x11b: x11b: an image editor, GIMP, draws its window on the X screen
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
-x11b: x11b: LibreOffice Writer opens its Open dialog on Ctrl+O
+x11b: x11b: LibreOffice Writer saves a document through its Save dialog
+x11b: x11b: LibreOffice Writer exports a PDF through its menu and a file dialog
 x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
 x11b: x11b: a network protocol analyser, Wireshark, draws its window on the X screen
 x11b: x11b: LibreOffice turns a text file into a PDF, fonts and all

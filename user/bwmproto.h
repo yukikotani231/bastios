@@ -27,7 +27,7 @@
 /* Client to server. */
 enum { BWM_CREATE = 1, BWM_DRAW = 2, BWM_DESTROY = 3, BWM_SETTITLE = 4, BWM_CREATE_SHM = 5, BWM_RESIZABLE = 6, BWM_RESIZED = 7 };
 /* Server to client. */
-enum { BWM_CREATED = 1, BWM_KEY = 2, BWM_MOUSE = 3, BWM_CLOSE = 4, BWM_RESIZE = 5 };
+enum { BWM_CREATED = 1, BWM_KEY = 2, BWM_MOUSE = 3, BWM_CLOSE = 4, BWM_RESIZE = 5, BWM_DROP = 6 };
 
 struct bwm_hdr { uint32_t type, len; };
 struct bwm_create { uint32_t w, h; char title[24]; };        /* the size of the contents */
@@ -47,6 +47,8 @@ struct bwm_key { uint32_t id, ch; };                            /* ch is a byte,
 #define BWM_KEY_FIND 0x108             /* Ctrl-Shift-F: look for text in the lines of the screen and the history */
 struct bwm_mouse { uint32_t id, x, y, buttons; };              /* x, y inside the contents; signed, and outside it while a drag that began in it goes on */
 struct bwm_close { uint32_t id; };
+#define BWM_DROP_FILE "/tmp/bwm.drag"     /* a program writes the path it is about to be dragged from here when the button goes down in its window */
+struct bwm_drop { uint32_t id; char path[512]; };            /* the button went up over this window after a drag that began in another window: the path BWM_DROP_FILE held (a terminal types it) */
 struct bwm_resizable { uint32_t id; };
 struct bwm_resize { uint32_t id, w, h; };                       /* the size of the contents asked for */
 struct bwm_resized { uint32_t id, w, h; };                      /* the size of the contents it now has */

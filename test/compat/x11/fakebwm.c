@@ -1,16 +1,17 @@
 /* A stand-in for bwm, to test bx11 (user/bx11.c) without a screen: takes one
  * shared window over BWM_SOCK, waits SECONDS for the X client to draw
  * itself, says whether the window holds pixels, moves the pointer to (10, 10)
- * and types KEYS, then says how many pixels of the window changed.
+ * and types KEYS (which can also click and report on the window).
  *
  *     fakebwm SECONDS KEYS
  *
  * In KEYS: \r is Enter, \e Escape, \t Tab, \cX Ctrl-X (X a letter), \xHH a
  * byte, \mX,Y; moves the pointer to (X, Y) and clicks the left button,
- * \dX,Y; double-clicks, \wN; waits N seconds, \s; prints how many pixels
- * changed since the last \s;, and \\ is a backslash. */
+ * \dX,Y; double-clicks, \wN; waits N seconds, \s; prints whether the window
+ * changed since the last \s;, \a; draws it as text, \g; prints it as a base64 PGM, and \\ is a backslash. */
 #include "../../../user/bwmlib.h"
 #include <ctype.h>
+#include <poll.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -63,6 +64,19 @@ int main(int argc, char **argv)
     struct bwm_mouse m = { 1, 10, 10, 0 };
     bwm_send(c, BWM_MOUSE, &m, sizeof m);
     usleep(300000);
+    /* bx11 sends a draw message for every change on the X screen, and a socket
+     * nobody reads fills up and blocks it (a dialog opening is enough), so a
+     * child reads what comes and throws it away until this process is gone. */
+    pid_t parent = getpid();
+    if (fork() == 0) {
+        static char sink[65536];
+        while (getppid() == parent) {
+            struct pollfd pf = { c, POLLIN, 0 };
+            if (poll(&pf, 1, 500) > 0 && read(c, sink, sizeof sink) <= 0)
+                break;
+        }
+        _exit(0);
+    }
     size_t npix = (size_t)cr.w * cr.h;
     uint32_t *before = malloc(npix * 4);
     memcpy(before, pix, npix * 4);
@@ -121,6 +135,32 @@ int main(int argc, char **argv)
                     while (n2 && row[n2 - 1] == ' ') row[--n2] = 0;
                     printf("fakebwm| %s\n", row);
                 }
+                fflush(stdout);
+                if (k[1] == ';') k++;
+                continue;
+            } else if (e == 'g') {               /* the window as a base64 PGM, half size, for a person to look at */
+                static const char b64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+                unsigned gw = cr.w / 2, gh = cr.h / 2;
+                unsigned char *g = malloc((size_t)gw * gh + 32);
+                int hl = sprintf((char *)g, "P5\n%u %u\n255\n", gw, gh);
+                for (unsigned y = 0; y < gh; y++)
+                    for (unsigned x = 0; x < gw; x++) {
+                        uint32_t v = pix[(size_t)y * 2 * cr.w + x * 2];
+                        g[hl + y * gw + x] = (unsigned char)(((v >> 16 & 255) + (v >> 8 & 255) + (v & 255)) / 3);
+                    }
+                size_t len = (size_t)hl + (size_t)gw * gh;
+                printf("fakebwm~");
+                for (size_t i = 0; i < len; i += 3) {
+                    unsigned v = g[i] << 16 | (i + 1 < len ? g[i + 1] << 8 : 0) | (i + 2 < len ? g[i + 2] : 0);
+                    putchar(b64[v >> 18 & 63]);
+                    putchar(b64[v >> 12 & 63]);
+                    putchar(i + 1 < len ? b64[v >> 6 & 63] : '=');
+                    putchar(i + 2 < len ? b64[v & 63] : '=');
+                    if (i % 57 == 54)
+                        printf("\nfakebwm~");
+                }
+                puts("\nfakebwm~END");
+                free(g);
                 fflush(stdout);
                 if (k[1] == ';') k++;
                 continue;

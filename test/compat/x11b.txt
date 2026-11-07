@@ -24,15 +24,28 @@ fakebwm: pixels drawn
 fakebwm: typed
 alive
 
-== x11b: LibreOffice Writer opens its Open dialog on Ctrl+O
+== x11b: LibreOffice Writer saves a document through its Save dialog
 # timeout 900
-$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; /disk/fakebwm 300 '\w30;\m400,300;\w3;\co\w60;\s;' >/disk/fb24.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/lo -d 8 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/soffice --norestore --nologo --writer >/disk/lo2.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb24.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb24.out 2>/dev/null || { bb tail -n 12 /disk/lo2.out | bb cut -c1-200; }; bb cat /disk/fb24.out; bb ps | bb grep -q 'soffice' && echo alive || bb cat /disk/lo2.out
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; /disk/fakebwm 300 '\w30;\m400,300;\w3;hello\w3;\cs\w60;\ca/tmp/out.odt\r\w20;\r\w30;' >/disk/fb24.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/lo -d 8 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/soffice --norestore --nologo --writer >/disk/lo2.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb24.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb24.out 2>/dev/null || { bb tail -n 12 /disk/lo2.out | bb cut -c1-200; }; bb cat /disk/fb24.out; bb test -s /disk/lo/tmp/out.odt && echo saved; bb grep -q application/vnd.oasis.opendocument.text /disk/lo/tmp/out.odt && echo odf; bb ps | bb grep -q 'soffice' && echo alive || bb cat /disk/lo2.out
 fakebwm: listening
 fakebwm: window 800x600 X11 :8
 fakebwm: pixels drawn
-fakebwm: shot changed
 fakebwm: typed
+saved
+odf
 alive
+
+== x11b: LibreOffice Writer exports a PDF through its menu and a file dialog
+# timeout 900
+$ bb kill -9 $(bb ps | bb awk '/bx11|Xvfb|x11start|fakebwm|\/usr\/bin\/|soffice|gimp|inkscape/ && !/awk/ && !/ps/ {print $1}') 2>/dev/null; bb sleep 5; /disk/fakebwm 300 '\w30;\m400,300;\w3;hello\w3;\m20,9;\w3;\m60,398;\w3;\m300,422;\w60;\ca/tmp/out.pdf\r\w40;' >/disk/fb25.out 2>&1 & bb sleep 3; /disk/busybox sh /disk/x11start -r /disk/x -c /disk/lo -d 9 -g 800x600 -b /disk/bx11 /usr/bin/env HOME=/tmp /usr/bin/soffice --norestore --nologo --writer >/disk/lo3.out 2>&1 & n=0; while [ $n -lt 460 ] && ! bb grep -q typed /disk/fb25.out 2>/dev/null; do bb sleep 1; n=$((n+1)); done; bb grep -q typed /disk/fb25.out 2>/dev/null || { bb tail -n 12 /disk/lo3.out | bb cut -c1-200; }; bb cat /disk/fb25.out; bb test -s /disk/lo/tmp/out.pdf && echo saved; bb grep -q '^%PDF' /disk/lo/tmp/out.pdf && echo pdf; bb ps | bb grep -q 'soffice' && echo alive || bb cat /disk/lo3.out
+fakebwm: listening
+fakebwm: window 800x600 X11 :9
+fakebwm: pixels drawn
+fakebwm: typed
+saved
+pdf
+alive
+
 
 == x11b: a vector graphics editor, Inkscape, draws its window on the X screen
 # timeout 900
