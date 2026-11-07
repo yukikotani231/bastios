@@ -2366,6 +2366,13 @@ t_thread: a thread keeps its descriptors while another spawns a child
 t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
 t_thread: clone3: a fork child
 t_thread: the process's CPU time counts its threads, those that ended too
+t_threadsig: signal 33 reaches the thread that sends it
+t_threadsig: signal 33 reaches a thread waiting on a futex
+t_threadsig: signal 33 reaches a thread in epoll_wait
+t_threadsig: signal 33 reaches a thread in nanosleep
+t_threadsig: signal 33 reaches a thread blocked in read
+t_threadsig: signal 33 reaches a thread that is running
+t_threadsig: a thread that has dropped root signals a sibling that has not
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
