@@ -423,6 +423,15 @@ fn dv_num(d: u64) -> DvNum
   if d == DEV_KEYEV {
     return DvNum { ty: DVT_CHAR, major: 13, minor: 64 };
   }
+  if d == DEV_SNDC {
+    return DvNum { ty: DVT_CHAR, major: 116, minor: 0 };
+  }
+  if d == DEV_PCM {
+    return DvNum { ty: DVT_CHAR, major: 116, minor: 16 };
+  }
+  if d == DEV_TIMER {
+    return DvNum { ty: DVT_CHAR, major: 116, minor: 33 };
+  }
   if d == DEV_RTC {
     return DvNum { ty: DVT_CHAR, major: 10, minor: 135 };
   }

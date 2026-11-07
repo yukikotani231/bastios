@@ -94,6 +94,12 @@ the real programs, and `script` (util-linux, only for `compat-host`).
     arm64 layers of the same Alpaquita image (`arch/aarch64/Makefile`), and
     cmake is made from the `cmake` wheel on PyPI (`--cmake-wheel`, pinned by
     SHA-256), which bundles its C++ runtime.
+- `alsa.txt`: sound, from a disk of its own (`alsadisk.py`) and a guest with
+  an HD Audio card (QEMU's `intel-hda`, its output discarded). Ubuntu 24.04's
+  alsa-utils and alsa-lib (glibc), unpacked from `.deb`s pinned by SHA-256 and
+  entered with `chroot`: `aplay` on the hardware device and through a `plug`
+  device, `amixer` and `speaker-test`. The samples that reach the card are
+  checked by `test/shell_test.sh`.
 - `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
   case unpacks Debian's root file system (the `debian:stable-slim` image,
   `DEBIAN_IMAGE`, without `/usr/share`, dpkg's file lists, gconv and Perl's

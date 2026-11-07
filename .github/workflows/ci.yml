@@ -529,8 +529,8 @@ jobs:
       matrix:
         include:
           - part: programs
-            lanes: main1,main2,dev,bastio
-            disks: disk.img dev.img bastio.img
+            lanes: main1,main2,dev,bastio,alsa
+            disks: disk.img dev.img bastio.img alsa.img
           - part: alpine
             lanes: alpine,alpine2,alpine3,alpine4,alpine5,go
             disks: alpine.img go.img
