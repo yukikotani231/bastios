@@ -557,6 +557,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print("     calendar title", repr(got), "after Esc", repr(gone), "wanted", repr(month_year))
             print(("ok  " if good else "FAIL"), f"({name}) Alt-C opens a calendar of this month and Esc closes it")
             fails += not good
+            # Alt-L locks the screen: a "Locked" box covers the desktop and keys (Ctrl-T here) do nothing but go to the
+            # prompt; root has no password in this image, so Enter unlocks.
+            def lock_word():
+                w, h, px = screendump()
+                return screen_text_at(px, w, (w - 280) // 2 + (280 - 48) // 2, (h - 110) // 2 + 30, 6, 1)[0].strip()
+            monitor("sendkey alt-l")
+            end = time.time() + 10
+            locked = lock_word()
+            while locked != "Locked" and time.time() < end:
+                locked = lock_word()
+            monitor("sendkey ctrl-t")
+            time.sleep(2)
+            still = lock_word()
+            monitor("sendkey ret")
+            end = time.time() + 10
+            open_ = lock_word()
+            while open_ == "Locked" and time.time() < end:
+                open_ = lock_word()
+            good = locked == "Locked" and still == "Locked" and open_ != "Locked"
+            if not good:
+                print("     lock box", repr(locked), "after Ctrl-T", repr(still), "after Enter", repr(open_))
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-L locks the screen, keys do not reach the windows, Enter unlocks")
+            fails += not good
             # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
             # a step the other way undoes it, and three in one direction go all the way round.
             monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar

@@ -18,6 +18,8 @@
 #include <fcntl.h>
 #include <stdint.h>
 #include <spawn.h>
+#include <pthread.h>
+#include <string.h>
 
 
 /* The classic BPF and seccomp definitions musl does not ship. */
@@ -162,6 +164,68 @@ static int spawn_traced(char **argv, int opts)
         ptrace(PTRACE_SYSCALL, c, 0, (void *)(long)pass);
     }
     return ok && kid > 0 && WIFEXITED(cx) && WEXITSTATUS(cx) == 0;
+}
+
+/* Program text that another process patches: it returns 42 until then. */
+__attribute__((noinline)) static int patched(void) { __asm__ volatile(""); return 42; }
+static int (*volatile patched_p)(void) = patched;
+/* The bytes that make it return 7. */
+#if defined(__x86_64__)
+static const unsigned char ret7[] = { 0xb8, 7, 0, 0, 0, 0xc3 };      /* mov $7, %eax; ret */
+#else
+static const unsigned char ret7[] = { 0xe0, 0x00, 0x80, 0x52, 0xc0, 0x03, 0x5f, 0xd6 };   /* mov w0, #7; ret */
+#endif
+
+static int wake_fd[2], tid_fd[2];
+static void *text_thread(void *a) {
+    (void)a;
+    int t = (int)syscall(SYS_gettid);
+    write(tid_fd[1], &t, sizeof t);
+    char x;
+    while (read(wake_fd[0], &x, 1) != 1) {}
+    return (void *)(intptr_t)patched_p();
+}
+
+/* A child whose second thread is the last of the process to run before
+ * the parent patches its program text (by /proc/PID/mem, or by
+ * PTRACE_POKETEXT on that thread): the thread then calls the patched
+ * function, and the child exits with what it returned (7 if the patch
+ * landed, 42 if not). The first thread waits in pthread_join all along, so
+ * the process's memory is held by the second one when the patch is made. */
+static int patch_text_in_thread(int by_ptrace) {
+    if (pipe(wake_fd) != 0 || pipe(tid_fd) != 0) return 0;
+    pid_t c = fork();
+    if (c == 0) {
+        pthread_t th;
+        void *r = 0;
+        if (pthread_create(&th, 0, text_thread, 0) != 0) _exit(1);
+        pthread_join(th, &r);
+        _exit((int)(intptr_t)r);
+    }
+    int tid = 0;
+    int ok = c > 0 && read(tid_fd[0], &tid, sizeof tid) == sizeof tid;
+    usleep(300000);                         /* the thread waits in read */
+    if (ok && !by_ptrace) {
+        char path[40];
+        snprintf(path, sizeof path, "/proc/%d/mem", (int)c);
+        int fd = open(path, O_RDWR);
+        ok = fd >= 0 && pwrite(fd, ret7, sizeof ret7, (off_t)(uintptr_t)patched) == (ssize_t)sizeof ret7;
+        if (fd >= 0) close(fd);
+    } else if (ok) {
+        int st = 0;
+        ok = ptrace(PTRACE_ATTACH, tid, 0, 0) == 0 && waitpid(tid, &st, __WALL) == tid && WIFSTOPPED(st);
+        errno = 0;
+        long w = ok ? ptrace(PTRACE_PEEKTEXT, tid, (void *)patched, 0) : 0;
+        ok = ok && errno == 0;
+        memcpy(&w, ret7, sizeof ret7);
+        ok = ok && ptrace(PTRACE_POKETEXT, tid, (void *)patched, (void *)w) == 0;
+        ptrace(PTRACE_DETACH, tid, 0, 0);
+    }
+    write(wake_fd[1], "w", 1);
+    int st = 0;
+    ok = c > 0 && waitpid(c, &st, 0) == c && ok && WIFEXITED(st) && WEXITSTATUS(st) == 7;
+    close(wake_fd[0]); close(wake_fd[1]); close(tid_fd[0]); close(tid_fd[1]);
+    return ok;
 }
 
 int main(int argc, char **argv) {
@@ -679,6 +743,10 @@ int main(int argc, char **argv) {
                cf >= 0 && e == 4 && cur == 55 && f == 4 && WIFEXITED(st) && WEXITSTATUS(st) == 0);
         if (cf >= 0) close(cf);
     }
+    EXPECT("/proc/PID/mem writes program text while another thread of the process holds its memory",
+           patch_text_in_thread(0));
+    EXPECT("PTRACE_POKETEXT on a thread other than the first writes program text",
+           patch_text_in_thread(1));
     EXPECT("strace -f style tracing of posix_spawn: the clone ends with a stop after the vfork event, and stops pair up",
            spawn_traced(argv, 0));
     EXPECT("the same with PTRACE_O_TRACEVFORKDONE: the stop after the clone follows the vfork-done stop",

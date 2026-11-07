@@ -999,6 +999,7 @@ t_mem: mmap is zeroed
 t_mem: mmap of a closed descriptor is EBADF
 t_mem: mmap of a file opened write-only is EACCES
 t_mem: mmap takes a free address hint and grows from it, as the Go runtime's heap arenas do
+t_mem: mmap without an address takes the highest free gap after hints far below, as on Linux
 t_mem: more than the old 64 MiB window: a 96 MiB mmap, then a 100 MiB malloc
 t_mem: mprotect makes 300 MiB of a PROT_NONE reservation readable, writable and executable (a JIT's code range), more than the machine has: only touched pages count, and code written there runs
 t_mem: mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the machine has: only touched pages count
@@ -1711,6 +1712,8 @@ t_ptrace: PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only
 t_ptrace: a buffer that is too small gets what fits, and the full size is the result
 t_ptrace: and at its exit the result, as an error
 t_ptrace: the tracee goes on to its end
+t_ptrace: /proc/PID/mem writes program text while another thread of the process holds its memory
+t_ptrace: PTRACE_POKETEXT on a thread other than the first writes program text
 t_ptrace: strace -f style tracing of posix_spawn: the clone ends with a stop after the vfork event, and stops pair up
 t_ptrace: the same with PTRACE_O_TRACEVFORKDONE: the stop after the clone follows the vfork-done stop
 t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH

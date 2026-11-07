@@ -22,6 +22,8 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <pwd.h>
+#include <shadow.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -902,6 +904,55 @@ static void draw_calendar(void)
     }
 }
 
+/* The screen lock (Alt-L): the desktop is covered, keys go only to the password prompt and the pointer does nothing. Enter with the
+ * right password (the one of the account bwm runs as, in /etc/shadow) unlocks; an account with no usable password unlocks on Enter. */
+static int lock_on;
+static char lock_buf[64];
+static int lock_n;
+static int lock_bad;                     /* the last try was wrong */
+static int lock_open;                    /* the account has no password to type */
+static int lock_check(const char *pw)
+{
+    struct passwd *p = getpwuid(getuid());
+    struct spwd *sp = p ? getspnam(p->pw_name) : NULL;
+    const char *h = sp ? sp->sp_pwdp : p ? p->pw_passwd : "";
+    if (!h || !*h || h[0] == '!' || h[0] == '*' || (h[0] == 'x' && !h[1]))
+        return 1;
+    const char *r = crypt(pw, h);
+    return r && strcmp(r, h) == 0;
+}
+static int lock_needs_password(void)
+{
+    return !lock_check("") ? 1 : 0;
+}
+static void draw_lock(void)
+{
+    if (!lock_on)
+        return;
+    fill(scene, 0, 0, (int)W, (int)H, rgb(10, 14, 30));
+    int bw = 280, bh = 110, x0 = ((int)W - bw) / 2, y0 = ((int)H - bh) / 2;
+    fill(scene, x0 - 1, y0 - 1, x0 + bw + 1, y0 + bh + 1, rgb(200, 200, 210));
+    fill(scene, x0, y0, x0 + bw, y0 + bh, rgb(30, 34, 52));
+    int hh, mm;
+    clock_hm(&hh, &mm);
+    char t[16];
+    snprintf(t, sizeof t, "%02d:%02d", hh, mm);
+    text(scene, x0 + (bw - 5 * CELL_W) / 2, y0 + 10, t, rgb(255, 255, 255));
+    text(scene, x0 + (bw - 6 * CELL_W) / 2, y0 + 30, "Locked", rgb(150, 150, 170));
+    if (lock_open) {
+        text(scene, x0 + (bw - 24 * CELL_W) / 2, y0 + 56, "Press Enter to unlock", rgb(220, 220, 230));
+    } else {
+        fill(scene, x0 + 20, y0 + 54, x0 + bw - 20, y0 + 74, rgb(15, 18, 30));
+        char st[65];
+        int n = lock_n < 28 ? lock_n : 28;
+        memset(st, '*', (size_t)n);
+        st[n] = 0;
+        text(scene, x0 + 26, y0 + 56, st, rgb(255, 255, 255));
+    }
+    if (lock_bad)
+        text(scene, x0 + (bw - 14 * CELL_W) / 2, y0 + 84, "Wrong password", rgb(240, 90, 90));
+}
+
 /* The window list shown while Alt-Tab is held: the top window (the one the
  * switch chose) is lit, the others follow in stacking order. */
 static int switch_on;                    /* Alt-Tab is being held: the window list is shown */
@@ -948,6 +999,7 @@ static void draw_scene(int x0, int y0, int x1, int y1)
     draw_menu();
     draw_calendar();
     draw_switcher();
+    draw_lock();
 }
 
 /* The pointer: '#' black outline, '.' white fill. */
@@ -2445,6 +2497,8 @@ int main(int argc, char **argv)
         if (clock_h * 60 + clock_m != clock_shown) {
             clock_shown = clock_h * 60 + clock_m;
             touch_bar();
+            if (lock_on)
+                touch_all();
         }
         struct win *top = focus();
         if (p[0].revents & POLLIN) {
@@ -2484,6 +2538,41 @@ int main(int argc, char **argv)
                             switch_on = 0;
                             touch_all();
                         }
+                    } else if (lock_on) {                          /* locked: only the password prompt hears the keyboard */
+                        char out[8];
+                        int m = down ? key_bytes(code, out) : 0;
+                        for (int j = 0; j < m; j++) {
+                            unsigned char c = (unsigned char)out[j];
+                            if (c == 13 || c == 10) {
+                                lock_buf[lock_n] = 0;
+                                if (lock_check(lock_buf)) {
+                                    lock_on = 0;
+                                    lock_bad = 0;
+                                } else {
+                                    lock_bad = 1;
+                                }
+                                lock_n = 0;
+                                memset(lock_buf, 0, sizeof lock_buf);
+                            } else if (c == 127 || c == 8) {
+                                if (lock_n > 0)
+                                    lock_buf[--lock_n] = 0;
+                            } else if (c == 21 || c == 27) {
+                                lock_n = 0;
+                                memset(lock_buf, 0, sizeof lock_buf);
+                            } else if (c >= 32 && c < 127 && lock_n < (int)sizeof lock_buf - 1) {
+                                lock_buf[lock_n++] = (char)c;
+                                lock_bad = 0;
+                            }
+                        }
+                        touch_all();
+                    } else if (code == 38 && down && k_alt) {      /* Alt-L: lock the screen */
+                        lock_on = 1;
+                        lock_n = 0;
+                        lock_bad = 0;
+                        lock_open = !lock_needs_password();
+                        memset(lock_buf, 0, sizeof lock_buf);
+                        run_on = menu_open = cal_on = switch_on = 0;
+                        touch_all();
                     } else if (run_on && down) {                   /* the Run prompt takes the keys: Enter runs the line in a terminal window, Esc cancels */
                         char out[8];
                         int m = key_bytes(code, out);
@@ -2797,6 +2886,10 @@ int main(int argc, char **argv)
                 if (ralt_on)
                     m[0] = (unsigned char)((m[0] & ~3) | 1);   /* it goes on as a left press, with the corner as its edges */
                 int down = m[0] & 1;
+                if (lock_on) {                           /* locked: the pointer moves and does nothing */
+                    buttons = m[0];
+                    continue;
+                }
                 if (menu_open && (dx || dy)) {
                     touch(MENU_X0 - 1, MENU_Y0 - 1, MENU_X0 + MENU_ITEM_W + 1, MENU_Y0 + menu_n * MENU_ITEM_H + 1);
                     menu_mx = mx; menu_my = my;

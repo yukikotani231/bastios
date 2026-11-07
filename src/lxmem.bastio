@@ -724,12 +724,24 @@ fn win_range(addr: u64, n: u64) -> u64
 // Holes: munmap gives back address space as well as pages. Each process
 // records up to HOLE_N ranges of window pages it unmapped in its mmap area
 // in k.holes (first page, end page; end 0 if the slot is free), and mmap
-// takes the first one large enough before going lower. Without this, a
+// takes the highest one large enough before going lower. Without this, a
 // program that maps and unmaps as it runs (musl's malloc does for every
 // large block) uses up the window even though little is mapped at once.
 // A range always leaves the list before it is used again (mmap,
 // MAP_FIXED, mprotect), so no page is handed out twice; a range that
-// finds no free slot is only address space lost, as before.
+// finds no free slot is only address space lost, as before (the smallest
+// of the ranges is the one lost).
+//
+// Highest first, as Linux hands out the highest gap that fits: mappings
+// made without an address stay close together under the top of the mmap
+// area. A hint far below the area (SpiderMonkey asks for its GC chunks
+// and code at random addresses) moves the area's bottom down to it and
+// leaves the space between as one large hole (mmap_hint); taking the
+// first hole in slot order put later mappings anywhere in that space, so
+// they spread over terabytes. Allocators that keep one map from region
+// number to size class over the span between their lowest and highest
+// region (scudo's 32-bit primary, which Alpine's Firefox uses) then built
+// release buffers of hundreds of megabytes on every release.
 
 /// Where word f of hole slot i of process p is in k.holes.
 fn hl_at(p: u64, i: u64, f: u64) -> u64
@@ -748,16 +760,30 @@ fn hole_put(k: &mut Kernel, pid: u64, first: u64, end: u64)
   if first >= end {
     return;
   }
+  // A free slot, or else the slot of the smallest hole if this one is
+  // larger (that hole's space is lost instead).
   let mut i = 0;
+  let mut small = HOLE_N;
+  let mut least = end - first;
   while i < HOLE_N
-    invariant i <= HOLE_N && kok(k) && pid < NPROC
+    invariant i <= HOLE_N && kok(k) && pid < NPROC && small <= HOLE_N
   {
-    if get(k.holes, hl_at(pid, i, 1)) == 0 {
+    let a = get(k.holes, hl_at(pid, i, 0));
+    let b = get(k.holes, hl_at(pid, i, 1));
+    if b == 0 {
       k.holes = set(k.holes, hl_at(pid, i, 0), first);
       k.holes = set(k.holes, hl_at(pid, i, 1), end);
       return;
     }
+    if a < b && b - a < least {
+      least = b - a;
+      small = i;
+    }
     i = i + 1;
+  }
+  if small < HOLE_N {
+    k.holes = set(k.holes, hl_at(pid, small, 0), first);
+    k.holes = set(k.holes, hl_at(pid, small, 1), end);
   }
 }
 
@@ -927,7 +953,7 @@ fn fixed_taken(k: &mut Kernel, pid: u64, first: u64, end: u64)
   }
 }
 
-/// Takes `pages` pages from the first hole of process pid that has them
+/// Takes `pages` pages from the highest hole of process pid that has them
 /// and returns where they start; STACK_FIRST if no hole does.
 fn hole_take(k: &mut Kernel, pid: u64, pages: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -935,24 +961,35 @@ fn hole_take(k: &mut Kernel, pid: u64, pages: u64) -> u64
   ensures result < STACK_FIRST ==> pages <= STACK_FIRST - result
 {
   let mut i = 0;
+  let mut best = HOLE_N;
+  let mut top = 0;
   while i < HOLE_N
-    invariant i <= HOLE_N && kok(k) && pid < NPROC
+    invariant i <= HOLE_N && kok(k) && pid < NPROC && best <= HOLE_N
   {
     let a = get(k.holes, hl_at(pid, i, 0));
     let b = get(k.holes, hl_at(pid, i, 1));
-    if b != 0 && a < b && b <= STACK_FIRST && pages > 0 && pages <= b - a {
-      // From its top, as Linux hands out space top down: the bottom of a
-      // hole may be where a mapping placed by a hint grows (lx_mmap_hint).
-      if pages == b - a {
-        k.holes = set(k.holes, hl_at(pid, i, 1), 0);
-      } else {
-        k.holes = set(k.holes, hl_at(pid, i, 1), b - pages);
-      }
-      return b - pages;
+    if b != 0 && a < b && b <= STACK_FIRST && pages > 0 && pages <= b - a && b > top {
+      best = i;
+      top = b;
     }
     i = i + 1;
   }
-  return STACK_FIRST;
+  if best >= HOLE_N {
+    return STACK_FIRST;
+  }
+  let a = get(k.holes, hl_at(pid, best, 0));
+  let b = get(k.holes, hl_at(pid, best, 1));
+  if !(b != 0 && a < b && b <= STACK_FIRST && pages > 0 && pages <= b - a) {
+    return STACK_FIRST;
+  }
+  // From its top, as Linux hands out space top down: the bottom of a hole
+  // may be where a mapping placed by a hint grows (lx_mmap_hint).
+  if pages == b - a {
+    k.holes = set(k.holes, hl_at(pid, best, 1), 0);
+  } else {
+    k.holes = set(k.holes, hl_at(pid, best, 1), b - pages);
+  }
+  return b - pages;
 }
 
 /// Whether pages first .. end lie in one hole of process pid.

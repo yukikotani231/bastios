@@ -272,7 +272,7 @@ highest populated one, and `pci_next` skips the buses above it. One survey
 pass (about 0.23 s of the remaining time) is left; bridge secondary bus
 numbers could cut it, but machines with several root buses need care.
 
-The smallest RAM that boots is 36 MiB (1863 free 4 KiB pages at the prompt).
+The smallest RAM that boots is 53 MiB (5019 4 KiB pages at the prompt); the fixed tables of the kernel's heap take about 34 MiB of it.
 `-m 16M` prints nothing because the image is linked at 16 MiB. Details and
 the failure modes of the other sizes are in [cloud.md](cloud.md).
 

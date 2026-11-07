@@ -1,4 +1,5 @@
-/* WireGuard cookies between two network namespaces joined by a veth pair. A
+/* compat-timeout: 240
+ * WireGuard cookies between two network namespaces joined by a veth pair. A
  * flood of initiations with a good mac1 (made here with a small BLAKE2s) and
  * a body that is garbage reaches the child's device, which turns busy and
  * answers with cookie replies (type 3, 64 bytes, the receiver index of the
