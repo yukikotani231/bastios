@@ -1006,6 +1006,9 @@ t_mem: mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space
+t_mem: mremap moves a PROT_NONE reservation, which faults until mprotect makes it usable
+t_mem: mremap of a stack page to its own size gives back its address
+t_mem: mremap shrinks a PROT_NONE reservation in place
 t_mem: munmap
 t_mem: munmap faults on touch
 t_mem: munmap gives address space back
