@@ -2432,6 +2432,9 @@ t_threadsig: signal 33 reaches a thread in nanosleep
 t_threadsig: signal 33 reaches a thread blocked in read
 t_threadsig: signal 33 reaches a thread that is running
 t_threadsig: a thread that has dropped root signals a sibling that has not
+t_jitmap: code written through a writable view of a memfd runs through an executable one
+t_jitmap: the same with the executable view mapped first
+t_jitmap: the same with 16 MiB views (a JIT code area: the Erlang VM's)
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input
