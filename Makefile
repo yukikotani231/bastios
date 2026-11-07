@@ -959,6 +959,14 @@ build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/co
 build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
+# Ubuntu's sound utilities on BastiOS, for the compatibility suite
+# (test/compat/alsa.txt): alsa-utils and alsa-lib, linked against glibc,
+# entered with chroot and playing on the guest's HD Audio card. The
+# .debs are pinned by SHA-256 in alsadisk.py and kept in ALPINE_CACHE.
+
+build/compat/alsa.img: test/compat/alsadisk.py test/compat/mkdisk.py
+	test/compat/alsadisk.py $@ --cache $(ALPINE_CACHE)
+
 # Modules of CPython's own regression tests (Lib/test of the source the python
 # above is built from; CI restores the python without its source, so it is
 # fetched again, just that directory), with the helper modules and data they import, in
@@ -1089,7 +1097,7 @@ build/compat/docker.img: test/compat/dockerdisk.py test/compat/alpinedisk.py tes
 # made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
 # COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
 # and run a part of the suite: the images of its lanes, and those lanes.
-COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/ruby.img build/compat/x11.img build/compat/x11b.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/docker.img build/compat/gitsuite.tar
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/alsa.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/ruby.img build/compat/x11.img build/compat/x11b.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/docker.img build/compat/gitsuite.tar
 
 GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
@@ -1102,11 +1110,11 @@ build/compat/oss: test/compat/ossrepos.sh
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
 compat: build/bastios.elf $(COMPAT_DISKS) build/compat/oss
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --alsa-disk build/compat/alsa.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --alsa-disk build/compat/alsa.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests
