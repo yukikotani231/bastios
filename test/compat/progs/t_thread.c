@@ -17,6 +17,7 @@
 #include <signal.h>
 #include <stdint.h>
 #include <sys/resource.h>
+#include <sys/time.h>
 #include <time.h>
 
 static int counter;
@@ -509,17 +510,24 @@ static int oom_score_of_threads(void) {
 
 /* Nice values and processor masks: threads that spin on a processor they
  * are pinned to, with the nice value each one sets for itself. */
-static pthread_barrier_t spin_bar;
-static volatile int spin_stop;
-struct spin { int cpu, nice, away; pthread_t t; };
+static volatile int spin_stop, spin_ready;
+struct spin { int cpu, nice, away; pthread_t t; int pol, prio; };
 
 static void *spinner(void *a) {
     struct spin *s = a;
     cpu_set_t c;
     CPU_ZERO(&c);
     CPU_SET(s->cpu, &c);
-    if (sched_setaffinity(0, sizeof c, &c) != 0 || setpriority(PRIO_PROCESS, 0, s->nice) != 0) s->away = -1;
-    pthread_barrier_wait(&spin_bar);
+    if (setpriority(PRIO_PROCESS, 0, s->nice) != 0) s->away = -1;
+    if (s->pol) {
+        struct sched_param sp = { .sched_priority = s->prio };
+        if (pthread_setschedparam(pthread_self(), s->pol, &sp) != 0) s->away = -1;
+    }
+    /* Ready before moving to the processor: there a thread of a higher
+     * priority may never let this one run. (No barrier either: its last
+     * step could fall to such a thread.) */
+    __atomic_add_fetch(&spin_ready, 1, __ATOMIC_SEQ_CST);
+    if (sched_setaffinity(0, sizeof c, &c) != 0) s->away = -1;
     while (!spin_stop)
         if (sched_getcpu() != s->cpu && s->away >= 0) s->away++;
     return 0;
@@ -537,12 +545,13 @@ static double thread_secs(pthread_t t) {
  * ran on a processor its mask leaves out. */
 static int spin_two(struct spin *s, double secs, double *a, double *wall) {
     spin_stop = 0;
-    pthread_barrier_init(&spin_bar, 0, 3);
+    spin_ready = 0;
     for (int i = 0; i < 2; i++) {
         s[i].away = 0;
         if (pthread_create(&s[i].t, 0, spinner, &s[i]) != 0) return 0;
     }
-    pthread_barrier_wait(&spin_bar);
+    while (__atomic_load_n(&spin_ready, __ATOMIC_SEQ_CST) < 2)
+        usleep(1000);
     struct timespec t0, t1;
     clock_gettime(CLOCK_MONOTONIC, &t0);
     double b0 = thread_secs(s[0].t), b1 = thread_secs(s[1].t);
@@ -553,7 +562,6 @@ static int spin_two(struct spin *s, double secs, double *a, double *wall) {
     spin_stop = 1;
     pthread_join(s[0].t, 0);
     pthread_join(s[1].t, 0);
-    pthread_barrier_destroy(&spin_bar);
     *wall = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
     return s[0].away == 0 && s[1].away == 0;
 }
@@ -594,6 +602,79 @@ static int nice_share(void) {
         return 0;
     }
     return 1;
+}
+
+/* Two SCHED_FIFO threads on one processor: while the one of priority 20
+ * spins, the one of priority 10 does not run at all, even when the
+ * real-time share is used up (only threads that are not real-time get the
+ * rest). */
+static int fifo_order(void) {
+    int c = last_cpu();
+    struct spin s[2] = { { c, 0, 0, 0, SCHED_FIFO, 20 }, { c, 0, 0, 0, SCHED_FIFO, 10 } };
+    double a[2], w;
+    if (c < 0 || !spin_two(s, 1.5, a, &w)) return 0;
+    if (a[0] < w * 0.6 || a[1] > w * 0.02) {
+        printf("  priority 20: %.3f s, priority 10: %.3f s of %.3f s\n", a[0], a[1], w);
+        return 0;
+    }
+    return 1;
+}
+
+/* Two SCHED_RR threads of one priority on one processor take turns. */
+static int rr_share(void) {
+    int c = last_cpu();
+    struct spin s[2] = { { c, 0, 0, 0, SCHED_RR, 10 }, { c, 0, 0, 0, SCHED_RR, 10 } };
+    double a[2], w;
+    if (c < 0 || !spin_two(s, 1.5, a, &w)) return 0;
+    if (a[0] < w * 0.25 || a[1] < w * 0.25) {
+        printf("  %.3f s and %.3f s of %.3f s\n", a[0], a[1], w);
+        return 0;
+    }
+    return 1;
+}
+
+/* A SCHED_FIFO thread that spins leaves a thread that is not real-time
+ * on its processor about 5% of the time (sched_rt_runtime_us), not none. */
+static int rt_share(void) {
+    int c = last_cpu();
+    struct spin s[2] = { { c, 0, 0, 0, SCHED_FIFO, 10 }, { c, 0, 0, 0, 0, 0 } };
+    double a[2], w;
+    if (c < 0 || !spin_two(s, 2.5, a, &w)) return 0;
+    if (a[0] < w * 0.8 || a[1] < w * 0.01 || a[1] > w * 0.15) {
+        printf("  SCHED_FIFO: %.3f s, SCHED_OTHER: %.3f s of %.3f s\n", a[0], a[1], w);
+        return 0;
+    }
+    return 1;
+}
+
+/* ITIMER_PROF is the process's: set by a thread that then waits, it runs
+ * down with another thread's time and signals while that one spins. */
+static volatile sig_atomic_t prof_fired;
+static void on_prof(int s) { (void)s; prof_fired = 1; }
+static void *prof_spin(void *a) {
+    (void)a;
+    struct timespec t0, t;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    do clock_gettime(CLOCK_MONOTONIC, &t);
+    while (!prof_fired && t.tv_sec - t0.tv_sec < 5);
+    return 0;
+}
+static void *prof_setter(void *a) {
+    (void)a;
+    struct itimerval it = { { 0, 0 }, { 0, 100000 } };
+    pthread_t sp;
+    if (setitimer(ITIMER_PROF, &it, 0) != 0 || pthread_create(&sp, 0, prof_spin, 0) != 0) return 0;
+    pthread_join(sp, 0);
+    return (void *)1;
+}
+static int prof_other_thread(void) {
+    pthread_t t;
+    void *r = 0;
+    prof_fired = 0;
+    signal(SIGPROF, on_prof);
+    if (pthread_create(&t, 0, prof_setter, 0) != 0 || pthread_join(t, &r) != 0 || r != (void *)1) return 0;
+    signal(SIGPROF, SIG_DFL);
+    return prof_fired;
 }
 
 int main(void) {
@@ -641,6 +722,10 @@ int main(void) {
     }
     EXPECT("two threads pinned to one processor run only there and share it", pinned_share());
     EXPECT("a nice-5 thread gets about a third of the time of a nice-0 one on the same processor", nice_share());
+    EXPECT("a SCHED_FIFO thread of priority 20 keeps one of priority 10 on its processor from running", fifo_order());
+    EXPECT("two SCHED_RR threads of one priority take turns on one processor", rr_share());
+    EXPECT("a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent", rt_share());
+    EXPECT("ITIMER_PROF set by one thread runs down with another thread's time", prof_other_thread());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");

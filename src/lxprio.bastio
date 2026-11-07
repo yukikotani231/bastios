@@ -2,9 +2,9 @@
 // the sched_* calls that set a policy or a CPU mask. The values are kept
 // in each process's row (F_NICE, F_SCHED) and handed back, with Linux's
 // checks and errors. The scheduler weighs a thread's nice value and
-// SCHED_IDLE as Linux does (nice_tick, nice_debtor), and runs a thread
-// only on the processors its mask allows (aff_ok); the real-time policies
-// are kept but not given priority.
+// SCHED_IDLE as Linux does (nice_tick, nice_debtor), runs a SCHED_FIFO or
+// SCHED_RR thread before every thread of a lower priority (rt_pick), and
+// runs a thread only on the processors its mask allows (aff_ok).
 // ioprio_set and ioprio_get keep an I/O priority per thread (k.sys from
 // SYS_IOP) the same way, with Linux 6.1's checks: the disk queue does not
 // look at it.
@@ -256,6 +256,7 @@ fn sched_set(k: &mut Kernel, pid: u64, who: u64, policy: u64, param: u64, keep: 
     return EINVAL;
   }
   pset(&mut k.procs, t, F_SCHED, pol + 256 * prio + reset);
+  sched_changed(&mut k, t);
   return 0;
 }
 
@@ -471,6 +472,155 @@ fn nice_debtor(k: &mut Kernel, p: u64) -> bool
   }
   k.sys = set(k.sys, SYS_SLICE + p, owed - SLICE);
   return true;
+}
+
+// Real-time policies. A READY thread under SCHED_FIFO or SCHED_RR runs
+// before any thread of a lower real-time priority and before every other
+// thread (rt_pick, which lx_pick asks first); among threads of one
+// priority the round robin goes on from where the processor left it. A
+// SCHED_FIFO thread keeps its processor at the tick, so it runs until it
+// blocks, yields, or a thread of a higher priority is ready; a SCHED_RR
+// thread gives it up to the next one of its priority after RR_TICKS ticks
+// (sched_rr_get_interval's 100 ms). A thread that becomes ready takes the
+// processor of a lower one at that processor's next tick (10 ms), not at
+// once. A thread waiting in a call that it runs again each time it is
+// picked (F_RESTART) has no priority until the call is done. As Linux does by default (sched_rt_runtime_us 950000 of
+// sched_rt_period_us 1000000), real-time threads get at most RT_SHARE
+// ticks of each processor in each RT_PERIOD ticks: past that, other
+// threads that are ready run first until the period ends (rt_throttled),
+// so a real-time thread that spins cannot lock the shell out.
+// SCHED_DEADLINE is kept and handed back but runs as SCHED_OTHER.
+const RR_TICKS: u64 = 10;
+const RT_PERIOD: u64 = 100;
+const RT_SHARE: u64 = 95;
+
+/// Thread p's real-time priority: 1 to 99 under SCHED_FIFO or SCHED_RR,
+/// else 0.
+fn rt_prio(procs: &Buf, p: u64) -> u64
+  requires ptab_ok(procs) && p < NPROC
+  ensures result < 100
+{
+  let s = pget(procs, p, F_SCHED);
+  if !rt_policy(s % 256) {
+    return 0;
+  }
+  let r = s / 256 % 256;
+  if r > 99 {
+    return 99;
+  }
+  return r;
+}
+
+/// Have the real-time threads used their share of processor `me` in this
+/// period? (A processor numbered past SYS_RTUSE's 64 words is never held
+/// back.)
+fn rt_throttled(k: &Kernel, me: u64) -> bool
+  requires kok(k)
+{
+  if me >= 64 || get(k.sys, SYS_RTPER + me) != k.ticks / RT_PERIOD {
+    return false;
+  }
+  return get(k.sys, SYS_RTUSE + me) >= RT_SHARE;
+}
+
+/// A tick on processor `me` found thread p running its own code: charges
+/// it (its nice value, or the real-time share). True if it keeps the
+/// processor.
+fn sched_tick(k: &mut Kernel, p: u64, me: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if rt_prio(k.procs, p) == 0 {
+    return nice_tick(&mut k, p);
+  }
+  if me < 64 {
+    let per = k.ticks / RT_PERIOD;
+    if get(k.sys, SYS_RTPER + me) != per {
+      k.sys = set(k.sys, SYS_RTPER + me, per);
+      k.sys = set(k.sys, SYS_RTUSE + me, 0);
+    }
+    k.sys = set(k.sys, SYS_RTUSE + me, sat_add(get(k.sys, SYS_RTUSE + me), 1));
+  }
+  if pget(k.procs, p, F_SCHED) % 256 == SCHED_RR {
+    let n = sat_add(get(k.sys, SYS_SLICE + p), 1);
+    if n >= RR_TICKS {
+      k.sys = set(k.sys, SYS_SLICE + p, 0);
+      return false;
+    }
+    k.sys = set(k.sys, SYS_SLICE + p, n);
+  }
+  return true;
+}
+
+/// Thread t's policy or priority was just set: it starts afresh (no nice
+/// debt, a whole SCHED_RR slice), and the scheduler starts looking for
+/// real-time threads if t is one.
+fn sched_changed(k: &mut Kernel, t: u64)
+  requires kok(k) && t < NPROC
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_SLICE + t, 0);
+  if rt_prio(k.procs, t) != 0 {
+    k.sys = set(k.sys, SYS_RTON, 1);
+  }
+}
+
+/// The READY real-time thread of the highest priority that may run on
+/// processor `me`, the first such from `base` round robin (cap as in
+/// lx_pick), or 0.
+fn rt_pick(k: &mut Kernel, base: u64, cap: u64, me: u64) -> u64
+  requires kok(k) && base < cap && cap <= NPROC
+  ensures kok(k) && result < NPROC
+{
+  let mut best = 0;
+  let mut bp = 0;
+  let mut i = 0;
+  while i < cap
+    invariant i <= cap && base < cap && cap <= NPROC && bp < NPROC && kok(k)
+  {
+    let mut p = base + i;
+    if p >= cap {
+      p = p - cap;
+    }
+    // A thread that waits in a call is READY and runs the call again each
+    // time it is picked (F_RESTART): it goes with the others, or a
+    // real-time reader of an empty pipe would keep the writer from running.
+    if p != 0 && state(k.procs, p) == READY && pget(k.procs, p, F_RESTART) == 0 {
+      let r = rt_prio(k.procs, p);
+      if r > best && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
+        best = r;
+        bp = p;
+      }
+    }
+    i = i + 1;
+  }
+  return bp;
+}
+
+/// Is a READY real-time thread that may run on processor `me` waiting
+/// with a priority above running thread q's (and not held back by the
+/// share, when q is not real-time)?
+fn rt_above(k: &Kernel, q: u64, me: u64) -> bool
+  requires kok(k) && q < NPROC
+{
+  if get(k.sys, SYS_RTON) == 0 {
+    return false;
+  }
+  let mine = rt_prio(k.procs, q);
+  if mine == 0 && rt_throttled(k, me) {
+    return false;
+  }
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);
+  let mut p = 1;
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && kok(k)
+  {
+    if state(k.procs, p) == READY && pget(k.procs, p, F_RESTART) == 0 && rt_prio(k.procs, p) > mine && aff_ok(k, p, me) {
+      return true;
+    }
+    p = p + 1;
+  }
+  return false;
 }
 
 /// Thread p left the processor: by itself (a call that blocked or yielded,
@@ -694,6 +844,7 @@ fn sched_setattr(k: &mut Kernel, pid: u64, who: u64, attr: u64, flags: u64) -> u
     pset(&mut k.procs, t, F_NICE, nice + 1);
   }
   pset(&mut k.procs, t, F_SCHED, pol + 256 * prio + sflags * RESET_KEPT);
+  sched_changed(&mut k, t);
   return 0;
 }
 

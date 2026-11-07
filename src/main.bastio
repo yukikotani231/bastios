@@ -97,6 +97,7 @@ import "oom.bastio";
 import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
+import "lxalsa.bastio";
 import "lxrtc.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";
@@ -741,7 +742,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // code, so it is not charged CPU time (a sleep would count otherwise).
     let mut keep = false;
     if pget(s.k.procs, p, F_RESTART) == 0 {
-      keep = nice_tick(&mut s.k, p);        // a thread that weighs more than nice 0 keeps the processor
+      keep = sched_tick(&mut s.k, p, cpu_no(cpu));        // nice values and the real-time policies (src/lxprio.bastio)
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
       s.k.sys = set(s.k.sys, SYS_BUSY, tick(get(s.k.sys, SYS_BUSY)));
       cpu_timers_tick(&mut s.k, p);
@@ -1078,7 +1079,7 @@ fn syscall_turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, v
   let other = others_ready(s.k.procs, s.k.pid_hi, p);
   let mut go = c == p && !s.stop && !s.k.naps && state(s.k.procs, p) == READY && pget(s.k.procs, p, F_RESTART) == 0
     && pget(s.k.procs, p, F_SIGPEND) == 0 && s.con.r.n + gfx_pending(s.k) == 0 && !(other && s.idle > 0)
-    && !cg_held(s.k, p) && aff_ok(s.k, p, cpu_no(cpu));
+    && !cg_held(s.k, p) && aff_ok(s.k, p, cpu_no(cpu)) && !rt_above(s.k, p, cpu_no(cpu));
   if go {
     // next_job's work for a process picked again, but for the signals
     // (a frame holds the FPU page) and the polls.

@@ -329,10 +329,11 @@ AARCH64_TTY_SKIP = ()
 
 
 class Guest:
-    def __init__(self, kernel, disk, log, web=None, idle=False, arch="x86_64", mem="256M"):
+    def __init__(self, kernel, disk, log, web=None, idle=False, arch="x86_64", mem="256M", sound=False):
         # idle: QEMU runs under SCHED_IDLE, on CPU time no other process wants.
         self.kernel, self.disk, self.log, self.idle, self.arch, self.mem = kernel, disk, log, idle, arch, mem
         self.q = None
+        self.sound = sound              # an HD Audio card whose output is discarded
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
@@ -382,6 +383,8 @@ class Guest:
                    "-serial", "stdio", "-monitor", "none",
                    "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-pci,netdev=n0"]
+            if self.sound:
+                cmd += ["-audiodev", "none,id=snd0", "-device", "intel-hda", "-device", "hda-output,audiodev=snd0"]
         self.q = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
@@ -684,6 +687,8 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
             if body and body[-1] == "":
                 body.pop()                  # the blank line that comes before the note
             continue
+        if line == "Terminated":
+            continue                        # the shell reporting a background job the case's kill ended
         body.append(line)
     if status is None:
         seen = "\n".join(body)[-600:]
@@ -848,6 +853,7 @@ def main():
     ap.add_argument("--alpine-repo", help="the same repository's directory, served at ALPINEURL")
     ap.add_argument("--registry-image", help="the layer list (JSON) of an image in the cache, which the web server serves as a registry for ocipull.sh")
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
+    ap.add_argument("--alsa-disk", help="the ALSA disk (Ubuntu's alsa-utils and glibc) for alsa.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--python-disk", help="the Python disk (the root of the python:alpine image) for python.txt")
@@ -874,7 +880,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "python2", "python3", "podman", "docker", "gitsuite"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "alsa", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "python2", "python3", "podman", "docker", "gitsuite"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -894,6 +900,7 @@ def main():
     bastio = load_applets(os.path.join(HERE, "bastio.txt"))
     alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     debian = load_applets(os.path.join(HERE, "debian.txt"))
+    alsa = load_applets(os.path.join(HERE, "alsa.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
     python = load_applets(os.path.join(HERE, "python.txt"))
@@ -1007,7 +1014,7 @@ def main():
         """Boots a guest from disk and runs groups on it, one after another.
         Returns their results and the guest's serial output."""
         out = io.BytesIO()
-        g = Guest(args.kernel, disk, out, web, arch=args.arch, mem=mem)
+        g = Guest(args.kernel, disk, out, web, arch=args.arch, mem=mem, sound=(name == "alsa"))
         t_lane = time.time()
         try:
             g.boot()
@@ -1127,6 +1134,11 @@ def main():
         disk = os.path.join(args.out, "debian-run.img")
         disk_copy(args.debian_disk, disk)
         lanes.append(("debian", disk, [("debian", "Debian (glibc)", applets_lane(debian, 300))]))
+    if args.alsa_disk and lane_chosen("alsa") and args.arch == "x86_64":
+        # Ubuntu's sound utilities (glibc) playing on the guest's sound card.
+        disk = os.path.join(args.out, "alsa-run.img")
+        disk_copy(args.alsa_disk, disk)
+        lanes.append(("alsa", disk, [("alsa", "Sound (alsa-utils)", applets_lane(alsa, 120))]))
     if args.node_disk and lane_chosen("node"):
         # V8 reserves a large range of address space and wants more memory
         # than the other lanes; the cases write the disk, so on a copy.
@@ -1247,7 +1259,7 @@ def main():
                 if c["name"] not in merged or python_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["python"] = sorted(merged.values(), key=lambda c: py_at.get(c["name"], len(py_at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "alsa", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]

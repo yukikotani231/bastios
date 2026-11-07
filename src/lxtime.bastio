@@ -400,6 +400,12 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_DEV && is_pty_dev(f.x) {
     return pty_bits(k, f.x);                // src/lxpty.bastio
   }
+  if f.kind == K_DEV && f.x == DEV_PCM {
+    return pcm_bits(k);                     // src/lxalsa.bastio
+  }
+  if f.kind == K_DEV && f.x == DEV_TIMER {
+    return tmr_bits(k);
+  }
   if f.kind == K_DEV && f.x == DEV_RTC {
     return rtc_bits(k);                // src/lxrtc.bastio
   }
@@ -821,8 +827,9 @@ fn itimer_out(k: &mut Kernel, pid: u64, va: u64, which: u64) -> u64
   let mut left = alarm_left(k, pid);
   if which != ITIMER_REAL {
     let w = cpu_timer(which);
-    left = pget(k.procs, pid, w);
-    iv = pget(k.procs, pid, w + 1);
+    let g = tgid(k.procs, pid);             // the process's, kept in its leader's row
+    left = pget(k.procs, g, w);
+    iv = pget(k.procs, g, w + 1);
   }
   xfer_u64(&mut k.fs.xfer, 0, iv / NS_PER_S);
   xfer_u64(&mut k.fs.xfer, 8, iv % NS_PER_S / 1000);
@@ -844,25 +851,31 @@ fn cpu_timer(which: u64) -> u64
   return F_PTIMER;
 }
 
-/// On a timer tick that found process p running: its CPU-time timers run
+/// On a timer tick that found thread p running: its process's CPU-time
+/// timers (in the leader's row: they count the time of every thread) run
 /// down by the tick, and one that runs out sends its signal (SIGVTALRM or
-/// SIGPROF) and starts again from its interval. Time in the kernel counts
-/// as the process's own: ITIMER_VIRTUAL and ITIMER_PROF run alike.
+/// SIGPROF) and starts again from its interval. As on Linux, the signal
+/// goes to the thread that was running unless that thread blocks it
+/// (then to one that does not): a thread that set the timer may
+/// not get a processor until the signal is handled (a higher real-time
+/// thread spinning until it is). Time in the kernel counts as the
+/// process's own: ITIMER_VIRTUAL and ITIMER_PROF run alike.
 fn cpu_timers_tick(k: &mut Kernel, p: u64)
   requires kok(k) && 1 <= p && p < NPROC
   ensures kok(k)
 {
+  let g = tgid(k.procs, p);
   let mut which = ITIMER_VIRTUAL;
   while which <= ITIMER_PROF
-    invariant ITIMER_VIRTUAL <= which && which <= ITIMER_PROF + 1 && kok(k)
+    invariant ITIMER_VIRTUAL <= which && which <= ITIMER_PROF + 1 && g < NPROC && kok(k)
   {
     let w = cpu_timer(which);
-    let left = pget(k.procs, p, w);
+    let left = pget(k.procs, g, w);
     if left > NS_PER_TICK {
-      pset(&mut k.procs, p, w, left - NS_PER_TICK);
+      pset(&mut k.procs, g, w, left - NS_PER_TICK);
     } else if left != 0 {
-      pset(&mut k.procs, p, w, pget(k.procs, p, w + 1));
-      post_sig(&mut k, p, 25 + which);      // SIGVTALRM (26), SIGPROF (27)
+      pset(&mut k.procs, g, w, pget(k.procs, g, w + 1));
+      post_proc_w(&mut k, p, 25 + which, 0);   // SIGVTALRM (26), SIGPROF (27), to p unless it blocks it
     }
     which = which + 1;
   }
@@ -929,8 +942,9 @@ fn lx_itimer(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   }
   if a != ITIMER_REAL {
     let w = cpu_timer(a);
-    pset(&mut k.procs, pid, w, value);
-    pset(&mut k.procs, pid, w + 1, interval);
+    let g = tgid(k.procs, pid);             // the process's, kept in its leader's row
+    pset(&mut k.procs, g, w, value);
+    pset(&mut k.procs, g, w + 1, interval);
     ret(&mut k.procs, pid, 0);
     return KEEP;
   }

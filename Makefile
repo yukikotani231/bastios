@@ -74,7 +74,7 @@ build build/user:
 UCFLAGS := $(CFLAGS) -fpie
 UPROGS  := sh hello spin true bench fstest crashme diskbench
 UASM    := fault straddle
-ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb mkeyev bwm bhello bterm mhog mpc mext4 mserial mtlb
+ELFPROGS := elfexec elfpie elfbad mhello fpucheck mtest mudp mtcp mtime mdir mmisc mspawn sysfuzz mthread mdyn ash mkfs mtone malsa mmouse mns mseccomp mcont mcloud mfd mproc mbig mfb mkeyev bwm bhello bterm mhog mpc mext4 mserial mtlb
 UBINS   := $(UPROGS:%=build/user/%.bin) $(UASM:%=build/user/%.bin) $(ELFPROGS:%=build/user/%.elf) build/user/ld-musl.so build/user/vdso.so
 
 # Which backend built the kernel and the user programs, rewritten only when it
@@ -169,7 +169,7 @@ build/user/vdso.so: user/vdso.c user/vdso.ld user/vdso.map | build/user
 # A C program against musl libc, static PIE (the musl-tools package).
 MUSLCC ?= musl-gcc
 
-build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf build/user/mkeyev.elf build/user/mhog.elf build/user/mpc.elf build/user/mext4.elf build/user/mserial.elf build/user/mtlb.elf: build/user/%.elf: user/%.c | build/user
+build/user/mhello.elf build/user/mtest.elf build/user/mudp.elf build/user/mtcp.elf build/user/mtime.elf build/user/mdir.elf build/user/mmisc.elf build/user/mspawn.elf build/user/mthread.elf build/user/mkfs.elf build/user/mtone.elf build/user/malsa.elf build/user/mmouse.elf build/user/mns.elf build/user/mseccomp.elf build/user/mcont.elf build/user/mcloud.elf build/user/mfd.elf build/user/mproc.elf build/user/mbig.elf build/user/mfb.elf build/user/mkeyev.elf build/user/mhog.elf build/user/mpc.elf build/user/mext4.elf build/user/mserial.elf build/user/mtlb.elf: build/user/%.elf: user/%.c | build/user
 	$(MUSLCC) -static-pie -O2 -o $@ $<
 
 # bwm draws text with the console's font.
@@ -959,6 +959,14 @@ build/compat/alpine.img: test/compat/alpinedisk.py test/compat/mkdisk.py test/co
 build/compat/debian.img: test/compat/debiandisk.py test/compat/alpinedisk.py test/compat/mkdisk.py build/compat/alpine.img
 	test/compat/debiandisk.py $@ $(DEBIAN_IMAGE) build/compat/alpine/disk/busybox --cache $(ALPINE_CACHE)
 
+# Ubuntu's sound utilities on BastiOS, for the compatibility suite
+# (test/compat/alsa.txt): alsa-utils and alsa-lib, linked against glibc,
+# entered with chroot and playing on the guest's HD Audio card. The
+# .debs are pinned by SHA-256 in alsadisk.py and kept in ALPINE_CACHE.
+
+build/compat/alsa.img: test/compat/alsadisk.py test/compat/mkdisk.py
+	test/compat/alsadisk.py $@ --cache $(ALPINE_CACHE)
+
 # Modules of CPython's own regression tests (Lib/test of the source the python
 # above is built from; CI restores the python without its source, so it is
 # fetched again, just that directory), with the helper modules and data they import, in
@@ -1089,7 +1097,7 @@ build/compat/docker.img: test/compat/dockerdisk.py test/compat/alpinedisk.py tes
 # made from before the checks run). COMPAT_DISKS, COMPAT_LANES and
 # COMPAT_SKIP_LANES (run.py --lanes and --skip-lanes) let a CI runner build
 # and run a part of the suite: the images of its lanes, and those lanes.
-COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/ruby.img build/compat/x11.img build/compat/x11b.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/docker.img build/compat/gitsuite.tar
+COMPAT_DISKS ?= build/compat/disk.img build/compat/dev.img build/compat/bastio.img build/compat/alpine.img build/compat/debian.img build/compat/alsa.img build/compat/node.img build/compat/go.img build/compat/jdk.img build/compat/ruby.img build/compat/x11.img build/compat/x11b.img build/compat/rust.img build/compat/python.img build/compat/podman.img build/compat/docker.img build/compat/gitsuite.tar
 
 GITSUITE_ARG = $(if $(filter build/compat/gitsuite.tar,$(COMPAT_DISKS)),--gitsuite-tar build/compat/gitsuite.tar)
 COMPAT_LANE_ARGS = $(if $(COMPAT_LANES),--lanes $(COMPAT_LANES)) $(if $(COMPAT_SKIP_LANES),--skip-lanes $(COMPAT_SKIP_LANES))
@@ -1102,11 +1110,11 @@ build/compat/oss: test/compat/ossrepos.sh
 compat-disks: build/bastios.elf $(COMPAT_DISKS)
 
 compat: build/bastios.elf $(COMPAT_DISKS) build/compat/oss
-	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --alsa-disk build/compat/alsa.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_LANE_ARGS) $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # Records which checks pass now, so `make compat` catches regressions.
 compat-baseline: build/bastios.elf $(COMPAT_DISKS)
-	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
+	test/compat/run.py --update-baseline --kernel build/bastios.elf --disk build/compat/disk.img --dev-disk build/compat/dev.img --bastio-disk build/compat/bastio.img --alpine-disk build/compat/alpine.img --alpine-repo build/compat/alpine/disk/http --registry-image $(ALPINE_CACHE)/sha256-$(ALPINE_BASE_DIGEST).json --debian-disk build/compat/debian.img --alsa-disk build/compat/alsa.img --node-disk build/compat/node.img --go-disk build/compat/go.img --python-disk build/compat/python.img --python-wheels build/compat/pythonwheels --jdk-disk build/compat/jdk.img --ruby-disk build/compat/ruby.img --x11-disk build/compat/x11.img --x11b-disk build/compat/x11b.img --rust-disk build/compat/rust.img --podman-disk build/compat/podman.img --docker-disk build/compat/docker.img $(GITSUITE_ARG) --out build/compat $(COMPAT_PROGS) --tcc-src $(TCC_SRC) --oss-dir build/compat/oss
 
 # The same checks on this Linux machine: are the expectations right?
 compat-host: $(COMPAT_BINS) build/compat/busybox $(COMPAT_APPS) build/compat/cpytests
@@ -1125,6 +1133,8 @@ crashsim: build/bastios.elf
 LTP_GIT ?= https://github.com/linux-test-project/ltp
 LTP_TAG ?= 20260930
 LTP_HDRS ?= /usr/include
+# Changes CI's cache key for the built tree (which is keyed on these LTP_ lines): bump it when the build steps below change.
+LTP_RECIPE ?= 2
 # Besides runtest/syscalls: the file system stress tests, the pseudo-terminal, namespace (container) and CVE regression tests, and the Open POSIX Test Suite.
 LTP_SUITES ?= --suite fs --suite mm --suite dio --suite fs_perms_simple --suite sched --suite pty --suite containers --suite cve --suite posix --suite libctest
 
@@ -1169,6 +1179,8 @@ build/ltp/.built: build/ltp/configure
 	$(MAKE) -C build/ltp/testcases/kernel/mem -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/io -s -k || true
 	$(MAKE) -C build/ltp/testcases/kernel/sched -s -k || true
+	# runtest/sched's sched_football (real-time priorities) is built with the real-time tests' library.
+	$(MAKE) -C build/ltp/testcases/realtime/lib -s && $(MAKE) -C build/ltp/testcases/realtime/func/sched_football -s || true
 	$(MAKE) -C build/ltp/testcases/kernel/containers -s -k || true
 	$(MAKE) -C build/ltp/testcases/cve -s -k || true
 	# The Open POSIX Test Suite is configured on its own; a few tests do not
