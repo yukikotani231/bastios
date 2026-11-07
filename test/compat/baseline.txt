@@ -173,6 +173,7 @@ alsa: alsa: a plug device converts the format and the rate
 alsa: alsa: amixer opens the control device
 alsa: alsa: aplay lists the card
 alsa: alsa: aplay plays mono 24 kHz on the hardware device
+alsa: alsa: aplay plays through mmap
 alsa: alsa: speaker-test plays a sine wave
 alsa: alsa: unpack the root, make the device nodes
 dev: make: a project of two files
