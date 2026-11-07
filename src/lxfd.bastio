@@ -1482,6 +1482,9 @@ fn lx_open_tail(k: &mut Kernel, pid: u64, n: u64, flags: u64, mode: u64, fh: u64
   if dev == DEV_DSP && !snd_live(k.snd) {
     return 18446744073709551597;                      // -ENODEV: no sound card
   }
+  if (dev == DEV_SNDC || dev == DEV_PCM || dev == DEV_TIMER) && !snd_live(k.snd) {
+    return 18446744073709551597;                      // -ENODEV: no sound card
+  }
   if dev == DEV_DSP {
     dsp_reset(&mut k);                                // each open starts at 48 kHz 16-bit stereo
   }
@@ -1548,8 +1551,14 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   if hv >= OFD_N {
     return ENFILE;
   }
-  if dev == DEV_RTC {
-    of_set(&mut k.ofd, hv, 3, flags / LO_NONBLOCK % 2);   // O_NONBLOCK, for rtc_read
+  if dev == DEV_RTC || dev == DEV_PCM || dev == DEV_TIMER {
+    of_set(&mut k.ofd, hv, 3, flags / LO_NONBLOCK % 2);   // O_NONBLOCK, for rtc_read and pcm_writei
+  }
+  if dev == DEV_PCM {
+    pcm_open_reset(&mut k);
+  }
+  if dev == DEV_TIMER {
+    pcm_set(&mut k, 12, 0);               // no timestamps until TREAD
   }
   if dev == DEV_PTSDIR {
     dpath_keep(&mut k.dpath, &mut k.dpathx, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd
@@ -1857,7 +1866,7 @@ fn lx_fcntl(k: &mut Kernel, pid: u64, fd: u64, cmd: u64, arg: u64) -> u64
       of_set(&mut k.ofd, h, 3, of_get(k.ofd, h, 3) / 2 * 2 + arg / LO_NONBLOCK % 2);
     }
     let rd = fd_look(k, pid, fd);
-    if rd.kind == K_DEV && rd.x == DEV_RTC && h < OFD_N {
+    if rd.kind == K_DEV && (rd.x == DEV_RTC || rd.x == DEV_PCM || rd.x == DEV_TIMER) && h < OFD_N {
       of_set(&mut k.ofd, h, 3, arg / LO_NONBLOCK % 2);   // /dev/rtc0 blocks for its alarm (src/lxrtc.bastio)
     }
     if h < OFD_N {
