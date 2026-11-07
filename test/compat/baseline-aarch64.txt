@@ -681,6 +681,9 @@ t_mem: mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space
+t_mem: mremap moves a PROT_NONE reservation, which faults until mprotect makes it usable
+t_mem: mremap of a stack page to its own size gives back its address
+t_mem: mremap shrinks a PROT_NONE reservation in place
 t_mem: munmap
 t_mem: munmap faults on touch
 t_mem: munmap gives address space back
@@ -1365,6 +1368,21 @@ t_sys: seccomp USER_NOTIF: a supervisor answers a call
 t_sys: setdomainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: settimeofday
+t_sysnet: lo's address is all zeros
+t_sysnet: lo's operstate is unknown, as on Linux
+t_sysnet: lo's mtu is 65536
+t_sysnet: lo's ifindex is 1
+t_sysnet: lo's type is ARPHRD_LOOPBACK (772)
+t_sysnet: lo's flags are up and loopback
+t_sysnet: lo has a carrier
+t_sysnet: lo's tx_queue_len is a number
+t_sysnet: an unknown file is ENOENT
+t_sysnet: an unknown interface is ENOENT
+t_sysnet: eth0's ifindex agrees with SIOCGIFINDEX
+t_sysnet: eth0's address agrees with SIOCGIFHWADDR
+t_sysnet: eth0's type is ARPHRD_ETHER (1)
+t_sysnet: eth0's mtu is 1500
+t_sysnet: eth0 is up
 t_sysv: shmat over its own address with SHM_REMAP replaces the attachment
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: GETNCNT counts a waiting process

@@ -160,10 +160,11 @@ and the first public key of the launch key pair from the metadata service.
   taken on has no `/dev/kvm`; the `bench-kvm` CI job measures boot under KVM
   against Ubuntu's Linux 6.8 (see docs/performance.md). Under TCG (QEMU 8, one CPU,
   `-kernel`) the 2.9 MB image reaches the `bastios>` prompt in 0.2 to 0.4 s
-  including QEMU's start-up. The smallest memory that boots is 36 MiB
-  (`-m 36M`: 1863 pages of 4 KiB free at the prompt); `-m 33M` and `-m 34M`
-  print `bastio: out of memory` (the kernel's own heap does not fit), and
-  `-m 24M` and below fail the same way. **`-m 16M` prints nothing** because
+  including QEMU's start-up. The smallest memory that boots is 53 MiB
+  (`-m 53M`: 5019 pages of 4 KiB at the prompt; it was 36 MiB before the
+  tables for 511 processes, 1024 descriptors, larger pipes and sockets grew);
+  `-m 52M` and below, down to `-m 24M`, print `bastio: out of memory` (the
+  kernel's own heap does not fit). **`-m 16M` prints nothing** because
   the image is linked at 16 MiB (`boot/linker.ld`), which is the end of 16 MiB
   of RAM: the loader has nowhere to put it and QEMU does not complain.
 - **Power off without ACPI.** QEMU's `microvm` (and Firecracker) publish no

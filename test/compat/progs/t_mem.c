@@ -479,6 +479,28 @@ int main(void) {
         }
         EXPECT("mremap growth reuses address space", ok);
     }
+    EXPECT("mremap moves a PROT_NONE reservation, which faults until mprotect makes it usable", ({
+        int ok = 0, st = 0;
+        char *r = mmap(0, 1 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_NORESERVE, -1, 0);
+        char *g = r != MAP_FAILED ? mremap(r, 1 << 20, 2 << 20, MREMAP_MAYMOVE) : MAP_FAILED;
+        if (g != MAP_FAILED) {
+            pid_t c = fork();
+            if (c == 0) { volatile char x = g[(2 << 20) - 1]; (void)x; _exit(0); }
+            ok = c > 0 && waitpid(c, &st, 0) == c && WIFSIGNALED(st) && WTERMSIG(st) == SIGSEGV;
+            ok &= mprotect(g, 2 << 20, PROT_READ | PROT_WRITE) == 0;
+            if (ok) { g[(2 << 20) - 1] = 3; ok = g[(2 << 20) - 1] == 3 && g[0] == 0; }
+            munmap(g, 2 << 20);
+        }
+        ok; }));
+    EXPECT("mremap shrinks a PROT_NONE reservation in place", ({
+        char *r = mmap(0, 1 << 20, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        int ok = r != MAP_FAILED && mremap(r, 1 << 20, 65536, 0) == r;
+        if (r != MAP_FAILED) munmap(r, 65536);
+        ok; }));
+    EXPECT("mremap of a stack page to its own size gives back its address", ({
+        volatile char here = 1;
+        char *pg = (char *)((unsigned long)&here & ~4095UL);
+        mremap(pg, 4096, 4096, 0) == pg && here == 1; }));
     {
         void *a[64]; int ok = 1;
         for (int i = 0; i < 64; i++) { a[i] = malloc(1000 + i * 3000); ok &= a[i] != NULL; if (a[i]) memset(a[i], i, 1000 + i * 3000); }

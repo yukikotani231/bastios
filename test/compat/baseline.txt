@@ -1006,6 +1006,9 @@ t_mem: mprotect makes 300 MiB of a PROT_NONE reservation writable, more than the
 t_mem: mprotect read-only faults on write
 t_mem: mremap grow
 t_mem: mremap growth reuses address space
+t_mem: mremap moves a PROT_NONE reservation, which faults until mprotect makes it usable
+t_mem: mremap of a stack page to its own size gives back its address
+t_mem: mremap shrinks a PROT_NONE reservation in place
 t_mem: munmap
 t_mem: munmap faults on touch
 t_mem: munmap gives address space back
@@ -1712,6 +1715,8 @@ t_ptrace: PTRACE_GET_SYSCALL_INFO at a signal stop is op 0, with the header only
 t_ptrace: a buffer that is too small gets what fits, and the full size is the result
 t_ptrace: and at its exit the result, as an error
 t_ptrace: the tracee goes on to its end
+t_ptrace: /proc/PID/mem writes program text while another thread of the process holds its memory
+t_ptrace: PTRACE_POKETEXT on a thread other than the first writes program text
 t_ptrace: strace -f style tracing of posix_spawn: the clone ends with a stop after the vfork event, and stops pair up
 t_ptrace: the same with PTRACE_O_TRACEVFORKDONE: the stop after the clone follows the vfork-done stop
 t_ptrace2: PTRACE_CONT of a tracee that is not stopped is ESRCH
@@ -2060,6 +2065,21 @@ t_sys: the names are written through /proc/sys/kernel/hostname and domainname
 t_sys: sethostname, uname, /proc/sys/kernel/hostname
 t_sys: splice reads a /proc file into a pipe
 t_sys: settimeofday
+t_sysnet: lo's address is all zeros
+t_sysnet: lo's operstate is unknown, as on Linux
+t_sysnet: lo's mtu is 65536
+t_sysnet: lo's ifindex is 1
+t_sysnet: lo's type is ARPHRD_LOOPBACK (772)
+t_sysnet: lo's flags are up and loopback
+t_sysnet: lo has a carrier
+t_sysnet: lo's tx_queue_len is a number
+t_sysnet: an unknown file is ENOENT
+t_sysnet: an unknown interface is ENOENT
+t_sysnet: eth0's ifindex agrees with SIOCGIFINDEX
+t_sysnet: eth0's address agrees with SIOCGIFHWADDR
+t_sysnet: eth0's type is ARPHRD_ETHER (1)
+t_sysnet: eth0's mtu is 1500
+t_sysnet: eth0 is up
 t_sysv: shmat over its own address with SHM_REMAP replaces the attachment
 t_sysv: /proc/sysvipc and /proc/sys/kernel limits
 t_sysv: msg_next_id and shm_next_id name the next id once; MSG_COPY leaves the message
@@ -2362,6 +2382,13 @@ t_thread: a thread keeps its descriptors while another spawns a child
 t_thread: clone3: CLONE_CLEAR_SIGHAND, and what it refuses
 t_thread: clone3: a fork child
 t_thread: the process's CPU time counts its threads, those that ended too
+t_threadsig: signal 33 reaches the thread that sends it
+t_threadsig: signal 33 reaches a thread waiting on a futex
+t_threadsig: signal 33 reaches a thread in epoll_wait
+t_threadsig: signal 33 reaches a thread in nanosleep
+t_threadsig: signal 33 reaches a thread blocked in read
+t_threadsig: signal 33 reaches a thread that is running
+t_threadsig: a thread that has dropped root signals a sibling that has not
 apps: ripgrep: a search over many files on several threads
 apps: ripgrep: case-insensitive counts and file lists
 apps: ripgrep: replacement, multi-line and standard input

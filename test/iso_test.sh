@@ -557,6 +557,29 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print("     calendar title", repr(got), "after Esc", repr(gone), "wanted", repr(month_year))
             print(("ok  " if good else "FAIL"), f"({name}) Alt-C opens a calendar of this month and Esc closes it")
             fails += not good
+            # Alt-L locks the screen: a "Locked" box covers the desktop and keys (Ctrl-T here) do nothing but go to the
+            # prompt; root has no password in this image, so Enter unlocks.
+            def lock_word():
+                w, h, px = screendump()
+                return screen_text_at(px, w, (w - 280) // 2 + (280 - 48) // 2, (h - 110) // 2 + 30, 6, 1)[0].strip()
+            monitor("sendkey alt-l")
+            end = time.time() + 10
+            locked = lock_word()
+            while locked != "Locked" and time.time() < end:
+                locked = lock_word()
+            monitor("sendkey ctrl-t")
+            time.sleep(2)
+            still = lock_word()
+            monitor("sendkey ret")
+            end = time.time() + 10
+            open_ = lock_word()
+            while open_ == "Locked" and time.time() < end:
+                open_ = lock_word()
+            good = locked == "Locked" and still == "Locked" and open_ != "Locked"
+            if not good:
+                print("     lock box", repr(locked), "after Ctrl-T", repr(still), "after Enter", repr(open_))
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-L locks the screen, keys do not reach the windows, Enter unlocks")
+            fails += not good
             # The wheel over the task bar cycles the windows like Alt-Tab: one step changes the picture,
             # a step the other way undoes it, and three in one direction go all the way round.
             monitor(*["mouse_move 0 250"] * 4)       # QEMU sends at most 255 a step: down to the bar
@@ -1253,6 +1276,57 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                             break
                     good = g > b + 20
             print(("ok  " if good else "FAIL"), f"({name}) w in the System window cycles the wallpaper")
+            fails += not good
+            # A click on the Wallpaper row does what w does. The window is found by its hint line (the only text in
+            # that grey), the pointer is brought to the corner first, and 6 more w presses go round to "none" again.
+            if good:
+                w, h, px = screendump()
+                hx = hy = None
+                for yy in range(h):
+                    row = px[yy * w * 3:(yy + 1) * w * 3]
+                    for xx in range(w):
+                        if row[xx * 3] == 0x80 and row[xx * 3 + 1] == 0x80 and row[xx * 3 + 2] == 0x90:
+                            hx = xx if hx is None else min(hx, xx)
+                            hy = yy if hy is None else hy
+                    if hy is not None and yy > hy + 16:
+                        break
+                good = hx is not None
+                if good:
+                    tx, ty = hx + 100, hy - 10                  # the Wallpaper row is the one above the hint
+                    # Where the pointer is now (the later steps move it relative to this): move it 30 right and see which
+                    # pixels change; the arrow's tip is the top left of what changed.
+                    monitor("mouse_move 30 0")
+                    time.sleep(0.4)
+                    w2, h2, px2 = screendump()
+                    monitor("mouse_move -30 0")
+                    time.sleep(0.4)
+                    ptx = pty = None
+                    for yy in range(h):               # (the window redraws itself too: only the arrow's black outline counts)
+                        if px[yy * w * 3:(yy + 1) * w * 3] != px2[yy * w * 3:(yy + 1) * w * 3]:
+                            for xx in range(w):
+                                a, b = (yy * w + xx) * 3, (yy * w + xx) * 3 + 3
+                                if px[a:b] == b"\0\0\0" and px2[a:b] != b"\0\0\0":
+                                    pty, ptx = yy, xx
+                                    break
+                            if ptx is not None:
+                                break
+                    good = ptx is not None
+                if good:
+                    monitor(*["mouse_move -250 -250"] * 8)
+                    monitor(*["mouse_move 250 0"] * (tx // 250), "mouse_move %d 0" % (tx % 250))
+                    monitor(*["mouse_move 0 250"] * (ty // 250), "mouse_move 0 %d" % (ty % 250))
+                    time.sleep(0.3)
+                    mark_click = len(out)
+                    monitor("mouse_button 1", "mouse_button 0")
+                    good = until(b"bsys: wallpaper @green", mark_click)
+                    for _ in range(6):
+                        monitor("sendkey w")
+                        time.sleep(0.3)
+                    monitor(*["mouse_move -250 -250"] * 8)         # and the pointer goes back where it was
+                    monitor(*["mouse_move 250 0"] * (ptx // 250), "mouse_move %d 0" % (ptx % 250))
+                    monitor(*["mouse_move 0 250"] * (pty // 250), "mouse_move 0 %d" % (pty % 250))
+                    time.sleep(0.3)
+            print(("ok  " if good else "FAIL"), f"({name}) a click on the Wallpaper row of the System window cycles the wallpaper")
             fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
