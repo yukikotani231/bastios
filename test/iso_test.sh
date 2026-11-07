@@ -1023,7 +1023,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
         # Two pictures for w in the System window to cycle through.
         q.stdin.write(b"mkdir -p /usr/share/wallpapers; cp /tmp/wall.ppm /usr/share/wallpapers/a.ppm; cp /tmp/wall.ppm /usr/share/wallpapers/b.ppm\r"); q.stdin.flush()
         time.sleep(0.5)
-        q.stdin.write(b"(sleep 24; echo /tmp/wall.ppm > /etc/bwm.wallpaper) &\r"); q.stdin.flush()
+        q.stdin.write(b"(sleep 4; echo /tmp/wall.ppm > /etc/bwm.wallpaper) &\r"); q.stdin.flush()
         time.sleep(0.5)
         q.stdin.write(b"bwm -n\r"); q.stdin.flush()
         good = until(b"bwm: ready", mark)
@@ -1054,14 +1054,10 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             if not good:
                 print("     samples:", seen)
             fails += not good
-            end = time.time() + 40                                           # the wallpaper file is written 24 s in, after the notices: a redraw of the whole screen can hold a slow host up for seconds
-            while True:
-                w, h, px = screendump()
-                at = (300 * w + 500) * 3
-                good = tuple(px[at:at + 3]) == (255, 0, 0)
-                if good or time.time() > end:
-                    break
-                time.sleep(0.5)
+            time.sleep(2.5)
+            w, h, px = screendump()
+            at = (300 * w + 500) * 3
+            good = tuple(px[at:at + 3]) == (255, 0, 0)
             print(("ok  " if good else "FAIL"), f"({name}) a file named in /etc/bwm.wallpaper replaces the wallpaper while bwm runs")
             fails += not good
             # The clock left of the Menu button: white digits on the task bar.

@@ -159,6 +159,7 @@ static void notice_expire(long long now)
 }
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
+static int bar_again;                    /* the notice changed while bwm waited: draw the task bar again */
 static struct win *wm_win;               /* the window the window menu is for; NULL when it is not showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
 static int run_on;                       /* the Alt-F2 prompt is showing in the task bar */
@@ -2518,7 +2519,7 @@ int main(int argc, char **argv)
                 wait = d < 0 ? 0 : (int)d;
             if (d <= 0) {
                 notice_expire(now_ms());
-                touch_bar();
+                bar_again = 1;                                /* (touched below: the rectangle is cleared after the poll) */
             }
         }
         if (grab_outside(buttons, my)) {
@@ -2543,6 +2544,10 @@ int main(int argc, char **argv)
         }
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
+        if (bar_again) {                                      /* a notice went or changed before the poll: the bar shows the new one */
+            touch_bar();
+            bar_again = 0;
+        }
         kb_poll();
         {                                                     /* a program posts a notice by writing a line to /tmp/bwm.notice (echo TEXT > /tmp/bwm.notice) */
             static long long notice_chk;
