@@ -1301,14 +1301,15 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     monitor("mouse_move -30 0")
                     time.sleep(0.4)
                     ptx = pty = None
-                    for yy in range(h):
+                    for yy in range(h):               # (the window redraws itself too: only the arrow's black outline counts)
                         if px[yy * w * 3:(yy + 1) * w * 3] != px2[yy * w * 3:(yy + 1) * w * 3]:
-                            pty = yy
                             for xx in range(w):
-                                if px[(yy * w + xx) * 3:(yy * w + xx) * 3 + 3] != px2[(yy * w + xx) * 3:(yy * w + xx) * 3 + 3]:
-                                    ptx = xx
+                                a, b = (yy * w + xx) * 3, (yy * w + xx) * 3 + 3
+                                if px[a:b] == b"\0\0\0" and px2[a:b] != b"\0\0\0":
+                                    pty, ptx = yy, xx
                                     break
-                            break
+                            if ptx is not None:
+                                break
                     good = ptx is not None
                 if good:
                     monitor(*["mouse_move -250 -250"] * 8)
