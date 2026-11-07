@@ -387,6 +387,17 @@ int main(void) {
            struct ucred v = {0}; socklen_t vl = sizeof v; int r2 = getsockopt(sv[0], SOL_SOCKET, SO_PEERCRED, &v, &vl);
            close(d); close(s); close(sv[0]); close(sv[1]); close(go[0]); close(go[1]);
            r == 0 && ul == sizeof u && u.pid == c && u.uid == geteuid() && r2 == 0 && v.pid == getpid(); }));
+    EXPECT("SO_PASSCRED: recvmsg on a unix socket carries the sender's SCM_CREDENTIALS", ({
+           int sv[2]; socketpair(AF_UNIX, SOCK_STREAM, 0, sv); int on = 1, g0 = 0; socklen_t gl = sizeof g0;
+           int so = setsockopt(sv[1], SOL_SOCKET, SO_PASSCRED, &on, sizeof on); getsockopt(sv[1], SOL_SOCKET, SO_PASSCRED, &g0, &gl);
+           write(sv[0], "hi", 2);
+           char b[8], c[CMSG_SPACE(sizeof(struct ucred))]; struct iovec v = {b, sizeof b};
+           struct msghdr m = {.msg_iov = &v, .msg_iovlen = 1, .msg_control = c, .msg_controllen = sizeof c};
+           int n = recvmsg(sv[1], &m, 0); struct cmsghdr *h = CMSG_FIRSTHDR(&m); struct ucred u = {0};
+           if (h && h->cmsg_level == SOL_SOCKET && h->cmsg_type == SCM_CREDENTIALS) memcpy(&u, CMSG_DATA(h), sizeof u);
+           write(sv[0], "yo", 2); struct msghdr m2 = {.msg_iov = &v, .msg_iovlen = 1}; int n2 = recvmsg(sv[0], &m2, MSG_DONTWAIT);
+           close(sv[0]); close(sv[1]);
+           so == 0 && g0 == 1 && n == 2 && h && h->cmsg_len == CMSG_LEN(sizeof u) && u.pid == getpid() && u.uid == geteuid() && u.gid == getegid() && n2 == -1; }));
     EXPECT("MSG_MORE holds a UDP datagram and a short TCP segment back until the next send", ({
            int r = socket(AF_INET, SOCK_DGRAM, 0), w = socket(AF_INET, SOCK_DGRAM, 0);
            struct sockaddr_in a = {.sin_family = AF_INET, .sin_addr.s_addr = htonl(INADDR_LOOPBACK)}; socklen_t l = sizeof a;

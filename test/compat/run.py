@@ -684,6 +684,8 @@ def run_applet_once(env, name, cmd, expected, timeout, bb):
             if body and body[-1] == "":
                 body.pop()                  # the blank line that comes before the note
             continue
+        if line == "Terminated":
+            continue                        # the shell reporting a background job the case's kill ended
         body.append(line)
     if status is None:
         seen = "\n".join(body)[-600:]
