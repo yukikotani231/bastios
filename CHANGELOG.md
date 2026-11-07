@@ -17,6 +17,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 ### Added
 
 - Page faults are counted per thread: `perf_event_open` `PAGE_FAULTS` and `PAGE_FAULTS_MIN` (they read 0 before), `getrusage` `ru_minflt` and `/proc/PID/stat` `minflt` (`test/compat/progs/t_perf.c`). Every fault is counted as minor; `PAGE_FAULTS_MAJ` still reads 0.
+- `bwm` locks the screen on Alt-L: the desktop is covered, the pointer and keys do nothing but feed a password prompt, and Enter with the account's password from `/etc/shadow` (or just Enter when it has none) unlocks. It is a cover for an unattended screen, not a defence against someone with the console or a USB keyboard at boot; programs keep running.
 - `bwm` shows a calendar of the month, today lit, when the clock in the task bar is clicked or Alt-C is pressed; a click anywhere or Escape closes it. It follows the time zone the clock uses.
 - `bx11` moves the X keyboard focus to each newly mapped top-level window (a dialog now receives keys), back to the one below when it closes, and to a window you click (`test/bx11_focus_test.sh`).
 - A TCP connection that has been reset or closed now polls as writable as well as readable and hung up, as on Linux, so a `poll` loop waiting for `POLLOUT` on it wakes and sees the write fail instead of stalling (`test/compat/progs/t_tcprst.c`; `msoak` has a 16-connection step).
