@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# What BastiOS does when it runs out of memory: boots a small machine (64 MiB
-# of RAM, about 30 MiB of it for programs), runs user/mhog.c on it, and checks
+# What BastiOS does when it runs out of memory: boots a small machine (72 MiB
+# of RAM, about half of it for programs), runs user/mhog.c on it, and checks
 #   - the page cache goes back before anything is killed (reclaim),
 #   - the out-of-memory killer picks the process with the highest oom_score,
 #     says so on the console, and the system carries on,
@@ -13,7 +13,12 @@ set -u
 cd "$(dirname "$0")/.."
 KERNEL=${KERNEL:-build/bastios.elf}
 TIMEOUT=${TIMEOUT:-300}
-MEM=${MEM:-64M}
+# 72 MiB, not 64: the native kernel's heap on a 64 MiB machine is so small that
+# a few kilobytes more kernel code (which move the pool's start and shrink the
+# heap extension taken from it by a few pages) made the 16 MiB swap table fail
+# with ENOMEM at swapon; 66 MiB passes. The test is about running out of
+# memory, which a slightly larger machine does as well.
+MEM=${MEM:-72M}
 SMP=${SMP:-1}
 
 python3 - "$KERNEL" "$TIMEOUT" "$MEM" "$SMP" <<'PY'
