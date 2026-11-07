@@ -43,6 +43,41 @@ static int maps_has(const char *b, unsigned long lo, unsigned long hi, const cha
     return 0;
 }
 
+/* All of path, read in pieces of `piece` bytes, into b as a string (up to
+ * n - 1 bytes); the count, or -1. */
+static int slurp_all(const char *path, char *b, int n, int piece) {
+    int fd = open(path, O_RDONLY), got = 0, r;
+    if (fd < 0) return -1;
+    while (got < n - 1 && (r = read(fd, b + got, (n - 1 - got) < piece ? (n - 1 - got) : piece)) > 0)
+        got += r;
+    close(fd);
+    b[got] = 0;
+    return got;
+}
+
+/* The line of maps text b that starts at address a: its end, offset and
+ * inode, and its name (empty if none) in nm (of nmlen bytes). */
+static int maps_at(const char *b, unsigned long a, unsigned long *e, unsigned long *off, unsigned long *ino, char *nm, int nmlen) {
+    for (; *b; b++) {
+        unsigned long s;
+        unsigned mj, mn;
+        char pr[8];
+        int used = 0;
+        const char *nl = strchr(b, '\n');
+        if (sscanf(b, "%lx-%lx %7s %lx %x:%x %lu%n", &s, e, pr, off, &mj, &mn, ino, &used) == 7 && s == a) {
+            const char *q = b + used;
+            int k = 0;
+            while (*q == ' ') q++;
+            while (*q && *q != '\n' && k < nmlen - 1) nm[k++] = *q++;
+            nm[k] = 0;
+            return 1;
+        }
+        if (!nl) break;
+        b = nl;
+    }
+    return 0;
+}
+
 /* Walks the directory at path: every entry must stat, and the files
  * must open for reading. Returns the number of files, or -1. */
 static int walk(const char *path, int depth) {
@@ -294,6 +329,51 @@ int main(int argc, char **argv) {
         EXPECT("maps has a [heap] after brk grows", ({ char *b0 = (char *)syscall(SYS_brk, 0); int r = 0; if ((char *)syscall(SYS_brk, b0 + 3 * 4096) == b0 + 3 * 4096) { b0[0] = 1; r = slurp("/proc/self/maps", mb, sizeof mb) > 0 && maps_has(mb, (unsigned long)b0, (unsigned long)b0 + 3 * 4096, "rw-p", "[heap]"); } r; }));
         EXPECT("maps has [stack] and [vdso]", strstr(mb, "[stack]\n") != NULL && strstr(mb, "[vdso]\n") != NULL);
         EXPECT("maps lines end at column 74 for names", ({ char *q = strstr(mb, "[stack]"); q && q[-1] == ' ' && ({ char *l = q; while (l > mb && l[-1] != '\n') l--; (size_t)(q - l) == 73; }); }));
+    }
+    {
+        /* /proc/PID/maps names the files mappings come from, with the
+           offset and inode, as debuggers and profilers read them. */
+        static char mb[65536];
+        char self[256], nm[300];
+        const char *fp = "/tmp/t_proc_mapped";
+        unsigned long e, off, ino;
+        struct stat sb;
+        ssize_t sl = readlink("/proc/self/exe", self, sizeof self - 1);
+        int fd = open(fp, O_RDWR | O_CREAT | O_TRUNC, 0644);
+        char page[4096];
+        memset(page, 'm', sizeof page);
+        int ok = sl > 0 && fd >= 0 && write(fd, page, 4096) == 4096 && write(fd, page, 4096) == 4096 && write(fd, page, 4096) == 4096 && fstat(fd, &sb) == 0;
+        if (sl > 0) self[sl] = 0;
+        char *m = ok ? mmap(NULL, 2 * 4096, PROT_READ, MAP_PRIVATE, fd, 4096) : MAP_FAILED;
+        if (fd >= 0) close(fd);
+        EXPECT("maps names the program's own file at its code", sl > 0 && slurp_all("/proc/self/maps", mb, sizeof mb, 4096) > 0
+               && maps_has(mb, (unsigned long)main, (unsigned long)main + 1, "r-xp", self));
+        EXPECT("maps names a mapped file, with its offset and inode, after its descriptor is closed", m != MAP_FAILED && slurp_all("/proc/self/maps", mb, sizeof mb, 4096) > 0
+               && maps_at(mb, (unsigned long)m, &e, &off, &ino, nm, sizeof nm) && e == (unsigned long)m + 2 * 4096 && off == 4096 && ino == sb.st_ino && !strcmp(nm, fp));
+        EXPECT("munmap of a file mapping's first page leaves the rest named, at the next offset", m != MAP_FAILED && munmap(m, 4096) == 0 && slurp_all("/proc/self/maps", mb, sizeof mb, 4096) > 0
+               && !maps_at(mb, (unsigned long)m, &e, &off, &ino, nm, sizeof nm)
+               && maps_at(mb, (unsigned long)m + 4096, &e, &off, &ino, nm, sizeof nm) && off == 2 * 4096 && !strcmp(nm, fp));
+        char *dst = mmap(NULL, 4096, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        char *mv = m != MAP_FAILED && dst != MAP_FAILED ? mremap(m + 4096, 4096, 4096, MREMAP_MAYMOVE | MREMAP_FIXED, dst) : MAP_FAILED;
+        EXPECT("mremap moves a file mapping's name with its pages", mv == dst && mv[0] == 'm' && slurp_all("/proc/self/maps", mb, sizeof mb, 4096) > 0
+               && maps_at(mb, (unsigned long)mv, &e, &off, &ino, nm, sizeof nm) && off == 2 * 4096 && !strcmp(nm, fp));
+        EXPECT("a forked child's maps names the same file", mv == dst && (p = fork()) >= 0 && (p == 0 ? (_exit(slurp_all("/proc/self/maps", mb, sizeof mb, 4096) > 0
+               && maps_at(mb, (unsigned long)mv, &e, &off, &ino, nm, sizeof nm) && !strcmp(nm, fp) ? 0 : 1), 0) :
+               (waitpid(p, &st, 0) == p && WIFEXITED(st) && WEXITSTATUS(st) == 0)));
+        if (mv == dst) munmap(mv, 4096);
+        /* Forty mappings of the file's first page, each a line of its own:
+           more than one read of 4 KiB holds, so it comes in pieces. */
+        char *many[40];
+        int nmany = 0;
+        fd = open(fp, O_RDONLY);
+        while (fd >= 0 && nmany < 40 && (many[nmany] = mmap(NULL, 4096, PROT_READ, MAP_PRIVATE, fd, 0)) != MAP_FAILED)
+            nmany++;
+        if (fd >= 0) close(fd);
+        EXPECT("maps longer than 4 KiB reads whole, in pieces", ({ int n = nmany == 40 ? slurp_all("/proc/self/maps", mb, sizeof mb, 1000) : 0, all = n > 4096 && n > 13 && !strcmp(mb + n - 8, "[stack]\n");
+               for (int i = 0; all && i < nmany; i++) all = maps_at(mb, (unsigned long)many[i], &e, &off, &ino, nm, sizeof nm) && off == 0 && !strcmp(nm, fp);
+               all; }));
+        for (int i = 0; i < nmany; i++) munmap(many[i], 4096);
+        unlink(fp);
     }
     EXPECT("auxv carries AT_HWCAP and AT_HWCAP2 (a C library's ifuncs read them before it has a thread pointer), AT_PAGESZ, and ends in AT_NULL", ({
            unsigned long av[64]; ssize_t n = slurp("/proc/self/auxv", (char *)av, sizeof av);

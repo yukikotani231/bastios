@@ -215,6 +215,7 @@ fn fork_into(k: &mut Kernel, mmu: &Mmu, pid: u64, c: u64, t: PageTable, fpu: Fra
   }
   lx_fd_fork(&mut k, pid, c);
   map_fork(&mut k, pid, c);
+  fn_fork(&mut k, pid, c);
   hole_fork(&mut k, pid, c);
   anon_fork(&mut k, pid, c);
   lazy_fork(&mut k, pid, c);
@@ -350,6 +351,7 @@ fn lx_execve(k: &mut Kernel, mmu: &Mmu, pid: u64, dirfd: u64, path: u64, argv: u
   anon_clear(&mut k, pid);
   swap_drop_all(&mut k, tgid(k.procs, pid));   // its swapped pages went with the old space
   lazy_set(&mut k, pid, src, hold, rn);   // map_drop_all dropped the old record
+  fn_exec(&mut k, pid, src, isrc, rn);      // and the old names: these are the new program's (src/lxfname.bastio)
   shm_drop_all(&mut k, pid);
   lx_fd_close_all(&mut k, pid, true);
   sig_reset(&mut k.sigact, pid, true);

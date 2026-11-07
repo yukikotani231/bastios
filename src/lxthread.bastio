@@ -234,8 +234,8 @@ fn group_move(k: &mut Kernel, mmu: &Mmu, h: u64, p: u64) -> bool
     swap_words(&mut k.sigact, h * SIGACT_ROW, p * SIGACT_ROW, SIGACT_ROW);
   }
   swap_words(&mut k.alarms, h * 2, p * 2, 2);
-  if (h + 1) * MAP_N * MAP_W <= len(k.maps) && (p + 1) * MAP_N * MAP_W <= len(k.maps) {
-    swap_words(&mut k.maps, h * MAP_N * MAP_W, p * MAP_N * MAP_W, MAP_N * MAP_W);
+  if (h + 1) * MP_ROW <= len(k.maps) && (p + 1) * MP_ROW <= len(k.maps) {
+    swap_words(&mut k.maps, h * MP_ROW, p * MP_ROW, MP_ROW);
   }
   swap_words(&mut k.holes, h * HOLE_N * 2, p * HOLE_N * 2, HOLE_N * 2);
   swap_words(&mut k.lazy, h * LZ_W, p * LZ_W, LZ_W);
@@ -420,6 +420,7 @@ fn lx_thread_clone(k: &mut Kernel, pid: u64, flags: u64, stack: u64, ptid: u64, 
   hole_clear(&mut k, c);                    // the group's holes stay with its holder
   anon_clear(&mut k, c);
   lazy_clear(&mut k, c);
+  fn_clear(&mut k, c);
   let fp = find_free(&mut k.mem);
   if fp >= NPAGES {
     return ENOMEM;

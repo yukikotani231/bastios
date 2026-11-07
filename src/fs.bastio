@@ -31,8 +31,8 @@ const NFD: u64 = 64;                  // rows a process's native calls and the k
 const FD_POOL: u64 = 4096;            // rows first in the table, for the files Linux descriptors name: any process may take any (OFD_N)
 const FD_ROWS: u64 = 69632;           // FD_POOL + NPROC * NFD
 const FD_STRIDE: u64 = 4;
-const HOLD_N: u64 = 512;              // holds (vfs_hold), in their own table
-const HOLD_LEN: u64 = 2048;           // HOLD_N * FD_STRIDE
+const HOLD_N: u64 = 2048;             // holds (vfs_hold), in their own table
+const HOLD_LEN: u64 = 8192;           // HOLD_N * FD_STRIDE
 const FTAB_LEN: u64 = FD_ROWS * FD_STRIDE;   // the most the table grows to (new_pid, src/proc.bastio)
 const FTAB_START: u64 = 24576;        // what it starts with: the pool and 32 processes' rows ((FD_POOL + PGROW * NFD) * FD_STRIDE)
 const ZEROS: u64 = 160;                // the longest lx_fill
@@ -707,6 +707,39 @@ fn vfs_hold_dup(v: &mut Vfs, i: u64)
       v.holds = set(v.holds, at, get(v.holds, at) + 1);
     }
   }
+}
+
+/// A reference on file handle h like vfs_hold's, from the hold that is
+/// already on h if there is one (vfs_hold_dup), so that the files many
+/// processes map (a shared library) take one hold each. HOLD_N if h is no
+/// such file or every hold is taken.
+fn vfs_hold_share(v: &mut Vfs, h: u64) -> u64
+  requires vfs_ok(v)
+  ensures vfs_ok(v) && result <= HOLD_N
+{
+  let mut fs = 0;
+  let mut node = 0;
+  if h < NFILES {
+    fs = FS_RAM;
+    node = h;
+  } else if h < NFILES + DSLOTS {
+    fs = FS_DISK;
+    node = h - NFILES;
+  } else {
+    return HOLD_N;
+  }
+  let mut i = 0;
+  while i < HOLD_N
+    invariant i <= HOLD_N && vfs_ok(v)
+  {
+    if get(v.holds, i * FD_STRIDE + FD_FS) == fs && get(v.holds, i * FD_STRIDE + FD_NODE) == node
+      && get(v.holds, i * FD_STRIDE + FD_OFF) != 0 && get(v.holds, i * FD_STRIDE + FD_OFF) < 4294967296 {
+      vfs_hold_dup(&mut v, i);
+      return i;
+    }
+    i = i + 1;
+  }
+  return vfs_hold(&mut v, h);
 }
 
 /// The file handle hold i is on, or NO_FILE.
