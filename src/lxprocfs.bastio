@@ -140,6 +140,8 @@ const SY_MEM: u64 = SY_TOPO + TOPO_N;  // after the topology files: file f at 0 
 const NET_A: u64 = 8;                  // the files of an interface in /sys/class/net/NAME: address, operstate, mtu, carrier, ifindex, type, flags, tx_queue_len
 const NET_N: u64 = 16;                 // lo and eth0, NET_A files each
 const SY_NET: u64 = SY_MEM + MEM_N;    // after the memory files: file a of lo at a, of eth0 at NET_A + a
+const RTC_A: u64 = 5;                  // the files of /sys/class/rtc/rtc0: name, date, time, since_epoch, max_user_freq
+const SY_RTC: u64 = SY_NET + NET_N;    // after the interface files: file a at a
 const PROC_OUT: u64 = 4096;           // XFER: the most a /proc file holds
 const S_IFLNK: u64 = 0xA1FF;          // a symbolic link, rwxrwxrwx
 const S_IFREG_RO: u64 = 0x8124;       // a regular file, r--r--r--
@@ -495,6 +497,10 @@ fn proc_file(procs: &Buf, x: &Bytes, n: u64) -> u64
   let mf = mem_sys_at(x, n);
   if mf != 0 {
     return PROC_DEV + PSYS + SY_MEM + mf - 1;      // a memory block's file
+  }
+  let rf = rtc_sys_at(x, n);
+  if rf != 0 {
+    return PROC_DEV + PSYS + SY_RTC + rf - 1;      // the clock's file
   }
   let nf = net_sys_at(x, n);
   if nf != 0 {
@@ -1163,6 +1169,96 @@ fn net_sys_text(k: &Kernel, pid: u64, t: u64, o: &mut Bytes) -> u64
   return put_s(&mut o, 0, "1000\n");
 }
 
+/// The /sys/class/rtc/rtc0 file the n-byte path in x names: its index + 1, or 0.
+fn rtc_sys_at(x: &Bytes, n: u64) -> u64
+  requires n <= blen(x)
+  ensures result <= RTC_A
+{
+  if n < 22 || !xfer_is(x, 0, 19, "sys/class/rtc/rtc0/") {
+    return 0;
+  }
+  if xfer_is(x, 19, n, "name") {
+    return 1;
+  }
+  if xfer_is(x, 19, n, "date") {
+    return 2;
+  }
+  if xfer_is(x, 19, n, "time") {
+    return 3;
+  }
+  if xfer_is(x, 19, n, "since_epoch") {
+    return 4;
+  }
+  if xfer_is(x, 19, n, "max_user_freq") {
+    return 5;
+  }
+  return 0;
+}
+
+/// Appends v as exactly w decimal digits (w at most 4), low digits kept.
+fn put_dd(o: &mut Bytes, at: u64, v: u64, w: u64) -> u64
+  requires blen(o) == PROC_OUT && at <= PROC_OUT && w <= 4
+  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  let mut a = at;
+  let mut i = w;
+  while i > 0
+    invariant i <= 4 && a <= PROC_OUT && blen(o) == PROC_OUT
+  {
+    i = i - 1;
+    let mut d = v;
+    let mut s = 0;
+    while s < i
+      invariant s <= i && i <= 3
+    {
+      d = d / 10;
+      s = s + 1;
+    }
+    a = put_c(&mut o, a, cast[u8](48 + d % 10));
+  }
+  return a;
+}
+
+/// The text of /sys/class/rtc/rtc0 file t (see RTC_A): the clock's name,
+/// its date and time in UTC and the seconds since the epoch, as hwclock-less
+/// scripts read them. Empty when there is no clock or it says nothing
+/// sensible (RTC_RD_TIME's EINVAL).
+fn rtc_sys_text(k: &mut Kernel, t: u64, o: &mut Bytes) -> u64
+  requires kok(k) && t < RTC_A && blen(o) == PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+{
+  if t == 0 {
+    return put_s(&mut o, 0, "rtc_cmos rtc_cmos\n");
+  }
+  if t == 4 {
+    return put_s(&mut o, 0, "64\n");
+  }
+  let s = hw_get(&mut k.hwc);
+  let days = s / 86400;
+  let rest = s % 86400;
+  if s == 0 || days < 10957 || days > 47500 {
+    return 0;
+  }
+  let c = civil_from_days(days);
+  if t == 1 {
+    let mut a = put_dd(&mut o, 0, c.year, 4);
+    a = put_c(&mut o, a, 45);
+    a = put_dd(&mut o, a, c.month, 2);
+    a = put_c(&mut o, a, 45);
+    a = put_dd(&mut o, a, c.day, 2);
+    return put_c(&mut o, a, 10);
+  }
+  if t == 2 {
+    let mut a = put_dd(&mut o, 0, rest / 3600, 2);
+    a = put_c(&mut o, a, 58);
+    a = put_dd(&mut o, a, rest / 60 % 60, 2);
+    a = put_c(&mut o, a, 58);
+    a = put_dd(&mut o, a, rest % 60, 2);
+    return put_c(&mut o, a, 10);
+  }
+  return put_c(&mut o, put_n(&mut o, 0, s), 10);
+}
+
 /// Makes /sys/class/net/lo and /sys/class/net/eth0, whose files
 /// (net_sys_text) say what ip link shows for them.
 fn net_sysfs(k: &mut Kernel)
@@ -1173,6 +1269,8 @@ fn net_sysfs(k: &mut Kernel)
   make_dir(&mut k.fs, "sys/class/net");
   make_dir(&mut k.fs, "sys/class/net/lo");
   make_dir(&mut k.fs, "sys/class/net/eth0");
+  make_dir(&mut k.fs, "sys/class/rtc");
+  make_dir(&mut k.fs, "sys/class/rtc/rtc0");
 }
 
 /// The /sys/devices/system/memory file the n-byte path in x names: its
@@ -3016,6 +3114,9 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     }
     if what >= SY_MEM && what - SY_MEM < MEM_N {
       return mem_text(k, what - SY_MEM, &mut o);
+    }
+    if what >= SY_RTC && what - SY_RTC < RTC_A {
+      return rtc_sys_text(&mut k, what - SY_RTC, &mut o);
     }
     if what >= SY_NET && what - SY_NET < NET_N {
       return net_sys_text(k, pid, what - SY_NET, &mut o);
