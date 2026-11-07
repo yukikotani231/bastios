@@ -73,7 +73,33 @@ static void *fast_thread(void *a) {
 }
 static void *cow_thread(void *a) { cow_buf[4096 * 3] = 7; return a; }
 
+/* Run in a fresh program (T_MEM_VA set), so no hole the other checks left
+ * is chosen first: two address hints far below the mmap area leave two
+ * gaps, the lower one in the earlier slot; a mapping made without an
+ * address must still go into the higher one, next to the others, as
+ * Linux's top-down search puts it. (Taking the first gap put Firefox's
+ * mappings terabytes apart, and scudo's 32-bit primary, which keeps
+ * one map over the span between its lowest and highest region, then
+ * built release buffers of hundreds of megabytes.) Exits 0 if so. */
+static int va_compact(void) {
+    const size_t pg = 4096, far = (size_t)64 << 30;
+    char *m = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    char *u = mmap(0, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (m == MAP_FAILED || u == MAP_FAILED || u > m) return 2;
+    munmap(m, 2 * pg);                                     /* a hole above u */
+    char *h1 = mmap(u - far, pg, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (h1 != u - far) return 3;                           /* the hint is free: taken */
+    char *r = mmap(0, 2 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r == MAP_FAILED || r < u) return 4;                /* the hole above u fits it */
+    char *h2 = mmap(h1 - far, pg, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (h2 != h1 - far) return 5;
+    char *t = mmap(0, pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (t == MAP_FAILED) return 6;
+    return t < u && u - t < (1l << 30) ? 0 : 7;            /* under u, not under h1 */
+}
+
 int main(void) {
+    if (getenv("T_MEM_VA")) return va_compact();
     setup();
     char *p = MAP_FAILED, *q = MAP_FAILED;
     int fd = -1, st;
@@ -624,6 +650,18 @@ int main(void) {
            if (c != MAP_FAILED) munmap(c, 4096);
            if (a != MAP_FAILED) munmap(a, 64 << 20);
            if (b != MAP_FAILED) munmap(b, 64 << 20);
+           ok; }));
+    EXPECT("mmap without an address takes the highest free gap after hints far below, as on Linux", ({
+           int ok = 0;
+           pid_t c = fork();
+           if (c == 0) {
+               char *av[] = { "t_mem", 0 }, *ev[] = { "T_MEM_VA=1", 0 };
+               execve("/proc/self/exe", av, ev);
+               _exit(9);
+           }
+           int ws;
+           if (c > 0 && waitpid(c, &ws, 0) == c) ok = WIFEXITED(ws) && WEXITSTATUS(ws) == 0;
+           if (!ok && c > 0) printf("  (child status %d)\n", WIFEXITED(ws) ? WEXITSTATUS(ws) : -1);
            ok; }));
     /* Firefox places its read-only shared memory as follows: it reserves
        16 GiB, unmaps it, maps the memfd read-write in the middle of that
