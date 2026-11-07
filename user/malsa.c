@@ -29,6 +29,7 @@
 #define PCM_START      0x4142u
 #define PCM_PREPARE    0x4140u
 #define PCM_DRAIN      0x4144u
+#define PCM_DROP       0x4143u
 #define PCM_WRITEI     0x40184150u
 #define CTL_PVERSION   0x80045500u
 #define CTL_CARD_INFO  0x81785501u
@@ -127,6 +128,85 @@ static int setup(int fd, uint32_t access)
         printf("malsa: prepare: errno %d\n", errno);
         return -1;
     }
+    return 0;
+}
+
+
+#define PCM_READI      0x80184151u
+
+/* Records 4800 frames (a tenth of a second) of 48 kHz stereo S16_LE through
+ * /dev/snd/pcmC0D0c the way arecord -D hw does: negotiates, prepares,
+ * starts and reads. Returns 0 (also without an input: ENODEV), or 1. */
+static int capture(void)
+{
+    int fd = open("/dev/snd/pcmC0D0c", O_RDWR | O_NONBLOCK);
+    if (fd < 0 && errno == ENODEV)
+        return 0;
+    if (fd < 0) {
+        printf("malsa: open pcmC0D0c: errno %d\n", errno);
+        return 1;
+    }
+    fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) & ~O_NONBLOCK);
+    char pinfo[288];
+    memset(pinfo, 0, sizeof pinfo);
+    if (ioctl(fd, PCM_INFO, pinfo) != 0 || *(uint32_t *)(pinfo + 8) != 1) {
+        printf("malsa: capture info: errno %d\n", errno);
+        return 1;
+    }
+    struct hw_params hw;
+    any(&hw);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0 || hw.intervals[RATE].min != 48000 || hw.intervals[CH].min != 2) {
+        printf("malsa: capture refine: errno %d, rate %u..%u\n", errno, hw.intervals[RATE].min, hw.intervals[RATE].max);
+        return 1;
+    }
+    memset(&hw.masks[0], 0, sizeof hw.masks[0]);
+    hw.masks[0].bits[0] = 1u << 3;
+    memset(&hw.masks[1], 0, sizeof hw.masks[1]);
+    hw.masks[1].bits[0] = 1u << 2;
+    fix(&hw, CH, 2);
+    fix(&hw, RATE, 48000);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
+        printf("malsa: capture refine to 48 kHz stereo: errno %d\n", errno);
+        return 1;
+    }
+    fix(&hw, PTIME, 21312);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
+        printf("malsa: capture period time: errno %d\n", errno);
+        return 1;
+    }
+    fix(&hw, BTIME, 85250);
+    if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
+        printf("malsa: capture buffer time: errno %d\n", errno);
+        return 1;
+    }
+    if (ioctl(fd, PCM_HW_PARAMS, &hw) != 0) {
+        printf("malsa: capture hw_params: errno %d\n", errno);
+        return 1;
+    }
+    unsigned long sw[17];
+    memset(sw, 0, sizeof sw);
+    sw[2] = 1200;
+    sw[4] = 1;
+    if (ioctl(fd, PCM_SW_PARAMS, sw) != 0 || ioctl(fd, PCM_PREPARE, 0) != 0 || ioctl(fd, PCM_START, 0) != 0) {
+        printf("malsa: capture start: errno %d\n", errno);
+        return 1;
+    }
+    static short buf[4800 * 2];
+    size_t got = 0;
+    while (got < 4800) {
+        struct xferi x = {0, buf + got * 2, 4800 - got};
+        if (ioctl(fd, PCM_READI, &x) != 0 || x.result <= 0) {
+            printf("malsa: readi: errno %d, result %ld\n", errno, x.result);
+            return 1;
+        }
+        got += x.result;
+    }
+    if (ioctl(fd, PCM_DROP, 0) != 0) {
+        printf("malsa: capture drop: errno %d\n", errno);
+        return 1;
+    }
+    close(fd);
+    printf("malsa: captured %zu frames\n", got);
     return 0;
 }
 
@@ -298,6 +378,8 @@ int main(int argc, char **argv)
 done:
     close(fd);
     close(ctl);
+    if (capture() != 0)
+        return 1;
     usleep(300000);
     printf("malsa: ok, %zu frames\n", frames);
     return 0;

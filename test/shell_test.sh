@@ -2750,6 +2750,26 @@ good = code == 0 and booted and off and booted[-1] == off.group(1)
 print(("ok  " if good else "FAIL"), f"(sound) every page back at power off (status {code})")
 fails += not good
 
+# Recording (src/hda.bastio, src/lxalsac.bastio): a codec with an input
+# (hda-duplex; QEMU's wav back end has none, so its audio back end is "none",
+# which records silence). mrec reads half a second from /dev/dsp, malsa
+# records 4800 frames through /dev/snd/pcmC0D0c after its playback.
+def record():
+    global out
+    for cmd in (b"mrec\r", b"malsa\r"):
+        mark = len(out)
+        qemu.stdin.write(cmd); qemu.stdin.flush()
+        read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M", "-audiodev", "none,id=snd0",
+                        "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0"], "record", 0, between=record)
+text = out.decode(errors="replace").replace("\r", "")
+good = ok and "mrec: ok, 96000 bytes" in text
+print(("ok  " if good else "FAIL"), "(record) mrec records half a second from /dev/dsp")
+fails += not good
+good = ok and "malsa: captured 4800 frames" in text and "malsa: ok, 24000 frames" in text
+print(("ok  " if good else "FAIL"), "(record) malsa records 4800 frames through pcmC0D0c")
+fails += not good
+
 # ALSA (src/lxalsa.bastio): malsa makes the ioctls alsa-lib's hw plugin
 # makes and plays half a second of a 1 kHz square wave as mono 24 kHz
 # S16_LE through /dev/snd/pcmC0D0p, with writei and then again through

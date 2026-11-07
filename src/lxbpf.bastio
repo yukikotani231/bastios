@@ -429,6 +429,9 @@ fn dv_num(d: u64) -> DvNum
   if d == DEV_PCM {
     return DvNum { ty: DVT_CHAR, major: 116, minor: 16 };
   }
+  if d == DEV_PCMC {
+    return DvNum { ty: DVT_CHAR, major: 116, minor: 24 };
+  }
   if d == DEV_TIMER {
     return DvNum { ty: DVT_CHAR, major: 116, minor: 33 };
   }

@@ -333,7 +333,7 @@ class Guest:
         # idle: QEMU runs under SCHED_IDLE, on CPU time no other process wants.
         self.kernel, self.disk, self.log, self.idle, self.arch, self.mem = kernel, disk, log, idle, arch, mem
         self.q = None
-        self.sound = sound              # an HD Audio card whose output is discarded
+        self.sound = sound              # an HD Audio card whose output is discarded and whose input is silent
         self.hosturl = f"http://10.0.2.2:{web.port}" if web else ""
         self.hostaddr = f"10.0.2.2 {web.port}" if web else ""
         self.hostport = f"{web.port}" if web else ""
@@ -384,7 +384,7 @@ class Guest:
                    "-drive", f"file={self.disk},format=raw,if=none,id=vd", "-device", "virtio-blk-pci,drive=vd",
                    "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.sshport}-:22", "-device", "virtio-net-pci,netdev=n0"]
             if self.sound:
-                cmd += ["-audiodev", "none,id=snd0", "-device", "intel-hda", "-device", "hda-output,audiodev=snd0"]
+                cmd += ["-audiodev", "none,id=snd0", "-device", "intel-hda", "-device", "hda-duplex,audiodev=snd0"]
         self.q = subprocess.Popen(
             cmd,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

@@ -132,6 +132,9 @@ fn prog_image(i: u64) -> Str {
   if i == 42 {
     return include_bytes("../../../build/user/malsa.elf");
   }
+  if i == 43 {
+    return include_bytes("../../../build/user/mrec.elf");
+  }
   return include_bytes("../../../build/user/fault.bin");
 }
 
