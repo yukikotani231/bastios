@@ -33,6 +33,10 @@ fn snd_free(s: Snd, m: &mut Mem)
 {
 }
 
+fn snd_queued(s: &Snd) -> u64 {
+  return 0;
+}
+
 /// Bytes a write could queue now.
 fn snd_room(s: &Snd) -> u64
   requires snd_ok(s)

@@ -147,6 +147,12 @@ if read_until(b"bastios> ", mark) and b"mtone: no sound card (ENODEV)" in out[ma
     print("ok   no sound card: /dev/dsp says ENODEV")
 else:
     print("FAIL no sound card: mtone"); fails += 1
+mark = len(out)
+qemu.stdin.write(b"malsa\r"); qemu.stdin.flush()
+if read_until(b"bastios> ", mark) and b"malsa: no sound card (ENODEV)" in out[mark:]:
+    print("ok   no sound card: /dev/snd says ENODEV")
+else:
+    print("FAIL no sound card: malsa"); fails += 1
 # A sleeping process does not run (wait_asleep): two seconds of BusyBox's
 # sleep cost QEMU well under a second of host CPU. Before, nanosleep ran
 # again on every pass and took the whole two seconds.
@@ -2737,6 +2743,41 @@ booted = re.findall(r"BastiOS 0.2: (\d+) pages of memory", text)
 off = re.search(r"BastiOS: (\d+) pages free at power off", text)
 good = code == 0 and booted and off and booted[-1] == off.group(1)
 print(("ok  " if good else "FAIL"), f"(sound) every page back at power off (status {code})")
+fails += not good
+
+# ALSA (src/lxalsa.bastio): malsa makes the ioctls alsa-lib's hw plugin
+# makes and plays half a second of a 1 kHz square wave as mono 24 kHz
+# S16_LE through /dev/snd/pcmC0D0p; the card must play it as the same
+# 500 periods of 24 frames up and 24 down at 48 kHz.
+wav2 = os.path.join(disk_dir.name, "alsa.wav")
+def play_alsa():
+    global out
+    mark = len(out)
+    qemu.stdin.write(b"malsa\r"); qemu.stdin.flush()
+    read_until(b"bastios> ", mark)
+ok, code = report_boot(["-machine", "pc", "-m", "64M",
+                        "-audiodev", f"wav,id=snd0,path={wav2},out.frequency=48000,out.channels=2,out.format=s16",
+                        "-device", "intel-hda", "-device", "hda-output,audiodev=snd0"], "alsa", 0, between=play_alsa)
+text = out.decode(errors="replace").replace("\r", "")
+good = ok and "malsa: ok, 12000 frames" in text
+print(("ok  " if good else "FAIL"), "(alsa) malsa negotiates the parameters, writes and drains")
+fails += not good
+runs = []
+try:
+    w = wave.open(wav2)
+    frames = w.readframes(w.getnframes())
+    left = [int.from_bytes(frames[i:i + 2], "little", signed=True) for i in range(0, len(frames), 4)]
+    loud = [i for i, v in enumerate(left) if v != 0]
+    if loud:
+        for v in left[loud[0]:loud[-1] + 1]:
+            if runs and runs[-1][0] == v:
+                runs[-1][1] += 1
+            else:
+                runs.append([v, 1])
+except (OSError, EOFError, wave.Error):
+    pass
+good = len(runs) == 1000 and all(n == 24 and v == (8000 if i % 2 == 0 else -8000) for i, (v, n) in enumerate(runs))
+print(("ok  " if good else "FAIL"), f"(alsa) QEMU played the mono 24 kHz wave as 48 kHz stereo ({len(runs)} half periods)")
 fails += not good
 
 # The PS/2 mouse (src/kbd.bastio, src/lxmouse.bastio): QEMU's monitor
