@@ -159,6 +159,8 @@ static void notice_expire(long long now)
 }
 static struct win *focus(void);
 static int menu_open;                    /* the launcher menu is showing */
+static int bar_again;                    /* the notice changed while bwm waited: draw the task bar again */
+static struct win *wm_win;               /* the window the window menu is for; NULL when it is not showing */
 static int menu_mx, menu_my;             /* the pointer, for the entry that is lit */
 static int run_on;                       /* the Alt-F2 prompt is showing in the task bar */
 static char run_buf[160];                /* what has been typed in it */
@@ -329,6 +331,8 @@ static void win_free(struct win *w)
     w->shm = NULL;
     if (sizing == w)
         sizing = NULL;
+    if (wm_win == w)
+        wm_win = NULL;
     w->used = 0;
     touch_bar();
 }
@@ -655,6 +659,61 @@ static void draw_menu(void)
         int y = MENU_Y0 + i * MENU_ITEM_H;
         fill(scene, MENU_X0, y, MENU_X0 + MENU_ITEM_W, y + MENU_ITEM_H, i == lit ? rgb(40, 90, 200) : rgb(45, 45, 60));
         text(scene, MENU_X0 + 10, y + 4, menu_label[i], rgb(255, 255, 255));
+    }
+}
+
+/* The window menu: a right click on a title bar offers Maximize or Restore, Minimize, the two halves of the screen, and Close. */
+enum { WM_MAX, WM_MIN, WM_LEFT, WM_RIGHT, WM_CLOSE };
+static int wm_n, wm_x0, wm_y0, wm_sel, wm_mx, wm_my;
+static unsigned char wm_act[5];
+
+static const char *wm_label(int act, const struct win *w)
+{
+    switch (act) {
+    case WM_MAX: return w->maxed ? "Restore" : "Maximize";
+    case WM_MIN: return "Minimize";
+    case WM_LEFT: return "Snap left";
+    case WM_RIGHT: return "Snap right";
+    default: return "Close";
+    }
+}
+
+static void wm_show(struct win *w, int x, int y)
+{
+    wm_n = 0;
+    if (w->resizable)
+        wm_act[wm_n++] = WM_MAX;
+    wm_act[wm_n++] = WM_MIN;
+    if (w->resizable) {
+        wm_act[wm_n++] = WM_LEFT;
+        wm_act[wm_n++] = WM_RIGHT;
+    }
+    wm_act[wm_n++] = WM_CLOSE;
+    wm_win = w;
+    wm_x0 = x + MENU_ITEM_W > (int)W ? (int)W - MENU_ITEM_W : x;
+    wm_y0 = y + wm_n * MENU_ITEM_H > (int)H - BAR_H ? (int)H - BAR_H - wm_n * MENU_ITEM_H : y;
+    wm_sel = -1;
+    wm_mx = x;
+    wm_my = y;
+}
+
+static int wm_at(int x, int y)
+{
+    if (!wm_win || x < wm_x0 || x >= wm_x0 + MENU_ITEM_W || y < wm_y0 || y >= wm_y0 + wm_n * MENU_ITEM_H)
+        return -1;
+    return (y - wm_y0) / MENU_ITEM_H;
+}
+
+static void draw_wmenu(void)
+{
+    if (!wm_win)
+        return;
+    int lit = wm_sel >= 0 ? wm_sel : wm_at(wm_mx, wm_my);
+    fill(scene, wm_x0 - 1, wm_y0 - 1, wm_x0 + MENU_ITEM_W + 1, wm_y0 + wm_n * MENU_ITEM_H + 1, rgb(200, 200, 210));
+    for (int i = 0; i < wm_n; i++) {
+        int y = wm_y0 + i * MENU_ITEM_H;
+        fill(scene, wm_x0, y, wm_x0 + MENU_ITEM_W, y + MENU_ITEM_H, i == lit ? rgb(40, 90, 200) : rgb(45, 45, 60));
+        text(scene, wm_x0 + 10, y + 4, wm_label(wm_act[i], wm_win), rgb(255, 255, 255));
     }
 }
 
@@ -997,6 +1056,7 @@ static void draw_scene(int x0, int y0, int x1, int y1)
             draw_win(z[i], z[i] == focus());
     draw_bar();
     draw_menu();
+    draw_wmenu();
     draw_calendar();
     draw_switcher();
     draw_lock();
@@ -1754,6 +1814,35 @@ static void snap_quarter(struct win *w, int right, int bottom)
     touch_win(w);
 }
 
+/* Does what entry IT of the window menu says, to the window it was opened for. */
+static void wm_do(int it)
+{
+    struct win *w = wm_win;
+    wm_win = NULL;
+    if (!w || !w->used || it < 0 || it >= wm_n)
+        return;
+    switch (wm_act[it]) {
+    case WM_MAX:
+        raise_win(w);
+        toggle_max(w);
+        break;
+    case WM_MIN:
+        minimize(w);
+        break;
+    case WM_LEFT:
+        raise_win(w);
+        snap_win(w, -1);
+        break;
+    case WM_RIGHT:
+        raise_win(w);
+        snap_win(w, 1);
+        break;
+    default:
+        close_win(w);
+        break;
+    }
+}
+
 /* Starts /bin/IMAGE with argv[0] NAME (bfiles is bterm run under that name). */
 static void launch_program(const char *name, const char *image)
 {
@@ -2430,7 +2519,7 @@ int main(int argc, char **argv)
                 wait = d < 0 ? 0 : (int)d;
             if (d <= 0) {
                 notice_expire(now_ms());
-                touch_bar();
+                bar_again = 1;                                /* (touched below: the rectangle is cleared after the poll) */
             }
         }
         if (grab_outside(buttons, my)) {
@@ -2455,6 +2544,10 @@ int main(int argc, char **argv)
         }
         int ox = mx, oy = my;
         dx0 = W; dy0 = H; dx1 = 0; dy1 = 0;
+        if (bar_again) {                                      /* a notice went or changed before the poll: the bar shows the new one */
+            touch_bar();
+            bar_again = 0;
+        }
         kb_poll();
         {                                                     /* a program posts a notice by writing a line to /tmp/bwm.notice (echo TEXT > /tmp/bwm.notice) */
             static long long notice_chk;
@@ -2696,6 +2789,15 @@ int main(int argc, char **argv)
                     } else if (code == 46 && down && k_alt) {      /* Alt-C: the calendar */
                         cal_on = !cal_on;
                         touch_all();
+                    } else if (wm_win && down) {                   /* the window menu takes the keys: Up and Down move, Enter chooses, anything else closes it */
+                        if (code == 103 || code == 108) {
+                            wm_sel = wm_sel < 0 ? (code == 108 ? 0 : wm_n - 1) : (wm_sel + wm_n + (code == 108 ? 1 : -1)) % wm_n;
+                        } else if ((code == 28 || code == 96) && wm_sel >= 0) {
+                            wm_do(wm_sel);
+                        } else if (code != 42 && code != 54 && code != 29 && code != 97 && code != 56 && code != 100) {
+                            wm_win = NULL;               /* (the modifier keys leave it open) */
+                        }
+                        touch_all();
                     } else if (menu_open && down) {                /* the open menu takes the keys: Up and Down move, Enter chooses, Esc closes */
                         int it = menu_sel;
                         if (code == 103 || code == 108) {
@@ -2897,6 +2999,17 @@ int main(int argc, char **argv)
                     menu_mx = mx; menu_my = my;
                     menu_sel = -1;
                 }
+                if (wm_win && (dx || dy)) {
+                    touch(wm_x0 - 1, wm_y0 - 1, wm_x0 + MENU_ITEM_W + 1, wm_y0 + wm_n * MENU_ITEM_H + 1);
+                    wm_mx = mx; wm_my = my;
+                    wm_sel = -1;
+                }
+                if (wm_win && ((down && !(buttons & 1)) || ((m[0] & 2) && !(buttons & 2)))) {
+                    wm_do(wm_at(mx, my));                /* a click chooses an entry or, anywhere else, closes the menu */
+                    touch_all();
+                    buttons = m[0];
+                    continue;
+                }
                 if (down && !(buttons & 1) && menu_open) {
                     int it = menu_at(mx, my);            /* a click chooses an entry or, anywhere else, closes the menu */
                     menu_open = 0;
@@ -2915,7 +3028,11 @@ int main(int argc, char **argv)
                 }
                 if (wheel && in_bar && !menu_open && !run_on)
                     cycle_windows(wheel < 0);            /* the wheel over the task bar goes through the windows */
-                if ((m[0] & 2) && !(buttons & 2) && !in_bar && !under && !menu_open) {
+                if ((m[0] & 2) && !(buttons & 2) && !in_bar && under && my < under->y + TITLE_H && !menu_open && !ralt_on && !k_alt) {
+                    raise_win(under);                    /* a right click on a title bar opens the window menu there */
+                    wm_show(under, mx, my);
+                    touch_all();
+                } else if ((m[0] & 2) && !(buttons & 2) && !in_bar && !under && !menu_open) {
                     menu_show(mx, my);                   /* a right click on the desktop opens the menu there */
                     menu_mx = mx; menu_my = my;
                     touch_all();
