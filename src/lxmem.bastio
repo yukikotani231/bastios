@@ -1269,12 +1269,27 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
     return EINVAL;
   }
   if r == 18446744073709551615 {
+    // The stack (one mapping on Linux, which grows down): a call that
+    // keeps its pages where they are is answered, as a program may ask
+    // so whether an address is mapped. Anything else is not supported.
+    if fl / MREMAP_FIXED % 2 == 0 && addr >= USER_BASE && (addr - USER_BASE) / 4096 >= STACK_FIRST
+      && (addr - USER_BASE) / 4096 < WPAGES && (oldn + 4095) / 4096 == (newn + 4095) / 4096
+      && (oldn + 4095) / 4096 <= WPAGES - (addr - USER_BASE) / 4096 {
+      return addr;
+    }
     return EFAULT;                          // not all in the mappable part of the window
   }
   // No mapping at addr (Linux finds no VMA there): EFAULT.
   let f0 = r / 4294967296;
   let e0 = r % 4294967296;
-  if anon_count(&mut k, pid, f0, e0) != e0 - f0 {
+  let held = anon_count(&mut k, pid, f0, e0);
+  if held != e0 - f0 {
+    // A PROT_NONE reservation has no pages and no record: it is the
+    // space in the mmap area that no hole holds. It moves (or shrinks)
+    // as address space only, so it stays inaccessible.
+    if held == 0 && fl < 2 && remap_reservable(&mut k, pid, f0, e0) {
+      return remap_reserved(&mut k, pid, f0, e0, (newn + 4095) / 4096, fl == 1);
+    }
     return EFAULT;
   }
   if fl / MREMAP_FIXED % 2 == 1 {
@@ -1376,6 +1391,55 @@ fn lx_mremap(k: &mut Kernel, pid: u64, addr: u64, oldn: u64, newn: u64, flags: u
   if from >= low / 4096 {
     hole_add(&mut k, pid, from, oend);      // where the pages were
   }
+  return USER_BASE + at * 4096;
+}
+
+/// Whether window pages first .. end of process pid can be a PROT_NONE
+/// reservation: in the mmap area, in no hole, with nothing there.
+fn remap_reservable(k: &mut Kernel, pid: u64, first: u64, end: u64) -> bool
+  requires kok(k) && pid < NPROC && first < end && end <= STACK_FIRST
+  ensures kok(k)
+{
+  let low = pget(k.procs, pid, F_MMAP);
+  if low > STACK_FIRST * 4096 || first < low / 4096 || hole_touch(k, pid, first, end) {
+    return false;
+  }
+  return !span_used(&mut k, pid, first, end);
+}
+
+/// mremap of a reservation (remap_reservable), pages first .. end, to
+/// `want` pages: the tail it gives up becomes a hole; a larger one, if it
+/// may move, takes space as mmap does (a hole, else below the mmap area)
+/// and gives the old range back as a hole. No page is mapped either way.
+fn remap_reserved(k: &mut Kernel, pid: u64, first: u64, end: u64, want: u64, may_move: bool) -> u64
+  requires kok(k) && pid < NPROC && first < end && end <= STACK_FIRST
+  ensures kok(k)
+  ensures lx_user_addr_or_errno(result)
+{
+  let have = end - first;
+  if want <= have {
+    if want < have {
+      hole_add(&mut k, pid, first + want, end);
+    }
+    return USER_BASE + first * 4096;
+  }
+  if !may_move || want > STACK_FIRST {
+    return ENOMEM;
+  }
+  let mut at = hole_take(&mut k, pid, want);
+  if at >= STACK_FIRST {
+    let brk = pget(k.procs, pid, F_BRK);
+    let low = pget(k.procs, pid, F_MMAP);
+    if low > STACK_FIRST * 4096 || brk > low || want * 4096 > low - brk {
+      return ENOMEM;
+    }
+    at = (low - want * 4096) / 4096;
+    if at * 4096 < brk || at + want > STACK_FIRST {
+      return ENOMEM;
+    }
+    pset(&mut k.procs, pid, F_MMAP, at * 4096);
+  }
+  hole_add(&mut k, pid, first, end);
   return USER_BASE + at * 4096;
 }
 
