@@ -1677,6 +1677,7 @@ posix-pthread_condattr_setpshared_2-1
 posix-pthread_create_1-1
 posix-pthread_create_1-2
 posix-pthread_create_1-3
+posix-pthread_create_1-6
 posix-pthread_create_11-1
 posix-pthread_create_12-1
 posix-pthread_create_2-1
