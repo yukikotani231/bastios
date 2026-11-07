@@ -510,6 +510,7 @@ t_ltp2: SCHED_RESET_ON_FORK: the child of a SCHED_FIFO process starts as SCHED_O
 t_ltp2: SIGSTOP stops a child (wait WUNTRACED, state T), SIGCONT continues it (WCONTINUED, waitid CLD_CONTINUED)
 t_ltp2: SIOCGIFCONF lists lo
 t_ltp2: SO_PEERCRED: the connecting child on the accepted socket, ourselves on a socketpair
+t_ltp2: SO_PASSCRED: recvmsg on a unix socket carries the sender's SCM_CREDENTIALS
 t_ltp2: TCP: bind to port 0 picks one, a second connect is EISCONN, AF_UNSPEC disconnects
 t_ltp2: UDP sendmsg joins its buffers into one datagram; bind errors
 t_ltp2: a CPU-time POSIX timer, and overruns of a timer set in the past

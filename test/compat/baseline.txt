@@ -2577,6 +2577,7 @@ t_ltp2: MSG_PEEK on a UDP socket leaves the datagram queued
 t_ltp2: a UDP datagram longer than the buffer sets MSG_TRUNC in recvmsg, and recv with MSG_TRUNC returns its length
 t_ltp2: TCP getsockname reads the bound address, and a connected or accepted socket's local address
 t_ltp2: SO_REUSEADDR, SO_REUSEPORT and SO_KEEPALIVE read back as set, and clear again
+t_ltp2: SO_PASSCRED: recvmsg on a unix socket carries the sender's SCM_CREDENTIALS
 t_ltp2: an IPV6_V6ONLY listener takes a connection to ::1, and names it ::1
 apps: cpython: tests of its own: select, selectors, poll, timeout, fcntl
 apps: cpython: tests of its own: os, stat, file, fileio, mmap, pipes
