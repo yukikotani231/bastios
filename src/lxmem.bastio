@@ -1583,6 +1583,12 @@ fn remap_fixed(k: &mut Kernel, pid: u64, r: u64, newn: u64, to_addr: u64) -> u64
   }
   fn_put(&mut k, pid, names, from, at);
   fixed_taken(&mut k, pid, at, at + want);
+  // Where the pages were is free address space again (a hole), as after
+  // munmap: else it would read as a PROT_NONE reservation, which a later
+  // mremap of it moves (remap_reservable) where Linux says EFAULT.
+  if from >= pget(k.procs, pid, F_MMAP) / 4096 {
+    hole_add(&mut k, pid, from, oend);
+  }
   return to_addr;
 }
 

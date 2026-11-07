@@ -372,7 +372,18 @@ int main(int argc, char **argv) {
         EXPECT("maps longer than 4 KiB reads whole, in pieces", ({ int n = nmany == 40 ? slurp_all("/proc/self/maps", mb, sizeof mb, 1000) : 0, all = n > 4096 && n > 13 && !strcmp(mb + n - 8, "[stack]\n");
                for (int i = 0; all && i < nmany; i++) all = maps_at(mb, (unsigned long)many[i], &e, &off, &ino, nm, sizeof nm) && off == 0 && !strcmp(nm, fp);
                all; }));
-        for (int i = 0; i < nmany; i++) munmap(many[i], 4096);
+        EXPECT("maps read in pieces while mappings before the place reached go away has whole lines", ({ int g = nmany == 40 ? open("/proc/self/maps", O_RDONLY) : -1, n = 0, r, all = 0;
+               if (g >= 0 && (n = read(g, mb, 1500)) > 0) {
+                   for (int i = 30; i < 40; i++) { munmap(many[i], 4096); many[i] = MAP_FAILED; }   /* the lowest: listed first */
+                   while (n < (int)sizeof mb - 1 && (r = read(g, mb + n, 1000)) > 0) n += r;
+                   mb[n] = 0;
+                   all = n > 13 && !strcmp(mb + n - 8, "[stack]\n");
+                   for (char *l = mb; all && *l; ) { unsigned long s0, e0, o0, i0; unsigned mj, mn; char pr[8]; char *nl = strchr(l, '\n');
+                       all = nl && sscanf(l, "%lx-%lx %7s %lx %x:%x %lu", &s0, &e0, pr, &o0, &mj, &mn, &i0) == 7 && s0 < e0; l = nl ? nl + 1 : l; }
+               }
+               if (g >= 0) close(g);
+               all; }));
+        for (int i = 0; i < nmany; i++) if (many[i] != MAP_FAILED) munmap(many[i], 4096);
         unlink(fp);
     }
     EXPECT("auxv carries AT_HWCAP and AT_HWCAP2 (a C library's ifuncs read them before it has a thread pointer), AT_PAGESZ, and ends in AT_NULL", ({

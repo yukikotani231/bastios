@@ -1795,35 +1795,37 @@ fn maps_ent(k: &mut Kernel, r: u64, o: &mut Bytes, from: u64, to: u64, bits: u64
   return put_s(&mut o, a, " kB\nSwap:                  0 kB\n");
 }
 
-/// Line ln[..l], which starts at byte pos of the whole file, goes into o
-/// where it falls in the part from byte skip on (o holds PROC_OUT bytes of
-/// it). Returns how much of o is filled now, given a filled before.
-fn maps_emit(o: &mut Bytes, a: u64, ln: &Bytes, l: u64, pos: u64, skip: u64) -> u64
-  requires blen(o) == PROC_OUT && blen(ln) == PROC_OUT && a <= PROC_OUT && l <= PROC_OUT && pos <= 0x10000000000 && skip <= 0x10000000000
-  ensures blen(o) == PROC_OUT && result <= PROC_OUT
+/// Where a read of maps stopped, as the description's offset keeps it:
+/// below MR_UNIT, a byte of the first entry (a seek); else MR_UNIT + the
+/// window page where the entry being read starts * MR_UNIT + the bytes of
+/// it already read. Linux's maps resumes at a mapping, not a byte, so a
+/// file read in several calls while the process maps and unmaps never
+/// splices two lines; this does the same.
+const MR_UNIT: u64 = 8192;
+const MR_END: u64 = MR_UNIT + WPAGES * MR_UNIT;   // past the stack: the end of the file
+
+/// Entry ln[..l], which starts at window page s, goes into o after the a
+/// bytes already there, from its byte b on, as much as fits in lim bytes.
+/// Returns the new fill of o, and in the high part (times MR_UNIT) where
+/// the next read goes on (maps_text): MR_UNIT + s * MR_UNIT + the bytes
+/// of the entry then read, if it did not all fit; else 0.
+fn maps_emit(o: &mut Bytes, a: u64, lim: u64, ln: &Bytes, l: u64, b: u64, s: u64) -> u64
+  requires blen(o) == PROC_OUT && blen(ln) == PROC_OUT && a <= lim && lim <= PROC_OUT && l <= PROC_OUT && s <= WPAGES
+  ensures blen(o) == PROC_OUT && result % MR_UNIT <= lim && result / MR_UNIT <= MR_END + MR_UNIT
 {
-  if pos + l <= skip {
-    return a;                               // before the part asked for
-  }
-  let mut b = a;
-  let mut j = 0;
-  if pos < skip {
-    j = skip - pos;
-  }
-  while j < l
-    invariant j <= l && l <= PROC_OUT && b <= PROC_OUT && pos + j >= skip && blen(o) == PROC_OUT && blen(ln) == PROC_OUT
+  let mut j = smaller(b, l);
+  let mut c = a;
+  while j < l && c < lim
+    invariant j <= l && l <= PROC_OUT && a <= c && c <= lim && lim <= PROC_OUT && blen(o) == PROC_OUT && blen(ln) == PROC_OUT
   {
-    let at = pos + j - skip;
-    if at >= PROC_OUT {
-      return b;
-    }
-    bset(&mut o, at, bget(ln, j));
-    if at + 1 > b {
-      b = at + 1;
-    }
+    bset(&mut o, c, bget(ln, j));
+    c = c + 1;
     j = j + 1;
   }
-  return b;
+  if j < l {
+    return c + (MR_UNIT + s * MR_UNIT + j) * MR_UNIT;
+  }
+  return c;
 }
 
 /// The row that holds process p's memory: p, or for a thread of a group
@@ -1842,22 +1844,26 @@ fn mm_of(k: &mut Kernel, p: u64) -> u64
   return h;
 }
 
-/// /proc/PID/maps of process p as reader r sees it, from byte skip on
-/// (as much as o holds): from its page tables, its records of anonymous
-/// memory not touched yet (those read as private read-write) and of code
-/// not read yet (read-only), and the files its pages map
+/// /proc/PID/maps of process p as reader r sees it, from where offset at
+/// says (MR_UNIT) on, up to lim bytes: from its page tables, its records of
+/// anonymous memory not touched yet (those read as private read-write) and
+/// of code not read yet (read-only), and the files its pages map
 /// (src/lxfname.bastio): runs of pages with the same permissions and file,
 /// the heap apart, then the vDSO and the stack, whose place is fixed.
-/// PROT_EXEC is not given, and a read-only shared map shows as private
-/// (the program's own pages share frames too); a PROT_NONE map that maps
-/// no pages is not listed. The walk is capped, so a window with very many
-/// touched pages lists only its lower part.
-fn maps_text(k: &mut Kernel, r: u64, p: u64, o: &mut Bytes, full: bool, skip: u64) -> u64
-  requires kok(k) && r < NPROC && p < NPROC && blen(o) == PROC_OUT
-  ensures kok(k) && blen(o) == PROC_OUT && result <= PROC_OUT
+/// Returns the bytes put in o, plus MR_UNIT times the offset the next read
+/// starts from. PROT_EXEC is not given, and a read-only shared map shows
+/// as private (the program's own pages share frames too); a PROT_NONE map
+/// that maps no pages is not listed. One read walks a capped number of
+/// steps, and the next goes on from there.
+fn maps_text(k: &mut Kernel, r: u64, p: u64, o: &mut Bytes, full: bool, at: u64, lim: u64) -> u64
+  requires kok(k) && r < NPROC && p < NPROC && blen(o) == PROC_OUT && lim <= PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && result % MR_UNIT <= PROC_OUT
 {
-  if skip > 0x1000000000 {
-    return 0;
+  let mut start = 0;
+  let mut skipb = at;
+  if at >= MR_UNIT {
+    start = smaller((at - MR_UNIT) / MR_UNIT, WPAGES);
+    skipb = at % MR_UNIT;
   }
   let w0 = pget(k.procs, p, F_BRK0);
   let w1 = pget(k.procs, p, F_BRK);
@@ -1866,8 +1872,7 @@ fn maps_text(k: &mut Kernel, r: u64, p: u64, o: &mut Bytes, full: bool, skip: u6
   let lz1 = get(k.lazy, lz_at(p, 0));      // code not read yet starts at lz1 - 1
   let mut ln = balloc(PROC_OUT);
   let mut a = 0;
-  let mut pos = 0;
-  let mut q = 0;
+  let mut q = start;
   let mut steps = 0;
   let mut open = false;
   let mut rs = 0;
@@ -1876,9 +1881,10 @@ fn maps_text(k: &mut Kernel, r: u64, p: u64, o: &mut Bytes, full: bool, skip: u6
   let mut rc = 0;
   let mut rf = NO_FILE;
   let mut ro = 0;
-  while q < VDSO_PAGE && steps < 262144 && pos < skip + PROC_OUT
-    invariant q <= VDSO_PAGE && a <= PROC_OUT && steps <= 262144 && rs <= WPAGES && re <= WPAGES && pos <= skip + PROC_OUT + PROC_OUT
-      && skip <= 0x1000000000 && rb < 16 && rc < 4 && b0 <= b1 && b1 <= WPAGES && blen(o) == PROC_OUT && blen(ln) == PROC_OUT && kok(k) && p < NPROC && r < NPROC
+  let mut next = 0;                         // where the next read starts, once this one is full
+  while q < VDSO_PAGE && steps < 262144 && next == 0
+    invariant q <= WPAGES && next <= MR_END + MR_UNIT && a <= lim && lim <= PROC_OUT && steps <= 262144 && rs <= WPAGES && re <= WPAGES
+      && rb < 16 && rc < 4 && b0 <= b1 && b1 <= WPAGES && blen(o) == PROC_OUT && blen(ln) == PROC_OUT && kok(k) && p < NPROC && r < NPROC
   {
     steps = steps + 1;
     let mut bits = user_page_bits(&mut k.spaces, p, q);
@@ -1916,17 +1922,20 @@ fn maps_text(k: &mut Kernel, r: u64, p: u64, o: &mut Bytes, full: bool, skip: u6
       nq = smaller(nq, b1);
     }
     let same = open && rb == bits && rc == cls && rf == f && q >= rs && (f == NO_FILE || (q - rs <= 0xFFFFFFFFFF && ro <= 0xFFFFFFFFFFFF && ro + (q - rs) * 4096 == fo));
-    if bits == 0 || !same {
-      if open {
-        let l = maps_ent(&mut k, r, &mut ln, rs, re, rb, rc, rf, ro, full);
-        a = maps_emit(&mut o, a, ln, l, pos, skip);
-        pos = pos + l;
-        open = false;
+    if open && (bits == 0 || !same) {
+      let l = maps_ent(&mut k, r, &mut ln, rs, re, rb, rc, rf, ro, full);
+      let e = maps_emit(&mut o, a, lim, ln, l, skipb, rs);
+      skipb = 0;
+      a = e % MR_UNIT;
+      next = e / MR_UNIT;
+      if next == 0 && a >= lim {
+        next = MR_UNIT + re * MR_UNIT;      // full, at the end of an entry
       }
+      open = false;
     }
-    if bits != 0 && same {
+    if next == 0 && bits != 0 && same {
       re = nq;
-    } else if bits != 0 {
+    } else if next == 0 && bits != 0 {
       open = true;
       rs = q;
       re = nq;
@@ -1935,24 +1944,62 @@ fn maps_text(k: &mut Kernel, r: u64, p: u64, o: &mut Bytes, full: bool, skip: u6
       rf = f;
       ro = fo;
     }
-    q = nq;
+    if next == 0 {
+      q = nq;
+    }
   }
-  if open && pos < skip + PROC_OUT {
+  if next == 0 && q < VDSO_PAGE {
+    // The steps ran out: the next read goes on from here (after the run
+    // this one has open, which it lists first).
+    if open {
+      next = MR_UNIT + rs * MR_UNIT;
+    } else {
+      next = MR_UNIT + q * MR_UNIT;
+    }
+    if a == 0 && open {
+      // Nothing fitted yet: list the open run now rather than return
+      // nothing, which would read as the end of the file.
+      let l = maps_ent(&mut k, r, &mut ln, rs, re, rb, rc, rf, ro, full);
+      let e = maps_emit(&mut o, a, lim, ln, l, skipb, rs);
+      a = e % MR_UNIT;
+      next = e / MR_UNIT;
+      if next == 0 {
+        next = MR_UNIT + re * MR_UNIT;
+      }
+    }
+    open = false;
+  }
+  if next == 0 && open {
     let l = maps_ent(&mut k, r, &mut ln, rs, re, rb, rc, rf, ro, full);
-    a = maps_emit(&mut o, a, ln, l, pos, skip);
-    pos = pos + l;
+    let e = maps_emit(&mut o, a, lim, ln, l, skipb, rs);
+    skipb = 0;
+    a = e % MR_UNIT;
+    next = e / MR_UNIT;
+    if next == 0 && a >= lim {
+      next = MR_UNIT + re * MR_UNIT;
+    }
   }
-  if pos < skip + PROC_OUT {
+  if next == 0 && start <= VDSO_PAGE {
     let l = maps_ent(&mut k, r, &mut ln, VDSO_PAGE, VDSO_PAGE + 1, 3, 3, NO_FILE, 0, full);
-    a = maps_emit(&mut o, a, ln, l, pos, skip);
-    pos = pos + l;
+    let e = maps_emit(&mut o, a, lim, ln, l, skipb, VDSO_PAGE);
+    skipb = 0;
+    a = e % MR_UNIT;
+    next = e / MR_UNIT;
+    if next == 0 && a >= lim {
+      next = MR_UNIT + (VDSO_PAGE + 1) * MR_UNIT;
+    }
   }
-  if pos < skip + PROC_OUT {
+  if next == 0 && start <= STACK_FIRST {
     let l = maps_ent(&mut k, r, &mut ln, STACK_FIRST, WPAGES, 7, 2, NO_FILE, 0, full);
-    a = maps_emit(&mut o, a, ln, l, pos, skip);
+    let e = maps_emit(&mut o, a, lim, ln, l, skipb, STACK_FIRST);
+    a = e % MR_UNIT;
+    next = e / MR_UNIT;
+  }
+  if next == 0 {
+    next = MR_END;                          // the end: a read from here gives nothing
   }
   bfree(ln);
-  return a;
+  return a + next * MR_UNIT;
 }
 
 /// Appends v in hex, at least 8 digits, as Linux's %08lx.
@@ -3147,7 +3194,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
         if sp == 0 || state(k.procs, sp) == ZOMBIE {
           return 0;
         }
-        return maps_text(&mut k, pid, mm_of(&mut k, sp), &mut o, true, 0);
+        return maps_text(&mut k, pid, mm_of(&mut k, sp), &mut o, true, 0, PROC_OUT) % MR_UNIT;
       }
       if w == 11 {
         // The sums /proc/PID/smaps_rollup gives, with the pages statm counts
@@ -3711,7 +3758,7 @@ fn proc_text(k: &mut Kernel, pid: u64, f: u64, o: &mut Bytes) -> u64
     return put_c(&mut o, a, 10);
   }
   if what == PF_MAPS {
-    return maps_text(&mut k, pid, mp, &mut o, false, 0);
+    return maps_text(&mut k, pid, mp, &mut o, false, 0, PROC_OUT) % MR_UNIT;
   }
   if what == PF_CMDLINE {
     let w = pget(k.procs, mp, F_ARGS);
@@ -3810,19 +3857,26 @@ fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
   if f == PROC_DEV + PF_MOUNTS {
     g = PROC_DEV + pid * 16 + PF_MOUNTS;    // /proc/mounts: the reader's mount namespace
   }
-  // maps and smaps are made from the offset on, so a reader gets all of
-  // a long one (one with file names is), PROC_OUT bytes at a time.
-  let ml = maps_fill(&mut k, pid, g, off, &mut out);
-  if ml != NO_RESULT {
-    let m = smaller(smaller(n, ml), XFER);
+  // maps and smaps are made from where the last read stopped (MR_UNIT), so
+  // a reader gets all of a long one (one with file names is), PROC_OUT
+  // bytes at a time, and whole entries even if the process changes its
+  // mappings between two reads. The offset is set so that the caller's
+  // advance by the bytes read lands on that place.
+  let mr = maps_fill(&mut k, pid, g, off, &mut out, smaller(n, PROC_OUT));
+  if mr != NO_RESULT {
+    let m = smaller(mr % MR_UNIT, XFER);
+    let at = mr / MR_UNIT;
     let mut i = 0;
     while i < m
-      invariant i <= m && m <= ml && ml <= PROC_OUT && m <= XFER && blen(out) == PROC_OUT && kok(k)
+      invariant i <= m && m <= XFER && m <= PROC_OUT && blen(out) == PROC_OUT && kok(k)
     {
       bset(&mut k.fs.xfer, i, bget(out, i));
       i = i + 1;
     }
     bfree(out);
+    if m > 0 && at >= m {
+      of_set(&mut k.ofd, h, 3, at - m);
+    }
     return m;
   }
   let l = proc_text(&mut k, pid, g, &mut out);
@@ -3842,26 +3896,29 @@ fn proc_fill(k: &mut Kernel, pid: u64, fd: u64, f: u64, n: u64) -> u64
   return m;
 }
 
-/// If /proc file f is a process's maps or smaps, the bytes of it from
-/// offset off on, as process pid reads them, in o (maps_text); NO_RESULT
-/// for any other file.
-fn maps_fill(k: &mut Kernel, pid: u64, f: u64, off: u64, o: &mut Bytes) -> u64
-  requires kok(k) && pid < NPROC && blen(o) == PROC_OUT
-  ensures kok(k) && blen(o) == PROC_OUT && (result <= PROC_OUT || result == NO_RESULT)
+/// If /proc file f is a process's maps or smaps, up to lim bytes of it
+/// from offset off (MR_UNIT) on, as process pid reads them, in o, with
+/// the offset after them (maps_text's result); NO_RESULT for any other file.
+fn maps_fill(k: &mut Kernel, pid: u64, f: u64, off: u64, o: &mut Bytes, lim: u64) -> u64
+  requires kok(k) && pid < NPROC && blen(o) == PROC_OUT && lim <= PROC_OUT
+  ensures kok(k) && blen(o) == PROC_OUT && (result % MR_UNIT <= PROC_OUT || result == NO_RESULT)
 {
   if f >= PROC_DEV && f < PROC_DEV + PSYS && (f - PROC_DEV) % 16 == PF_MAPS {
     let p = (f - PROC_DEV) / 16;
-    if p == 0 || p >= NPROC || state(k.procs, p) == ZOMBIE {
+    if p == 0 {
+      return NO_RESULT;                     // pid 0's 10 is /proc/net/dev (PF_NETDEV)
+    }
+    if p >= NPROC || state(k.procs, p) == ZOMBIE {
       return 0;
     }
-    return maps_text(&mut k, pid, mm_of(&mut k, p), &mut o, false, off);
+    return maps_text(&mut k, pid, mm_of(&mut k, p), &mut o, false, off, lim);
   }
   if f >= PROC_DEV + PSYS + SY_PX && f - (PROC_DEV + PSYS + SY_PX) < NPROC * PXF_N && (f - (PROC_DEV + PSYS + SY_PX)) % PXF_N == 13 {
     let sp = (f - (PROC_DEV + PSYS + SY_PX)) / PXF_N;
     if sp == 0 || sp >= NPROC || state(k.procs, sp) == ZOMBIE {
       return 0;
     }
-    return maps_text(&mut k, pid, mm_of(&mut k, sp), &mut o, true, off);
+    return maps_text(&mut k, pid, mm_of(&mut k, sp), &mut o, true, off, lim);
   }
   return NO_RESULT;
 }
