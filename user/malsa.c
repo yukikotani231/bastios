@@ -28,6 +28,7 @@
 #define PCM_WRITEI     0x40184150u
 #define CTL_PVERSION   0x80045500u
 #define CTL_CARD_INFO  0x81785501u
+#define CTL_SUBSCRIBE  0xC0045516u
 #define CTL_PCM_NEXT   0x80045530u
 
 struct mask { uint32_t bits[8]; };
@@ -72,10 +73,10 @@ int main(void)
         printf("malsa: open controlC0: errno %d\n", errno);
         return 1;
     }
-    int ver = 0, dev = -1;
+    int ver = 0, dev = -1, sub = 1;
     char info[376];
     memset(info, 0, sizeof info);
-    if (ioctl(ctl, CTL_PVERSION, &ver) != 0 || (ver >> 16) != 2 || ioctl(ctl, CTL_CARD_INFO, info) != 0
+    if (ioctl(ctl, CTL_SUBSCRIBE, &sub) != 0 || ioctl(ctl, CTL_PVERSION, &ver) != 0 || (ver >> 16) != 2 || ioctl(ctl, CTL_CARD_INFO, info) != 0
         || !strstr(info + 40, "BastiOS") || ioctl(ctl, CTL_PCM_NEXT, &dev) != 0 || dev != 0
         || ioctl(ctl, CTL_PCM_NEXT, &dev) != 0 || dev != -1) {
         printf("malsa: control: version %#x, name \"%s\", next device %d\n", ver, info + 40, dev);
