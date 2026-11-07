@@ -50,6 +50,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/snd/pcmC0D0p") {
     return DEV_PCM;
   }
+  if xfer_is(x, 0, n, "dev/snd/timer") {
+    return DEV_TIMER;
+  }
   if xfer_is(x, 0, n, "dev/input/mice") || xfer_is(x, 0, n, "dev/psaux") {
     return DEV_MICE;                        // src/lxmouse.bastio
   }
@@ -120,6 +123,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_PCM {
     return 0x7410;                          // 116:16, card 0 device 0 playback
   }
+  if d == DEV_TIMER {
+    return 0x7421;                          // 116:33
+  }
   if d == DEV_RTC {
     return 0xA87;                           // 10:135 (the rtc misc device), /dev/rtc0
   }
@@ -175,6 +181,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   }
   if rdev == 0x7410 {
     return DEV_PCM;
+  }
+  if rdev == 0x7421 {
+    return DEV_TIMER;
   }
   if rdev == 0xD40 {
     return DEV_KEYEV;

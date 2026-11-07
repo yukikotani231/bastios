@@ -82,6 +82,9 @@ const PCM_WRITEI: u64 = 0x40184150;
 const CTL_PVERSION: u64 = 0x80045500;
 const CTL_CARD_INFO: u64 = 0x81785501;
 const CTL_ELEM_LIST: u64 = 0xC0505510;
+const CTL_ELEM_INFO: u64 = 0xC1105511;
+const CTL_ELEM_READ: u64 = 0xC4C85512;
+const CTL_ELEM_WRITE: u64 = 0xC4C85513;
 const CTL_PCM_NEXT: u64 = 0x80045530;
 const CTL_PCM_INFO: u64 = 0xC1205531;
 const CTL_PCM_PREFER: u64 = 0x40045532;
@@ -96,19 +99,21 @@ const ST_RUNNING: u64 = 3;
 /// A stream word: 0 state, 1 rate, 2 channels, 3 bits per sample, 4 period
 /// frames, 5 buffer frames, 6 frames given to the card, 7 frames of the
 /// write in progress already taken, 8 frames the program committed through
-/// mmap (appl_ptr), 9 the address of its mapping, 10 the access (1 = mmap).
+/// mmap (appl_ptr), 9 the address of its mapping, 10 the access (1 = mmap),
+/// 11 the period ticks the timer device has handed out, 12 whether it reads
+/// events with time stamps (TREAD).
 fn pcm_w(k: &Kernel, i: u64) -> u64
-  requires kok(k) && i < 11
-  ensures result <= 0x4000000000000 && ((i != 6 && i != 8 && i != 9) ==> result <= 0x40000000)
+  requires kok(k) && i < 15
+  ensures result <= 0x4000000000000 && ((i != 6 && i != 8 && i != 9 && i != 11) ==> result <= 0x40000000)
 {
-  if i == 6 || i == 8 || i == 9 {
+  if i == 6 || i == 8 || i == 9 || i == 11 {
     return smaller(get(k.sys, SYS_ALSA + i), 0x4000000000000);   // frames: 2^50 at most
   }
   return smaller(get(k.sys, SYS_ALSA + i), 0x40000000);
 }
 
 fn pcm_set(k: &mut Kernel, i: u64, v: u64)
-  requires kok(k) && i < 11
+  requires kok(k) && i < 15
   ensures kok(k)
 {
   k.sys = set(k.sys, SYS_ALSA + i, v);
@@ -631,6 +636,7 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     pcm_set(&mut k, 8, 0);
     pcm_set(&mut k, 9, 0);
     pcm_set(&mut k, 10, rd32(k.fs.xfer, HP_ACCESS) % 2);
+    pcm_set(&mut k, 11, 0);
     return pcm_out(&mut k, pid, arg, HP_SIZE);
   }
   if req == PCM_HW_FREE {
@@ -664,6 +670,7 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     pcm_set(&mut k, 6, 0);
     pcm_set(&mut k, 7, 0);
     pcm_set(&mut k, 8, 0);
+    pcm_set(&mut k, 11, 0);
     pcm_to_dsp(&mut k);
     return 0;
   }
@@ -749,6 +756,30 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   return ENOTTY;
 }
 
+/// The mixer control "PCM Playback Volume" (numid 1): two channels, 0 to 255.
+/// It scales nothing; alsa-lib's softvol plugin, which the card's default
+/// PCM goes through, reads it and scales the samples itself.
+fn ctl_vol(k: &Kernel, ch: u64) -> u64
+  requires kok(k) && ch < 2
+  ensures result <= 255
+{
+  let w = pcm_w(k, 13 + ch);
+  if w == 0 {
+    return 255;
+  }
+  return smaller(w - 1, 255);
+}
+
+/// Fills the control's struct snd_ctl_elem_id at byte `at` of the transfer buffer.
+fn ctl_put_id(k: &mut Kernel, at: u64)
+  requires kok(k) && at + 64 <= XFER
+  ensures kok(k)
+{
+  store_le32(&mut k.fs.xfer, at, 1);
+  store_le32(&mut k.fs.xfer, at + 4, 2);       // SNDRV_CTL_ELEM_IFACE_MIXER
+  pcm_str(&mut k, at + 16, 44, "PCM Playback Volume");
+}
+
 /// ioctl(2) on /dev/snd/controlC0: the card and its one PCM device.
 fn snd_ctl_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
@@ -761,7 +792,7 @@ fn snd_ctl_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   if req == CTL_CARD_INFO {
     xfer_zero(&mut k, 376);
     pcm_str(&mut k, 8, 16, "HDA");
-    pcm_str(&mut k, 24, 16, "HDA-Intel");
+    pcm_str(&mut k, 24, 16, "BastiOS-HDA");
     pcm_str(&mut k, 40, 32, "BastiOS HD Audio");
     pcm_str(&mut k, 72, 80, "BastiOS HD Audio at the PCI bus");
     pcm_str(&mut k, 168, 80, "");
@@ -792,14 +823,66 @@ fn snd_ctl_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     return pcm_ioctl(&mut k, pid, 0, PCM_INFO, arg);
   }
   if req == CTL_ELEM_LIST {
-    // No mixer controls: used = count = 0.
+    // One control, numid 1.
     let e = pcm_in(&mut k, pid, arg, 80);
     if e != 0 {
       return e;
     }
-    store_le32(&mut k.fs.xfer, 8, 0);
-    store_le32(&mut k.fs.xfer, 12, 0);
+    let off = rd32(k.fs.xfer, 0);
+    let space = rd32(k.fs.xfer, 4);
+    let ptr = smaller(load_le64(k.fs.xfer, 16), 0x7FFFFFFFFFFF);
+    let mut used = 0;
+    if off == 0 && space >= 1 && ptr != 0 {
+      xfer_zero(&mut k, 64);
+      ctl_put_id(&mut k, 0);
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, ptr, k.fs.xfer, 64) != 64 {
+        return EFAULT;
+      }
+      used = 1;
+    }
+    xfer_zero(&mut k, 80);
+    store_le32(&mut k.fs.xfer, 0, cast[u32](off));
+    store_le32(&mut k.fs.xfer, 4, cast[u32](space));
+    store_le32(&mut k.fs.xfer, 8, cast[u32](used));
+    store_le32(&mut k.fs.xfer, 12, 1);
+    xfer_u64(&mut k.fs.xfer, 16, ptr);
     return pcm_out(&mut k, pid, arg, 80);
+  }
+  if req == CTL_ELEM_INFO || req == CTL_ELEM_READ || req == CTL_ELEM_WRITE {
+    let e = pcm_in(&mut k, pid, arg, 96);
+    if e != 0 {
+      return e;
+    }
+    let numid = rd32(k.fs.xfer, 0);
+    if numid != 1 && !(numid == 0 && xfer_is(k.fs.xfer, 16, 35, "PCM Playback Volume")) {
+      return ENOENT;
+    }
+    ctl_put_id(&mut k, 0);
+    if req == CTL_ELEM_INFO {
+      store_le32(&mut k.fs.xfer, 64, 2);           // SNDRV_CTL_ELEM_TYPE_INTEGER
+      store_le32(&mut k.fs.xfer, 68, 3);           // readable and writable
+      store_le32(&mut k.fs.xfer, 72, 2);           // two channels
+      xfer_u64(&mut k.fs.xfer, 80, 0);             // minimum
+      xfer_u64(&mut k.fs.xfer, 88, 255);           // maximum
+      return pcm_out(&mut k, pid, arg, 96);
+    }
+    let mut changed = 0;
+    if req == CTL_ELEM_WRITE {
+      let l = smaller(load_le64(k.fs.xfer, 72), 255);
+      let r = smaller(load_le64(k.fs.xfer, 80), 255);
+      if l != ctl_vol(k, 0) || r != ctl_vol(k, 1) {
+        changed = 1;
+      }
+      pcm_set(&mut k, 13, l + 1);
+      pcm_set(&mut k, 14, r + 1);
+    }
+    xfer_u64(&mut k.fs.xfer, 72, ctl_vol(k, 0));
+    xfer_u64(&mut k.fs.xfer, 80, ctl_vol(k, 1));
+    let e2 = pcm_out(&mut k, pid, arg, 96);
+    if e2 != 0 {
+      return e2;
+    }
+    return changed;
   }
   if req == CTL_PCM_PREFER || req == CTL_SUBSCRIBE {
     return 0;
@@ -849,4 +932,139 @@ fn pcm_mapped(k: &mut Kernel, at: u64)
   ensures kok(k)
 {
   pcm_set(&mut k, 9, smaller(at, 0x7FFFFFFFFFFF));
+}
+
+// The PCM's timer, /dev/snd/timer: alsa-lib's dmix mixer waits on it for
+// the slave stream's periods. One tick is one period of frames the card
+// has played; a reader gets the ticks it has not had yet.
+const TMR_PVERSION: u64 = 0x80045400;
+const TMR_NEXT_DEVICE: u64 = 0xC0145401;
+const TMR_TREAD: u64 = 0x40045402;
+const TMR_SELECT: u64 = 0x40345410;
+const TMR_INFO: u64 = 0x81005411;
+const TMR_PARAMS: u64 = 0x40505412;
+const TMR_STATUS: u64 = 0x80605414;
+const TMR_START: u64 = 0x54A0;
+const TMR_STOP: u64 = 0x54A1;
+const TMR_CONTINUE: u64 = 0x54A2;
+const TMR_PAUSE: u64 = 0x54A3;
+const TMR_EVENT_TICK: u64 = 21;
+
+/// Periods the card has played that the timer has not handed out yet.
+fn tmr_ready(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= 0x4000000000000
+{
+  let g = pcm_w(k, 6);
+  let sq = smaller(pcm_queued(k), g);
+  let hw = g - sq;
+  let per = larger(smaller(pcm_w(k, 4), PCM_MAX_PERIOD), 1);
+  let total = hw / per;
+  let got = pcm_w(k, 11);
+  return total - smaller(got, total);
+}
+
+fn tmr_bits(k: &Kernel) -> u64
+  requires kok(k)
+{
+  if !snd_live(k.snd) {
+    return POLLERR;
+  }
+  if tmr_ready(k) > 0 {
+    return POLLIN;
+  }
+  return 0;
+}
+
+/// read(2) on /dev/snd/timer: one event with the ticks so far (struct
+/// snd_timer_tread: event, time stamp, value; or, before TREAD, struct
+/// snd_timer_read: resolution, ticks).
+fn tmr_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let tread = pcm_w(k, 12) == 1;
+  let mut need = 8;
+  if tread {
+    need = 32;
+  }
+  if len < need {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  let ticks = tmr_ready(k);
+  if ticks == 0 {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
+      ret(&mut k.procs, pid, EAGAIN);
+      return KEEP;
+    }
+    return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
+  }
+  xfer_zero(&mut k, 32);
+  if tread {
+    store_le32(&mut k.fs.xfer, 0, cast[u32](TMR_EVENT_TICK));
+    store_le32(&mut k.fs.xfer, 24, cast[u32](smaller(ticks, 0x40000000)));
+  } else {
+    store_le32(&mut k.fs.xfer, 0, 1);
+    store_le32(&mut k.fs.xfer, 4, cast[u32](smaller(ticks, 0x40000000)));
+  }
+  let done = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, need);
+  if done != need {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  pcm_set(&mut k, 11, pcm_w(k, 11) + smaller(ticks, 0x40000000));
+  ret(&mut k.procs, pid, need);
+  return KEEP;
+}
+
+/// ioctl(2) on /dev/snd/timer.
+fn tmr_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == TMR_PVERSION {
+    xfer_u64(&mut k.fs.xfer, 0, 0x20006);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == TMR_NEXT_DEVICE {
+    // The PCM's is the only timer worth listing, and programs open it by
+    // its id: no more devices.
+    xfer_zero(&mut k, 20);
+    store_le32(&mut k.fs.xfer, 0, 0xFFFFFFFF);
+    return pcm_out(&mut k, pid, arg, 20);
+  }
+  if req == TMR_TREAD {
+    let e = pcm_in(&mut k, pid, arg, 4);
+    if e != 0 {
+      return e;
+    }
+    if rd32(k.fs.xfer, 0) != 0 {
+      pcm_set(&mut k, 12, 1);
+    } else {
+      pcm_set(&mut k, 12, 0);
+    }
+    return 0;
+  }
+  if req == TMR_SELECT || req == TMR_PARAMS || req == TMR_START || req == TMR_STOP || req == TMR_CONTINUE
+    || req == TMR_PAUSE {
+    return 0;
+  }
+  if req == TMR_INFO {
+    xfer_zero(&mut k, 256);
+    pcm_str(&mut k, 8, 64, "PCM Playback 0-0-0");
+    pcm_str(&mut k, 72, 80, "BastiOS HD Audio");
+    xfer_u64(&mut k.fs.xfer, 160, 1000000);    // resolution
+    xfer_u64(&mut k.fs.xfer, 168, 1000000);
+    xfer_u64(&mut k.fs.xfer, 176, 1000000);
+    return pcm_out(&mut k, pid, arg, 256);
+  }
+  if req == TMR_STATUS {
+    xfer_zero(&mut k, 96);
+    store_le32(&mut k.fs.xfer, 16, 1000000);   // resolution
+    store_le32(&mut k.fs.xfer, 28, cast[u32](smaller(tmr_ready(k), 0x40000000)));   // queue
+    return pcm_out(&mut k, pid, arg, 96);
+  }
+  return ENOTTY;
 }

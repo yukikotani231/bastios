@@ -33,6 +33,10 @@
 #define CTL_PVERSION   0x80045500u
 #define CTL_CARD_INFO  0x81785501u
 #define CTL_SUBSCRIBE  0xC0045516u
+#define CTL_ELEM_LIST  0xC0505510u
+#define CTL_ELEM_INFO  0xC1105511u
+#define CTL_ELEM_READ  0xC4C85512u
+#define CTL_ELEM_WRITE 0xC4C85513u
 #define CTL_PCM_NEXT   0x80045530u
 
 struct mask { uint32_t bits[8]; };
@@ -145,6 +149,42 @@ int main(int argc, char **argv)
         || ioctl(ctl, CTL_PCM_NEXT, &dev) != 0 || dev != -1) {
         printf("malsa: control: version %#x, name \"%s\", next device %d\n", ver, info + 40, dev);
         return 1;
+    }
+    /* one mixer control, "PCM Playback Volume": listed, described, read, written */
+    {
+        unsigned char list[80], ids[64], el[1224];
+        memset(list, 0, sizeof list);
+        if (ioctl(ctl, CTL_ELEM_LIST, list) != 0 || *(uint32_t *)(list + 12) != 1) {
+            printf("malsa: elem list: errno %d, count %u\n", errno, *(uint32_t *)(list + 12));
+            return 1;
+        }
+        *(uint32_t *)(list + 4) = 1;
+        *(uint64_t *)(list + 16) = (uint64_t)(uintptr_t)ids;
+        if (ioctl(ctl, CTL_ELEM_LIST, list) != 0 || *(uint32_t *)(list + 8) != 1 || strcmp((char *)ids + 16, "PCM Playback Volume")) {
+            printf("malsa: elem list ids: errno %d\n", errno);
+            return 1;
+        }
+        memset(el, 0, sizeof el);
+        strcpy((char *)el + 16, "PCM Playback Volume");
+        if (ioctl(ctl, CTL_ELEM_INFO, el) != 0 || *(uint32_t *)(el + 64) != 2 || *(uint32_t *)(el + 72) != 2
+            || *(uint64_t *)(el + 88) != 255) {
+            printf("malsa: elem info: errno %d\n", errno);
+            return 1;
+        }
+        memset(el, 0, sizeof el);
+        *(uint32_t *)el = 1;
+        *(uint64_t *)(el + 72) = 200;
+        *(uint64_t *)(el + 80) = 100;
+        if (ioctl(ctl, CTL_ELEM_WRITE, el) != 1) {
+            printf("malsa: elem write: errno %d\n", errno);
+            return 1;
+        }
+        memset(el, 0, sizeof el);
+        *(uint32_t *)el = 1;
+        if (ioctl(ctl, CTL_ELEM_READ, el) != 0 || *(uint64_t *)(el + 72) != 200 || *(uint64_t *)(el + 80) != 100) {
+            printf("malsa: elem read: errno %d\n", errno);
+            return 1;
+        }
     }
     int fd = open("/dev/snd/pcmC0D0p", O_RDWR | O_NONBLOCK);
     if (fd < 0) {
