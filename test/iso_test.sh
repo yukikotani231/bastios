@@ -1277,6 +1277,34 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                     good = g > b + 20
             print(("ok  " if good else "FAIL"), f"({name}) w in the System window cycles the wallpaper")
             fails += not good
+            # A click on the Wallpaper row does what w does. The window is found by its hint line (the only text in
+            # that grey), the pointer is brought to the corner first, and 6 more w presses go round to "none" again.
+            if good:
+                w, h, px = screendump()
+                hx = hy = None
+                for yy in range(h):
+                    row = px[yy * w * 3:(yy + 1) * w * 3]
+                    for xx in range(w):
+                        if row[xx * 3] == 0x80 and row[xx * 3 + 1] == 0x80 and row[xx * 3 + 2] == 0x90:
+                            hx = xx if hx is None else min(hx, xx)
+                            hy = yy if hy is None else hy
+                    if hy is not None and yy > hy + 16:
+                        break
+                good = hx is not None
+                if good:
+                    tx, ty = hx + 100, hy - 10                  # the Wallpaper row is the one above the hint
+                    monitor(*["mouse_move -250 -250"] * 8)
+                    monitor(*["mouse_move 250 0"] * (tx // 250), "mouse_move %d 0" % (tx % 250))
+                    monitor(*["mouse_move 0 250"] * (ty // 250), "mouse_move 0 %d" % (ty % 250))
+                    time.sleep(0.3)
+                    mark_click = len(out)
+                    monitor("mouse_button 1", "mouse_button 0")
+                    good = until(b"bsys: wallpaper @green", mark_click)
+                    for _ in range(6):
+                        monitor("sendkey w")
+                        time.sleep(0.3)
+            print(("ok  " if good else "FAIL"), f"({name}) a click on the Wallpaper row of the System window cycles the wallpaper")
+            fails += not good
             # p swaps the figures for the list of processes; j walks down it to the sleeping
             # one and x ends it.
             monitor("sendkey p")
