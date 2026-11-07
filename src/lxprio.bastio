@@ -1,7 +1,10 @@
 // Linux scheduling priorities: getpriority/setpriority (and so nice), and
 // the sched_* calls that set a policy or a CPU mask. The values are kept
 // in each process's row (F_NICE, F_SCHED) and handed back, with Linux's
-// checks and errors; the scheduler itself treats every process alike.
+// checks and errors. The scheduler weighs a thread's nice value and
+// SCHED_IDLE as Linux does (nice_tick, nice_debtor), and runs a thread
+// only on the processors its mask allows (aff_ok); the real-time policies
+// are kept but not given priority.
 // ioprio_set and ioprio_get keep an I/O priority per thread (k.sys from
 // SYS_IOP) the same way, with Linux 6.1's checks: the disk queue does not
 // look at it.
@@ -345,24 +348,129 @@ fn sched_affinity(k: &mut Kernel, pid: u64, who: u64, size: u64, mask: u64) -> u
   return 0;
 }
 
-/// The processor getcpu names for thread p: the first one its mask allows
-/// (programs that pin themselves to a processor check that they run there),
-/// 0 when no mask was set.
+/// The processor getcpu and /proc/PID/stat name for thread p: the one it
+/// was last picked on (aff_ran).
 fn aff_cpu(k: &Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
   ensures result < 64
 {
+  return get(k.sys, SYS_ONCPU + p) % 64;
+}
+
+/// May thread p run on processor `me` (its number, 0 for the bootstrap
+/// one)? Yes unless its mask (sched_setaffinity) names some processor that
+/// runs and not this one. A processor numbered past the mask word takes
+/// any thread.
+fn aff_ok(k: &Kernel, p: u64, me: u64) -> bool
+  requires kok(k) && p < NPROC
+{
   let m = get(k.sys, SYS_AFF + p) & cpu_mask(k);
+  if m == 0 || me >= 64 {
+    return true;
+  }
+  return (m >> me) % 2 == 1;
+}
+
+/// Thread p was picked to run on processor `me`.
+fn aff_ran(k: &mut Kernel, p: u64, me: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  if me < 64 {
+    k.sys = set(k.sys, SYS_ONCPU + p, me);
+  }
+}
+
+// Nice values. A processor's ticks are shared among the threads that want
+// it in proportion to their weights, as Linux shares its time: a nice-0
+// thread weighs 1024 and each step of nice weighs 1.25 times less (nice 19
+// about 15, nice -20 about 88761), and SCHED_IDLE weighs 3. A thread is
+// charged, at each tick that finds it running its own code, 1024 * 1024 /
+// weight (SLICE units: 1024 of them are a nice-0 thread's tick); the word
+// at SYS_SLICE keeps what it was charged and not yet paid for. Once that
+// reaches SLICE the thread pays it and gives the processor up (nice_tick),
+// so a nice-0 thread runs a tick a turn, as before, and a thread that
+// weighs more runs several. A thread that weighs less is left with a debt,
+// which it pays one SLICE at a time by being passed over when the round
+// robin comes to it (nice_debtor). A debtor that is the only thread a
+// processor could run still runs (lx_pick), and a thread that waits in a
+// call or sleeps owes nothing for it: only ticks charge.
+const SLICE: u64 = 1024;
+
+/// What a tick costs thread p, in SLICE units: SLICE * 1024 / its weight.
+fn nice_cost(k: &Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures 0 < result && result <= 400000
+{
+  if pget(k.procs, p, F_SCHED) % 256 == SCHED_IDLE {
+    return SLICE * 1024 / 3;
+  }
+  let n = nice_of(k.procs, p);
+  // The weight, times 1024 (so that the steps keep their fractions).
+  let mut w = 1048576;
   let mut i = 0;
-  while i < 63 && (m >> i) % 2 == 0
-    invariant i <= 63
-  {
-    i = i + 1;
+  if n > 20 {
+    while i < n - 20
+      invariant i <= 19 && w <= 1048576
+    {
+      w = w * 4 / 5;
+      i = i + 1;
+    }
+  } else {
+    while i < 20 - n
+      invariant i <= 20 && w <= 1048576 * 87 && w >= 1048576
+    {
+      w = w * 5 / 4;
+      if w > 1048576 * 87 {
+        w = 1048576 * 87;
+      }
+      i = i + 1;
+    }
   }
-  if m == 0 {
-    return 0;
+  if w < 3000 {
+    return 360000;                          // not reached: nice 19 leaves w near 15000
   }
-  return i;
+  let c = SLICE * 1024 * 1024 / w;
+  if c == 0 {
+    return 1;
+  }
+  if c > 360000 {
+    return 360000;
+  }
+  return c;
+}
+
+/// A tick found thread p running its own code: charges it. True if it
+/// keeps the processor (it has paid for less than a SLICE).
+fn nice_tick(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let owed = get(k.sys, SYS_SLICE + p);
+  if owed == 0 && nice_of(k.procs, p) == 20 && pget(k.procs, p, F_SCHED) % 256 != SCHED_IDLE {
+    return false;                           // nice 0: a tick a turn
+  }
+  let a = sat_add(owed, nice_cost(k, p));
+  if a < SLICE {
+    k.sys = set(k.sys, SYS_SLICE + p, a);
+    return true;
+  }
+  k.sys = set(k.sys, SYS_SLICE + p, a - SLICE);
+  return false;
+}
+
+/// The round robin came to READY thread p: if it owes a SLICE or more, it
+/// pays one and is passed over (true).
+fn nice_debtor(k: &mut Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let owed = get(k.sys, SYS_SLICE + p);
+  if owed < SLICE {
+    return false;
+  }
+  k.sys = set(k.sys, SYS_SLICE + p, owed - SLICE);
+  return true;
 }
 
 /// Thread p left the processor: by itself (a call that blocked or yielded,
