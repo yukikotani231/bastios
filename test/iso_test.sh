@@ -1037,10 +1037,13 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
             # The next line waits for its turn: a plain line is on a blue bar, a line that starts with ! on a red one.
             time.sleep(1.5)
-            end = time.time() + 12
+            t0 = time.time()
+            end = t0 + 12
+            seen = []
             while True:                                                  # a slow host shows the first notice late, so the second is late too: look until it is up
                 w, h, px = screendump()
                 nt = screen_text_at(px[1:], w, 64, h - 24 + 4, 12, 1)[0]
+                seen.append((round(time.time() - t0, 1), nt))
                 if nt == "Tests passed" or time.time() > end:
                     break
                 time.sleep(0.3)
@@ -1048,6 +1051,8 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             bar = tuple(px[at:at + 3])
             good = nt == "Tests passed" and bar == (40, 80, 150)
             print(("ok  " if good else "FAIL"), f"({name}) a second line in /tmp/bwm.notice waits for its turn, on a blue bar ({nt!r}, {bar})")
+            if not good:
+                print("     samples:", seen)
             fails += not good
             time.sleep(2.5)
             w, h, px = screendump()
@@ -2667,6 +2672,55 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print("\n".join(l for l in lines if l))
         print(("ok  " if good else "FAIL"), f"({name}) a file dragged from bfiles onto a terminal window types its path there")
         fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # A right click on a title bar opens the window menu: Snap left fills the left half, Close ends the window.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+        good = until(b"bterm: window", mark)
+        if good:
+            time.sleep(1.5)
+            w, h, px = screendump()
+            before = tuple(px[(30 * w + 400) * 3:(30 * w + 400) * 3 + 3])             # the desktop, right of the window's top-left corner after a snap
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 150 80")
+            time.sleep(0.3)
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            w, h, px = screendump()
+            items = screen_text_at(px, w, 168, 84, 10, 1)[0]                           # the pointer covers the M
+            good = items.startswith("aximize")
+            print(("ok  " if good else "FAIL"), f"({name}) a right click on a title bar opens the window menu ({items!r})")
+            fails += not good
+            monitor("mouse_move 0 58")                                                  # the third entry, Snap left
+            time.sleep(0.3)
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            after = tuple(px[(30 * w + 400) * 3:(30 * w + 400) * 3 + 3])
+            good = after != before and tuple(px[(5 * w + 5) * 3:(5 * w + 5) * 3 + 3]) != (0, 0, 0)
+            print(("ok  " if good else "FAIL"), f"({name}) Snap left in the window menu fills the left half ({before}, {after})")
+            fails += not good
+            monitor("mouse_move 0 -130")                                                # onto the title bar of the snapped window
+            time.sleep(0.3)
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            monitor("mouse_move 0 100")                                                 # Close
+            time.sleep(0.3)
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(1.5)
+            w, h, px = screendump()
+            back = tuple(px[(30 * w + 400) * 3:(30 * w + 400) * 3 + 3])
+            good = back == before
+            print(("ok  " if good else "FAIL"), f"({name}) Close in the window menu ends the window ({back})")
+            fails += not good
+        else:
+            print("FAIL", f"({name}) the window menu test could not start bwm")
+            fails += 1
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
         time.sleep(0.5)

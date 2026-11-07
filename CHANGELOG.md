@@ -16,6 +16,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
 
+- bwm: a right click on a title bar opens a window menu at the pointer: Maximize or Restore, Minimize, Snap left, Snap right and Close (the snap and maximize entries only for resizable windows). Up, Down and Enter choose from the keyboard, and any other key or a click elsewhere closes it. `test/iso_test.sh` opens it, snaps a window and closes it. Pure window-manager code in `user/bwm.c`; nothing in the trusted base grew beyond that C source.
 - The scheduler honours nice values and `SCHED_IDLE` with Linux's weights (nice 0 weighs 1024, each step 1.25 times less), so of two threads on one processor a nice-0 one gets about three times the time of a nice-5 one, and honours `sched_setaffinity`: a thread runs only on the processors its mask names. `getcpu` names the processor the thread last ran on (`test/compat/progs/t_thread.c`). The real-time policies are still kept but not given priority.
 - `/sys/class/rtc/rtc0/wakealarm`, readable and writable (`+N`, an epoch time or `0`), the same alarm as `RTC_WKALM_SET` (`test/compat/progs/t_rtc.c`)
 - `/dev/rtc0` alarm: `RTC_ALM_SET`/`RTC_ALM_READ`, `RTC_WKALM_SET`/`RTC_WKALM_RD`, `RTC_AIE_ON`/`RTC_AIE_OFF`, and a `read`/`poll` that wait for it (`test/compat/progs/t_rtc.c`)
