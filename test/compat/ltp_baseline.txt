@@ -806,6 +806,7 @@ rt_sigqueueinfo02
 rt_sigtimedwait01
 rt_tgsigqueueinfo01
 sbrk02
+sched_football
 sched_get_priority_max01
 sched_get_priority_max02
 sched_get_priority_min01
