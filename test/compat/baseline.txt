@@ -978,6 +978,11 @@ t_ltp3: readlink with a zero-size buffer is EINVAL
 t_ltp3: a loop device's queue/ files give the sector size and DMA alignment
 t_ltp3: statx(STATX_DIOALIGN) of a block device gives its alignment
 t_ltp3: statx(STATX_DIOALIGN) of a directory leaves the bit clear
+t_maps: every line of /proc/self/maps parses with Crashpad's format
+t_maps: /proc/self/maps read 100 bytes at a time is the same text
+t_maps: every line of another process's maps parses too
+t_maps: a few thousand mappings read back as that many parseable lines, in order, in pieces
+t_maps: another process with thousands of mappings reads back whole in 64 KiB, 4096 and 100 byte pieces
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL

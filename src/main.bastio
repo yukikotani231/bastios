@@ -115,6 +115,8 @@ fn fault_name(con: &mut Con, v: u64)
 {
   if v == 0 {
     puts(&mut con, "divide error");
+  } else if v == 3 {
+    puts(&mut con, "breakpoint");
   } else if v == 6 {
     puts(&mut con, "invalid opcode");
   } else if v == 13 {
