@@ -1174,7 +1174,7 @@ def main():
         # The second X11 disk: the server and client roots again, and GIMP's.
         disk = os.path.join(args.out, "x11b-run.img")
         disk_copy(args.x11b_disk, disk)
-        lanes.append(("x11b", disk, [("x11b", "X11 (second disk)", applets_lane(x11b, 900))], "1G"))
+        lanes.append(("x11b", disk, [("x11b", "X11 (second disk)", applets_lane(x11b, 900))], "2G"))
     if args.rust_disk and lane_chosen("rust"):
         # rustc is a large dynamic program, and the cases unpack a root
         # of about a gigabyte onto the disk: a copy.

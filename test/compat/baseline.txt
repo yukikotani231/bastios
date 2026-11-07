@@ -1862,6 +1862,32 @@ t_rtc: sysfs: since_epoch is the time the clock says
 t_rtc: sysfs: date is the UTC date of since_epoch
 t_rtc: sysfs: time is the UTC time of since_epoch
 t_rtc: sysfs: max_user_freq is a number
+t_rtc: RTC_WKALM_SET arms an alarm
+t_rtc: RTC_WKALM_RD says armed, not yet pending, and the same time
+t_rtc: a nonblocking read before the alarm is EAGAIN
+t_rtc: poll does not report it ready
+t_rtc: a blocking read waits for the alarm and returns an unsigned long
+t_rtc: it waited about 3 seconds
+t_rtc: the alarm is disarmed after the read
+t_rtc: RTC_ALM_SET takes a time of day
+t_rtc: RTC_ALM_READ gives it back
+t_rtc: RTC_AIE_ON arms it
+t_rtc: poll reports it readable once it is due
+t_rtc: the read then returns at once
+t_rtc: RTC_AIE_OFF disarms it
+t_rtc: a disarmed nonblocking read is EAGAIN
+t_rtc: a blocking read with no alarm armed is EIO, not a hang
+t_rtc: an alarm in the past is refused
+t_rtc: a short read is EINVAL
+t_rtc: wakealarm opens for writing
+t_rtc: it is empty while no alarm is armed
+t_rtc: +30 arms an alarm 30 seconds on
+t_rtc: RTC_WKALM_RD sees it
+t_rtc: reading it gives that time
+t_rtc: 0 disarms it
+t_rtc: an absolute time arms it
+t_rtc: a time in the past is EINVAL
+t_rtc: so is text
 t_rtnlev: sockets in the link group, the address group, both and none
 t_rtnlev: a veth pair is made
 t_rtnlev: the link group hears both ends
@@ -2355,6 +2381,9 @@ x11b: x11b: LibreOffice turns a text file into a PDF, fonts and all
 x11b: x11b: Inkscape exports an SVG drawing as a PNG
 x11b: x11b: a partition editor, GParted, draws its window on the X screen
 x11b: x11b: a 3D modeller, OpenSCAD, draws its window on the X screen
+x11b: x11b: a web browser, Firefox, draws its window on the X screen
+x11b: x11b: a mail client, Thunderbird, draws its window on the X screen
+x11b: x11b: a PDF viewer, Evince, opens a PDF and its Open dialog
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program

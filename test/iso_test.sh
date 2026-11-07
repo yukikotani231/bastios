@@ -2604,6 +2604,37 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = until(b"moved2", mark)
             print(("ok  " if good else "FAIL"), f"({name}) the dragged file is in the directory and gone from the old place")
             fails += not good
+        # Dragging an image from bfiles onto an image viewer window shows it there. The viewer opens from a click on
+        # p.ppm; its title bar is dragged out from under the bfiles window (which a press raises), and q.ppm is dragged
+        # from the list onto it.
+        mark = len(out)
+        q.stdin.write(b"mkdir -p /tmp/dv; printf 'P6 2 2 255\\n\\377\\000\\000\\377\\000\\000\\377\\000\\000\\377\\000\\000' > /tmp/dv/p.ppm; cp /tmp/dv/p.ppm /tmp/dv/q.ppm; bwm -n -c bfiles /tmp/dv\r"); q.stdin.flush()
+        good = until(b"bfiles: window", mark)
+        if good:
+            time.sleep(1)
+            monitor(*["mouse_move -200 -200"] * 4, "mouse_move 150 130")
+            monitor("mouse_button 1", "mouse_button 0")                       # p.ppm: opens the viewer
+            good = until(b"bview: window", mark)
+        if good:
+            time.sleep(1)
+            monitor(*["mouse_move -200 -200"] * 4, "mouse_move 120 110")      # the viewer's title bar
+            monitor("mouse_button 1", "mouse_move 250 150", "mouse_move 250 150", "mouse_button 0")
+            time.sleep(0.5)
+            monitor(*["mouse_move -200 -200"] * 4, "mouse_move 150 146")      # q.ppm in the list
+            time.sleep(0.3)
+            monitor("mouse_button 1")
+            time.sleep(0.7)
+            mark2 = len(out)
+            monitor("mouse_move 255 150", "mouse_move 255 154", "mouse_button 0")
+            good = until(b"bview: show /tmp/dv/q.ppm", mark2)
+        print(("ok  " if good else "FAIL"), f"({name}) a file dragged from bfiles onto an image viewer window shows it there")
+        fails += not good
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
         # Dragging a file from bfiles over a terminal window types its path there (nothing is run). The terminal comes
         # from the t key of bfiles, so it opens just right and below the bfiles window; the file is dragged from the
         # strip of the list left of it to the part of the terminal right of the (raised) bfiles window.

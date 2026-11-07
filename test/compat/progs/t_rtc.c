@@ -10,10 +10,19 @@
 #include <sys/stat.h>
 #include <sys/sysmacros.h>
 #include <time.h>
+#include <poll.h>
+#include <stdint.h>
 
 struct rtc_time { int sec, min, hour, mday, mon, year, wday, yday, isdst; };
 #define RTC_RD_TIME _IOR('p', 0x09, struct rtc_time)
 #define RTC_SET_TIME _IOW('p', 0x0a, struct rtc_time)
+#define RTC_ALM_SET _IOW('p', 0x07, struct rtc_time)
+#define RTC_ALM_READ _IOR('p', 0x08, struct rtc_time)
+#define RTC_AIE_ON _IO('p', 0x01)
+#define RTC_AIE_OFF _IO('p', 0x02)
+struct rtc_wkalrm { unsigned char enabled, pending; struct rtc_time time; };
+#define RTC_WKALM_SET _IOW('p', 0x0f, struct rtc_wkalrm)
+#define RTC_WKALM_RD _IOR('p', 0x10, struct rtc_wkalrm)
 
 static time_t as_time(const struct rtc_time *r) {
     struct tm t = {.tm_sec = r->sec, .tm_min = r->min, .tm_hour = r->hour, .tm_mday = r->mday, .tm_mon = r->mon, .tm_year = r->year};
@@ -90,6 +99,96 @@ int main(void) {
         strftime(want, sizeof want, "%H:%M:%S\n", &gt);
         EXPECT("sysfs: time is the UTC time of since_epoch", !strcmp(tm_, want));
         EXPECT("sysfs: max_user_freq is a number", atoi(fq) > 0);
+    }
+
+    {
+        /* The alarm: due 3 seconds from now. */
+        struct rtc_wkalrm w;
+        memset(&w, 0, sizeof w);
+        ioctl(fd, RTC_RD_TIME, &w.time);
+        time_t due = as_time(&w.time) + 3;
+        struct tm dt;
+        gmtime_r(&due, &dt);
+        w.enabled = 1;
+        w.time = (struct rtc_time){.sec = dt.tm_sec, .min = dt.tm_min, .hour = dt.tm_hour, .mday = dt.tm_mday, .mon = dt.tm_mon, .year = dt.tm_year};
+        EXPECT("RTC_WKALM_SET arms an alarm", ioctl(fd, RTC_WKALM_SET, &w) == 0);
+        struct rtc_wkalrm g;
+        memset(&g, 0, sizeof g);
+        EXPECT("RTC_WKALM_RD says armed, not yet pending, and the same time",
+               ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 1 && g.pending == 0 && as_time(&g.time) == due);
+        int fl = fcntl(fd, F_GETFL);
+        unsigned long data = 0;
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        EXPECT("a nonblocking read before the alarm is EAGAIN", read(fd, &data, sizeof data) == -1 && errno == EAGAIN);
+        struct pollfd pf = {.fd = fd, .events = POLLIN};
+        EXPECT("poll does not report it ready", poll(&pf, 1, 0) == 0);
+        fcntl(fd, F_SETFL, fl);
+        struct timespec t0, t1;
+        clock_gettime(CLOCK_MONOTONIC, &t0);
+        ssize_t n = read(fd, &data, sizeof data);
+        clock_gettime(CLOCK_MONOTONIC, &t1);
+        double el = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+        EXPECT("a blocking read waits for the alarm and returns an unsigned long", n == (ssize_t)sizeof data && (data & 0xff) == 0xa0 && (data >> 8) == 1);
+        EXPECT("it waited about 3 seconds", el > 1.5 && el < 8.0);
+        EXPECT("the alarm is disarmed after the read", ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 0);
+
+        /* RTC_ALM_SET takes a time of day: the next time the clock shows it. */
+        struct rtc_time t;
+        ioctl(fd, RTC_RD_TIME, &t);
+        time_t soon = as_time(&t) + 2;
+        gmtime_r(&soon, &dt);
+        struct rtc_time al = {.sec = dt.tm_sec, .min = dt.tm_min, .hour = dt.tm_hour, .mday = -1, .mon = -1, .year = -1};
+        EXPECT("RTC_ALM_SET takes a time of day", ioctl(fd, RTC_ALM_SET, &al) == 0);
+        struct rtc_time back_tm;
+        memset(&back_tm, 0, sizeof back_tm);
+        EXPECT("RTC_ALM_READ gives it back", ioctl(fd, RTC_ALM_READ, &back_tm) == 0 && back_tm.sec == al.sec && back_tm.min == al.min && back_tm.hour == al.hour);
+        EXPECT("RTC_AIE_ON arms it", ioctl(fd, RTC_AIE_ON, 0) == 0);
+        pf.revents = 0;
+        EXPECT("poll reports it readable once it is due", poll(&pf, 1, 8000) == 1 && (pf.revents & POLLIN));
+        EXPECT("the read then returns at once", read(fd, &data, sizeof data) == (ssize_t)sizeof data);
+        ioctl(fd, RTC_AIE_ON, 0);
+        EXPECT("RTC_AIE_OFF disarms it", ioctl(fd, RTC_AIE_OFF, 0) == 0 && ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 0);
+        fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+        EXPECT("a disarmed nonblocking read is EAGAIN", read(fd, &data, sizeof data) == -1 && errno == EAGAIN);
+        fcntl(fd, F_SETFL, fl);
+        EXPECT("a blocking read with no alarm armed is EIO, not a hang", read(fd, &data, sizeof data) == -1 && errno == EIO);
+        w.time = back_tm;
+        ioctl(fd, RTC_RD_TIME, &w.time);
+        w.time.year -= 1;
+        EXPECT("an alarm in the past is refused", ioctl(fd, RTC_WKALM_SET, &w) == -1 && errno == EINVAL);
+        EXPECT("a short read is EINVAL", read(fd, &data, 4) == -1 && errno == EINVAL);
+    }
+
+    {
+        /* /sys/class/rtc/rtc0/wakealarm arms the same alarm (what rtcwake writes). */
+        struct rtc_wkalrm g;
+        struct rtc_time t;
+        ioctl(fd, RTC_RD_TIME, &t);
+        time_t base = as_time(&t);
+        int wf = open("/sys/class/rtc/rtc0/wakealarm", O_WRONLY);
+        int rf = open("/sys/class/rtc/rtc0/wakealarm", O_RDONLY);
+        EXPECT("wakealarm opens for writing", wf >= 0);
+        if (wf >= 0) {
+            char buf[64] = "";
+            EXPECT("it is empty while no alarm is armed", (lseek(rf, 0, SEEK_SET), read(rf, buf, sizeof buf - 1)) == 0);
+            EXPECT("+30 arms an alarm 30 seconds on", write(wf, "+30\n", 4) == 4);
+            memset(&g, 0, sizeof g);
+            EXPECT("RTC_WKALM_RD sees it", ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 1 && as_time(&g.time) - base >= 29 && as_time(&g.time) - base <= 33);
+            int r = (lseek(rf, 0, SEEK_SET), read(rf, buf, sizeof buf - 1));
+            buf[r > 0 ? r : 0] = 0;
+            long v = atol(buf);
+            EXPECT("reading it gives that time", r > 0 && v - (long)base >= 29 && v - (long)base <= 33);
+            EXPECT("0 disarms it", write(wf, "0\n", 2) == 2 && ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 0 && (lseek(rf, 0, SEEK_SET), read(rf, buf, sizeof buf - 1)) == 0);
+            char abs_[32];
+            int an = snprintf(abs_, sizeof abs_, "%ld\n", (long)base + 20);
+            EXPECT("an absolute time arms it", write(wf, abs_, an) == an && ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 1 && as_time(&g.time) - base >= 19 && as_time(&g.time) - base <= 23);
+            an = snprintf(abs_, sizeof abs_, "%ld\n", (long)base - 100);
+            EXPECT("a time in the past is EINVAL", write(wf, abs_, an) == -1 && errno == EINVAL);
+            EXPECT("so is text", write(wf, "soon\n", 5) == -1 && errno == EINVAL);
+            write(wf, "0\n", 2);
+            close(wf);
+            close(rf);
+        }
     }
 
     EXPECT("an unprivileged program cannot set it", ({

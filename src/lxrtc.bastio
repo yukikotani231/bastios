@@ -4,17 +4,30 @@
 // seconds, minutes, hours, day of the month, month 0 to 11, years since
 // 1900, day of the week 0 to 6 from Sunday, day of the year, and 0 for
 // daylight saving) for the time the clock says, in UTC. RTC_SET_TIME writes
-// it, for a program that holds CAP_SYS_TIME. A read, the alarm and the
-// periodic and update interrupts are not offered (ENOTTY or EINVAL, as for
-// a clock with no interrupt line). Without a clock (AArch64 today) the
-// device does not open (ENOENT).
+// it, for a program that holds CAP_SYS_TIME.
+//
+// One alarm: RTC_ALM_SET/RTC_ALM_READ (a time of day, the next time the
+// clock shows it), RTC_WKALM_SET/RTC_WKALM_RD (a full date) and
+// RTC_AIE_ON/RTC_AIE_OFF. The clock has no interrupt line here, so a
+// read(2) of the descriptor (an unsigned long: 0xA0 for RTC_AF | RTC_IRQF,
+// the count of alarms in the byte above) and poll look at the clock each
+// tick; a read waits for the alarm unless the descriptor is O_NONBLOCK, and
+// disarms it. The periodic and update interrupts are not offered (ENOTTY).
+// Without a clock (AArch64 today) the device does not open (ENOENT).
 
 import "linux.bastio";
 import "calendar.bastio";
 
 const RTC_RD_TIME: u64 = 0x80247009;      // _IOR('p', 9, struct rtc_time)
 const RTC_SET_TIME: u64 = 0x4024700A;     // _IOW('p', 10, struct rtc_time)
+const RTC_ALM_SET: u64 = 0x40247007;      // _IOW('p', 7, struct rtc_time)
+const RTC_ALM_READ: u64 = 0x80247008;     // _IOR('p', 8, struct rtc_time)
+const RTC_AIE_ON: u64 = 0x7001;
+const RTC_AIE_OFF: u64 = 0x7002;
+const RTC_WKALM_SET: u64 = 0x4028700F;    // _IOW('p', 15, struct rtc_wkalrm)
+const RTC_WKALM_RD: u64 = 0x80287010;     // _IOR('p', 16, struct rtc_wkalrm)
 const RTC_TM_SIZE: u64 = 36;
+const RTC_WK_SIZE: u64 = 40;              // struct rtc_wkalrm: enabled, pending, 2 bytes of padding, a struct rtc_time
 
 /// Stores v as a 32-bit little-endian int at byte `at` of the transfer buffer.
 fn rtc_tm_put(k: &mut Kernel, at: u64, v: u64)
@@ -22,6 +35,140 @@ fn rtc_tm_put(k: &mut Kernel, at: u64, v: u64)
   ensures kok(k)
 {
   store_le32(&mut k.fs.xfer, at, cast[u32](v % 4294967296));
+}
+
+/// The words of the alarm in k.sys: when, as a wall-clock second of the
+/// kernel (0 for none; the clock has no interrupt line, so the kernel's own
+/// time says when it is due), and whether it is armed.
+fn rtc_alarm(k: &Kernel) -> u64
+  requires kok(k)
+{
+  return get(k.sys, SYS_RTCA);
+}
+
+fn rtc_armed(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get(k.sys, SYS_RTCA + 1) == 1;
+}
+
+/// The kernel's wall clock, in seconds.
+fn rtc_wall(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result < 20000000000
+{
+  return wall_ns(k) / 1000000000;
+}
+
+/// The alarm is armed and its time has come.
+fn rtc_fired(k: &Kernel) -> bool
+  requires kok(k)
+{
+  if !rtc_armed(k) || rtc_alarm(k) == 0 {
+    return false;
+  }
+  return rtc_wall(k) >= rtc_alarm(k);
+}
+
+/// The wall-clock second at which the clock will show `at` (it is `now`
+/// on the clock now).
+fn rtc_due(k: &Kernel, at: u64, now: u64) -> u64
+  requires kok(k)
+{
+  if at < now {
+    return rtc_wall(k);
+  }
+  let gap = smaller(at - now, 5000000000);
+  return rtc_wall(k) + gap;
+}
+
+/// Fills the transfer buffer with the struct rtc_time for t seconds, from
+/// byte `at`; false if t is outside 2000 to 2099.
+fn rtc_tm_fill(k: &mut Kernel, at: u64, t: u64) -> bool
+  requires kok(k) && at + RTC_TM_SIZE <= XFER
+  ensures kok(k)
+{
+  let days = t / 86400;
+  let rest = t % 86400;
+  if days < 10957 || days > 47500 {
+    return false;
+  }
+  let c = civil_from_days(days);
+  if c.year < 2000 || c.year > 2099 {
+    return false;
+  }
+  rtc_tm_put(&mut k, at, rest % 60);
+  rtc_tm_put(&mut k, at + 4, rest / 60 % 60);
+  rtc_tm_put(&mut k, at + 8, rest / 3600);
+  rtc_tm_put(&mut k, at + 12, c.day);
+  rtc_tm_put(&mut k, at + 16, c.month - 1);
+  rtc_tm_put(&mut k, at + 20, c.year - 1900);
+  rtc_tm_put(&mut k, at + 24, (days + 4) % 7);
+  let jan1 = days_from_civil(c.year, 1, 1);
+  if days >= jan1 {
+    rtc_tm_put(&mut k, at + 28, days - jan1);
+  }
+  return true;
+}
+
+/// The seconds a struct rtc_time at byte `at` of the transfer buffer
+/// names, or NO_RESULT if a field is out of range.
+fn rtc_tm_secs(k: &Kernel, at: u64) -> u64
+  requires kok(k) && at + RTC_TM_SIZE <= XFER
+{
+  let sec = rd32(k.fs.xfer, at);
+  let min = rd32(k.fs.xfer, at + 4);
+  let hour = rd32(k.fs.xfer, at + 8);
+  let day = rd32(k.fs.xfer, at + 12);
+  let mon = rd32(k.fs.xfer, at + 16);
+  let yr = rd32(k.fs.xfer, at + 20);
+  if sec > 59 || min > 59 || hour > 23 || day < 1 || day > 31 || mon > 11 || yr < 100 || yr > 199 {
+    return NO_RESULT;
+  }
+  return days_from_civil(yr + 1900, mon + 1, day) * 86400 + hour * 3600 + min * 60 + sec;
+}
+
+/// read(2) of /dev/rtc0: waits for the alarm, then returns the unsigned
+/// long Linux gives for it and disarms the alarm.
+fn rtc_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if len < 8 {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  if !rtc_fired(k) {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
+      ret(&mut k.procs, pid, EAGAIN);       // O_NONBLOCK
+      return KEEP;
+    }
+    if !rtc_armed(k) {
+      ret(&mut k.procs, pid, EIO);          // nothing can ever wake this read
+      return KEEP;
+    }
+    return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
+  }
+  k.sys = set(k.sys, SYS_RTCA + 1, 0);
+  xfer_u64(&mut k.fs.xfer, 0, 0x1A0);   // RTC_AF | RTC_IRQF, one alarm
+  let done = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 8);
+  if done != 8 {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  ret(&mut k.procs, pid, 8);
+  return KEEP;
+}
+
+/// poll(2) bits of /dev/rtc0: readable once the alarm has fired.
+fn rtc_bits(k: &Kernel) -> u64
+  requires kok(k)
+{
+  if rtc_fired(k) {
+    return POLLIN;
+  }
+  return 0;
 }
 
 fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
@@ -33,26 +180,9 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     if t == 0 {
       return EINVAL;                      // the clock says nothing sensible
     }
-    let days = t / 86400;
-    let rest = t % 86400;
-    if days < 10957 || days > 47500 {
-      return EINVAL;
-    }
-    let c = civil_from_days(days);
-    if c.year < 2000 || c.year > 2099 {
-      return EINVAL;
-    }
     xfer_zero(&mut k, RTC_TM_SIZE);
-    rtc_tm_put(&mut k, 0, rest % 60);
-    rtc_tm_put(&mut k, 4, rest / 60 % 60);
-    rtc_tm_put(&mut k, 8, rest / 3600);
-    rtc_tm_put(&mut k, 12, c.day);
-    rtc_tm_put(&mut k, 16, c.month - 1);
-    rtc_tm_put(&mut k, 20, c.year - 1900);
-    rtc_tm_put(&mut k, 24, (days + 4) % 7);
-    let jan1 = days_from_civil(c.year, 1, 1);
-    if days >= jan1 {
-      rtc_tm_put(&mut k, 28, days - jan1);
+    if !rtc_tm_fill(&mut k, 0, t) {
+      return EINVAL;
     }
     return lx_put_out(&mut k, pid, arg, RTC_TM_SIZE);
   }
@@ -63,18 +193,88 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, RTC_TM_SIZE) != RTC_TM_SIZE {
       return EFAULT;
     }
-    let sec = rd32(k.fs.xfer, 0);
-    let min = rd32(k.fs.xfer, 4);
-    let hour = rd32(k.fs.xfer, 8);
-    let day = rd32(k.fs.xfer, 12);
-    let mon = rd32(k.fs.xfer, 16);
-    let yr = rd32(k.fs.xfer, 20);
-    if sec > 59 || min > 59 || hour > 23 || day < 1 || day > 31 || mon > 11 || yr < 100 || yr > 199 {
+    let secs = rtc_tm_secs(k, 0);
+    if secs == NO_RESULT {
       return EINVAL;
     }
-    let secs = days_from_civil(yr + 1900, mon + 1, day) * 86400 + hour * 3600 + min * 60 + sec;
     if !hw_set(&mut k.hwc, secs) {
       return EINVAL;
+    }
+    return 0;
+  }
+  if req == RTC_AIE_ON || req == RTC_AIE_OFF {
+    if req == RTC_AIE_ON {
+      k.sys = set(k.sys, SYS_RTCA + 1, 1);
+    } else {
+      k.sys = set(k.sys, SYS_RTCA + 1, 0);
+    }
+    return 0;
+  }
+  if req == RTC_ALM_SET {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, RTC_TM_SIZE) != RTC_TM_SIZE {
+      return EFAULT;
+    }
+    let hour = rd32(k.fs.xfer, 8);
+    let min = rd32(k.fs.xfer, 4);
+    let sec = rd32(k.fs.xfer, 0);
+    if sec > 59 || min > 59 || hour > 23 {
+      return EINVAL;
+    }
+    let now = hw_get(&mut k.hwc);
+    let mut at = now / 86400 * 86400 + hour * 3600 + min * 60 + sec;
+    if at <= now {
+      at = at + 86400;                  // the next time the clock shows it
+    }
+    k.sys = set(k.sys, SYS_RTCA, rtc_due(k, at, now));
+    return 0;
+  }
+  if req == RTC_ALM_READ || req == RTC_WKALM_RD {
+    let mut at = 0;
+    if req == RTC_WKALM_RD {
+      at = 4;
+    }
+    xfer_zero(&mut k, RTC_WK_SIZE);
+    if rtc_alarm(k) != 0 {
+      let now = hw_get(&mut k.hwc);
+      let due = smaller(rtc_alarm(k), 5000000000);
+      let wall = rtc_wall(k);
+      if due + now < wall || !rtc_tm_fill(&mut k, at, due + now - wall) {
+        return EINVAL;
+      }
+    }
+    if req == RTC_WKALM_RD {
+      if rtc_armed(k) {
+        bset(&mut k.fs.xfer, 0, 1);
+      }
+      if rtc_fired(k) {
+        bset(&mut k.fs.xfer, 1, 1);
+      }
+      return lx_put_out(&mut k, pid, arg, RTC_WK_SIZE);
+    }
+    return lx_put_out(&mut k, pid, arg, RTC_TM_SIZE);
+  }
+  if req == RTC_WKALM_SET {
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, arg, &mut k.fs.xfer, RTC_WK_SIZE) != RTC_WK_SIZE {
+      return EFAULT;
+    }
+    let secs = rtc_tm_secs(k, 4);
+    if secs == NO_RESULT {
+      return EINVAL;
+    }
+    let on = bget(k.fs.xfer, 0);
+    let now = hw_get(&mut k.hwc);
+    if on != 0 && secs <= now {
+      return EINVAL;                    // an alarm in the past (Linux: ETIME)
+    }
+    if secs > now {
+      k.sys = set(k.sys, SYS_RTCA, rtc_due(k, secs, now));
+    } else {
+      k.sys = set(k.sys, SYS_RTCA, 0);
+    }
+    if on != 0 {
+      k.sys = set(k.sys, SYS_RTCA + 1, 1);
+    } else {
+      k.sys = set(k.sys, SYS_RTCA + 1, 0);
     }
     return 0;
   }
