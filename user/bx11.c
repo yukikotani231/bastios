@@ -16,6 +16,12 @@
  * selections, and a selection an X client takes (a copy in the X program)
  * goes into /tmp/bwm.clip. It needs the XFIXES extension to hear of that.
  *
+ * Keyboard focus follows the windows: the X server has no window manager, so
+ * bx11 gives the focus to each top-level window that is mapped (a dialog
+ * takes the keys when it opens) and back to the one below when it goes, and
+ * a click on a window focuses it. Menus (override-redirect windows) are left
+ * alone.
+ *
  * A bwm window cannot be resized for it: the X screen has one size. The
  * pixels are copied 20 times a second, only the rows that changed. */
 #include "bwmlib.h"
@@ -296,10 +302,94 @@ static void selection_request(const unsigned char *e)
     }
 }
 
+/* ---- keyboard focus ---- */
+
+#define MAXTOP 32
+static uint32_t tops[MAXTOP];            /* the mapped top-level windows, the focused one last */
+static int ntop;
+
+static void set_focus(uint32_t w)        /* w 1 is PointerRoot */
+{
+    unsigned char q[12];
+    memset(q, 0, sizeof q);
+    q[0] = 42;                           /* SetInputFocus, revert to PointerRoot */
+    q[1] = 1;
+    q[2] = 3;
+    put32(q + 4, w);
+    xseq++;
+    xwrite(q, sizeof q);
+}
+
+static void top_remove(uint32_t w)
+{
+    for (int i = 0; i < ntop; i++)
+        if (tops[i] == w) {
+            memmove(&tops[i], &tops[i + 1], (size_t)(ntop - i - 1) * sizeof tops[0]);
+            ntop--;
+            if (i == ntop)               /* it had the focus: the one below takes it */
+                set_focus(ntop ? tops[ntop - 1] : 1);
+            return;
+        }
+}
+
+static void top_focus(uint32_t w)        /* w is mapped: it comes to the top and takes the focus */
+{
+    if (ntop && tops[ntop - 1] == w)
+        return;
+    for (int i = 0; i < ntop; i++)
+        if (tops[i] == w) {
+            memmove(&tops[i], &tops[i + 1], (size_t)(ntop - i - 1) * sizeof tops[0]);
+            ntop--;
+            break;
+        }
+    if (ntop == MAXTOP)
+        memmove(tops, tops + 1, (size_t)(--ntop) * sizeof tops[0]);
+    tops[ntop++] = w;
+    set_focus(w);
+}
+
+/* SubstructureNotify on the root: the top-level windows that map and unmap. */
+static void focus_init(void)
+{
+    unsigned char q[16];
+    memset(q, 0, sizeof q);
+    q[0] = 2;                            /* ChangeWindowAttributes: event-mask */
+    q[2] = 4;
+    put32(q + 4, xroot);
+    put32(q + 8, 0x800);
+    put32(q + 12, 1u << 19);
+    xseq++;
+    xwrite(q, sizeof q);
+}
+
+/* The top-level window under the pointer, or 0. */
+static uint32_t window_under_pointer(void)
+{
+    unsigned char q[8];
+    memset(q, 0, sizeof q);
+    q[0] = 38;                           /* QueryPointer */
+    q[2] = 2;
+    put32(q + 4, xroot);
+    xseq++;
+    if (xwrite(q, sizeof q) != 0)
+        return 0;
+    unsigned char *r = xreply(xseq);
+    if (!r)
+        return 0;
+    uint32_t child = rd32(r + 12);
+    free(r);
+    return child;
+}
+
 static void handle_event(const unsigned char *e)
 {
     int code = e[0] & 0x7f;
-    if (code == 30) {
+    if (code == 19) {                                /* MapNotify */
+        if (!e[12] && rd32(e + 8) != cwin)           /* not override-redirect: a window, a dialog */
+            top_focus(rd32(e + 8));
+    } else if (code == 18 || code == 17) {           /* UnmapNotify, DestroyNotify */
+        top_remove(rd32(e + 8));
+    } else if (code == 30) {
         selection_request(e);
     } else if (code == 29) {                         /* SelectionClear: somebody else took it */
         int i = sel_index(rd32(e + 12));
@@ -620,6 +710,14 @@ static void mouse(const struct bwm_mouse *m)
     fake(6, 0, x, y);
     static const int xb[3] = { 1, 3, 2 };            /* bwm: left, right, middle */
     uint32_t now = m->buttons & 7, was = last_buttons & 7;
+    if (now & ~was) {                                /* a press focuses the window it is on */
+        uint32_t under = window_under_pointer();
+        for (int i = 0; under && i < ntop; i++)
+            if (tops[i] == under) {
+                top_focus(under);
+                break;
+            }
+    }
     for (int i = 0; i < 3; i++) {
         if ((now ^ was) & (1u << i))
             fake((now >> i & 1) ? 4 : 5, xb[i], x, y);
@@ -649,6 +747,7 @@ int main(int argc, char **argv)
         puts("bx11: the X server has no XTEST extension or no keyboard map");
         return 1;
     }
+    focus_init();
     if (clip_init() != 0)
         puts("bx11: no clipboard sharing (the X server has no XFIXES extension)");
     /* Opened for writing, so that the mapping shares the pages the X server
