@@ -1262,7 +1262,9 @@ static void to_client(int cli, uint32_t type, const void *p, uint32_t len)
 {
     if (cli < 0 || clis[cli].fd < 0)
         return;
-    unsigned char b[sizeof(struct bwm_hdr) + 32];
+    unsigned char b[sizeof(struct bwm_hdr) + sizeof(struct bwm_drop)];      /* the largest event is a drop */
+    if (len > sizeof(struct bwm_drop))
+        return;
     struct bwm_hdr h = { type, len };
     memcpy(b, &h, sizeof h);
     memcpy(b + sizeof h, p, len);
