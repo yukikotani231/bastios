@@ -3,7 +3,7 @@
 boot/aarch64/boot.S: 502 lines
 boot/aarch64/efi.c: 525 lines
 boot/aarch64/linker.ld: 26 lines
-boot/aarch64/platform.c: 661 lines
+boot/aarch64/platform.c: 662 lines
 boot/ap.S: 84 lines
 boot/boot.S: 655 lines
 boot/core.h: 72 lines
@@ -13,8 +13,8 @@ boot/limine.conf: 29 lines
 boot/linker.ld: 18 lines
 boot/multiboot.c: 321 lines
 boot/platform.c: 113 lines
-boot/smp.c: 824 lines
+boot/smp.c: 825 lines
 user/start.S: 19 lines
 user/start-aarch64.S: 17 lines
 user/user.ld: 15 lines
-total: 3932 lines
+total: 3934 lines

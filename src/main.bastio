@@ -347,6 +347,12 @@ fn go_idle(s: &mut Sys) -> Job
   return Job::Idle;
 }
 
+/// This processor's number: 0 for the bootstrap one, then in the order
+/// they started (as cpu_mask and sched_setaffinity count them).
+fn cpu_no(cpu: &Cpu) -> u64 {
+  return boot_info(cpu, INFO_SMP, 6);
+}
+
 /// Under the lock: what this processor does next. Starting at `from`
 /// (round robin), takes the next READY process out, with its registers
 /// loaded into `cpu` (the caller loads its FPU page), and marks it RUNNING. With `poll`, first
@@ -387,7 +393,8 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
     s.k.ns = tsc_now(s.k.tsc, s.k.ns, cpu);
     sleepers_due(&mut s.k);
   }
-  let p = lx_pick(&mut s.k, from);
+  let me = cpu_no(cpu);
+  let p = lx_pick(&mut s.k, from, me);
   // Only the bootstrap processor takes V_DISK. A process the disk woke
   // that this processor is not about to run would wait for an idle
   // processor's next tick without a V_WAKE. An idle application processor
@@ -433,6 +440,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
           cpu_set(&mut cpu, R_FSBASE, pget(s.k.procs, p, F_REGS + R_FSBASE));
           boot_info(cpu, INFO_GSBASE, pget(s.k.procs, p, F_GSBASE));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
+          aff_ran(&mut s.k, p, me);
           return Job::Run(Task { pid: p, tgid: tgid(s.k.procs, p), vpid: vpid_of(s.k, p, p), vtgid: vpid_of(s.k, p, tgid(s.k.procs, p)), vppid: lx_ppid(s.k, p), rg: reap_gen(s.k), lease: l, fpu: f, slow: sc_mode(s.k, p) != 0 || tr2_get(s.k, p) % 2 == 1 });
         },
       }
@@ -732,7 +740,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // syscall instruction and F_RESTART set, and retries the call each
     // time it runs; a tick that finds it there has run none of its own
     // code, so it is not charged CPU time (a sleep would count otherwise).
+    let mut keep = false;
     if pget(s.k.procs, p, F_RESTART) == 0 {
+      keep = nice_tick(&mut s.k, p);        // a thread that weighs more than nice 0 keeps the processor
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
       s.k.sys = set(s.k.sys, SYS_BUSY, tick(get(s.k.sys, SYS_BUSY)));
       cpu_timers_tick(&mut s.k, p);
@@ -755,6 +765,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     lx_alarms(&mut s.k);
     if v == V_TIMER {
       power_button(&mut s);
+    }
+    if keep {
+      return p;
     }
     return (p + 1) % NPROC;
   }
@@ -1066,7 +1079,7 @@ fn syscall_turn(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, p: u64, tgid_: u64, v
   let other = others_ready(s.k.procs, s.k.pid_hi, p);
   let mut go = c == p && !s.stop && !s.k.naps && state(s.k.procs, p) == READY && pget(s.k.procs, p, F_RESTART) == 0
     && pget(s.k.procs, p, F_SIGPEND) == 0 && s.con.r.n + gfx_pending(s.k) == 0 && !(other && s.idle > 0)
-    && !cg_held(s.k, p);
+    && !cg_held(s.k, p) && aff_ok(s.k, p, cpu_no(cpu));
   if go {
     // next_job's work for a process picked again, but for the signals
     // (a frame holds the FPU page) and the polls.

@@ -2171,6 +2171,8 @@ t_thread: pthread_create + join
 t_thread: pthread_detach
 t_thread: a thread reads the leader's maps, cmdline, auxv and statm and finds the group's memory
 t_thread: thread-local storage
+t_thread: two threads pinned to one processor run only there and share it
+t_thread: a nice-5 thread gets about a third of the time of a nice-0 one on the same processor
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
 t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
@@ -2390,6 +2392,7 @@ x11b: x11b: a partition editor, GParted, draws its window on the X screen
 x11b: x11b: a 3D modeller, OpenSCAD, draws its window on the X screen
 x11b: x11b: a web browser, Firefox, draws its window on the X screen
 x11b: x11b: a mail client, Thunderbird, draws its window on the X screen
+x11b: x11b: a PDF viewer, Evince, opens a PDF and its Open dialog
 rust: rust: unpack the root, make the device nodes
 rust: rust: version
 rust: rust: compile and run a program

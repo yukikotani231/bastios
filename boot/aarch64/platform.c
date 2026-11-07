@@ -675,6 +675,7 @@ uint64_t bst_platform_acpi(uint64_t sig, uint64_t off) { (void)sig; (void)off; r
  * completion is noticed within i microseconds, not at the next tick; every
  * other query is 0. */
 uint64_t bst_platform_info(uint64_t what, uint64_t i) {
+    if (what == 14) return this_cpu()->id;                  /* the processor's number */
     if (what == 13) {
         uint64_t f;
         __asm__ volatile ("mrs %0, cntfrq_el0" : "=r"(f));

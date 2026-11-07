@@ -858,7 +858,8 @@ uint64_t bst_platform_info(uint64_t what, uint64_t i) {
     case 6:                                                /* processor startup */
         return i == 0 ? madt_cpus : i == 1 ? madt_x2 : i == 2 ? smp_stop
              : i == 3 ? apic_now : i == 4 ? apic_fw
-             : i == 5 ? this_core() == bst_core0 : 0;
+             : i == 5 ? this_core() == bst_core0
+             : i == 6 ? *(uint64_t *)(this_core() + CORE_INDEX) : 0;   /* the processor's number */
     case 7:                                                /* the local APIC timer's calibration */
         return i == 0 ? timer_from : i == 1 ? lapic_ticks_10ms : i == 2 ? bsp_lapic_tick : i == 3 ? tsc_hz : i == 4 ? (uint64_t)idle_untimed : 0;
     case 8: {                                              /* ACPI: where the RSDP came from, its revision, the tables */

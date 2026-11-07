@@ -107,6 +107,7 @@ const V_WAKE: u64 = 50;       // another processor's wake-up (an SGI): look for 
 const MAX_IDLE: u64 = 1024;   // more than there are processors
 const INFO_POLL: u64 = 13;    // not a query: while idle, wake every i microseconds (0: only at ticks), to find a finished I/O
 const POLL_US: u64 = 500;
+const INFO_CPUNO: u64 = 14;   // this processor's number: 0 for the first, then in the order they started
 const INFO_KICK: u64 = 12;    // not a query: sends the wake-up to the other processors (the answer is 0)
 const V_SYSCALL: u64 = 128;
 const V_ABORT: u64 = 14;
@@ -302,7 +303,8 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64) -> Job
   if s.k.naps {
     sleepers_due(&mut s.k);
   }
-  let p = lx_pick(&mut s.k, from);
+  let me = boot_info(cpu, INFO_CPUNO, 0);
+  let p = lx_pick(&mut s.k, from, me);
   if p == 0 {
     if live_count(s.k.procs, s.k.pid_hi) == 0 {
       s.stop = true;
@@ -344,6 +346,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64) -> Job
           }
           cpu_set(&mut cpu, R_TLS, pget(s.k.procs, p, reg_word(R_TLS)));
           pset(&mut s.k.procs, p, F_STATE, RUNNING);
+          aff_ran(&mut s.k, p, me);
           return Job::Run(Task { pid: p, lease: l, fpu: f });
         },
       }
@@ -410,7 +413,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     // A process waiting in a system call is READY with its pc on the
     // call and F_RESTART set; a tick that finds it there has run none of
     // its own code, so it is not charged CPU time.
+    let mut keep = false;
     if pget(s.k.procs, p, F_RESTART) == 0 {
+      keep = nice_tick(&mut s.k, p);        // nice values, as src/main.bastio
       pset(&mut s.k.procs, p, F_TICKS, tick(pget(s.k.procs, p, F_TICKS)));
       cpu_timers_tick(&mut s.k, p);
       cg_cpu_tick(&mut s.k, p);             // cpu.max and cpu.weight (src/lxcgroup.bastio)
@@ -427,6 +432,9 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
       cg_cpu_tick(&mut s.k, 0);
     }
     lx_alarms(&mut s.k);
+    if keep {
+      return p;
+    }
     return (p + 1) % NPROC;
   }
   if v == V_SYSCALL && pget(s.k.procs, p, F_ABI) != 0 {
