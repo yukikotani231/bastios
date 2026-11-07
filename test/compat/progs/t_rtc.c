@@ -159,6 +159,38 @@ int main(void) {
         EXPECT("a short read is EINVAL", read(fd, &data, 4) == -1 && errno == EINVAL);
     }
 
+    {
+        /* /sys/class/rtc/rtc0/wakealarm arms the same alarm (what rtcwake writes). */
+        struct rtc_wkalrm g;
+        struct rtc_time t;
+        ioctl(fd, RTC_RD_TIME, &t);
+        time_t base = as_time(&t);
+        int wf = open("/sys/class/rtc/rtc0/wakealarm", O_WRONLY);
+        int rf = open("/sys/class/rtc/rtc0/wakealarm", O_RDONLY);
+        EXPECT("wakealarm opens for writing", wf >= 0);
+        if (wf >= 0) {
+            char buf[64] = "";
+            EXPECT("it is empty while no alarm is armed", (lseek(rf, 0, SEEK_SET), read(rf, buf, sizeof buf - 1)) == 0);
+            EXPECT("+30 arms an alarm 30 seconds on", write(wf, "+30\n", 4) == 4);
+            memset(&g, 0, sizeof g);
+            EXPECT("RTC_WKALM_RD sees it", ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 1 && as_time(&g.time) - base >= 29 && as_time(&g.time) - base <= 33);
+            int r = (lseek(rf, 0, SEEK_SET), read(rf, buf, sizeof buf - 1));
+            buf[r > 0 ? r : 0] = 0;
+            long v = atol(buf);
+            EXPECT("reading it gives that time", r > 0 && v - (long)base >= 29 && v - (long)base <= 33);
+            EXPECT("0 disarms it", write(wf, "0\n", 2) == 2 && ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 0 && (lseek(rf, 0, SEEK_SET), read(rf, buf, sizeof buf - 1)) == 0);
+            char abs_[32];
+            int an = snprintf(abs_, sizeof abs_, "%ld\n", (long)base + 20);
+            EXPECT("an absolute time arms it", write(wf, abs_, an) == an && ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 1 && as_time(&g.time) - base >= 19 && as_time(&g.time) - base <= 23);
+            an = snprintf(abs_, sizeof abs_, "%ld\n", (long)base - 100);
+            EXPECT("a time in the past is EINVAL", write(wf, abs_, an) == -1 && errno == EINVAL);
+            EXPECT("so is text", write(wf, "soon\n", 5) == -1 && errno == EINVAL);
+            write(wf, "0\n", 2);
+            close(wf);
+            close(rf);
+        }
+    }
+
     EXPECT("an unprivileged program cannot set it", ({
         int ok = 0;
         pid_t c = fork();
