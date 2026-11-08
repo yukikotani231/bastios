@@ -52,7 +52,7 @@ const ACC_MMAP_IL: u64 = 1;             // bit 0: SNDRV_PCM_ACCESS_MMAP_INTERLEA
 const ACC_RW_IL: u64 = 8;               // bit 3: SNDRV_PCM_ACCESS_RW_INTERLEAVED
 const PCM_MIN_PERIOD: u64 = 32;
 const PCM_MAX_PERIOD: u64 = 2048;
-const PCM_MAX_BUFFER: u64 = 4096;
+const PCM_MAX_BUFFER: u64 = 3840;
 
 // ioctl requests.
 const PCM_PVERSION: u64 = 0x80044100;
@@ -405,10 +405,10 @@ fn pcm_appl(k: &Kernel) -> u64
   requires kok(k)
   ensures result <= 0x4000000000000
 {
-  if pcm_w(k, 10) == 1 {
+  if pcm_w(k, 10) == 1 && !pcm_free(k) {
     return pcm_w(k, 8);
   }
-  return pcm_w(k, 6);
+  return pcm_w(k, 6);                     // written, or a buffer that runs free
 }
 
 /// Frames of the stream the card still holds, counted in the program's
@@ -478,6 +478,20 @@ fn pcm_in(k: &mut Kernel, pid: u64, arg: u64, n: u64) -> u64
   return 0;
 }
 
+/// Whether the mmap buffer runs free (see pcm_pump).
+fn pcm_free(k: &Kernel) -> bool
+  requires kok(k)
+{
+  return get(k.sys, SYS_ALSAF) == 1;
+}
+
+fn pcm_setfree(k: &mut Kernel, v: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_ALSAF, v);
+}
+
 /// A new open of /dev/snd/pcmC0D0p.
 fn pcm_open_reset(k: &mut Kernel)
   requires kok(k)
@@ -490,6 +504,7 @@ fn pcm_open_reset(k: &mut Kernel)
     pcm_set(&mut k, i, 0);
     i = i + 1;
   }
+  pcm_setfree(&mut k, 0);
 }
 
 /// Moves the stream's format into /dev/dsp's converter.
@@ -521,6 +536,44 @@ fn pcm_pump(k: &mut Kernel, pid: u64)
     return;
   }
   pcm_to_dsp(&mut k);
+  if pcm_free(k) && pcm_w(k, 0) == ST_RUNNING {
+    // Free running: the card is given the buffer in order, two periods
+    // ahead of what it has played, whatever the program has committed, and
+    // what it was given is zeroed in the mapping behind it.
+    let mut r2 = 0;
+    let mut go = true;
+    while go && r2 < 6
+      invariant r2 <= 6 && fb >= 1 && fb <= 4 && bs >= 1 && bs <= 0x40000000 && kok(k)
+    {
+      let t = pcm_w(k, 6);
+      let per = larger(smaller(pcm_w(k, 4), 1024), 1);
+      let lead = smaller(2 * per, bs);
+      let q = smaller(pcm_queued(k), 0x40000000);
+      if q >= lead {
+        go = false;
+      } else {
+        let pos = t % bs;
+        let chunk = smaller(smaller(lead - q, bs - pos), 1024);
+        let r = dsp_write(&mut k, pid, base + pos * fb, chunk * fb);
+        if r >= 0x100000000 {
+          go = false;
+        } else {
+          let n = smaller(r / fb, chunk);
+          if n == 0 {
+            go = false;
+          } else {
+            xfer_zero(&mut k, n * fb);
+            if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, base + pos * fb, k.fs.xfer, n * fb) != n * fb {
+              go = false;
+            }
+            pcm_set(&mut k, 6, t + n);
+          }
+        }
+      }
+      r2 = r2 + 1;
+    }
+    return;
+  }
   let mut rounds = 0;
   let mut more = true;
   while more && rounds < 6
@@ -651,7 +704,8 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     pcm_set(&mut k, 8, 0);
     pcm_set(&mut k, 9, 0);
     pcm_set(&mut k, 10, rd32(k.fs.xfer, HP_ACCESS) % 2);
-    pcm_set(&mut k, 11, 0);
+    tmr_reset(&mut k);
+    pcm_setfree(&mut k, 0);
     return pcm_out(&mut k, pid, arg, HP_SIZE);
   }
   if req == PCM_HW_FREE {
@@ -673,6 +727,16 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
       b = b * 2;
       i = i + 1;
     }
+    // A stream that never stops for an underrun and silences what it has
+    // played (alsa-lib's dmix does both for its slave) runs free over its
+    // buffer, as a DMA ring does: see pcm_pump.
+    let stop = load_le64(k.fs.xfer, 40);
+    let sil = load_le64(k.fs.xfer, 56);
+    if pcm_w(k, 10) == 1 && stop >= b && sil >= b {
+      pcm_setfree(&mut k, 1);
+    } else {
+      pcm_setfree(&mut k, 0);
+    }
     xfer_u64(&mut k.fs.xfer, 64, b);
     store_le32(&mut k.fs.xfer, 72, 0x2000F);
     return pcm_out(&mut k, pid, arg, 136);
@@ -685,7 +749,7 @@ fn pcm_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     pcm_set(&mut k, 6, 0);
     pcm_set(&mut k, 7, 0);
     pcm_set(&mut k, 8, 0);
-    pcm_set(&mut k, 11, 0);
+    tmr_reset(&mut k);
     pcm_to_dsp(&mut k);
     return 0;
   }
@@ -978,8 +1042,26 @@ const TMR_CONTINUE: u64 = 0x54A2;
 const TMR_PAUSE: u64 = 0x54A3;
 const TMR_EVENT_TICK: u64 = 21;
 
-/// Periods the card has played that the timer has not handed out yet.
-fn tmr_ready(k: &Kernel) -> u64
+/// The slot (0 to 7) of the timer open `h`, or 8.
+fn tmr_slot(k: &Kernel, h: u64) -> u64
+  requires kok(k)
+  ensures result <= 8
+{
+  let mut i = 0;
+  let mut at = 8;
+  while i < 8
+    invariant i <= 8 && at <= 8 && kok(k)
+  {
+    if at == 8 && get(k.sys, SYS_ALSAT + 2 * i) == smaller(h, 0xFFFFFF) + 1 {
+      at = i;
+    }
+    i = i + 1;
+  }
+  return at;
+}
+
+/// Periods the card has played since the stream began.
+fn tmr_total(k: &Kernel) -> u64
   requires kok(k)
   ensures result <= 0x4000000000000
 {
@@ -987,18 +1069,78 @@ fn tmr_ready(k: &Kernel) -> u64
   let sq = smaller(pcm_queued(k), g);
   let hw = g - sq;
   let per = larger(smaller(pcm_w(k, 4), PCM_MAX_PERIOD), 1);
-  let total = hw / per;
-  let got = pcm_w(k, 11);
+  return hw / per;
+}
+
+/// A new open of /dev/snd/timer as description `h`: it has been handed nothing.
+fn tmr_open(k: &mut Kernel, h: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let at = tmr_slot(k, h);
+  if at < 8 {
+    k.sys = set(k.sys, SYS_ALSAT + 2 * at, 0);
+  }
+}
+
+/// Sets the periods the timer open `h` has been handed (a new open takes a
+/// free slot, or the last one).
+fn tmr_setgot(k: &mut Kernel, h: u64, v: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut at = tmr_slot(k, h);
+  if at == 8 {
+    at = 7;
+    let mut i = 0;
+    while i < 8
+      invariant i <= 8 && at <= 7 && kok(k)
+    {
+      if at == 7 && get(k.sys, SYS_ALSAT + 2 * i) == 0 {
+        at = i;
+      }
+      i = i + 1;
+    }
+  }
+  k.sys = set(k.sys, SYS_ALSAT + 2 * at, smaller(h, 0xFFFFFF) + 1);
+  k.sys = set(k.sys, SYS_ALSAT + 2 * at + 1, v);
+}
+
+/// Forgets the periods every timer open was handed (the stream began again).
+fn tmr_reset(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < 16
+    invariant i <= 16 && kok(k)
+  {
+    k.sys = set(k.sys, SYS_ALSAT + i, 0);
+    i = i + 1;
+  }
+}
+
+/// Periods the card has played that the timer open `h` has not been handed.
+fn tmr_ready(k: &Kernel, h: u64) -> u64
+  requires kok(k)
+  ensures result <= 0x4000000000000
+{
+  let total = tmr_total(k);
+  let at = tmr_slot(k, h);
+  let mut got = 0;
+  if at < 8 {
+    got = smaller(get(k.sys, SYS_ALSAT + 2 * at + 1), 0x4000000000000);
+  }
   return total - smaller(got, total);
 }
 
-fn tmr_bits(k: &Kernel) -> u64
+fn tmr_bits(k: &Kernel, h: u64) -> u64
   requires kok(k)
 {
   if !snd_live(k.snd) {
     return POLLERR;
   }
-  if tmr_ready(k) > 0 {
+  if tmr_ready(k, h) > 0 {
     return POLLIN;
   }
   return 0;
@@ -1020,9 +1162,9 @@ fn tmr_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
     ret(&mut k.procs, pid, EINVAL);
     return KEEP;
   }
-  let ticks = tmr_ready(k);
+  let h = fd_ofd(k, pid, fd);
+  let ticks = tmr_ready(k, h);
   if ticks == 0 {
-    let h = fd_ofd(k, pid, fd);
     if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
       ret(&mut k.procs, pid, EAGAIN);
       return KEEP;
@@ -1042,13 +1184,13 @@ fn tmr_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
     ret(&mut k.procs, pid, EFAULT);
     return KEEP;
   }
-  pcm_set(&mut k, 11, pcm_w(k, 11) + smaller(ticks, 0x40000000));
+  tmr_setgot(&mut k, h, tmr_total(k));
   ret(&mut k.procs, pid, need);
   return KEEP;
 }
 
 /// ioctl(2) on /dev/snd/timer.
-fn tmr_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
+fn tmr_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
@@ -1077,6 +1219,10 @@ fn tmr_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   }
   if req == TMR_SELECT || req == TMR_PARAMS || req == TMR_START || req == TMR_STOP || req == TMR_CONTINUE
     || req == TMR_PAUSE {
+    if req == TMR_SELECT || req == TMR_START {
+      let h = fd_ofd(k, pid, fd);
+      tmr_setgot(&mut k, h, tmr_total(k));      // counts the periods from here on
+    }
     return 0;
   }
   if req == TMR_INFO {
@@ -1091,7 +1237,7 @@ fn tmr_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
   if req == TMR_STATUS {
     xfer_zero(&mut k, 96);
     store_le32(&mut k.fs.xfer, 16, 1000000);   // resolution
-    store_le32(&mut k.fs.xfer, 28, cast[u32](smaller(tmr_ready(k), 0x40000000)));   // queue
+    store_le32(&mut k.fs.xfer, 28, cast[u32](smaller(tmr_ready(k, fd_ofd(k, pid, fd)), 0x40000000)));   // queue
     return pcm_out(&mut k, pid, arg, 96);
   }
   return ENOTTY;

@@ -2719,11 +2719,43 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Enter in the window menu chooses the lit entry ({back})")
             fails += not good
+            # A right click on the window's task bar button opens the same menu above it: Minimize hides the window, and the entry is then Show.
+            mid = (200 * w + 200) * 3
+            winpx = tuple(px[mid:mid + 3])
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 90 0", "mouse_move 0 252", "mouse_move 0 252", "mouse_move 0 252")   # on the first window button
+            time.sleep(1.0)
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            monitor("mouse_move 0 -122")                                                # the Minimize entry
+            time.sleep(0.3)
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(1.2)
+            w, h, px = screendump()
+            hidpx = tuple(px[mid:mid + 3])
+            hidden = hidpx != winpx
+            print(("ok  " if hidden else "FAIL"), f"({name}) a right click on a task bar button opens the window menu, and Minimize hides the window")
+            fails += not hidden
+            monitor("mouse_move 0 122")
+            time.sleep(1.0)
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            monitor("mouse_move 0 -122")                                                # the Show entry
+            time.sleep(0.3)
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(1.2)
+            w, h, px = screendump()
+            good = tuple(px[mid:mid + 3]) != hidpx
+            print(("ok  " if good else "FAIL"), f"({name}) Show in the window menu of a hidden window brings it back ({winpx}, {hidpx}, {tuple(px[mid:mid + 3])})")
+            fails += not good
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 150 138")
+            time.sleep(0.3)
             monitor("mouse_move 0 -58")                                                 # onto the title bar of the restored window
             time.sleep(0.3)
             monitor("mouse_button 2", "mouse_button 0")
             time.sleep(0.7)
-            monitor("mouse_move 0 106")                                                 # Close
+            monitor("mouse_move 0 130")                                                 # Close
             time.sleep(0.3)
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(1.5)
@@ -2734,6 +2766,37 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
         else:
             print("FAIL", f"({name}) the window menu test could not start bwm")
+            fails += 1
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Keep on top (window menu): a window with it set stays above the others, even after another window is clicked and raised.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+        good = until(b"bterm: window", mark)
+        if good:
+            time.sleep(1.5)
+            monitor("sendkey ctrl-t")                                                   # a second terminal, 30 px down and right of the first
+            time.sleep(1.5)
+            monitor("sendkey alt-f3", "sendkey down", "sendkey down", "sendkey down", "sendkey down", "sendkey ret")   # Keep on top for it
+            time.sleep(1.0)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 85 80")
+            time.sleep(0.3)
+            w, h, px = screendump()
+            before = tuple(px[(105 * w + 400) * 3:(105 * w + 400) * 3 + 3])           # the second window's title bar
+            monitor("mouse_button 1", "mouse_button 0")                                 # click the first window: it is raised, but the other stays above
+            time.sleep(1.0)
+            w, h, px = screendump()
+            after = tuple(px[(105 * w + 400) * 3:(105 * w + 400) * 3 + 3])
+            good = before == after and before != (0, 0, 0)
+            print(("ok  " if good else "FAIL"), f"({name}) a Keep on top window stays above a window clicked afterwards ({before}, {after})")
+            fails += not good
+        else:
+            print("FAIL", f"({name}) the keep on top test could not start bwm")
             fails += 1
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
@@ -3756,6 +3819,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 print(("ok  " if good else "FAIL"), f"({name}) a double click selects a word and copies it")
                 if not good:
                     print("\n".join(l for l in lines4 if l))
+                fails += not good
+            if good:
+                # Alt-Shift-1 pastes the selection before the latest one ("copied", which the double click on "echo" replaced).
+                monitor("sendkey alt-shift-1")
+                time.sleep(1)
+                w, h, px = screendump()
+                lines5 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copiedcopiedechocopied" for l in lines5)
+                print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-1 pastes the previous clipboard entry")
+                if not good:
+                    print("\n".join(l for l in lines5 if l))
                 fails += not good
             bracket = good
             if good:

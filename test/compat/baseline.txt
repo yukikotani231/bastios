@@ -170,7 +170,9 @@ debian: debian: mount --make-shared, findmnt shows the propagation
 debian: debian: unshare gives a mount namespace of its own
 debian: debian: util-linux mount tools see the mount table
 alsa: alsa: SDL2 plays through its ALSA backend
+alsa: alsa: aplay plays through dmix
 alsa: alsa: amixer lists the volume control
+alsa: alsa: the default device converts the rate of a recording
 alsa: alsa: aplay lists the card
 alsa: alsa: aplay plays mono 24 kHz on the hardware device
 alsa: alsa: aplay plays through mmap
@@ -1710,6 +1712,8 @@ t_proc: status has CapInh, CapPrm, CapEff, CapBnd and CapAmb
 t_proc: CapEff is what capget says
 t_proc: dropping a capability from the bounding set shows in CapBnd
 t_proc: a memfd at a three- or four-digit descriptor opens read-only through /proc/self/fd/N
+t_proc: pread reads a /proc file from an offset and keeps the descriptor's position
+t_proc: pread of /proc/self/maps in pieces ends
 t_ptrace: PTRACE_ATTACH stops the target with SIGSTOP
 t_ptrace: PTRACE_CONT with a signal runs the handler for it
 t_ptrace: PTRACE_CONT without a signal drops the one that stopped it, and the child saw the poke

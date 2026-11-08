@@ -181,7 +181,7 @@ static int capture(int mmapped)
                hw.intervals[PTIME].max, hw.intervals[PTIME].flags, hw.intervals[PSIZE].min);
         return 1;
     }
-    fix(&hw, BTIME, 85250);
+    fix(&hw, BSIZE, 3069);                  /* three periods of 1023 frames: the buffer holds at most 3840 */
     if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
         printf("malsa: capture buffer time: errno %d\n", errno);
         return 1;
