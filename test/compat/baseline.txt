@@ -3197,5 +3197,6 @@ server: server: redis restarts and loads the snapshot
 server: server: redis replays its append-only file
 server: server: redis replicates to a second server
 server: server: nginx runs workers under a master
+server: server: haproxy forwards requests to nginx
 server: server: memcached stores and returns a value
 server: server: nginx serves a page

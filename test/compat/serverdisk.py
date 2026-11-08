@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Writes the server disk for the compat suite (test/compat/server.txt):
-Redis, memcached and nginx of Ubuntu 24.04, with the glibc and the
+Redis, memcached, nginx and HAProxy of Ubuntu 24.04, with the glibc and the
 libraries they link against, as a tar file (/disk/root.tar) next to a
 static BusyBox at /disk/busybox. The checks unpack the root under /disk/s,
 chroot into it and run the servers and their clients.
@@ -67,6 +67,10 @@ PACKAGES = (
      "bb38c38adb4ef548f2851b5cf7f70bbdbcb27d582c17550aa053edb9e4098d84"),
     ("pool/main/n/nginx/nginx_1.24.0-2ubuntu7_amd64.deb",
      "de56297d8b47be0324cf699be438cb58902a26ed1307d129fc4f32aa5e4a5994"),
+    ("pool/main/l/lua5.4/liblua5.4-0_5.4.6-3build2_amd64.deb",
+     "6a520259e5b06e86191a25af6d448387cdd2b3d291a0aa956ce272e84d071260"),
+    ("pool/main/h/haproxy/haproxy_2.8.5-1ubuntu3_amd64.deb",
+     "861bf08a4f55a87663cb56597991ad995e2e4b1a1fff2ce5cd31fd6bf559fbb5"),
 )
 
 
