@@ -51,3 +51,40 @@ fn snd_size(s: &Snd) -> u64
 {
   return 0;
 }
+
+/// Can the card record?
+fn snd_has_in(s: &Snd) -> bool {
+  return false;
+}
+
+/// Starts recording if it is not running.
+fn snd_in_start(s: &mut Snd)
+  requires snd_ok(s)
+  ensures snd_ok(s)
+{
+}
+
+/// Stops recording and drops what was recorded.
+fn snd_in_stop(s: &mut Snd)
+  requires snd_ok(s)
+  ensures snd_ok(s)
+{
+}
+
+/// Is the card recording?
+fn snd_in_running(s: &Snd) -> bool {
+  return false;
+}
+
+/// Bytes recorded and not read yet.
+fn snd_in_avail(s: &Snd) -> u64 {
+  return 0;
+}
+
+/// Takes up to n bytes (whole frames) of the recording into dst at 0; how many.
+fn snd_in_get(s: &mut Snd, dst: &mut Bytes, n: u64) -> u64
+  requires snd_ok(s) && n <= blen(dst)
+  ensures snd_ok(s) && result <= n
+{
+  return 0;
+}

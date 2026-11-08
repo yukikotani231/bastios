@@ -364,6 +364,9 @@ fn lx_read_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   if d.kind == K_DEV && d.x == DEV_TIMER {
     return tmr_read(&mut k, pid, n, a, va, cnt);    // src/lxalsa.bastio
   }
+  if d.kind == K_DEV && d.x == DEV_DSP {
+    return dsp_read(&mut k, pid, n, a, va, cnt);    // src/lxsnd.bastio
+  }
   if d.kind == K_DEV && d.x == DEV_KEYEV {
     return keyev_read(&mut k, pid, n, a, va, cnt);  // src/lxkeyev.bastio
   }
@@ -1345,6 +1348,9 @@ fn lx_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if d.kind == K_DEV && d.x == DEV_PCM {
     return pcm_ioctl(&mut k, pid, fd, req % 0x100000000, arg);   // src/lxalsa.bastio
+  }
+  if d.kind == K_DEV && d.x == DEV_PCMC {
+    return cap_ioctl(&mut k, pid, fd, req % 0x100000000, arg);   // src/lxalsac.bastio
   }
   if d.kind == K_DEV && d.x == DEV_SNDC {
     return snd_ctl_ioctl(&mut k, pid, req % 0x100000000, arg);

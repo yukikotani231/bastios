@@ -13,7 +13,7 @@
 // as room allows. The status and control pages are not mapped (mmap fails
 // at their offsets), so alsa-lib uses SYNC_PTR for the pointers.
 // A blocking write that cannot finish sleeps and runs again, as other
-// blocking calls do. Recording is not offered. Without a sound card the
+// blocking calls do. Recording is src/lxalsac.bastio. Without a sound card the
 // devices do not open (ENODEV). There is one stream, and its state lives in
 // k.sys from SYS_ALSA.
 
@@ -262,30 +262,34 @@ fn pcm_pass(k: &mut Kernel) -> bool
   let ph3 = c20(iv_max(k, IV_PSIZE));
   let bl3 = c20(iv_min(k, IV_BSIZE));
   let bh3 = c20(iv_max(k, IV_BSIZE));
-  if !iv_narrow(&mut k, IV_PTIME, cdiv(pl3 * 1000000, rh), ph3 * 1000000 / rl) {
+  // A size has the time it takes rounded either way, as in the kernel's
+  // rules (an inexact quotient leaves both neighbours): 1023 frames at
+  // 48 kHz last 21312 and 21313 microseconds.
+  if !iv_narrow(&mut k, IV_PTIME, pl3 * 1000000 / rh, cdiv(ph3 * 1000000, rl)) {
     return false;
   }
-  if !iv_narrow(&mut k, IV_BTIME, cdiv(bl3 * 1000000, rh), bh3 * 1000000 / rl) {
+  if !iv_narrow(&mut k, IV_BTIME, bl3 * 1000000 / rh, cdiv(bh3 * 1000000, rl)) {
     return false;
   }
   let ptl = iv_min(k, IV_PTIME);
   let pth = iv_max(k, IV_PTIME);
   let btl = iv_min(k, IV_BTIME);
   let bth = iv_max(k, IV_BTIME);
-  if !iv_narrow(&mut k, IV_PSIZE, cdiv(ptl * rl, 1000000), pth * rh / 1000000) {
+  // and the sizes for a time are those whose time can be it
+  if !iv_narrow(&mut k, IV_PSIZE, (larger(ptl, 1) - 1) * rl / 1000000 + 1, larger(cdiv((pth + 1) * rh, 1000000), 1) - 1) {
     return false;
   }
-  if !iv_narrow(&mut k, IV_BSIZE, cdiv(btl * rl, 1000000), bth * rh / 1000000) {
+  if !iv_narrow(&mut k, IV_BSIZE, (larger(btl, 1) - 1) * rl / 1000000 + 1, larger(cdiv((bth + 1) * rh, 1000000), 1) - 1) {
     return false;
   }
   let mut rhi = 4294967295;
-  if ptl > 0 {
-    rhi = smaller(rhi, ph3 * 1000000 / ptl);
+  if ptl > 1 {
+    rhi = smaller(rhi, ph3 * 1000000 / (ptl - 1));
   }
-  if btl > 0 {
-    rhi = smaller(rhi, bh3 * 1000000 / btl);
+  if btl > 1 {
+    rhi = smaller(rhi, bh3 * 1000000 / (btl - 1));
   }
-  if !iv_narrow(&mut k, IV_RATE, cdiv(pl3 * 1000000, larger(pth, 1)), rhi) {
+  if !iv_narrow(&mut k, IV_RATE, pl3 * 1000000 / (pth + 1), rhi) {
     return false;
   }
   return true;
@@ -817,8 +821,21 @@ fn snd_ctl_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     if e != 0 {
       return e;
     }
-    if rd32(k.fs.xfer, 0) != 0 || rd32(k.fs.xfer, 4) != 0 || rd32(k.fs.xfer, 8) != 0 {
-      return ENOENT;                    // device 0, subdevice 0, playback only
+    if rd32(k.fs.xfer, 0) != 0 || rd32(k.fs.xfer, 4) != 0 || rd32(k.fs.xfer, 8) > 1 {
+      return ENOENT;                    // device 0, subdevice 0
+    }
+    if rd32(k.fs.xfer, 8) == 1 {
+      if !snd_has_in(k.snd) {
+        return ENOENT;
+      }
+      xfer_zero(&mut k, 288);
+      store_le32(&mut k.fs.xfer, 8, 1);       // stream: capture
+      pcm_str(&mut k, 16, 64, "HDA");
+      pcm_str(&mut k, 80, 80, "BastiOS HD Audio");
+      pcm_str(&mut k, 160, 32, "subdevice #0");
+      store_le32(&mut k.fs.xfer, 200, 1);
+      store_le32(&mut k.fs.xfer, 204, 1);
+      return pcm_out(&mut k, pid, arg, 288);
     }
     return pcm_ioctl(&mut k, pid, 0, PCM_INFO, arg);
   }

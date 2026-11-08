@@ -98,6 +98,7 @@ import "lxcow.bastio";
 import "hda.bastio";
 import "lxsnd.bastio";
 import "lxalsa.bastio";
+import "lxalsac.bastio";
 import "lxrtc.bastio";
 import "lxmouse.bastio";
 import "lxfb.bastio";
@@ -534,7 +535,7 @@ fn stretch_p(s: &mut Sys, cpu: &Cpu)
   // What else the tick drives: a polled keyboard or mouse (USB, or a PS/2
   // mouse), sound, a card that
   // raises no interrupt, the network stack's timers, the disk's batch.
-  if s.polled || snd_queued(s.k.snd) != 0
+  if s.polled || snd_queued(s.k.snd) != 0 || snd_in_running(s.k.snd)
      || (nic_up(s.k.nic) && !nic_irq(s.k.nic)) || !nic_timers_idle(s.k.nic)
      || !dq_idle(s.k.fs.disk.q) || s.k.fs.disk.pw != 0 || s.k.fs.disk.pdn != 0 {
     return;
@@ -1820,7 +1821,7 @@ fn main(ports: &mut Ports, win: &mut MmioSpace, pool: &mut Pool, mmu: &mut Mmu, 
   } else if ser_on == SER_ACM {
     puts(&mut con, "serial: USB CDC-ACM device (/dev/ttyACM0)\r\n");
   }
-  // The sound card, if any, with six pages from SND_AT.
+  // The sound card, if any, with HDA_PAGES pages from SND_AT.
   let snd = snd_find(&mut pci, &mut m, &mut win, SND_AT, fb_lo, fb_hi, usb_lo, usb_hi, dk_lo, dk_hi);
   let snd_l = snd_lo(snd);
   let snd_h = snd_hi(snd);

@@ -49,7 +49,11 @@ fn snd_find(pci: &mut Pci, m: &mut Mem, win: &mut MmioSpace, at: u64, lo: u64, h
   let f3 = take_low_page(&mut m, at + 3);
   let f4 = take_low_page(&mut m, at + 4);
   let f5 = take_low_page(&mut m, at + 5);
-  let h = hda_new(mmio_claim(&mut win, bar, size), f0, f1, f2, f3, f4, f5);
+  let f6 = take_low_page(&mut m, at + 6);
+  let f7 = take_low_page(&mut m, at + 7);
+  let f8 = take_low_page(&mut m, at + 8);
+  let f9 = take_low_page(&mut m, at + 9);
+  let h = hda_new(mmio_claim(&mut win, bar, size), f0, f1, f2, f3, f4, f5, f6, f7, f8, f9);
   if h.outs == 0 {
     mmio_release(&mut win, hda_free(h, &mut m));
     return Snd::None;
@@ -98,6 +102,7 @@ fn snd_poll(s: &mut Snd)
   match s {
     Snd::Hda(mut h) => {
       hda_poll(&mut h);
+      hda_in_poll(&mut h);
       s = Snd::Hda(h);
     },
     Snd::None => { s = Snd::None; },
@@ -112,6 +117,76 @@ fn snd_put(s: &mut Snd, src: &Bytes, n: u64) -> u64
   match s {
     Snd::Hda(mut h) => {
       let k = hda_put(&mut h, src, n);
+      s = Snd::Hda(h);
+      return k;
+    },
+    Snd::None => {
+      s = Snd::None;
+      return 0;
+    },
+  }
+}
+
+/// Can the card record?
+fn snd_has_in(s: &Snd) -> bool {
+  match s {
+    Snd::Hda(h) => { return hda_has_in(h); },
+    Snd::None => { return false; },
+  }
+}
+
+/// Starts recording if it is not running.
+fn snd_in_start(s: &mut Snd)
+  requires snd_ok(s)
+  ensures snd_ok(s)
+{
+  match s {
+    Snd::Hda(mut h) => {
+      hda_in_start(&mut h);
+      s = Snd::Hda(h);
+    },
+    Snd::None => { s = Snd::None; },
+  }
+}
+
+/// Stops recording and drops what was recorded.
+fn snd_in_stop(s: &mut Snd)
+  requires snd_ok(s)
+  ensures snd_ok(s)
+{
+  match s {
+    Snd::Hda(mut h) => {
+      hda_in_stop(&mut h);
+      s = Snd::Hda(h);
+    },
+    Snd::None => { s = Snd::None; },
+  }
+}
+
+/// Is the card recording?
+fn snd_in_running(s: &Snd) -> bool {
+  match s {
+    Snd::Hda(h) => { return hda_in_running(h); },
+    Snd::None => { return false; },
+  }
+}
+
+/// Bytes recorded and not read yet.
+fn snd_in_avail(s: &Snd) -> u64 {
+  match s {
+    Snd::Hda(h) => { return hda_in_avail(h); },
+    Snd::None => { return 0; },
+  }
+}
+
+/// Takes up to n bytes (whole frames) of the recording into dst at 0; how many.
+fn snd_in_get(s: &mut Snd, dst: &mut Bytes, n: u64) -> u64
+  requires snd_ok(s) && n <= blen(dst)
+  ensures snd_ok(s) && result <= n
+{
+  match s {
+    Snd::Hda(mut h) => {
+      let k = hda_in_get(&mut h, &mut dst, n);
       s = Snd::Hda(h);
       return k;
     },

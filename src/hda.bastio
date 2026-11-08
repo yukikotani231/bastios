@@ -27,8 +27,8 @@ import "pci.bastio";
 import "pages.bastio";
 
 const HDA_CLASS: u64 = 0x040300;       // multimedia, HD Audio
-const HDA_PAGES: u64 = 6;              // the rings, the buffer list, four data pages
-const SND_AT: u64 = 45;                // those pages: 45 .. 50, after the xHCI controller's
+const HDA_PAGES: u64 = 10;             // the rings, the buffer list, four data pages, four more for recording
+const SND_AT: u64 = 45;                // those pages: 45 .. 54, after the xHCI controller's
 const HDA_MAX_LEN: u64 = 0x4000;       // registers claimed: the BAR, up to 16 KiB
 const HDA_MIN_LEN: u64 = 0x1000;
 const HDA_SPINS: u64 = 1000000;
@@ -40,6 +40,9 @@ const NO_RESP: u64 = 4294967296;       // a codec did not answer
 const MAX_OUTS: u64 = 4;
 const FMT_48K_S16_2: u64 = 0x11;       // 48 kHz (base 48k, x1, /1), 16 bits, 2 channels
 const STREAM_TAG: u64 = 1;
+const IN_TAG: u64 = 2;                 // the recording stream's tag
+const IN_IDLE: u64 = 100;              // ticks without a read before recording stops by itself
+const IN_BDL: u64 = 256;               // its buffer descriptors, in the same page as the output's
 
 // Controller registers.
 const HD_GCAP: u64 = 0x00;             // 16 bits: output, input, bidirectional streams
@@ -91,6 +94,7 @@ const P_CONNLEN: u64 = 0x0E;
 const P_INAMP: u64 = 0x0D;             // input amplifier: 0 dB offset in bits 0-6
 const P_OUTAMP: u64 = 0x12;            // output amplifier: 0 dB offset in bits 0-6
 const W_DAC: u64 = 0;
+const W_ADC: u64 = 1;
 const W_MIXER: u64 = 2;
 const W_SELECTOR: u64 = 3;
 const W_PIN: u64 = 4;
@@ -110,6 +114,13 @@ struct Hda {
   fill: u64,          // bytes queued and not yet played
   last: u64,          // how far the controller had played at the last poll
   quiet: u64,         // polls in a row with nothing queued while running
+  ins: u64,           // 1 if a converter (ADC) was set up for recording
+  isd: u64,           // the first input stream descriptor's offset
+  e0: Dma, e1: Dma, e2: Dma, e3: Dma,   // the recording ring
+  irun: bool,         // the recording stream is running
+  ilast: u64,         // how far the controller had recorded at the last poll
+  iavail: u64,        // bytes recorded and not yet read (the oldest is at ilast - iavail)
+  iidle: u64,         // ticks since the last read
 }
 
 spec fn hda_ok(h: &Hda) -> bool {
@@ -117,6 +128,8 @@ spec fn hda_ok(h: &Hda) -> bool {
   && HD_SD0 <= h.sd && h.sd % 32 == 0 && h.sd + 0x20 <= mmio_len(h.regs)
   && h.cad < 16 && h.corb < 256 && h.rirb < 256 && h.amp0 < 128 && h.outs <= MAX_OUTS
   && h.wpos < RING && h.wpos % 4 == 0 && h.fill <= RING && h.last < RING && h.last % 4 == 0
+  && h.ins <= 1 && HD_SD0 <= h.isd && h.isd % 32 == 0 && h.isd + 0x20 <= mmio_len(h.regs)
+  && h.ilast < RING && h.ilast % 4 == 0 && h.iavail <= RING && h.iavail % 4 == 0 && h.iidle <= IN_IDLE
 }
 
 spec fn hreg(h: &Hda, off: u64, w: u64) -> bool {
@@ -411,6 +424,91 @@ fn route(h: &mut Hda, p: u64) -> bool
   return false;
 }
 
+/// Tells ADC nid to record into stream 2 (channels 0 and 1) in the driver's
+/// format, with its input `i` unmuted.
+fn adc_on(h: &mut Hda, nid: u64, i: u64)
+  requires hda_ok(h) && nid < 128 && i < 16
+  ensures hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+  ensures h.wpos == old(h.wpos) && h.fill == old(h.fill) && h.last == old(h.last)
+{
+  unmute(&mut h, nid, i);
+  let f = verb(&mut h, nid, V_FORMAT + FMT_48K_S16_2);
+  let s = verb(&mut h, nid, V_STREAM + IN_TAG * 16);
+}
+
+/// Pin p, if it is an analogue input that is wired up (line in, aux or a
+/// microphone): switches its input on. True if it was one.
+fn in_pin(h: &mut Hda, p: u64) -> bool
+  requires hda_ok(h) && p < 128
+  ensures hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+  ensures h.wpos == old(h.wpos) && h.fill == old(h.fill) && h.last == old(h.last)
+{
+  let caps = param(&mut h, p, P_PINCAPS);
+  let cfg = verb(&mut h, p, V_CONFIG);
+  if caps == NO_RESP || cfg == NO_RESP || (caps >> 5) % 2 == 0 {
+    return false;                     // not an input
+  }
+  let dev = (cfg >> 20) % 16;
+  if (cfg >> 30) % 4 == 1 || (dev != 8 && dev != 9 && dev != 10) {
+    return false;                     // not wired, or not line in, aux or a microphone
+  }
+  unmute(&mut h, p, 0);
+  let mut ctl = 0x20;                 // input enable
+  if (caps >> 12) % 2 == 1 {
+    ctl = 0x24;                       // and a bias of 80% for a microphone
+  }
+  let c = verb(&mut h, p, V_PINCTL + ctl);
+  return true;
+}
+
+/// ADC a: finds an input pin behind it, directly or through one mixer or
+/// selector, and sets the path up. False if there is none.
+fn in_route(h: &mut Hda, a: u64) -> bool
+  requires hda_ok(h) && a < 128
+  ensures hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+  ensures h.wpos == old(h.wpos) && h.fill == old(h.fill) && h.last == old(h.last)
+{
+  let n = conn_len(&mut h, a);
+  let mut i = 0;
+  while i < n
+    invariant n <= 16 && hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+    invariant h.wpos == old(h.wpos) && h.fill == old(h.fill) && h.last == old(h.last)
+  {
+    let b = conn_at(&mut h, a, i);
+    if b < 128 {
+      let t = wtype(&mut h, b);
+      if t == W_PIN {
+        if in_pin(&mut h, b) {
+          select(&mut h, a, i, n);
+          adc_on(&mut h, a, i);
+          return true;
+        }
+      } else if t == W_MIXER || t == W_SELECTOR {
+        let m = conn_len(&mut h, b);
+        let mut j = 0;
+        while j < m
+          invariant m <= 16 && hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+          invariant h.wpos == old(h.wpos) && h.fill == old(h.fill) && h.last == old(h.last)
+        {
+          let c = conn_at(&mut h, b, j);
+          if c < 128 && wtype(&mut h, c) == W_PIN && in_pin(&mut h, c) {
+            if t == W_SELECTOR {
+              select(&mut h, b, j, m);
+            }
+            unmute(&mut h, b, j);
+            select(&mut h, a, i, n);
+            adc_on(&mut h, a, i);
+            return true;
+          }
+          j = j + 1;
+        }
+      }
+    }
+    i = i + 1;
+  }
+  return false;
+}
+
 /// Sets up pin p if it is an output that is wired up (its configuration
 /// default does not say "no connection") and not a digital one, and a DAC
 /// can reach it. True if it was.
@@ -484,6 +582,17 @@ fn codec_up(h: &mut Hda)
           }
           w = w + 1;
         }
+        // And the first ADC that has an input to record from.
+        w = w0;
+        while w < w0 + wn && w < 128 && h.ins == 0
+          invariant hda_ok(h) && h.run == old(h.run)
+          invariant h.wpos == old(h.wpos) && h.fill == old(h.fill) && h.last == old(h.last)
+        {
+          if wtype(&mut h, w) == W_ADC && in_route(&mut h, w) {
+            h.ins = 1;
+          }
+          w = w + 1;
+        }
       }
       return;
     }
@@ -513,13 +622,14 @@ fn wait8(h: &mut Hda, off: u64, mask: u64, want: u64, spins: u64) -> bool
 /// The controller at `regs`: resets it, starts the command rings, sets up
 /// the first codec's outputs and the output stream (not running). With
 /// no codec, or no output it can reach, `outs` is 0.
-fn hda_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f5: Frame) -> Hda
+fn hda_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f5: Frame, f6: Frame, f7: Frame, f8: Frame, f9: Frame) -> Hda
   requires mmio_base(regs) % 4096 == 0 && HDA_MIN_LEN <= mmio_len(regs) && mmio_len(regs) <= HDA_MAX_LEN
   ensures hda_ok(result) && !result.run
   ensures mmio_base(result.regs) == mmio_base(regs) && mmio_len(result.regs) == mmio_len(regs)
 {
   let mut h = Hda { regs: regs, ring: dma_lend(f0), bdl: dma_lend(f1), d0: dma_lend(f2), d1: dma_lend(f3), d2: dma_lend(f4), d3: dma_lend(f5),
-    sd: HD_SD0, cad: 0, corb: 0, rirb: 0, outs: 0, amp0: 0, amp0i: 0, run: false, wpos: 0, fill: 0, last: 0, quiet: 0 };
+    sd: HD_SD0, cad: 0, corb: 0, rirb: 0, outs: 0, amp0: 0, amp0i: 0, run: false, wpos: 0, fill: 0, last: 0, quiet: 0,
+    ins: 0, isd: HD_SD0, e0: dma_lend(f6), e1: dma_lend(f7), e2: dma_lend(f8), e3: dma_lend(f9), irun: false, ilast: 0, iavail: 0, iidle: 0 };
   let mut i = 0;
   while i < 4096
     invariant i <= 4096 && i % 8 == 0 && hda_ok(h) && h.outs == 0 && !h.run
@@ -530,6 +640,10 @@ fn hda_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f5
     dma_write64(&mut h.d1, i, 0);
     dma_write64(&mut h.d2, i, 0);
     dma_write64(&mut h.d3, i, 0);
+    dma_write64(&mut h.e0, i, 0);
+    dma_write64(&mut h.e1, i, 0);
+    dma_write64(&mut h.e2, i, 0);
+    dma_write64(&mut h.e3, i, 0);
     i = i + 8;
   }
   // The first output stream comes after the input streams.
@@ -620,12 +734,43 @@ fn hda_new(regs: Mmio, f0: Frame, f1: Frame, f2: Frame, f3: Frame, f4: Frame, f5
   hw16(&mut h, sdo + SD_LVI, 3);
   hw16(&mut h, sdo + SD_FMT, FMT_48K_S16_2);
   hw8(&mut h, sdo + SD_TAG, STREAM_TAG * 16);
+  if iss == 0 {
+    h.ins = 0;
+  } else if h.ins == 1 {
+    in_stream(&mut h);
+  }
   return h;
+}
+
+/// Resets the recording stream and programs it: the buffer list (four
+/// pages, no interrupts), the ring's length, the format and the tag. Its
+/// position starts at the top of the ring.
+fn in_stream(h: &mut Hda)
+  requires hda_ok(h)
+  ensures hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+  ensures h.wpos == old(h.wpos) && h.fill == old(h.fill) && h.last == old(h.last) && h.ins == old(h.ins)
+{
+  let sdi = h.isd;
+  hw8(&mut h, sdi + SD_CTL, 1);
+  let t1 = wait8(&mut h, sdi + SD_CTL, 1, 1, HDA_SPINS);
+  hw8(&mut h, sdi + SD_CTL, 0);
+  let t2 = wait8(&mut h, sdi + SD_CTL, 1, 0, HDA_SPINS);
+  bd(&mut h.bdl, IN_BDL / 16, dma_phys(h.e0));
+  bd(&mut h.bdl, IN_BDL / 16 + 1, dma_phys(h.e1));
+  bd(&mut h.bdl, IN_BDL / 16 + 2, dma_phys(h.e2));
+  bd(&mut h.bdl, IN_BDL / 16 + 3, dma_phys(h.e3));
+  let b = dma_phys(h.bdl) + IN_BDL;
+  hw32(&mut h, sdi + SD_BDPL, b % 4294967296);
+  hw32(&mut h, sdi + SD_BDPU, b / 4294967296 % 4294967296);
+  hw32(&mut h, sdi + SD_CBL, RING);
+  hw16(&mut h, sdi + SD_LVI, 3);
+  hw16(&mut h, sdi + SD_FMT, FMT_48K_S16_2);
+  hw8(&mut h, sdi + SD_TAG, IN_TAG * 16);
 }
 
 /// Buffer descriptor i: a whole page at physical address a, no interrupt.
 fn bd(d: &mut Dma, i: u64, a: u64)
-  requires i < 4
+  requires i < 32
 {
   dma_write64(&mut d, i * 16, a);
   dma_write32(&mut d, i * 16 + 8, 4096);
@@ -805,6 +950,145 @@ fn hda_queued(h: &Hda) -> u64 {
   return h.fill;
 }
 
+/// Can the card record?
+fn hda_has_in(h: &Hda) -> bool {
+  return h.ins == 1;
+}
+
+/// Starts recording if it is not running: from the top of the ring, nothing
+/// recorded yet.
+fn hda_in_start(h: &mut Hda)
+  requires hda_ok(h)
+  ensures hda_ok(h) && h.outs == old(h.outs)
+{
+  if h.ins == 0 || h.irun {
+    return;
+  }
+  in_stream(&mut h);
+  let sdi = h.isd;
+  h.ilast = 0;
+  h.iavail = 0;
+  h.iidle = 0;
+  hw8(&mut h, sdi + SD_STS, 0x1C);
+  hw8(&mut h, sdi + SD_CTL, 2);
+  h.irun = true;
+}
+
+/// Stops recording and drops what was recorded.
+fn hda_in_stop(h: &mut Hda)
+  requires hda_ok(h)
+  ensures hda_ok(h) && h.outs == old(h.outs)
+{
+  if h.ins == 0 {
+    return;
+  }
+  let sdi = h.isd;
+  hw8(&mut h, sdi + SD_CTL, 0);
+  h.irun = false;
+  h.iavail = 0;
+}
+
+/// Is recording running?
+fn hda_in_running(h: &Hda) -> bool {
+  return h.irun;
+}
+
+/// Bytes recorded and not read yet.
+fn hda_in_avail(h: &Hda) -> u64 {
+  return h.iavail;
+}
+
+/// On a tick: counts what the controller has recorded since the last poll
+/// (a reader that falls more than a ring behind loses the oldest bytes).
+/// If nobody has read for IN_IDLE ticks the stream stops and what was
+/// recorded is dropped; the next start begins again.
+fn hda_in_poll(h: &mut Hda)
+  requires hda_ok(h)
+  ensures hda_ok(h) && h.outs == old(h.outs)
+{
+  if !h.irun {
+    return;
+  }
+  let sdi = h.isd;
+  let lp = hr32(&mut h, sdi + SD_LPIB) % RING;
+  let now = lp - lp % 4;
+  let got = (now + RING - h.ilast) % RING;
+  assert got % 4 == 0;
+  let tot = h.iavail + got;
+  h.ilast = now;
+  if tot >= RING {
+    h.iavail = RING;
+  } else {
+    h.iavail = tot;
+  }
+  h.iidle = h.iidle + 1;
+  if h.iidle >= IN_IDLE {
+    hw8(&mut h, sdi + SD_CTL, 0);
+    h.irun = false;
+    h.iavail = 0;
+    h.iidle = 0;
+  }
+}
+
+/// Copies n bytes of the recording, the oldest first, from the ring at
+/// `from` into dst (at 0), wrapping.
+fn hda_ring_out(h: &mut Hda, dst: &mut Bytes, from: u64, n: u64)
+  requires hda_ok(h) && from < RING && from % 4 == 0 && n <= RING && n % 4 == 0 && n <= blen(dst)
+  ensures hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+  ensures h.fill == old(h.fill) && h.last == old(h.last) && h.quiet == old(h.quiet) && blen(dst) == old(blen(dst))
+  ensures h.wpos == old(h.wpos) && h.ins == old(h.ins) && h.irun == old(h.irun) && h.ilast == old(h.ilast) && h.iavail == old(h.iavail)
+{
+  let mut at = from;
+  let mut done = 0;
+  while done < n
+    invariant done <= n && done % 4 == 0 && at < RING && at % 4 == 0 && n <= blen(dst) && n % 4 == 0 && hda_ok(h) && h.outs == old(h.outs) && h.run == old(h.run)
+    invariant h.fill == old(h.fill) && h.last == old(h.last) && h.quiet == old(h.quiet) && blen(dst) == old(blen(dst))
+    invariant h.wpos == old(h.wpos) && h.ins == old(h.ins) && h.irun == old(h.irun) && h.ilast == old(h.ilast) && h.iavail == old(h.iavail)
+  {
+    let off = at % 4096;
+    assert off % 4 == 0 && off < 4096;
+    let mut k = 4096 - off;
+    if n - done < k {
+      k = n - done;
+    }
+    assert k % 4 == 0 && done + k <= n && off + k <= 4096;
+    let p = at / 4096;
+    if p == 0 {
+      dma_to_bytes(&mut dst, done, &mut h.e0, off, k);
+    } else if p == 1 {
+      dma_to_bytes(&mut dst, done, &mut h.e1, off, k);
+    } else if p == 2 {
+      dma_to_bytes(&mut dst, done, &mut h.e2, off, k);
+    } else {
+      dma_to_bytes(&mut dst, done, &mut h.e3, off, k);
+    }
+    done = done + k;
+    at = (at + k) % RING;
+    assert at % 4 == 0;
+  }
+}
+
+/// Takes up to n bytes (whole frames) of the recording, the oldest first,
+/// into dst at 0. Returns how many.
+fn hda_in_get(h: &mut Hda, dst: &mut Bytes, n: u64) -> u64
+  requires hda_ok(h) && n <= blen(dst)
+  ensures hda_ok(h) && h.outs == old(h.outs) && result <= n
+{
+  hda_in_poll(&mut h);
+  h.iidle = 0;
+  let mut k = smaller(n, h.iavail);
+  k = k - k % 4;
+  if k == 0 {
+    return 0;
+  }
+  assert k <= h.iavail && k <= RING && k <= n;
+  let from = (h.ilast + RING - h.iavail) % RING;
+  assert from % 4 == 0 && from < RING;
+  hda_ring_out(&mut h, &mut dst, from, k);
+  h.iavail = h.iavail - k;
+  return k;
+}
+
 /// Stops the stream and the rings, puts the controller in reset, and
 /// takes the pages back (at power off). Returns its registers.
 fn hda_free(h: Hda, m: &mut Mem) -> Mmio
@@ -814,6 +1098,8 @@ fn hda_free(h: Hda, m: &mut Mem) -> Mmio
   let mut d = h;
   let sdo = d.sd;
   hw8(&mut d, sdo + SD_CTL, 0);
+  let sdi = d.isd;
+  hw8(&mut d, sdi + SD_CTL, 0);
   hw8(&mut d, HD_CORBCTL, 0);
   hw8(&mut d, HD_RIRBCTL, 0);
   let s1 = wait8(&mut d, sdo + SD_CTL, 2, 0, HDA_SPINS);
@@ -826,5 +1112,9 @@ fn hda_free(h: Hda, m: &mut Mem) -> Mmio
   give_page(&mut m, dma_take(d.d1));
   give_page(&mut m, dma_take(d.d2));
   give_page(&mut m, dma_take(d.d3));
+  give_page(&mut m, dma_take(d.e0));
+  give_page(&mut m, dma_take(d.e1));
+  give_page(&mut m, dma_take(d.e2));
+  give_page(&mut m, dma_take(d.e3));
   return d.regs;
 }

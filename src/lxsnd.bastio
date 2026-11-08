@@ -6,7 +6,9 @@
 // frame, no filter). Each open starts at the card's own format. A write
 // queues what fits and returns how much that was; a write to a full queue
 // waits for room.
-// Reading (recording) is not supported. Without a sound card, opening
+// Reading records, at the card's own format whatever was set (48 kHz
+// 16-bit stereo; the conversions are for playback only): a read returns
+// what has been recorded, or waits for some. Without a sound card, opening
 // /dev/dsp fails with ENODEV.
 
 import "linux.bastio";
@@ -245,4 +247,49 @@ fn dsp_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     return lx_put_out(&mut k, pid, arg, 16);
   }
   return EINVAL;
+}
+
+/// read(2) on /dev/dsp: up to len bytes (whole frames) of what the card has
+/// recorded, oldest first; waits for some, or EAGAIN when non-blocking.
+fn dsp_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if !snd_has_in(k.snd) {
+    ret(&mut k.procs, pid, ENODEV);
+    return KEEP;
+  }
+  if len < 4 {
+    ret(&mut k.procs, pid, EINVAL);
+    return KEEP;
+  }
+  let want = smaller(len, XFER);
+  let got = snd_in_get(&mut k.snd, &mut k.fs.xfer, want);
+  if got == 0 {
+    snd_in_start(&mut k.snd);
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
+      ret(&mut k.procs, pid, EAGAIN);
+      return KEEP;
+    }
+    return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
+  }
+  let done = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, got);
+  if done != got {
+    ret(&mut k.procs, pid, EFAULT);
+    return KEEP;
+  }
+  ret(&mut k.procs, pid, got);
+  return KEEP;
+}
+
+/// poll bits of /dev/dsp: writable always (a write waits for room, as it
+/// did), readable once something is recorded.
+fn dsp_bits(k: &Kernel) -> u64
+  requires kok(k)
+{
+  if snd_in_avail(k.snd) >= 4 {
+    return POLLIN | POLLOUT;
+  }
+  return POLLOUT;
 }

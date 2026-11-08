@@ -50,6 +50,9 @@ fn dev_at(x: &Bytes, n: u64) -> u64
   if xfer_is(x, 0, n, "dev/snd/pcmC0D0p") {
     return DEV_PCM;
   }
+  if xfer_is(x, 0, n, "dev/snd/pcmC0D0c") {
+    return DEV_PCMC;                        // src/lxalsac.bastio
+  }
   if xfer_is(x, 0, n, "dev/snd/timer") {
     return DEV_TIMER;
   }
@@ -123,6 +126,9 @@ fn dev_rdev(d: u64) -> u64 {
   if d == DEV_PCM {
     return 0x7410;                          // 116:16, card 0 device 0 playback
   }
+  if d == DEV_PCMC {
+    return 0x7418;                          // 116:24, card 0 device 0 capture
+  }
   if d == DEV_TIMER {
     return 0x7421;                          // 116:33
   }
@@ -181,6 +187,9 @@ fn rdev_dev(rdev: u64) -> u64 {
   }
   if rdev == 0x7410 {
     return DEV_PCM;
+  }
+  if rdev == 0x7418 {
+    return DEV_PCMC;
   }
   if rdev == 0x7421 {
     return DEV_TIMER;

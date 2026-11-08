@@ -403,8 +403,14 @@ fn leaf_bits(k: &Kernel, pid: u64, fd: u64) -> u64
   if f.kind == K_DEV && f.x == DEV_PCM {
     return pcm_bits(k);                     // src/lxalsa.bastio
   }
+  if f.kind == K_DEV && f.x == DEV_PCMC {
+    return cap_bits(k);                     // src/lxalsac.bastio
+  }
   if f.kind == K_DEV && f.x == DEV_TIMER {
     return tmr_bits(k);
+  }
+  if f.kind == K_DEV && f.x == DEV_DSP {
+    return dsp_bits(k);                     // src/lxsnd.bastio
   }
   if f.kind == K_DEV && f.x == DEV_RTC {
     return rtc_bits(k);                // src/lxrtc.bastio

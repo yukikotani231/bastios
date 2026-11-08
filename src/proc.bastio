@@ -550,6 +550,7 @@ const DEV_RTC: u64 = 15;                // OF_DEV device /dev/rtc0 (src/lxrtc.ba
 const DEV_SNDC: u64 = 16;               // OF_DEV device /dev/snd/controlC0 (src/lxalsa.bastio)
 const DEV_TIMER: u64 = 18;              // OF_DEV device /dev/snd/timer, the PCM's period ticks (src/lxalsa.bastio)
 const DEV_PCM: u64 = 17;                // OF_DEV device /dev/snd/pcmC0D0p (src/lxalsa.bastio)
+const DEV_PCMC: u64 = 19;               // OF_DEV device /dev/snd/pcmC0D0c, the recording PCM (src/lxalsac.bastio)
 const DEV_SER: u64 = 14;                // OF_DEV device /dev/ttyUSB0 and /dev/ttyACM0 (src/lxserial.bastio)
 const MICE_LEN: u64 = 3528;              // the mouse's buffer (a 56-byte header and 192 packets of 4 bytes), then the USB serial port's (SER_LEN, src/lxserial.bastio), then the key events (src/lxkeyev.bastio): a 16-byte header and 128 events of 4 bytes
 const GFX_LEN: u64 = 131712;            // GFX_HDR + GFX_SLOTS * GFX_SLOT: /dev/fb0's queue (src/lxfb.bastio)
@@ -650,7 +651,8 @@ const SYS_RTON: u64 = SYS_ONCPU + NPROC;     // 1 once a thread has been made SC
 const SYS_RTUSE: u64 = SYS_RTON + 1;        // a word per processor (64): the ticks real-time threads ran on it in its period SYS_RTPER (src/lxprio.bastio)
 const SYS_RTPER: u64 = SYS_RTUSE + 64;      // a word per processor: that period, the tick count / RT_PERIOD
 const SYS_ALSA: u64 = SYS_RTPER + 64;             // fifteen words: the ALSA stream's state, rate, channels, sample bits, period, buffer, frames given to the card, the write in progress, the mmap appl_ptr, the mmap address, the access, the period ticks read from the timer device and whether it reads events with timestamps, and the two channels of the mixer control (value + 1; 0 is full) (src/lxalsa.bastio)
-const SYS_LEN: u64 = SYS_ALSA + 15;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
+const SYS_ALSAC: u64 = SYS_ALSA + 15;         // six words: the recording PCM's state, frames read, period, buffer, frames of the read in progress already done (src/lxalsac.bastio)
+const SYS_LEN: u64 = SYS_ALSAC + 6;            // host and domain names, adjtimex state (src/lxsys.bastio), then from SYS_PQ the POSIX queues (src/lxmq.bastio), then from SYS_PR prctl state (src/lxprctl.bastio), then from SYS_RL resource limits, then from SYS_DL SCHED_DEADLINE parameters (src/lxprio.bastio), then from SYS_JC stop reports, then from SYS_TM CPU times, then from SYS_RB robust futex lists, then from SYS_CAP capabilities, then from SYS_IOP I/O priorities, then from SYS_AT access times (src/lxmisc.bastio), then from SYS_LR locked ranges (src/lxrlimit.bastio), then from SYS_PT a word per process for ptrace (src/lxptrace.bastio), then from SYS_SEAL the memfd seals (src/lxmore.bastio), then SYS_BUSY, the timer ticks all processes have run (/proc/stat)
 const SYS_PIPEMAX: u64 = 150;          // /proc/sys/fs/pipe-max-size (0: PIPE_CAP), past the adjtimex words (src/lxsys.bastio)
 const AT_N: u64 = 32;
 const LR_N: u64 = 4;
@@ -1399,7 +1401,7 @@ fn nr_open(k: &Kernel) -> u64
 
 // ---------------------------------------------------------------- programs
 
-const NPROGS: u64 = 43;
+const NPROGS: u64 = 44;
 const LDSO_PROG: u64 = 25;            // musl's dynamic linker, the interpreter of musl programs
 
 fn prog_name(i: u64) -> Str {
@@ -1531,6 +1533,9 @@ fn prog_name(i: u64) -> Str {
   }
   if i == 42 {
     return "malsa";
+  }
+  if i == 43 {
+    return "mrec";
   }
   return "(file)";                    // a program loaded from a file
 }

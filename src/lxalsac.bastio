@@ -1,0 +1,328 @@
+// ALSA recording for Linux programs: /dev/snd/pcmC0D0c on the sound card's
+// input (src/hda.bastio), with the ioctls alsa-lib's "hw" plugin uses
+// (arecord, SDL's capture devices, PulseAudio's ALSA source). The card
+// records 48 kHz 16-bit stereo and that is all this device offers: signed
+// 16-bit little-endian, two channels, 48 kHz, read/write interleaved access
+// (snd_pcm_readi). A program that wants another format asks for it through
+// alsa-lib's plug layer (plughw, the default device), which converts in
+// user space. There is no mmap access.
+//
+// The recording is a ring of 4096 frames in the driver. A read takes the
+// oldest frames; a program that falls more than a ring behind loses the
+// oldest. The first read of a prepared stream starts it, as in Linux, and
+// a stream that nobody has read for a second stops by itself (the driver);
+// the next read starts it again, so a program that paused for longer loses
+// a gap and sees no error. Poll reports POLLIN once a period is ready, and
+// POLLERR with POLLIN when the stream stopped by itself.
+//
+// State lives in k.sys from SYS_ALSAC: 0 state, 1 frames read (appl_ptr),
+// 2 period frames, 3 buffer frames, 4 frames of the read in progress
+// already delivered. Opening the device without a sound card, or with one
+// that cannot record, fails with ENODEV.
+
+import "linux.bastio";
+import "lxalsa.bastio";
+
+const CAP_READI: u64 = 0x80184151;
+
+fn cap_w(k: &Kernel, i: u64) -> u64
+  requires kok(k) && i < 5
+  ensures result <= 0x4000000000000
+{
+  return smaller(get(k.sys, SYS_ALSAC + i), 0x4000000000000);   // frames: 2^50 at most
+}
+
+fn cap_set(k: &mut Kernel, i: u64, v: u64)
+  requires kok(k) && i < 5
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_ALSAC + i, v);
+}
+
+/// A new open of /dev/snd/pcmC0D0c.
+fn cap_open_reset(k: &mut Kernel)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut i = 0;
+  while i < 5
+    invariant i <= 5 && kok(k)
+  {
+    cap_set(&mut k, i, 0);
+    i = i + 1;
+  }
+}
+
+/// Frames recorded and not read yet (at most the ring's 4096).
+fn cap_avail(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= 4096
+{
+  return smaller(snd_in_avail(k.snd) / 4, 4096);
+}
+
+/// What a poll on the device finds now.
+fn cap_bits(k: &Kernel) -> u64
+  requires kok(k)
+{
+  if !snd_live(k.snd) {
+    return POLLERR;
+  }
+  if cap_w(k, 0) != ST_RUNNING {
+    return 0;
+  }
+  if !snd_in_running(k.snd) && cap_avail(k) < larger(cap_w(k, 2), 1) {
+    return POLLIN | POLLERR;                // it stopped by itself: a read starts it again
+  }
+  if cap_avail(k) >= larger(cap_w(k, 2), 1) {
+    return POLLIN;
+  }
+  return 0;
+}
+
+/// Narrows the parameters in the transfer buffer to what recording offers
+/// (the only format, channels and rate the card has, read/write access) and
+/// makes them agree with each other. False: nothing is left.
+fn cap_narrow(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  let ac = rd32(k.fs.xfer, HP_ACCESS);
+  store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](ac / 8 % 2 * ACC_RW_IL));
+  let fm = rd32(k.fs.xfer, HP_FORMAT);
+  store_le32(&mut k.fs.xfer, HP_FORMAT, cast[u32](fm / 4 % 2 * FMT_S16));
+  if !iv_narrow(&mut k, IV_CH, 2, 2) || !iv_narrow(&mut k, IV_RATE, DSP_RATE, DSP_RATE) {
+    return false;
+  }
+  return pcm_refine(&mut k);
+}
+
+/// Picks one value for everything still open (HW_PARAMS): the smallest
+/// period and count.
+fn cap_choose(k: &mut Kernel) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  if !cap_narrow(&mut k) {
+    return false;
+  }
+  iv_fix(&mut k, IV_PSIZE, iv_min(k, IV_PSIZE));
+  if !cap_narrow(&mut k) {
+    return false;
+  }
+  iv_fix(&mut k, IV_PERIODS, iv_min(k, IV_PERIODS));
+  if !cap_narrow(&mut k) {
+    return false;
+  }
+  return iv_min(k, IV_BSIZE) == iv_max(k, IV_BSIZE) && iv_min(k, IV_RATE) == iv_max(k, IV_RATE);
+}
+
+/// snd_pcm_readi: struct snd_xferi { long result; void *buf; unsigned long
+/// frames; }. Takes the recorded frames as they come and waits for the rest
+/// (or reports what it took on a non-blocking descriptor).
+fn cap_readi(k: &mut Kernel, pid: u64, fd: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let st = cap_w(k, 0);
+  if st != ST_PREPARED && st != ST_RUNNING {
+    return EBADFD;
+  }
+  let e = pcm_in(&mut k, pid, arg, 24);
+  if e != 0 {
+    return e;
+  }
+  let buf = smaller(load_le64(k.fs.xfer, 8), 0x7FFFFFFFFFFF);
+  let frames = smaller(load_le64(k.fs.xfer, 16), 1048576);
+  if st == ST_PREPARED {
+    cap_set(&mut k, 0, ST_RUNNING);         // the first read starts it
+  }
+  let mut done = smaller(cap_w(k, 4), frames);
+  let mut rounds = 0;
+  let mut blocked = false;
+  while done < frames && rounds < 8 && !blocked
+    invariant done <= frames && frames <= 1048576 && rounds <= 8 && kok(k)
+  {
+    let want = smaller((frames - done) * 4, XFER);
+    let got = snd_in_get(&mut k.snd, &mut k.fs.xfer, want);
+    if got == 0 {
+      if !snd_in_running(k.snd) {
+        snd_in_start(&mut k.snd);
+      }
+      blocked = true;
+    } else {
+      let n = smaller(got, want);
+      if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, buf + done * 4, k.fs.xfer, n) != n {
+        cap_set(&mut k, 4, 0);
+        return EFAULT;
+      }
+      done = done + n / 4;
+      cap_set(&mut k, 1, cap_w(k, 1) + n / 4);
+    }
+    rounds = rounds + 1;
+  }
+  if done < frames {
+    let h = fd_ofd(k, pid, fd);
+    if h < OFD_N && of_get(k.ofd, h, 3) % 2 == 1 {
+      cap_set(&mut k, 4, 0);
+      if done == 0 {
+        return EAGAIN;                      // a non-blocking read with nothing recorded
+      }
+      xfer_u64(&mut k.fs.xfer, 0, done);
+      return pcm_out(&mut k, pid, arg, 8);
+    }
+    cap_set(&mut k, 4, done);
+    return SC_WAIT;
+  }
+  cap_set(&mut k, 4, 0);
+  xfer_u64(&mut k.fs.xfer, 0, frames);
+  return pcm_out(&mut k, pid, arg, 8);
+}
+
+/// ioctl(2) on /dev/snd/pcmC0D0c.
+fn cap_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if req == PCM_PVERSION {
+    xfer_u64(&mut k.fs.xfer, 0, 0x2000F);
+    return lx_put_out(&mut k, pid, arg, 4);
+  }
+  if req == PCM_USER_PVERSION || req == PCM_TSTAMP || req == PCM_TTSTAMP || req == PCM_HWSYNC || req == PCM_RESUME
+    || req == PCM_PAUSE || req == PCM_XRUN {
+    return 0;
+  }
+  if req == PCM_INFO {
+    xfer_zero(&mut k, 288);
+    store_le32(&mut k.fs.xfer, 8, 1);         // stream: SNDRV_PCM_STREAM_CAPTURE
+    pcm_str(&mut k, 16, 64, "HDA");
+    pcm_str(&mut k, 80, 80, "BastiOS HD Audio");
+    pcm_str(&mut k, 160, 32, "subdevice #0");
+    store_le32(&mut k.fs.xfer, 200, 1);       // subdevices_count
+    store_le32(&mut k.fs.xfer, 204, 1);       // subdevices_avail
+    return pcm_out(&mut k, pid, arg, 288);
+  }
+  if req == PCM_HW_REFINE || req == PCM_HW_PARAMS {
+    let e = pcm_in(&mut k, pid, arg, HP_SIZE);
+    if e != 0 {
+      return e;
+    }
+    if req == PCM_HW_REFINE {
+      if !cap_narrow(&mut k) {
+        return EINVAL;
+      }
+      return pcm_out(&mut k, pid, arg, HP_SIZE);
+    }
+    if !cap_choose(&mut k) {
+      return EINVAL;
+    }
+    cap_set(&mut k, 0, ST_SETUP);
+    cap_set(&mut k, 1, 0);
+    cap_set(&mut k, 2, iv_min(k, IV_PSIZE));
+    cap_set(&mut k, 3, iv_min(k, IV_BSIZE));
+    cap_set(&mut k, 4, 0);
+    return pcm_out(&mut k, pid, arg, HP_SIZE);
+  }
+  if req == PCM_HW_FREE {
+    snd_in_stop(&mut k.snd);
+    cap_set(&mut k, 0, ST_OPEN);
+    return 0;
+  }
+  if req == PCM_SW_PARAMS {
+    // Accepted as given, with the boundary alsa-lib wraps its pointers at.
+    let e = pcm_in(&mut k, pid, arg, 136);
+    if e != 0 {
+      return e;
+    }
+    let mut b = larger(cap_w(k, 3), 1);
+    let mut i = 0;
+    while i < 40 && b < 0x1000000000000000
+      invariant i <= 40 && b >= 1 && b <= 0x2000000000000000 && kok(k)
+    {
+      b = b * 2;
+      i = i + 1;
+    }
+    xfer_u64(&mut k.fs.xfer, 64, b);
+    store_le32(&mut k.fs.xfer, 72, 0x2000F);
+    return pcm_out(&mut k, pid, arg, 136);
+  }
+  if req == PCM_PREPARE || req == PCM_RESET {
+    if cap_w(k, 0) == ST_OPEN {
+      return EBADFD;
+    }
+    snd_in_stop(&mut k.snd);
+    cap_set(&mut k, 0, ST_PREPARED);
+    cap_set(&mut k, 1, 0);
+    cap_set(&mut k, 4, 0);
+    return 0;
+  }
+  if req == PCM_START {
+    if cap_w(k, 0) != ST_PREPARED {
+      return EBADFD;
+    }
+    snd_in_start(&mut k.snd);
+    cap_set(&mut k, 0, ST_RUNNING);
+    return 0;
+  }
+  if req == PCM_CHANNEL_INFO {
+    // struct snd_pcm_channel_info { unsigned int channel; long offset; unsigned int first, step; }:
+    // interleaved, 16-bit samples of two channels (no mmap, so only for the answer's sake).
+    let e = pcm_in(&mut k, pid, arg, 24);
+    if e != 0 {
+      return e;
+    }
+    let ch = rd32(k.fs.xfer, 0);
+    if ch >= 2 {
+      return EINVAL;
+    }
+    xfer_u64(&mut k.fs.xfer, 8, 0);
+    store_le32(&mut k.fs.xfer, 16, cast[u32](ch * 16));
+    store_le32(&mut k.fs.xfer, 20, 32);
+    return pcm_out(&mut k, pid, arg, 24);
+  }
+  if req == PCM_DROP || req == PCM_DRAIN {
+    if cap_w(k, 0) == ST_OPEN {
+      return EBADFD;
+    }
+    snd_in_stop(&mut k.snd);
+    cap_set(&mut k, 0, ST_SETUP);
+    return 0;
+  }
+  if req == CAP_READI {
+    return cap_readi(&mut k, pid, fd, arg);
+  }
+  if req == PCM_STATUS || req == PCM_STATUS_EXT {
+    // state, appl_ptr, hw_ptr, delay, avail, avail_max at 0 and 40..72 of the 152 bytes.
+    xfer_zero(&mut k, 152);
+    let av = cap_avail(k);
+    let appl = cap_w(k, 1);
+    store_le32(&mut k.fs.xfer, 0, cast[u32](cap_w(k, 0) % 256));
+    xfer_u64(&mut k.fs.xfer, 40, appl);
+    xfer_u64(&mut k.fs.xfer, 48, appl + av);
+    xfer_u64(&mut k.fs.xfer, 56, av);
+    xfer_u64(&mut k.fs.xfer, 64, av);
+    xfer_u64(&mut k.fs.xfer, 72, larger(cap_w(k, 3), av));
+    return pcm_out(&mut k, pid, arg, 152);
+  }
+  if req == PCM_DELAY {
+    xfer_u64(&mut k.fs.xfer, 0, cap_avail(k));
+    return pcm_out(&mut k, pid, arg, 8);
+  }
+  if req == PCM_SYNC_PTR {
+    // struct snd_pcm_sync_ptr { flags; status at 8: state, hw_ptr at 16; control at 72: appl_ptr, avail_min }.
+    // The program's appl_ptr is not taken: reads move it.
+    let e = pcm_in(&mut k, pid, arg, 136);
+    if e != 0 {
+      return e;
+    }
+    xfer_zero(&mut k, 136);
+    let av = cap_avail(k);
+    let appl = cap_w(k, 1);
+    store_le32(&mut k.fs.xfer, 8, cast[u32](cap_w(k, 0) % 256));
+    xfer_u64(&mut k.fs.xfer, 16, appl + av);
+    xfer_u64(&mut k.fs.xfer, 72, appl);
+    xfer_u64(&mut k.fs.xfer, 80, 1);
+    return pcm_out(&mut k, pid, arg, 136);
+  }
+  return ENOTTY;
+}
