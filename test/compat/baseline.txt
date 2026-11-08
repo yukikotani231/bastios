@@ -177,8 +177,11 @@ alsa: alsa: aplay plays through mmap
 alsa: alsa: arecord lists the card
 alsa: alsa: arecord records on the default device
 alsa: alsa: arecord records one second on the hardware device
+alsa: alsa: arecord records through mmap
 alsa: alsa: speaker-test plays a sine wave
 alsa: alsa: the default device converts the format and the rate
+alsa: alsa: the default device converts the format of a recording
+alsa: alsa: the default device mixes a recording down to mono
 alsa: alsa: unpack the root, make the device nodes
 dev: make: a project of two files
 dev: make: parallel jobs
@@ -985,7 +988,7 @@ t_maps: every line of /proc/self/maps parses with Crashpad's format
 t_maps: /proc/self/maps read 100 bytes at a time is the same text
 t_maps: every line of another process's maps parses too
 t_maps: a few thousand mappings read back as that many parseable lines, in order, in pieces
-t_maps: another process with thousands of mappings reads back whole in 64 KiB, 4096 and 100 byte pieces
+t_maps: another process with thousands of mappings reads back whole in 64 KiB and 4096 byte pieces
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL

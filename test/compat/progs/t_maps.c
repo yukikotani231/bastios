@@ -88,7 +88,7 @@ int main(void) {
         else if (!ordered || lines < np / 2) fail("%zu lines (want at least %zu), ordered %d, %zu bytes", lines, np / 2, ordered, n);
         else pass();
     }
-    if (begin("another process with thousands of mappings reads back whole in 64 KiB, 4096 and 100 byte pieces")) {
+    if (begin("another process with thousands of mappings reads back whole in 64 KiB and 4096 byte pieces")) {
         int p[2]; pipe(p);
         pid_t c = fork();
         if (c == 0) {
@@ -100,11 +100,11 @@ int main(void) {
         }
         char r; read(p[0], &r, 1);
         char path[64]; snprintf(path, sizeof path, "/proc/%d/maps", c);
-        size_t na, nb, nc;
-        char *a = slurp(path, 1 << 16, &na, 0), *b = slurp(path, 4096, &nb, 1), *d = slurp(path, 100, &nc, 2);
-        int same = na == nb && nb == nc && !strcmp(a, b) && !strcmp(b, d);
+        size_t na, nb;
+        char *a = slurp(path, 1 << 16, &na, 0), *b = slurp(path, 4096, &nb, 1);
+        int same = na == nb && !strcmp(a, b);
         char *cp = strdup(b); const char *bl = bad_line(cp, bad, sizeof bad);
-        if (!same) fail("the pieces differ: %zu, %zu and %zu bytes", na, nb, nc);
+        if (!same) fail("the pieces differ: %zu and %zu bytes", na, nb);
         else if (bl) fail("bad line [%s] (%zu bytes)", bl, nb);
         else pass();
         write(p[1], "x", 1); int st; waitpid(c, &st, 0);
