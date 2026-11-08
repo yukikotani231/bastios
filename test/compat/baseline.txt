@@ -3186,3 +3186,10 @@ t_landlock: a ruleset is made
 t_landlock: an unknown access is EINVAL
 t_landlock: the ABI version is 1
 t_landlock: the parent is not restricted
+server: server: unpack the root, make the device nodes
+server: server: redis answers PING, SET and GET
+server: server: redis keeps lists, hashes and expiry
+server: server: redis saves a snapshot in a forked child
+server: server: redis restarts and loads the snapshot
+server: server: memcached stores and returns a value
+server: server: nginx serves a page
