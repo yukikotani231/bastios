@@ -19,6 +19,9 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 - bterm: clipboard history. The four selections before the current one are kept in `/tmp/bwm.clip.1` to `.4`, and Alt-Shift-1 to Alt-Shift-4 paste them.
 - bwm: Keep on top in the window menu keeps a window above the others, however they are raised.
 - bwm: a right click on a window's button in the task bar opens its window menu above it; the Minimize entry reads Show for a minimized window. `test/iso_test.sh` minimizes and shows a window this way.
+- `FUTEX_WAKE` wakes real-time waiters of one priority in the order they began to wait, as Linux's futex queues do, rather than in thread order, and each woken one takes its place behind the others of its priority in the order it was woken. With this, a writer that waited first on a rwlock gets it before a reader of its priority that waited later (Open POSIX `pthread_rwlock_unlock` 3-1).
+- Real-time threads of one priority run in the order they became ready, as on Linux: one that blocks, yields or ends its `SCHED_RR` slice goes behind the others, and one a higher-priority thread took the processor from goes on first, not after whatever the round robin over thread slots came to next.
+- A real-time thread whose sleep (`nanosleep`, `clock_nanosleep`, a timed futex wait) is over gets its priority at once, and the processor that notices interrupts the others so it runs without waiting for its own processor's tick. A reader waiting on an empty pipe or socket still waits for a tick: such waits are tried again rather than woken.
 - A real-time thread woken by `FUTEX_WAKE` runs at once on the processor it may use: the waker interrupts the other processors (as for a signal) instead of leaving it for that processor's next 10 ms tick. A processor with nothing more urgent keeps its thread.
 - `FUTEX_WAKE` wakes real-time (`SCHED_FIFO`/`SCHED_RR`) waiters first, highest priority first, as Linux does; the rest still wake in thread order. A mutex or condition variable released with real-time threads waiting hands over to the most urgent one (Open POSIX `pthread_attr_setschedpolicy` 2-1 now passes).
 - `clock_gettime`, `clock_getres` and `clock_nanosleep` take a negative clock id passed as 32 bits (a thread's CPU-time clock from `pthread_getcpuclockid`, as a program that makes the system call itself passes it). GHC's `getCurrentThreadCPUTime` did, and the compiler stopped with "not supported".
@@ -251,6 +254,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 
 ### Fixed
+- The real-time share (95%) counts its period in the processor's own ticks, not the bootstrap processor's: under an emulator on a busy host a processor's ticks lag, and its non-real-time threads then got no turn at all while a `SCHED_FIFO` thread spun.
 
 - `setitimer(ITIMER_PROF)` and `ITIMER_VIRTUAL` count the time of every thread in the process, as on Linux, wherever they were set from. They used to be kept in the row of the thread that set them, so they only ran down while that thread ran. A thread that set one and then waited for another thread never got its signal; that hung the Open POSIX test `pthread_create` 1-6. The signal goes to the thread that was running when the timer ran out, unless that thread blocks it (`test/compat/progs/t_thread.c`).
 ### Documentation
