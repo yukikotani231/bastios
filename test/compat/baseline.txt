@@ -3191,5 +3191,6 @@ server: server: redis answers PING, SET and GET
 server: server: redis keeps lists, hashes and expiry
 server: server: redis saves a snapshot in a forked child
 server: server: redis restarts and loads the snapshot
+server: server: redis replays its append-only file
 server: server: memcached stores and returns a value
 server: server: nginx serves a page

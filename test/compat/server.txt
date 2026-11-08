@@ -40,6 +40,11 @@ rdb_last_bgsave_status:ok
 $ R="bb chroot /disk/s /usr/bin/redis-cli"; $R shutdown nosave; bb sleep 1; bb chroot /disk/s /usr/bin/redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp --logfile /tmp/redis.log --save '' >/dev/null 2>&1; bb sleep 2; $R get persist; $R shutdown nosave
 "yes"
 
+== server: redis replays its append-only file
+$ R="bb chroot /disk/s /usr/bin/redis-cli"; S="bb chroot /disk/s /usr/bin/redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp/aof --logfile /tmp/redis.log --save '' --appendonly yes --appendfsync always"; bb mkdir -p /disk/s/tmp/aof; $S >/dev/null 2>&1; bb sleep 2; $R set kept yes >/dev/null; $R incr n >/dev/null; $R incr n >/dev/null; $R shutdown nosave; bb sleep 1; $S >/dev/null 2>&1; bb sleep 2; $R get kept; $R get n; $R shutdown nosave
+"yes"
+"2"
+
 == server: memcached stores and returns a value
 $ bb chroot /disk/s /usr/bin/memcached -u root -l 127.0.0.1 -p 11211 -d; bb sleep 1; printf 'set k 0 0 5\r\nhello\r\nget k\r\nquit\r\n' | bb nc 127.0.0.1 11211 | bb tr -d '\r'
 STORED
