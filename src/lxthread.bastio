@@ -988,40 +988,105 @@ fn waitv_wake(k: &mut Kernel, q: u64, g: u64, addr: u64) -> bool
   return true;
 }
 
+/// Ends plain waiter q's futex call with 0, as if it had returned.
+fn futex_end(k: &mut Kernel, q: u64)
+  requires kok(k) && 1 <= q && q < NPROC
+  ensures kok(k)
+{
+  let rip = pget(k.procs, q, F_REGS + R_RIP);
+  if rip <= 0xFFFFFFFFFFFFFFF0 {
+    pset(&mut k.procs, q, F_REGS + R_RIP, rip + SYSCALL_LEN);
+  }
+  pset(&mut k.procs, q, F_REGS + R_RET, 0);
+  pset(&mut k.procs, q, F_RESTART, 0);
+  pset(&mut k.procs, q, F_FUTEX, 0);
+  pset(&mut k.procs, q, F_STATE, READY);
+  pt_woken(&mut k, q);                    // its tracer sees the call end (src/lxptrace.bastio)
+  rt_kick(&mut k, q);
+}
+
+/// Wakes waiter q of key addr (group g) if it is one, a plain waiter or one
+/// between two tries; true if it woke.
+fn futex_wake_one(k: &mut Kernel, q: u64, g: u64, addr: u64) -> bool
+  requires kok(k) && 1 <= q && q < NPROC
+  ensures kok(k)
+{
+  if futex_polling(k.procs, q, g, addr) {
+    // Its registers are live on another processor: leave it a note,
+    // which its next try finds (lx_futex).
+    pset(&mut k.procs, q, F_FUTEX, FUTEX_WOKEN);
+    return true;
+  }
+  if futex_waiting(k.procs, q, g, addr) {
+    futex_end(&mut k, q);
+    return true;
+  }
+  return false;
+}
+
+/// The plain waiter on key addr (group g, not pid) of the highest
+/// real-time priority, the lowest-numbered of those, or 0 if no waiter is
+/// real-time.
+fn futex_rt_first(k: &Kernel, pid: u64, g: u64, addr: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures result < NPROC
+{
+  let mut best = 0;
+  let mut bp = 0;
+  let mut q = 1;
+  while q < NPROC
+    invariant 1 <= q && q <= NPROC && best < NPROC && kok(k)
+  {
+    if q != pid && (futex_waiting(k.procs, q, g, addr) || futex_polling(k.procs, q, g, addr)) {
+      let r = rt_prio(k.procs, q);
+      if r > bp {
+        best = q;
+        bp = r;
+      }
+    }
+    q = q + 1;
+  }
+  return best;
+}
+
 /// Wakes up to n waiters on key (futex_key) that pid reaches; returns how
-/// many.
+/// many. Real-time waiters go first, highest priority first, as on Linux;
+/// the rest go in thread order.
 fn futex_wake(k: &mut Kernel, pid: u64, addr: u64, n: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures kok(k) && result <= NPROC
 {
   let g = futex_group(k.procs, pid, addr);
+  let mut first = 0;
+  if get(k.sys, SYS_RTON) != 0 {
+    let mut i = 0;
+    while i < NPROC && first < n
+      invariant i <= NPROC && first <= i && kok(k)
+    {
+      let q = futex_rt_first(k, pid, g, addr);
+      if q == 0 {
+        i = NPROC;
+      } else {
+        if futex_wake_one(&mut k, q, g, addr) {
+          first = first + 1;
+        }
+        i = i + 1;
+      }
+    }
+  }
   let mut woken = 0;
   let mut q = 1;
-  while q < NPROC && woken < n
-    invariant 1 <= q && q <= NPROC && woken <= n && woken < q && kok(k)
+  while q < NPROC && first + woken < n
+    invariant 1 <= q && q <= NPROC && woken < q && kok(k)
   {
-    if q != pid && futex_polling(k.procs, q, g, addr) {
-      // Its registers are live on another processor: leave it a note,
-      // which its next try finds (lx_futex).
-      pset(&mut k.procs, q, F_FUTEX, FUTEX_WOKEN);
-      woken = woken + 1;
-    } else if q != pid && futex_waiting(k.procs, q, g, addr) {
-      let rip = pget(k.procs, q, F_REGS + R_RIP);
-      if rip <= 0xFFFFFFFFFFFFFFF0 {
-        pset(&mut k.procs, q, F_REGS + R_RIP, rip + SYSCALL_LEN);
-      }
-      pset(&mut k.procs, q, F_REGS + R_RET, 0);
-      pset(&mut k.procs, q, F_RESTART, 0);
-      pset(&mut k.procs, q, F_FUTEX, 0);
-      pset(&mut k.procs, q, F_STATE, READY);
-      pt_woken(&mut k, q);                // its tracer sees the call end (src/lxptrace.bastio)
+    if q != pid && futex_wake_one(&mut k, q, g, addr) {
       woken = woken + 1;
     } else if q != pid && waitv_wake(&mut k, q, g, addr) {
       woken = woken + 1;
     }
     q = q + 1;
   }
-  return woken;
+  return smaller(first + woken, NPROC);
 }
 
 /// Moves up to n waiters on key addr that pid reaches to wait on key to.
