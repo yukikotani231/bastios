@@ -2705,11 +2705,25 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = after != before and tuple(px[(5 * w + 5) * 3:(5 * w + 5) * 3 + 3]) != (0, 0, 0)
             print(("ok  " if good else "FAIL"), f"({name}) Snap left in the window menu fills the left half ({before}, {after})")
             fails += not good
-            monitor("mouse_move 0 -130")                                                # onto the title bar of the snapped window
+            monitor("sendkey alt-f3")                                                   # the same menu from the keyboard, the first entry lit
+            time.sleep(0.7)
+            w, h, px = screendump()
+            items = screen_text_at(px, w, 12, 24, 7, 1)[0]
+            good = items == "Restore"
+            print(("ok  " if good else "FAIL"), f"({name}) Alt-F3 opens the window menu of the focused window ({items!r})")
+            fails += not good
+            monitor("sendkey ret")                                                      # Enter chooses Restore: the window is back
+            time.sleep(1.5)
+            w, h, px = screendump()
+            back = tuple(px[(30 * w + 400) * 3:(30 * w + 400) * 3 + 3])
+            good = back == before
+            print(("ok  " if good else "FAIL"), f"({name}) Enter in the window menu chooses the lit entry ({back})")
+            fails += not good
+            monitor("mouse_move 0 -58")                                                 # onto the title bar of the restored window
             time.sleep(0.3)
             monitor("mouse_button 2", "mouse_button 0")
             time.sleep(0.7)
-            monitor("mouse_move 0 100")                                                 # Close
+            monitor("mouse_move 0 106")                                                 # Close
             time.sleep(0.3)
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(1.5)
