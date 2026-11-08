@@ -3090,6 +3090,9 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
     if pd.kind == K_DEV && pd.x == DEV_PCM {
       pcm_mapped(&mut k, r);
     }
+    if pd.kind == K_DEV && pd.x == DEV_PCMC {
+      cap_mapped(&mut k, r);                // src/lxalsac.bastio
+    }
   }
   if flags / MAP_ANONYMOUS % 2 == 0 && r >= USER_BASE && r - USER_BASE < USER_SIZE && n <= USER_SIZE {
     fn_mmap(&mut k, pid, fd, (r - USER_BASE) / 4096, (n + 4095) / 4096, o);   // its name, for /proc/PID/maps (src/lxfname.bastio)
@@ -3112,7 +3115,7 @@ fn lx_mmap_core(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u
     let z = fd_look(k, pid, fd);
     // /dev/zero (DEV_ZERO): fresh zero pages; so are the data pages of the
     // ALSA PCM device (src/lxalsa.bastio), which copies from them.
-    zero = z.kind == K_DEV && (z.x == 2 || (z.x == DEV_PCM && off == 0));
+    zero = z.kind == K_DEV && (z.x == 2 || ((z.x == DEV_PCM || z.x == DEV_PCMC) && off == 0));
     anon = zero;
   }
   let mut f = NO_FILE;

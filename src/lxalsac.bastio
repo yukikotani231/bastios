@@ -5,7 +5,10 @@
 // 16-bit little-endian, two channels, 48 kHz, read/write interleaved access
 // (snd_pcm_readi). A program that wants another format asks for it through
 // alsa-lib's plug layer (plughw, the default device), which converts in
-// user space. There is no mmap access.
+// user space. MMAP_INTERLEAVED works as the playback device's does: the
+// data pages of the mapping are ordinary zeroed pages, and the kernel copies
+// the recorded frames into them at hw_ptr (on every SYNC_PTR, status or
+// poll) as far as the program's appl_ptr leaves room.
 //
 // The recording is a ring of 4096 frames in the driver. A read takes the
 // oldest frames; a program that falls more than a ring behind loses the
@@ -15,9 +18,10 @@
 // a gap and sees no error. Poll reports POLLIN once a period is ready, and
 // POLLERR with POLLIN when the stream stopped by itself.
 //
-// State lives in k.sys from SYS_ALSAC: 0 state, 1 frames read (appl_ptr),
-// 2 period frames, 3 buffer frames, 4 frames of the read in progress
-// already delivered. Opening the device without a sound card, or with one
+// State lives in k.sys from SYS_ALSAC: 0 state, 1 frames delivered (read, or
+// copied into the mapping: hw_ptr), 2 period frames, 3 buffer frames, 4
+// frames of the read in progress already delivered, 5 the address of the
+// mapping, 6 the program's appl_ptr (mmap), 7 the access (1 = mmap). Opening the device without a sound card, or with one
 // that cannot record, fails with ENODEV.
 
 import "linux.bastio";
@@ -26,14 +30,14 @@ import "lxalsa.bastio";
 const CAP_READI: u64 = 0x80184151;
 
 fn cap_w(k: &Kernel, i: u64) -> u64
-  requires kok(k) && i < 5
+  requires kok(k) && i < 8
   ensures result <= 0x4000000000000
 {
   return smaller(get(k.sys, SYS_ALSAC + i), 0x4000000000000);   // frames: 2^50 at most
 }
 
 fn cap_set(k: &mut Kernel, i: u64, v: u64)
-  requires kok(k) && i < 5
+  requires kok(k) && i < 8
   ensures kok(k)
 {
   k.sys = set(k.sys, SYS_ALSAC + i, v);
@@ -45,8 +49,8 @@ fn cap_open_reset(k: &mut Kernel)
   ensures kok(k)
 {
   let mut i = 0;
-  while i < 5
-    invariant i <= 5 && kok(k)
+  while i < 8
+    invariant i <= 8 && kok(k)
   {
     cap_set(&mut k, i, 0);
     i = i + 1;
@@ -61,6 +65,32 @@ fn cap_avail(k: &Kernel) -> u64
   return smaller(snd_in_avail(k.snd) / 4, 4096);
 }
 
+/// Frames a read, or the program's next look at the mapping, can take now:
+/// those recorded and not delivered, and in mmap access those delivered
+/// into the mapping and not yet consumed (appl_ptr).
+fn cap_ready(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= 0x4000000000000 + 4096
+{
+  let mut n = cap_avail(k);
+  if cap_w(k, 7) == 1 {
+    let hw = cap_w(k, 1);
+    n = n + (hw - smaller(cap_w(k, 6), hw));
+  }
+  return n;
+}
+
+/// The program's appl_ptr: frames it consumed (read, or committed in the mapping).
+fn cap_appl(k: &Kernel) -> u64
+  requires kok(k)
+  ensures result <= 0x4000000000000
+{
+  if cap_w(k, 7) == 1 {
+    return cap_w(k, 6);
+  }
+  return cap_w(k, 1);
+}
+
 /// What a poll on the device finds now.
 fn cap_bits(k: &Kernel) -> u64
   requires kok(k)
@@ -71,24 +101,77 @@ fn cap_bits(k: &Kernel) -> u64
   if cap_w(k, 0) != ST_RUNNING {
     return 0;
   }
-  if !snd_in_running(k.snd) && cap_avail(k) < larger(cap_w(k, 2), 1) {
+  if !snd_in_running(k.snd) && cap_ready(k) < larger(cap_w(k, 2), 1) {
     return POLLIN | POLLERR;                // it stopped by itself: a read starts it again
   }
-  if cap_avail(k) >= larger(cap_w(k, 2), 1) {
+  if cap_ready(k) >= larger(cap_w(k, 2), 1) {
     return POLLIN;
   }
   return 0;
 }
 
+/// mmap(2) of /dev/snd/pcmC0D0c returned `at`: the pages the recording is
+/// copied into.
+fn cap_mapped(k: &mut Kernel, at: u64)
+  requires kok(k)
+  ensures kok(k)
+{
+  cap_set(&mut k, 5, smaller(at, 0x7FFFFFFFFFFF));
+}
+
+/// Mmap access: copies what has been recorded into the mapping, at hw_ptr,
+/// as far as the program's appl_ptr leaves room in the buffer.
+fn cap_pull(k: &mut Kernel, pid: u64)
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  if cap_w(k, 7) != 1 || cap_w(k, 0) != ST_RUNNING || cap_w(k, 5) == 0 {
+    return;
+  }
+  if !snd_in_running(k.snd) {
+    snd_in_start(&mut k.snd);                 // it stopped by itself: starts again
+  }
+  let bs = larger(smaller(cap_w(k, 3), 4096), 1);
+  let mut rounds = 0;
+  let mut more = true;
+  while rounds < 8 && more
+    invariant rounds <= 8 && kok(k)
+  {
+    let hw = cap_w(k, 1);
+    let used = hw - smaller(cap_w(k, 6), hw);
+    let mut chunk = 0;
+    if used < bs {
+      let pos = hw % bs;
+      chunk = smaller(smaller(bs - used, bs - pos), XFER / 4);
+    }
+    if chunk == 0 {
+      more = false;
+    } else {
+      let pos = hw % bs;
+      let got = snd_in_get(&mut k.snd, &mut k.fs.xfer, chunk * 4);
+      if got == 0 {
+        more = false;
+      } else {
+        let n = smaller(got, chunk * 4);
+        if copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, cap_w(k, 5) + pos * 4, k.fs.xfer, n) != n {
+          cap_set(&mut k, 5, 0);                // the mapping is gone
+          more = false;
+        } else {
+          cap_set(&mut k, 1, hw + n / 4);
+        }
+      }
+    }
+    rounds = rounds + 1;
+  }
+}
+
 /// Narrows the parameters in the transfer buffer to what recording offers
-/// (the only format, channels and rate the card has, read/write access) and
+/// (the only format, channels and rate the card has) and
 /// makes them agree with each other. False: nothing is left.
 fn cap_narrow(k: &mut Kernel) -> bool
   requires kok(k)
   ensures kok(k)
 {
-  let ac = rd32(k.fs.xfer, HP_ACCESS);
-  store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](ac / 8 % 2 * ACC_RW_IL));
   let fm = rd32(k.fs.xfer, HP_FORMAT);
   store_le32(&mut k.fs.xfer, HP_FORMAT, cast[u32](fm / 4 % 2 * FMT_S16));
   if !iv_narrow(&mut k, IV_CH, 2, 2) || !iv_narrow(&mut k, IV_RATE, DSP_RATE, DSP_RATE) {
@@ -103,6 +186,11 @@ fn cap_choose(k: &mut Kernel) -> bool
   requires kok(k)
   ensures kok(k)
 {
+  if rd32(k.fs.xfer, HP_ACCESS) / 8 % 2 == 1 {
+    store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](ACC_RW_IL));
+  } else {
+    store_le32(&mut k.fs.xfer, HP_ACCESS, cast[u32](ACC_MMAP_IL));
+  }
   if !cap_narrow(&mut k) {
     return false;
   }
@@ -125,7 +213,7 @@ fn cap_readi(k: &mut Kernel, pid: u64, fd: u64, arg: u64) -> u64
   ensures kok(k)
 {
   let st = cap_w(k, 0);
-  if st != ST_PREPARED && st != ST_RUNNING {
+  if (st != ST_PREPARED && st != ST_RUNNING) || cap_w(k, 7) == 1 {
     return EBADFD;
   }
   let e = pcm_in(&mut k, pid, arg, 24);
@@ -221,6 +309,9 @@ fn cap_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     cap_set(&mut k, 2, iv_min(k, IV_PSIZE));
     cap_set(&mut k, 3, iv_min(k, IV_BSIZE));
     cap_set(&mut k, 4, 0);
+    cap_set(&mut k, 5, 0);
+    cap_set(&mut k, 6, 0);
+    cap_set(&mut k, 7, rd32(k.fs.xfer, HP_ACCESS) % 2);
     return pcm_out(&mut k, pid, arg, HP_SIZE);
   }
   if req == PCM_HW_FREE {
@@ -254,6 +345,7 @@ fn cap_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     cap_set(&mut k, 0, ST_PREPARED);
     cap_set(&mut k, 1, 0);
     cap_set(&mut k, 4, 0);
+    cap_set(&mut k, 6, 0);
     return 0;
   }
   if req == PCM_START {
@@ -293,9 +385,10 @@ fn cap_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
   }
   if req == PCM_STATUS || req == PCM_STATUS_EXT {
     // state, appl_ptr, hw_ptr, delay, avail, avail_max at 0 and 40..72 of the 152 bytes.
+    cap_pull(&mut k, pid);
     xfer_zero(&mut k, 152);
-    let av = cap_avail(k);
-    let appl = cap_w(k, 1);
+    let av = cap_ready(k);
+    let appl = cap_appl(k);
     store_le32(&mut k.fs.xfer, 0, cast[u32](cap_w(k, 0) % 256));
     xfer_u64(&mut k.fs.xfer, 40, appl);
     xfer_u64(&mut k.fs.xfer, 48, appl + av);
@@ -305,19 +398,26 @@ fn cap_ioctl(k: &mut Kernel, pid: u64, fd: u64, req: u64, arg: u64) -> u64
     return pcm_out(&mut k, pid, arg, 152);
   }
   if req == PCM_DELAY {
-    xfer_u64(&mut k.fs.xfer, 0, cap_avail(k));
+    cap_pull(&mut k, pid);
+    xfer_u64(&mut k.fs.xfer, 0, cap_ready(k));
     return pcm_out(&mut k, pid, arg, 8);
   }
   if req == PCM_SYNC_PTR {
     // struct snd_pcm_sync_ptr { flags; status at 8: state, hw_ptr at 16; control at 72: appl_ptr, avail_min }.
-    // The program's appl_ptr is not taken: reads move it.
+    // In read/write access the program's appl_ptr is not taken: reads move it.
     let e = pcm_in(&mut k, pid, arg, 136);
     if e != 0 {
       return e;
     }
+    let flags = rd32(k.fs.xfer, 0);
+    let newa = smaller(load_le64(k.fs.xfer, 72), 0x4000000000000);
+    if flags / 2 % 2 == 1 && cap_w(k, 7) == 1 && newa >= cap_w(k, 6) && newa <= cap_w(k, 1) {
+      cap_set(&mut k, 6, newa);
+    }
+    cap_pull(&mut k, pid);
     xfer_zero(&mut k, 136);
-    let av = cap_avail(k);
-    let appl = cap_w(k, 1);
+    let av = cap_ready(k);
+    let appl = cap_appl(k);
     store_le32(&mut k.fs.xfer, 8, cast[u32](cap_w(k, 0) % 256));
     xfer_u64(&mut k.fs.xfer, 16, appl + av);
     xfer_u64(&mut k.fs.xfer, 72, appl);
