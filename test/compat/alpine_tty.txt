@@ -38,7 +38,7 @@ $ bb umount /disk/a/dev/pts; bb umount /disk/a/dev; bb cat /disk/a/root/term.txt
 42
 
 == nvim: edit and save a C file
-$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/hello.c
+$ bb rm -f /disk/a/root/hello.c; bb chroot /disk/a /usr/bin/nvim -u NONE /root/hello.c
 > i#include <stdio.h>\rint main(void) { return 0; }\x1b
 > :wq\r
 $ bb cat /disk/a/root/hello.c
@@ -54,7 +54,7 @@ edit
 // edited
 
 == nvim: git commit opens Neovim as the editor, and the message typed there is the commit's
-$ bb chroot /disk/a /bin/sh -c 'cd /root && git init -q --template= ed && cd ed && git config user.name a && git config user.email a@b && echo x > f && git add f && GIT_EDITOR="nvim -u NONE" git commit'
+$ bb chroot /disk/a /bin/sh -c 'cd /root && rm -rf ed && git init -q --template= ed && cd ed && git config user.name a && git config user.email a@b && echo x > f && git add f && GIT_EDITOR="nvim -u NONE" git commit'
 > \x0c
 > \x0c
 > \x0c
@@ -64,15 +64,15 @@ $ bb chroot /disk/a /bin/sh -c 'cd /root/ed && git --no-pager log --format=%s'
 typed in nvim
 
 == nvim: edit a Bastio program, prove and build it, run it
-$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
+$ bb rm -f /disk/a/root/dev.bastio; bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
 > ifn put_num(con: &Serial, x: u64) {\r  if x >= 10 {\r    put_num(con, x / 10);\r  }\r  serial_write(con, cast[u8](48 + x % 10));\r}\r\rfn main(con: Serial) -> Serial {\r  put_num(con, 6 * 7);\r  serial_write(con, 10);\r  return con;\r}\x1b
 > :wq\r
-$ cd /disk/a/root && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio && ./dev; cd /
+$ cd /disk/a/root && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio && ./dev && cp dev.bastio dev0.bastio; cd /
 bastioc1: dev.bastio: 5 proof obligation(s) discharged
 42
 
 == nvim: an edit that breaks a proof is rejected
-$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
+$ bb cp /disk/a/root/dev0.bastio /disk/a/root/dev.bastio; bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.bastio
 > Gofn add(a: u64, b: u64) -> u64 {\r  return a + b;\r}\x1b
 > :wq\r
 $ cd /disk/a/root && rm -f dev && CC=/disk/tcc BASTIO_SOLVER=/disk/z3 /disk/bastioc1 -o dev dev.bastio 2>&1 | bb grep -o 'E-VERIFY-OVERFLOW'; ls dev 2>&1 | bb head -n 1; cd /
@@ -80,14 +80,14 @@ E-VERIFY-OVERFLOW
 ls: dev: No such file or directory
 
 == nvim: edit a C file, build it with tcc, run it
-$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.c
+$ bb rm -f /disk/a/root/dev.c; bb chroot /disk/a /usr/bin/nvim -u NONE /root/dev.c
 > i#include <stdio.h>\rint main(void) { printf("built %d\\n", 6 * 7); return 0; }\x1b
 > :wq\r
 $ cd /disk/a/root && /disk/tcc -o devc dev.c && ./devc; cd /
 built 42
 
 == nvim: edit a C file, build it with gcc, run it
-$ bb chroot /disk/a /usr/bin/nvim -u NONE /root/devg.c
+$ bb rm -f /disk/a/root/devg.c; bb chroot /disk/a /usr/bin/nvim -u NONE /root/devg.c
 > i#include <stdio.h>\rint main(void) { printf("gcc built %d\\n", 6 * 7); return 0; }\x1b
 > :wq\r
 $ bb chroot /disk/a /bin/sh -c 'cd /root && gcc -o devg devg.c && ./devg'
@@ -118,7 +118,7 @@ $ bb cat /disk/a/root/bang.txt
 escaped
 
 == nvim: u undoes an edit, and the undo file is written
-$ bb mkdir -p /disk/a/root/u && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE -c "set undofile undodir=/root/u" notes.txt'
+$ bb rm -rf /disk/a/root/u /disk/a/root/notes.txt; bb mkdir -p /disk/a/root/u && bb chroot /disk/a /bin/sh -c 'cd /root && nvim -u NONE -c "set undofile undodir=/root/u" notes.txt'
 > iline one\x1b
 > :w\r
 > ofile two\x1b
@@ -137,7 +137,7 @@ $ bb cat /disk/a/root/size.txt
 80x24 colour
 
 == nvim: Japanese text is typed in, edited by character and saved as UTF-8
-$ bb chroot /disk/a /bin/sh -c 'cd /root && TERM=xterm LANG=C.UTF-8 nvim -u NONE ja.txt'
+$ bb rm -f /disk/a/root/ja.txt; bb chroot /disk/a /bin/sh -c 'cd /root && TERM=xterm LANG=C.UTF-8 nvim -u NONE ja.txt'
 > i\xe6\x97\xa5\xe6\x9c\xac\xe8\xaa\x9e\x1b
 > $x
 > :wq\r

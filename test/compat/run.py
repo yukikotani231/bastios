@@ -741,6 +741,10 @@ def run_tty(env, name, prog, keys, check, expected, timeout, bb):
     if second["result"] == "pass":
         print(f"compat: {name}: passed on the second try (first: {first['result']}, {first['detail'][:120]})", flush=True)
         second["retried"] = True
+    else:
+        # Both failed: keep the first try's cause too, since the second
+        # can fail only because the first left its files behind.
+        second["detail"] = (second["detail"] + f" (first try: {first['result']}, {first['detail'][:200]})").strip()
     return second
 
 
