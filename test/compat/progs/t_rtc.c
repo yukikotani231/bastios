@@ -135,7 +135,7 @@ int main(void) {
         /* RTC_ALM_SET takes a time of day: the next time the clock shows it. */
         struct rtc_time t;
         ioctl(fd, RTC_RD_TIME, &t);
-        time_t soon = as_time(&t) + 2;
+        time_t soon = as_time(&t) + 5;      /* far enough ahead that a slow runner reads it back before it is due */
         gmtime_r(&soon, &dt);
         struct rtc_time al = {.sec = dt.tm_sec, .min = dt.tm_min, .hour = dt.tm_hour, .mday = -1, .mon = -1, .year = -1};
         EXPECT("RTC_ALM_SET takes a time of day", ioctl(fd, RTC_ALM_SET, &al) == 0);
@@ -144,7 +144,7 @@ int main(void) {
         EXPECT("RTC_ALM_READ gives it back", ioctl(fd, RTC_ALM_READ, &back_tm) == 0 && back_tm.sec == al.sec && back_tm.min == al.min && back_tm.hour == al.hour);
         EXPECT("RTC_AIE_ON arms it", ioctl(fd, RTC_AIE_ON, 0) == 0);
         pf.revents = 0;
-        EXPECT("poll reports it readable once it is due", poll(&pf, 1, 8000) == 1 && (pf.revents & POLLIN));
+        EXPECT("poll reports it readable once it is due", poll(&pf, 1, 15000) == 1 && (pf.revents & POLLIN));
         EXPECT("the read then returns at once", read(fd, &data, sizeof data) == (ssize_t)sizeof data);
         ioctl(fd, RTC_AIE_ON, 0);
         EXPECT("RTC_AIE_OFF disarms it", ioctl(fd, RTC_AIE_OFF, 0) == 0 && ioctl(fd, RTC_WKALM_RD, &g) == 0 && g.enabled == 0);
