@@ -45,6 +45,7 @@ struct bwm_key { uint32_t id, ch; };                            /* ch is a byte,
 #define BWM_KEY_ZOOM_OUT 0x106         /* Ctrl-minus: smaller text */
 #define BWM_KEY_ZOOM_RESET 0x107       /* Ctrl-0: the normal size */
 #define BWM_KEY_FIND 0x108             /* Ctrl-Shift-F: look for text in the lines of the screen and the history */
+#define BWM_KEY_PASTE_OLD 0x109        /* Alt-Shift-1 to 4: 0x109 to 0x10c paste the 1st to 4th older clipboard entry */
 struct bwm_mouse { uint32_t id, x, y, buttons; };              /* x, y inside the contents; signed, and outside it while a drag that began in it goes on */
 struct bwm_close { uint32_t id; };
 #define BWM_DROP_FILE "/tmp/bwm.drag"     /* a program writes the path it is about to be dragged from here when the button goes down in its window */

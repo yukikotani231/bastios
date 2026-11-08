@@ -3820,6 +3820,17 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
                 if not good:
                     print("\n".join(l for l in lines4 if l))
                 fails += not good
+            if good:
+                # Alt-Shift-1 pastes the selection before the latest one ("copied", which the double click on "echo" replaced).
+                monitor("sendkey alt-shift-1")
+                time.sleep(1)
+                w, h, px = screendump()
+                lines5 = screen_text_at(px, w, 72, 90, 80, 24)
+                good = any(l.strip() == "# copiedcopiedechocopied" for l in lines5)
+                print(("ok  " if good else "FAIL"), f"({name}) Alt-Shift-1 pastes the previous clipboard entry")
+                if not good:
+                    print("\n".join(l for l in lines5 if l))
+                fails += not good
             bracket = good
             if good:
                 # A program that asked for bracketed paste (mode 2004) gets the paste between 200~ and 201~.

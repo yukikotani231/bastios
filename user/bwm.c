@@ -2895,6 +2895,11 @@ int main(int argc, char **argv)
                         else if (t)
                             minimize(t);
                         touch_all();
+                    } else if (down && k_shift && k_alt && !k_ctrl && code >= 2 && code <= 5) {
+                        if (top && top->cli >= 0) {                /* Alt-Shift-1 to 4: paste an older clipboard entry (keys 0x109 to 0x10c, for bterm) */
+                            struct bwm_key ok = { (uint32_t)top->id, BWM_KEY_PASTE_OLD + (uint32_t)(code - 2) };
+                            to_client(top->cli, BWM_KEY, &ok, sizeof ok);
+                        }
                     } else if (down && k_shift && (code == 110 || (code == 47 && k_ctrl))) {
                         if (top && top->cli >= 0) {                /* Shift-Insert, Ctrl-Shift-V: paste (key 0x100, for bterm) */
                             struct bwm_key pk = { (uint32_t)top->id, BWM_KEY_PASTE };
