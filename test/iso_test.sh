@@ -2727,7 +2727,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             time.sleep(1.0)
             monitor("mouse_button 2", "mouse_button 0")
             time.sleep(0.7)
-            monitor("mouse_move 0 -98")                                                 # the Minimize entry
+            monitor("mouse_move 0 -122")                                                # the Minimize entry
             time.sleep(0.3)
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(1.2)
@@ -2736,11 +2736,11 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             hidden = hidpx != winpx
             print(("ok  " if hidden else "FAIL"), f"({name}) a right click on a task bar button opens the window menu, and Minimize hides the window")
             fails += not hidden
-            monitor("mouse_move 0 98")
+            monitor("mouse_move 0 122")
             time.sleep(1.0)
             monitor("mouse_button 2", "mouse_button 0")
             time.sleep(0.7)
-            monitor("mouse_move 0 -98")                                                 # the Show entry
+            monitor("mouse_move 0 -122")                                                # the Show entry
             time.sleep(0.3)
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(1.2)
@@ -2755,7 +2755,7 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             time.sleep(0.3)
             monitor("mouse_button 2", "mouse_button 0")
             time.sleep(0.7)
-            monitor("mouse_move 0 106")                                                 # Close
+            monitor("mouse_move 0 130")                                                 # Close
             time.sleep(0.3)
             monitor("mouse_button 1", "mouse_button 0")
             time.sleep(1.5)
@@ -2766,6 +2766,37 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             fails += not good
         else:
             print("FAIL", f"({name}) the window menu test could not start bwm")
+            fails += 1
+        monitor("sendkey ctrl-q")
+        until(b"bwm: bye", mark)
+        time.sleep(0.5)
+        mark = len(out)
+        q.stdin.write(b"\r"); q.stdin.flush()
+        until(b"# ", mark)
+        # Keep on top (window menu): a window with it set stays above the others, even after another window is clicked and raised.
+        mark = len(out)
+        q.stdin.write(b"bwm -n -c bterm\r"); q.stdin.flush()
+        good = until(b"bterm: window", mark)
+        if good:
+            time.sleep(1.5)
+            monitor("sendkey ctrl-t")                                                   # a second terminal, 30 px down and right of the first
+            time.sleep(1.5)
+            monitor("sendkey alt-f3", "sendkey down", "sendkey down", "sendkey down", "sendkey down", "sendkey ret")   # Keep on top for it
+            time.sleep(1.0)
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 85 80")
+            time.sleep(0.3)
+            w, h, px = screendump()
+            before = tuple(px[(105 * w + 400) * 3:(105 * w + 400) * 3 + 3])           # the second window's title bar
+            monitor("mouse_button 1", "mouse_button 0")                                 # click the first window: it is raised, but the other stays above
+            time.sleep(1.0)
+            w, h, px = screendump()
+            after = tuple(px[(105 * w + 400) * 3:(105 * w + 400) * 3 + 3])
+            good = before == after and before != (0, 0, 0)
+            print(("ok  " if good else "FAIL"), f"({name}) a Keep on top window stays above a window clicked afterwards ({before}, {after})")
+            fails += not good
+        else:
+            print("FAIL", f"({name}) the keep on top test could not start bwm")
             fails += 1
         monitor("sendkey ctrl-q")
         until(b"bwm: bye", mark)
