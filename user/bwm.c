@@ -2810,6 +2810,13 @@ int main(int argc, char **argv)
                                 running = 0;
                         }
                         touch_all();
+                    } else if (code == 61 && down && k_alt) {      /* Alt-F3: open the window menu of the focused window from the keyboard */
+                        struct win *t = focus();
+                        if (t && !t->hidden && !menu_open) {
+                            wm_show(t, t->x + BORDER, t->y + TITLE_H);
+                            wm_sel = 0;
+                            touch_all();
+                        }
                     } else if (code == 59 && down && k_alt) {      /* Alt-F1: open the launcher menu from the keyboard */
                         menu_show((int)W - 4 - MENU_ITEM_W, (int)H - BAR_H - menu_n * MENU_ITEM_H);
                         menu_sel = 0;
