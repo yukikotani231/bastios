@@ -614,8 +614,13 @@ fn rt_ready(k: &Kernel, p: u64) -> bool
 /// not used up? Only the most urgent such thread is weighed. A thread a
 /// sleep's end, a pipe or a socket woke is found this way; the caller then
 /// interrupts the other processors (V_WAKE) instead of leaving it for their
-/// next tick.
-fn rt_preempt_due(k: &Kernel, except: u64) -> u64
+/// next tick. Processor `here` (the caller's; 64 or more for none) does not
+/// count: the interrupt goes to the others, and it picks its next thread
+/// itself. Counting it idle once its thread blocked sent the interrupt to
+/// a processor that had already taken the head of the queue, and the
+/// interrupt held that thread back while `here` ran the next one (a
+/// writer woken with a reader lost the rwlock to it under QEMU).
+fn rt_preempt_due(k: &Kernel, except: u64, here: u64) -> u64
   requires kok(k)
   ensures result < NPROC
 {
@@ -643,6 +648,9 @@ fn rt_preempt_due(k: &Kernel, except: u64) -> u64
   }
   // The processors that run a thread now; one whose thread q outranks.
   let mut busy = 0;
+  if here < 64 {
+    busy = 1 << here;
+  }
   p = 1;
   while p < cap
     invariant 1 <= p && cap <= NPROC && q < NPROC && kok(k)
@@ -650,7 +658,7 @@ fn rt_preempt_due(k: &Kernel, except: u64) -> u64
     if state(k.procs, p) == RUNNING {
       let c = aff_cpu(k, p);
       busy = busy | (1 << c);
-      if rt_prio(k.procs, p) < qp && aff_ok(k, q, c) && !rt_throttled(k, c) {
+      if c != here && rt_prio(k.procs, p) < qp && aff_ok(k, q, c) && !rt_throttled(k, c) {
         return q;
       }
     }
@@ -673,11 +681,11 @@ fn rt_preempt_due(k: &Kernel, except: u64) -> u64
 /// per tick for the same thread (SYS_RTON keeps which, and when): a
 /// thread the processors cannot take after all (its group's space is
 /// lent, say) does not draw an interrupt from every call until the tick.
-fn rt_preempt_kick(k: &mut Kernel, except: u64) -> bool
+fn rt_preempt_kick(k: &mut Kernel, except: u64, here: u64) -> bool
   requires kok(k)
   ensures kok(k)
 {
-  let q = rt_preempt_due(k, except);
+  let q = rt_preempt_due(k, except, here);
   if q == 0 {
     return false;
   }
@@ -707,6 +715,18 @@ fn rt_seq(k: &mut Kernel, p: u64) -> u64
   k.sys = set(k.sys, SYS_RTSEQ + NPROC, n);
   k.sys = set(k.sys, SYS_RTSEQ + p, n);
   return n;
+}
+
+/// Thread p begins a futex wait: it is stamped with the order waits
+/// began in, so that waiters of one real-time priority are woken first in,
+/// first out, as Linux's futex queues do (futex_rt_first).
+fn futex_queued(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let n = sat_add(get(k.sys, SYS_FXSEQ + NPROC), 1);
+  k.sys = set(k.sys, SYS_FXSEQ + NPROC, n);
+  k.sys = set(k.sys, SYS_FXSEQ + p, n);
 }
 
 /// Thread p blocked, yielded or used up its SCHED_RR slice: it goes to the

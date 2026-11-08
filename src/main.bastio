@@ -406,7 +406,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64, poll: bool) ->
   // is when their own ticks, 10 ms apart, would have found it.
   if (woke || s.ticked) && s.idle > 0 && any_ready(s.k.procs, s.k.pid_hi) {
     lapic_wake(&mut s.apic);
-  } else if rt_preempt_kick(&mut s.k, p) {
+  } else if rt_preempt_kick(&mut s.k, p, me) {
     lapic_wake(&mut s.apic);              // a real-time thread a sleep's end woke, another processor should take now
   }
   s.ticked = false;
@@ -666,7 +666,7 @@ fn linux_trap(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64) -> u64
   if get(s.k.sys, SYS_KICK) != 0 {
     s.k.sys = set(s.k.sys, SYS_KICK, 0);
     lapic_wake(&mut s.apic);              // a signal for a process running on another processor
-  } else if rt_preempt_kick(&mut s.k, 0) {
+  } else if rt_preempt_kick(&mut s.k, 0, cpu_no(cpu)) {
     lapic_wake(&mut s.apic);              // the call woke a real-time thread (a pipe, a socket) another processor should take now
   }
   sock_wake(&mut s.k);

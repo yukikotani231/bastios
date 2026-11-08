@@ -1002,6 +1002,9 @@ fn futex_end(k: &mut Kernel, q: u64)
   pset(&mut k.procs, q, F_FUTEX, 0);
   pset(&mut k.procs, q, F_STATE, READY);
   pt_woken(&mut k, q);                    // its tracer sees the call end (src/lxptrace.bastio)
+  if rt_prio(k.procs, q) > 0 {
+    let at = rt_seq(&mut k, q);           // its place among the threads of its priority is when it was woken
+  }
   rt_kick(&mut k, q);
 }
 
@@ -1025,23 +1028,26 @@ fn futex_wake_one(k: &mut Kernel, q: u64, g: u64, addr: u64) -> bool
 }
 
 /// The plain waiter on key addr (group g, not pid) of the highest
-/// real-time priority, the lowest-numbered of those, or 0 if no waiter is
-/// real-time.
+/// real-time priority, the one that began to wait first of those
+/// (futex_queued), or 0 if no waiter is real-time.
 fn futex_rt_first(k: &Kernel, pid: u64, g: u64, addr: u64) -> u64
   requires kok(k) && pid < NPROC
   ensures result < NPROC
 {
   let mut best = 0;
   let mut bp = 0;
+  let mut bat = 0;
   let mut q = 1;
   while q < NPROC
     invariant 1 <= q && q <= NPROC && best < NPROC && kok(k)
   {
     if q != pid && (futex_waiting(k.procs, q, g, addr) || futex_polling(k.procs, q, g, addr)) {
       let r = rt_prio(k.procs, q);
-      if r > bp {
+      let at = get(k.sys, SYS_FXSEQ + q);
+      if r > bp || (r > 0 && r == bp && at < bat) {
         best = q;
         bp = r;
+        bat = at;
       }
     }
     q = q + 1;
@@ -1344,6 +1350,7 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
     // On a later try F_FUTEX may name another word: a requeue moved it.
     if was == 0 {
       pset(&mut k.procs, pid, F_FUTEX, key);
+      futex_queued(&mut k, pid);
     }
     return r;
   }
@@ -1351,6 +1358,7 @@ fn lx_futex(k: &mut Kernel, pid: u64, was: u64, addr: u64, op: u64, val: u64) ->
   if r == SWITCH {
     if was == 0 {
       pset(&mut k.procs, pid, F_FUTEX, key);
+      futex_queued(&mut k, pid);
     }
     pset(&mut k.procs, pid, F_STATE, FUTEXWAIT);
   }

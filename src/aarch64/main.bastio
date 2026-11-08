@@ -306,7 +306,7 @@ fn next_job(s: &mut Sys, cpu: &mut Cpu, mmu: &mut Mmu, from: u64) -> Job
   }
   let me = boot_info(cpu, INFO_CPUNO, 0);
   let p = lx_pick(&mut s.k, from, me);
-  if rt_preempt_kick(&mut s.k, p) {
+  if rt_preempt_kick(&mut s.k, p, me) {
     let woke = boot_info(cpu, INFO_KICK, 0);    // a real-time thread a sleep's end woke, another processor should take now
   }
   if p == 0 {
@@ -476,7 +476,7 @@ fn finish(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64, fpu: Frame, v: u64) -> 
     if get(s.k.sys, SYS_KICK) != 0 {
       s.k.sys = set(s.k.sys, SYS_KICK, 0);
       let woke = boot_info(cpu, INFO_KICK, 0);   // a signal for a process running on another processor
-    } else if rt_preempt_kick(&mut s.k, 0) {
+    } else if rt_preempt_kick(&mut s.k, 0, boot_info(cpu, INFO_CPUNO, 0)) {
       let woke = boot_info(cpu, INFO_KICK, 0);   // the call woke a real-time thread (a pipe, a socket) another processor should take now
     }
     if what == SWITCH {

@@ -962,6 +962,80 @@ out:
     return ok;
 }
 
+/* Two SCHED_FIFO waiters of one priority on one futex word: A, the
+ * first thread made (so the lower slot), begins its wait after B. One
+ * FUTEX_WAKE must wake B, which waited first, as Linux's futex queues do. */
+static int fw_word, fw_gate, fw_a_in, fw_b_in, fw_n, fw_order[2];
+static pid_t fw_tid[2];
+static void *fw_thread(void *a) {
+    long v = (long)a;
+    int id = (int)(v & 1);
+    fh_pin((int)(v >> 1), 10);
+    fw_tid[id] = gettid();
+    if (id == 0) {
+        while (!__atomic_load_n(&fw_gate, __ATOMIC_SEQ_CST))
+            syscall(SYS_futex, &fw_gate, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+        __atomic_store_n(&fw_a_in, 1, __ATOMIC_SEQ_CST);
+    } else {
+        __atomic_store_n(&fw_b_in, 1, __ATOMIC_SEQ_CST);
+    }
+    while (!__atomic_load_n(&fw_word, __ATOMIC_SEQ_CST))
+        syscall(SYS_futex, &fw_word, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+    int i = __atomic_fetch_add(&fw_n, 1, __ATOMIC_SEQ_CST);
+    if (i < 2) fw_order[i] = id;
+    return 0;
+}
+static int asleep(pid_t *tidp) {
+    for (int i = 0; i < 5000; i++) {
+        pid_t tid = __atomic_load_n(tidp, __ATOMIC_SEQ_CST);
+        if (tid && thread_state(getpid(), tid) == 'S') return 1;
+        usleep(1000);
+    }
+    return 0;
+}
+static int futex_fifo(void) {
+    int c = last_cpu();
+    cpu_set_t all, other;
+    if (c < 1 || sched_getaffinity(0, sizeof all, &all) != 0) return 0;
+    CPU_ZERO(&other);
+    CPU_SET(0, &other);
+    if (sched_setaffinity(0, sizeof other, &other) != 0) return 0;
+    fw_word = fw_gate = fw_a_in = fw_b_in = fw_n = 0;
+    fw_order[0] = fw_order[1] = -1;
+    fw_tid[0] = fw_tid[1] = 0;
+    pthread_t a, b;
+    int ok = 0, made = 0;
+    snprintf(spin_note, sizeof spin_note, "a waiter did not begin to wait");
+    if (pthread_create(&a, 0, fw_thread, (void *)(long)(c << 1 | 0)) != 0) goto out;
+    made = 1;
+    if (!asleep(&fw_tid[0])) goto wake;   /* A waits on the gate */
+    if (pthread_create(&b, 0, fw_thread, (void *)(long)(c << 1 | 1)) != 0) goto wake;
+    made = 2;
+    while (!__atomic_load_n(&fw_b_in, __ATOMIC_SEQ_CST)) usleep(1000);
+    if (!asleep(&fw_tid[1])) goto wake;   /* B waits on the word */
+    __atomic_store_n(&fw_gate, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fw_gate, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    while (!__atomic_load_n(&fw_a_in, __ATOMIC_SEQ_CST)) usleep(1000);
+    if (!asleep(&fw_tid[0])) goto wake;                                       /* then A, behind B */
+    __atomic_store_n(&fw_word, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fw_word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    for (int i = 0; i < 100 && !__atomic_load_n(&fw_n, __ATOMIC_SEQ_CST); i++) usleep(2000);
+    usleep(50000);
+    ok = fw_n == 1 && fw_order[0] == 1;
+    snprintf(spin_note, sizeof spin_note, "woken %d, first %s", fw_n,
+             fw_order[0] == 1 ? "B (waited first)" : fw_order[0] == 0 ? "A (waited second)" : "none");
+wake:
+    __atomic_store_n(&fw_gate, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fw_gate, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    __atomic_store_n(&fw_word, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fw_word, FUTEX_WAKE_PRIVATE, 2, 0, 0, 0);
+    if (made >= 2) pthread_join(b, 0);
+    pthread_join(a, 0);
+out:
+    sched_setaffinity(0, sizeof all, &all);
+    return ok;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -1015,6 +1089,7 @@ int main(void) {
     EXPECT_SHARE("a SCHED_FIFO thread woken on another processor runs there at once, not at its next tick", rt_wake_now);
     EXPECT_SHARE("a SCHED_FIFO thread whose sleep ends runs on its processor at once, not at its next tick", rt_wake_sleep);
     EXPECT_SHARE("SCHED_FIFO threads of one priority keep their order, and a preempted one goes on first", fifo_head);
+    EXPECT_SHARE("FUTEX_WAKE wakes SCHED_FIFO waiters of one priority in the order they began to wait", futex_fifo);
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
