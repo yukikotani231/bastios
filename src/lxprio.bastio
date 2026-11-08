@@ -583,11 +583,23 @@ fn sched_changed(k: &mut Kernel, t: u64)
 /// a thread of a lower priority, or idle, picks q now rather than at its
 /// next tick, up to 10 ms later. One that has nothing better to run keeps
 /// its thread (finish returns it, and lx_pick starts from it).
+///
+/// The first thread a call kicks for is the most urgent it woke (futex_wake
+/// wakes in that order), and rt_preempt_kick is told so (the mark in
+/// SYS_RTON): if the caller then blocks before an idle processor has taken
+/// q, its next call would see q still READY and that processor still idle
+/// and interrupt it again, and under QEMU the second interrupt reached it
+/// just after it had taken q, holding q back while the caller's processor
+/// ran the next thread (a woken reader took a rwlock before the writer
+/// woken ahead of it).
 fn rt_kick(k: &mut Kernel, q: u64)
   requires kok(k) && q < NPROC
   ensures kok(k)
 {
   if get(k.sys, SYS_RTON) != 0 && rt_prio(k.procs, q) > 0 {
+    if get(k.sys, SYS_KICK) == 0 {
+      k.sys = set(k.sys, SYS_RTON, 2 + q + NPROC * (k.ticks % 0x100000000));
+    }
     k.sys = set(k.sys, SYS_KICK, 1);
   }
 }
