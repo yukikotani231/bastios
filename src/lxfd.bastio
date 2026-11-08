@@ -1565,6 +1565,7 @@ fn lx_open_dev(k: &mut Kernel, pid: u64, dev: u64, flags: u64) -> u64
   }
   if dev == DEV_TIMER {
     pcm_set(&mut k, 12, 0);               // no timestamps until TREAD
+    tmr_open(&mut k, hv);
   }
   if dev == DEV_PTSDIR {
     dpath_keep(&mut k.dpath, &mut k.dpathx, hv, k.mstr, lpath_len(k));   // the name it was opened by, for /proc/PID/fd

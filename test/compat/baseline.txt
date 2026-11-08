@@ -170,6 +170,7 @@ debian: debian: mount --make-shared, findmnt shows the propagation
 debian: debian: unshare gives a mount namespace of its own
 debian: debian: util-linux mount tools see the mount table
 alsa: alsa: SDL2 plays through its ALSA backend
+alsa: alsa: aplay plays through dmix
 alsa: alsa: amixer lists the volume control
 alsa: alsa: aplay lists the card
 alsa: alsa: aplay plays mono 24 kHz on the hardware device
