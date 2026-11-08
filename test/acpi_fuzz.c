@@ -30,6 +30,7 @@
 #define ARENA_SIZE (64ull << 20)
 
 /* what boot.S, ap.S, platform.c and multiboot.c provide */
+uint64_t bst_platform_xsave_mask;
 uint64_t bst_kernel_pml4[512];
 uint64_t bst_gdt[64];
 const char bst_ap_trampoline[1] = {0}, bst_ap_trampoline_end[1] = {0};
