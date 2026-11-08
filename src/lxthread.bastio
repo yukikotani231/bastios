@@ -185,7 +185,7 @@ fn lx_pick(k: &mut Kernel, from: u64, me: u64) -> u64
     if p >= cap {
       p = p - cap;
     }
-    if p != 0 && state(k.procs, p) == READY && !(skip_rt && rt_prio(k.procs, p) != 0 && pget(k.procs, p, F_RESTART) == 0) && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
+    if p != 0 && state(k.procs, p) == READY && !(skip_rt && rt_prio(k.procs, p) != 0 && rt_ready(k, p)) && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
       if !nice_debtor(&mut k, p) {
         return p;
       }

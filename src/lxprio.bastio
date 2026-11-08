@@ -481,10 +481,12 @@ fn nice_debtor(k: &mut Kernel, p: u64) -> bool
 // SCHED_FIFO thread keeps its processor at the tick, so it runs until it
 // blocks, yields, or a thread of a higher priority is ready; a SCHED_RR
 // thread gives it up to the next one of its priority after RR_TICKS ticks
-// (sched_rr_get_interval's 100 ms). A thread that becomes ready takes the
-// processor of a lower one at that processor's next tick (10 ms), not at
-// once. A thread waiting in a call that it runs again each time it is
-// picked (F_RESTART) has no priority until the call is done. As Linux does by default (sched_rt_runtime_us 950000 of
+// (sched_rr_get_interval's 100 ms). A thread that a futex wake or the end
+// of a sleep makes ready takes the processor of a lower one at once (the
+// other processors get V_WAKE: rt_kick, rt_preempt_kick); any other at
+// that processor's next tick (10 ms). A thread waiting in a call that it
+// runs again each time it is picked (F_RESTART) has no priority until the
+// call is done, unless it is a timed wait that is over (rt_ready). As Linux does by default (sched_rt_runtime_us 950000 of
 // sched_rt_period_us 1000000), real-time threads get at most RT_SHARE
 // ticks of each processor in each RT_PERIOD ticks: past that, other
 // threads that are ready run first until the period ends (rt_throttled),
@@ -588,6 +590,103 @@ fn rt_kick(k: &mut Kernel, q: u64)
   }
 }
 
+/// Whether READY thread p would run its own code if picked, so that its
+/// real-time priority counts: it is not in a call it runs again each time
+/// (F_RESTART), or it is in a timed wait (F_RESTART is the deadline + 2)
+/// whose deadline has passed, a sleep that is over, which its next try
+/// ends. A reader of an empty pipe tries again until there is data and so
+/// gets no priority until then (or it would keep the writer from running).
+fn rt_ready(k: &Kernel, p: u64) -> bool
+  requires kok(k) && p < NPROC
+{
+  if state(k.procs, p) != READY {
+    return false;
+  }
+  let w = pget(k.procs, p, F_RESTART);
+  return w == 0 || (w >= 2 && w - 2 <= k.ns);
+}
+
+/// Is there a READY real-time thread (other than `except`) that a
+/// processor would take now if it looked: one it may run on that is idle,
+/// or that runs a thread of a lower priority, and whose real-time share is
+/// not used up? Only the most urgent such thread is weighed. A thread a
+/// sleep's end, a pipe or a socket woke is found this way; the caller then
+/// interrupts the other processors (V_WAKE) instead of leaving it for their
+/// next tick.
+fn rt_preempt_due(k: &Kernel, except: u64) -> u64
+  requires kok(k)
+  ensures result < NPROC
+{
+  if get(k.sys, SYS_RTON) == 0 {
+    return 0;
+  }
+  let cap = smaller(len(k.procs) / STRIDE, k.pid_hi);
+  let mut q = 0;
+  let mut qp = 0;
+  let mut p = 1;
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && q < NPROC && kok(k)
+  {
+    if p != except && rt_ready(k, p) {
+      let r = rt_prio(k.procs, p);
+      if r > qp {
+        q = p;
+        qp = r;
+      }
+    }
+    p = p + 1;
+  }
+  if q == 0 {
+    return 0;
+  }
+  // The processors that run a thread now; one whose thread q outranks.
+  let mut busy = 0;
+  p = 1;
+  while p < cap
+    invariant 1 <= p && cap <= NPROC && q < NPROC && kok(k)
+  {
+    if state(k.procs, p) == RUNNING {
+      let c = aff_cpu(k, p);
+      busy = busy | (1 << c);
+      if rt_prio(k.procs, p) < qp && aff_ok(k, q, c) && !rt_throttled(k, c) {
+        return q;
+      }
+    }
+    p = p + 1;
+  }
+  let mut c = 0;
+  let n = smaller(k.cpus, 64);
+  while c < n
+    invariant c <= n && n <= 64 && q < NPROC && kok(k)
+  {
+    if (busy >> c) % 2 == 0 && aff_ok(k, q, c) && !rt_throttled(k, c) {
+      return q;
+    }
+    c = c + 1;
+  }
+  return 0;
+}
+
+/// Should the caller send V_WAKE because of rt_preempt_due? At most once
+/// per tick for the same thread (SYS_RTON keeps which, and when): a
+/// thread the processors cannot take after all (its group's space is
+/// lent, say) does not draw an interrupt from every call until the tick.
+fn rt_preempt_kick(k: &mut Kernel, except: u64) -> bool
+  requires kok(k)
+  ensures kok(k)
+{
+  let q = rt_preempt_due(k, except);
+  if q == 0 {
+    return false;
+  }
+  let mark = 2 + q + NPROC * (k.ticks % 0x100000000);
+  if get(k.sys, SYS_RTON) == mark {
+    return false;
+  }
+  k.sys = set(k.sys, SYS_RTON, mark);
+  return true;
+}
+
 /// The READY real-time thread of the highest priority that may run on
 /// processor `me`, the first such from `base` round robin (cap as in
 /// lx_pick), or 0.
@@ -608,7 +707,7 @@ fn rt_pick(k: &mut Kernel, base: u64, cap: u64, me: u64) -> u64
     // A thread that waits in a call is READY and runs the call again each
     // time it is picked (F_RESTART): it goes with the others, or a
     // real-time reader of an empty pipe would keep the writer from running.
-    if p != 0 && state(k.procs, p) == READY && pget(k.procs, p, F_RESTART) == 0 {
+    if p != 0 && rt_ready(k, p) {
       let r = rt_prio(k.procs, p);
       if r > best && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
         best = r;
@@ -638,7 +737,7 @@ fn rt_above(k: &Kernel, q: u64, me: u64) -> bool
   while p < cap
     invariant 1 <= p && cap <= NPROC && kok(k)
   {
-    if state(k.procs, p) == READY && pget(k.procs, p, F_RESTART) == 0 && rt_prio(k.procs, p) > mine && aff_ok(k, p, me) {
+    if rt_ready(k, p) && rt_prio(k.procs, p) > mine && aff_ok(k, p, me) {
       return true;
     }
     p = p + 1;
