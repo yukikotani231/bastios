@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Writes the server disk for the compat suite (test/compat/server.txt):
-Redis, memcached, nginx, HAProxy and dnsmasq of Ubuntu 24.04, with the glibc and the
+Redis, memcached, nginx, HAProxy, dnsmasq and OpenSSH of Ubuntu 24.04, with the glibc and the
 libraries they link against, as a tar file (/disk/root.tar) next to a
 static BusyBox at /disk/busybox. The checks unpack the root under /disk/s,
 chroot into it and run the servers and their clients.
@@ -99,6 +99,50 @@ PACKAGES = (
      "594a82d7b70ecff393753ee0ab6611b0b18226c4f922d27ccb3f66caeae3d5d1"),
     ("pool/main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_amd64.deb",
      "bbb55111182a44d0fe97a84120407e17bb6e23d41e2670d73aa78f619e29efa2"),
+    ("pool/main/o/openssh/openssh-sftp-server_9.6p1-3ubuntu13_amd64.deb",
+     "7283bf47a1966bd6fa3d1b6eb0ef5b06cf4306c3e7389b6b670f97c3079b7a62"),
+    ("pool/main/o/openssh/openssh-client_9.6p1-3ubuntu13_amd64.deb",
+     "cb275222577a9b0ac65a9ea6e13096779aa56bf42e48478edb72e866547f7688"),
+    ("pool/main/libs/libselinux/libselinux1_3.5-2ubuntu2_amd64.deb",
+     "c0fe6dfac61d458f3e65c4a2bf6a920030a97d2429e33d0b405a8c4a63ef2864"),
+    ("pool/main/k/krb5/libgssapi-krb5-2_1.20.1-6ubuntu2_amd64.deb",
+     "0e22fb29a907ef6deeb56543bcbf9f736500cb37da2e3a6257c1bedf7c0783db"),
+    ("pool/main/k/krb5/libkrb5support0_1.20.1-6ubuntu2_amd64.deb",
+     "5a6aa4d7f11ccad8f4bdfbce5e718827875d9440b1fb3d40c82dff0d9edb6e9b"),
+    ("pool/main/k/krb5/libk5crypto3_1.20.1-6ubuntu2_amd64.deb",
+     "212318ab9c98e151cfd331b9310827d43316dcf33e1e0e8d3d9fc2b3fbd88cfb"),
+    ("pool/main/e/e2fsprogs/libcom-err2_1.47.0-2.4~exp1ubuntu4_amd64.deb",
+     "c95d59cad331f88ddffa3a85f1119bac98dd956916af642c60dd66a485ee97df"),
+    ("pool/main/k/krb5/libkrb5-3_1.20.1-6ubuntu2_amd64.deb",
+     "10ab284396a94349aa319c7c0a59cc747c5d75ba8b81e0ffcbdae96d8d8a2a78"),
+    ("pool/main/k/keyutils/libkeyutils1_1.6.3-3build1_amd64.deb",
+     "0679f198b0128179e46cdf956fb2022c23c758664c00bc8efa0382d509683a8a"),
+    ("pool/main/libf/libfido2/libfido2-1_1.14.0-1build3_amd64.deb",
+     "1dfed970b870e3c949b983f2bcc28e33e1a1207c6cf5a60ee2cb226bb02b1da7"),
+    ("pool/main/s/systemd/libudev1_255.4-1ubuntu8_amd64.deb",
+     "0955df93006711ba7328cc919673902c75a04f57f6ad37010b0ee052996fbb08"),
+    ("pool/main/libc/libcbor/libcbor0.10_0.10.2-1.2ubuntu2_amd64.deb",
+     "6ae45862612eb5d9918a005b882a67b722428cfde06d56bb651d3c04a47f4d2d"),
+    ("pool/main/libe/libedit/libedit2_3.1-20230828-1build1_amd64.deb",
+     "3afbc8ddf835049dd4d88275b9d13680e4c4cdd59e191cbd63424152cc08e00e"),
+    ("pool/main/n/ncurses/libtinfo6_6.4+20240113-1ubuntu2_amd64.deb",
+     "53e1e1753729d04cf65b05e6e58abe06e2bb76cc07eff0e1b2a638a638ca209b"),
+    ("pool/main/libb/libbsd/libbsd0_0.12.1-1build1_amd64.deb",
+     "8e97b7d541416512a81e7845c5f21910344c9c5c610893cf265d3298e0caad6b"),
+    ("pool/main/libm/libmd/libmd0_1.1.0-2build1_amd64.deb",
+     "77f8cdbf03a43656bbf6604e18bd16834fc8bf2c949d4fbdf24ac297869b667a"),
+    ("pool/main/o/openssh/openssh-server_9.6p1-3ubuntu13_amd64.deb",
+     "6fe2467aff7aa8ed1cbe91a3521df69a41b90122143392f94037d4225a7098cb"),
+    ("pool/main/t/tcp-wrappers/libwrap0_7.6.q-33_amd64.deb",
+     "36118b862539868408ee056411d6e470068d14c46e5296b29bfb744770f5d2ce"),
+    ("pool/main/p/pam/libpam0g_1.5.3-5ubuntu5_amd64.deb",
+     "4f82423cce72fb29c6a52d86cd060bed427fb393b86a45e1b404a1785e5c4ae2"),
+    ("pool/main/a/audit/libaudit1_3.1.2-2.1build1_amd64.deb",
+     "ab7708324073d0978b3355e0bc265192c57711e81847d01458c305332ea7f98e"),
+    ("pool/main/libc/libcap-ng/libcap-ng0_0.8.4-2build2_amd64.deb",
+     "cf1e9437ac7ddf6539dbe87b68858cbdef84d78c6aac243ab3b6e564a52ed930"),
+    ("pool/main/a/audit/libaudit-common_3.1.2-2.1build1_all.deb",
+     "f2dd99597b416cff8cefeb350c1e4eb7e15fc6f7a57cd37f4a4c11f4a8049a92"),
 )
 
 

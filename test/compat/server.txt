@@ -84,3 +84,9 @@ $ bb printf '10.9.8.7 host.test\n' > /disk/s/etc/dnsmasq.hosts; bb chroot /disk/
 1
 status 1
 status 1
+
+== server: sshd accepts a key login and runs a command
+$ cd /disk/s; bb cp /disk/busybox usr/bin/sh; bb mkdir -p run/sshd root etc/ssh; echo 'sshd:x:74:74::/run/sshd:/bin/false' >> etc/passwd; bb sed -i 's|^root:x:0:0::/:/bin/sh|root:x:0:0::/root:/bin/sh|' etc/passwd; bb chroot /disk/s /usr/bin/ssh-keygen -q -t ed25519 -N '' -f /etc/ssh/hk; bb chroot /disk/s /usr/bin/ssh-keygen -q -t ed25519 -N '' -f /root/id; bb cp root/id.pub etc/ssh/ak; bb printf 'Port 2222\nListenAddress 127.0.0.1\nHostKey /etc/ssh/hk\nPidFile /tmp/sshd.pid\nUsePAM no\nPermitRootLogin yes\nPasswordAuthentication no\nAuthorizedKeysFile /etc/ssh/ak\nStrictModes no\n' > etc/ssh/sshd_config; bb chroot /disk/s /usr/sbin/sshd -f /etc/ssh/sshd_config; bb sleep 2; S="bb chroot /disk/s /usr/bin/ssh -F /dev/null -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o LogLevel=ERROR -i /root/id -p 2222 root@127.0.0.1"; $S echo logged in; $S 'exit 7'; echo status $?; echo piped | $S 'read x; echo got $x'; cd /
+logged in
+status 7
+got piped
