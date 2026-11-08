@@ -2719,6 +2719,38 @@ def run(name, firmware, usb=False, nvme=False, stick=None, diag=False):
             good = back == before
             print(("ok  " if good else "FAIL"), f"({name}) Enter in the window menu chooses the lit entry ({back})")
             fails += not good
+            # A right click on the window's task bar button opens the same menu above it: Minimize hides the window, and the entry is then Show.
+            mid = (200 * w + 200) * 3
+            winpx = tuple(px[mid:mid + 3])
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 90 0", "mouse_move 0 252", "mouse_move 0 252", "mouse_move 0 252")   # on the first window button
+            time.sleep(1.0)
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            monitor("mouse_move 0 -98")                                                 # the Minimize entry
+            time.sleep(0.3)
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(1.2)
+            w, h, px = screendump()
+            hidpx = tuple(px[mid:mid + 3])
+            hidden = hidpx != winpx
+            print(("ok  " if hidden else "FAIL"), f"({name}) a right click on a task bar button opens the window menu, and Minimize hides the window")
+            fails += not hidden
+            monitor("mouse_move 0 98")
+            time.sleep(1.0)
+            monitor("mouse_button 2", "mouse_button 0")
+            time.sleep(0.7)
+            monitor("mouse_move 0 -98")                                                 # the Show entry
+            time.sleep(0.3)
+            monitor("mouse_button 1", "mouse_button 0")
+            time.sleep(1.2)
+            w, h, px = screendump()
+            good = tuple(px[mid:mid + 3]) != hidpx
+            print(("ok  " if good else "FAIL"), f"({name}) Show in the window menu of a hidden window brings it back ({winpx}, {hidpx}, {tuple(px[mid:mid + 3])})")
+            fails += not good
+            monitor("mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200", "mouse_move -200 -200",
+                    "mouse_move 150 138")
+            time.sleep(0.3)
             monitor("mouse_move 0 -58")                                                 # onto the title bar of the restored window
             time.sleep(0.3)
             monitor("mouse_button 2", "mouse_button 0")

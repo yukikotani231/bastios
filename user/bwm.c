@@ -671,7 +671,7 @@ static const char *wm_label(int act, const struct win *w)
 {
     switch (act) {
     case WM_MAX: return w->maxed ? "Restore" : "Maximize";
-    case WM_MIN: return "Minimize";
+    case WM_MIN: return w->hidden ? "Show" : "Minimize";
     case WM_LEFT: return "Snap left";
     case WM_RIGHT: return "Snap right";
     default: return "Close";
@@ -1827,7 +1827,10 @@ static void wm_do(int it)
         toggle_max(w);
         break;
     case WM_MIN:
-        minimize(w);
+        if (w->hidden)
+            raise_win(w);
+        else
+            minimize(w);
         break;
     case WM_LEFT:
         raise_win(w);
@@ -3035,7 +3038,10 @@ int main(int argc, char **argv)
                 }
                 if (wheel && in_bar && !menu_open && !run_on)
                     cycle_windows(wheel < 0);            /* the wheel over the task bar goes through the windows */
-                if ((m[0] & 2) && !(buttons & 2) && !in_bar && under && my < under->y + TITLE_H && !menu_open && !ralt_on && !k_alt) {
+                if ((m[0] & 2) && !(buttons & 2) && in_bar && !menu_open && !run_on && mx >= BTN_X0 && mx < (int)W - MENU_W - 12 - CLOCK_W && bar_window(mx)) {
+                    wm_show(bar_window(mx), mx, (int)H - BAR_H);   /* a right click on a window's task bar button opens its window menu above it */
+                    touch_all();
+                } else if ((m[0] & 2) && !(buttons & 2) && !in_bar && under && my < under->y + TITLE_H && !menu_open && !ralt_on && !k_alt) {
                     raise_win(under);                    /* a right click on a title bar opens the window menu there */
                     wm_show(under, mx, my);
                     touch_all();

@@ -15,6 +15,7 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
+- bwm: a right click on a window's button in the task bar opens its window menu above it; the Minimize entry reads Show for a minimized window. `test/iso_test.sh` minimizes and shows a window this way.
 - A real-time thread woken by `FUTEX_WAKE` runs at once on the processor it may use: the waker interrupts the other processors (as for a signal) instead of leaving it for that processor's next 10 ms tick. A processor with nothing more urgent keeps its thread.
 - `FUTEX_WAKE` wakes real-time (`SCHED_FIFO`/`SCHED_RR`) waiters first, highest priority first, as Linux does; the rest still wake in thread order. A mutex or condition variable released with real-time threads waiting hands over to the most urgent one (Open POSIX `pthread_attr_setschedpolicy` 2-1 now passes).
 - `clock_gettime`, `clock_getres` and `clock_nanosleep` take a negative clock id passed as 32 bits (a thread's CPU-time clock from `pthread_getcpuclockid`, as a program that makes the system call itself passes it). GHC's `getCurrentThreadCPUTime` did, and the compiler stopped with "not supported".
