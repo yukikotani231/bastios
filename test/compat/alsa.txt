@@ -80,6 +80,12 @@ $ bb chroot /disk/s /usr/bin/aplay -D dmix -d 1 -f S16_LE -r 48000 -c 2 /dev/zer
 Playing raw data '/dev/zero' : Signed 16 bit Little Endian, Rate 48000 Hz, Stereo
 status 0
 
+== alsa: the default device converts the rate of a recording
+$ bb chroot /disk/s /usr/bin/arecord -d 1 -f S16_LE -r 16000 -c 2 -t raw /rec6.raw 2>&1; echo status $?; bb wc -c < /disk/s/rec6.raw
+Recording raw data '/rec6.raw' : Signed 16 bit Little Endian, Rate 16000 Hz, Stereo
+status 0
+64000
+
 == alsa: amixer lists the volume control
 $ bb chroot /disk/s /usr/bin/amixer controls; bb chroot /disk/s /usr/bin/amixer cset numid=1 200,100 >/dev/null; bb chroot /disk/s /usr/bin/amixer cget numid=1 | bb grep ': values'
 numid=1,iface=MIXER,name='PCM Playback Volume'
