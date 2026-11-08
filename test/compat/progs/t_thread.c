@@ -508,6 +508,21 @@ static int oom_score_of_threads(void) {
 }
 
 
+/* Why the last share check failed, for its FAIL line. */
+static char spin_note[160];
+#define EXPECT_SHARE(name, f) do { \
+    if (begin(name)) { \
+        spin_note[0] = 0; \
+        if (f()) pass(); else fail("%s: %s", #f, spin_note); \
+    } \
+} while (0)
+
+/* The checks below weigh each thread's time against the time the
+ * processor ran them in all (a[0] + a[1]), not against the clock: a
+ * virtual processor gets less than all of the clock from a busy host, and
+ * its timer ticks, which CPU time is counted in, come late or merge. They
+ * only ask that the processor ran a fifth of the clock. */
+
 /* Nice values and processor masks: threads that spin on a processor they
  * are pinned to, with the nice value each one sets for itself. */
 static volatile int spin_stop, spin_ready;
@@ -563,6 +578,8 @@ static int spin_two(struct spin *s, double secs, double *a, double *wall) {
     pthread_join(s[0].t, 0);
     pthread_join(s[1].t, 0);
     *wall = (t1.tv_sec - t0.tv_sec) + (t1.tv_nsec - t0.tv_nsec) / 1e9;
+    if (s[0].away || s[1].away)
+        snprintf(spin_note, sizeof spin_note, "off the processor: %d and %d", s[0].away, s[1].away);
     return s[0].away == 0 && s[1].away == 0;
 }
 
@@ -582,8 +599,9 @@ static int pinned_share(void) {
     struct spin s[2] = { { c, 0, 0, 0 }, { c, 0, 0, 0 } };
     double a[2], w;
     if (c < 0 || !spin_two(s, 1.5, a, &w)) return 0;
-    if (a[0] + a[1] > w * 1.15 || a[0] < w * 0.25 || a[1] < w * 0.25) {
-        printf("  cpu %d: %.3f s and %.3f s of %.3f s\n", c, a[0], a[1], w);
+    double u = a[0] + a[1];
+    if (u > w * 1.15 || u < w * 0.2 || a[0] < u * 0.25 || a[1] < u * 0.25) {
+        snprintf(spin_note, sizeof spin_note, "cpu %d: %.3f s and %.3f s of %.3f s", c, a[0], a[1], w);
         return 0;
     }
     return 1;
@@ -597,8 +615,8 @@ static int nice_share(void) {
     struct spin s[2] = { { c, 0, 0, 0 }, { c, 5, 0, 0 } };
     double a[2], w;
     if (c < 0 || !spin_two(s, 2.0, a, &w)) return 0;
-    if (a[0] < a[1] * 2 || a[1] < a[0] * 0.15) {
-        printf("  nice 0: %.3f s, nice 5: %.3f s of %.3f s\n", a[0], a[1], w);
+    if (a[0] + a[1] < w * 0.2 || a[0] < a[1] * 2 || a[1] < a[0] * 0.15) {
+        snprintf(spin_note, sizeof spin_note, "nice 0: %.3f s, nice 5: %.3f s of %.3f s", a[0], a[1], w);
         return 0;
     }
     return 1;
@@ -613,8 +631,9 @@ static int fifo_order(void) {
     struct spin s[2] = { { c, 0, 0, 0, SCHED_FIFO, 20 }, { c, 0, 0, 0, SCHED_FIFO, 10 } };
     double a[2], w;
     if (c < 0 || !spin_two(s, 1.5, a, &w)) return 0;
-    if (a[0] < w * 0.6 || a[1] > w * 0.02) {
-        printf("  priority 20: %.3f s, priority 10: %.3f s of %.3f s\n", a[0], a[1], w);
+    double u = a[0] + a[1];
+    if (u < w * 0.2 || a[1] > u * 0.02) {
+        snprintf(spin_note, sizeof spin_note, "priority 20: %.3f s, priority 10: %.3f s of %.3f s", a[0], a[1], w);
         return 0;
     }
     return 1;
@@ -626,8 +645,9 @@ static int rr_share(void) {
     struct spin s[2] = { { c, 0, 0, 0, SCHED_RR, 10 }, { c, 0, 0, 0, SCHED_RR, 10 } };
     double a[2], w;
     if (c < 0 || !spin_two(s, 1.5, a, &w)) return 0;
-    if (a[0] < w * 0.25 || a[1] < w * 0.25) {
-        printf("  %.3f s and %.3f s of %.3f s\n", a[0], a[1], w);
+    double u = a[0] + a[1];
+    if (u < w * 0.2 || a[0] < u * 0.25 || a[1] < u * 0.25) {
+        snprintf(spin_note, sizeof spin_note, "%.3f s and %.3f s of %.3f s", a[0], a[1], w);
         return 0;
     }
     return 1;
@@ -640,8 +660,9 @@ static int rt_share(void) {
     struct spin s[2] = { { c, 0, 0, 0, SCHED_FIFO, 10 }, { c, 0, 0, 0, 0, 0 } };
     double a[2], w;
     if (c < 0 || !spin_two(s, 2.5, a, &w)) return 0;
-    if (a[0] < w * 0.8 || a[1] < w * 0.01 || a[1] > w * 0.15) {
-        printf("  SCHED_FIFO: %.3f s, SCHED_OTHER: %.3f s of %.3f s\n", a[0], a[1], w);
+    double u = a[0] + a[1];
+    if (u < w * 0.2 || a[1] < u * 0.01 || a[1] > u * 0.15) {
+        snprintf(spin_note, sizeof spin_note, "SCHED_FIFO: %.3f s, SCHED_OTHER: %.3f s of %.3f s", a[0], a[1], w);
         return 0;
     }
     return 1;
@@ -720,11 +741,11 @@ int main(void) {
         int r = fork_snapshot();
         if (r == 1) pass(); else if (r == 0) fail("mmap, pthread_create, fork or waitpid failed");
     }
-    EXPECT("two threads pinned to one processor run only there and share it", pinned_share());
-    EXPECT("a nice-5 thread gets about a third of the time of a nice-0 one on the same processor", nice_share());
-    EXPECT("a SCHED_FIFO thread of priority 20 keeps one of priority 10 on its processor from running", fifo_order());
-    EXPECT("two SCHED_RR threads of one priority take turns on one processor", rr_share());
-    EXPECT("a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent", rt_share());
+    EXPECT_SHARE("two threads pinned to one processor run only there and share it", pinned_share);
+    EXPECT_SHARE("a nice-5 thread gets about a third of the time of a nice-0 one on the same processor", nice_share);
+    EXPECT_SHARE("a SCHED_FIFO thread of priority 20 keeps one of priority 10 on its processor from running", fifo_order);
+    EXPECT_SHARE("two SCHED_RR threads of one priority take turns on one processor", rr_share);
+    EXPECT_SHARE("a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent", rt_share);
     EXPECT("ITIMER_PROF set by one thread runs down with another thread's time", prof_other_thread());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
