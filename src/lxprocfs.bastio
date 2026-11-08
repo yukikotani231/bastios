@@ -4198,6 +4198,16 @@ fn maps_fill(k: &mut Kernel, pid: u64, f: u64, off: u64, o: &mut Bytes, lim: u64
   return NO_RESULT;
 }
 
+/// Is f a maps or smaps file? Those are read from a cursor that proc_fill
+/// keeps in the description's offset (see maps_fill), not from a byte offset, so
+/// a pread cannot name a place in them.
+fn is_maps_file(f: u64) -> bool {
+  if f >= PROC_DEV && f < PROC_DEV + PSYS && (f - PROC_DEV) % 16 == PF_MAPS {
+    return true;
+  }
+  return f >= PROC_DEV + PSYS + SY_PX && f - (PROC_DEV + PSYS + SY_PX) < NPROC * PXF_N && (f - (PROC_DEV + PSYS + SY_PX)) % PXF_N == 13;
+}
+
 /// read(2) on /proc file f, open in descriptor fd: the bytes of the file
 /// as generated now, from the description's offset.
 fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
@@ -4285,7 +4295,7 @@ fn mem_io(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64, write: boo
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
-  if !is_mem_file(f) && !write {
+  if !is_mem_file(f) && !write && !is_maps_file(f) {
     return proc_read_text(&mut k, pid, fd, f, va, n);    // pread on any other /proc file (lx_pio)
   }
   if f < PROC_DEV + 16 {

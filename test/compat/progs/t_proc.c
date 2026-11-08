@@ -441,5 +441,16 @@ int main(int argc, char **argv) {
                   close(f);
               }
               ok; }));
+    /* A reader that preads a file in pieces until it returns 0 (gdb does with /proc/PID/maps)
+     * gets to the end: pread never hands out the same text for every offset. */
+    EXPECT("pread of /proc/self/maps in pieces ends",
+           ({ char b[128]; int ok = 0, f = open("/proc/self/maps", O_RDONLY);
+              if (f >= 0) {
+                  off_t off = 0; ssize_t n = 0; int i;
+                  for (i = 0; i < 4000 && (n = pread(f, b, sizeof b, off)) > 0; i++) off += n;
+                  ok = i < 4000 && n <= 0;
+                  close(f);
+              }
+              ok; }));
     return done();
 }

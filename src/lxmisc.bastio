@@ -590,7 +590,7 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
     of_set(&mut k.ofd, h, 3, at);
     return r;
   }
-  if d.kind == K_DEV && (is_mem_file(d.x) || (!write && d.x >= PROC_DEV)) {
+  if d.kind == K_DEV && (is_mem_file(d.x) || (!write && d.x >= PROC_DEV && !is_maps_file(d.x))) {
     // /proc/PID/mem, or the text of another /proc file (the .NET runtime reads /proc/PID/stat
     // this way): at off, leaving the descriptor's position as it was.
     let h = fd_ofd(k, pid, fd);
