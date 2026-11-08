@@ -15,6 +15,7 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
+- `pread64` on a `/proc` file reads its text from the offset and keeps the descriptor's position (it was `EBADF`; `maps` and `smaps`, read from a cursor, still are). The .NET runtime reads `/proc/PID/stat` this way, and `dotnet` stopped in `Process.StartTime`.
 - bterm: clipboard history. The four selections before the current one are kept in `/tmp/bwm.clip.1` to `.4`, and Alt-Shift-1 to Alt-Shift-4 paste them.
 - bwm: Keep on top in the window menu keeps a window above the others, however they are raised.
 - bwm: a right click on a window's button in the task bar opens its window menu above it; the Minimize entry reads Show for a minimized window. `test/iso_test.sh` minimizes and shows a window this way.
