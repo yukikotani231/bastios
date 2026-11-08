@@ -513,11 +513,15 @@ fn rt_prio(procs: &Buf, p: u64) -> u64
 
 /// Have the real-time threads used their share of processor `me` in this
 /// period? (A processor numbered past SYS_RTUSE's 64 words is never held
-/// back.)
+/// back.) A period is RT_PERIOD of that processor's own ticks that found a
+/// thread running its code, not of the bootstrap processor's: under an
+/// emulator on a busy host one processor's ticks can come late or merge,
+/// and a period of the other's would then end before the share was used,
+/// so the other threads would never get their turn.
 fn rt_throttled(k: &Kernel, me: u64) -> bool
   requires kok(k)
 {
-  if me >= 64 || get(k.sys, SYS_RTPER + me) != k.ticks / RT_PERIOD {
+  if me >= 64 {
     return false;
   }
   return get(k.sys, SYS_RTUSE + me) >= RT_SHARE;
@@ -530,16 +534,21 @@ fn sched_tick(k: &mut Kernel, p: u64, me: u64) -> bool
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  if rt_prio(k.procs, p) == 0 {
-    return nice_tick(&mut k, p);
-  }
-  if me < 64 {
-    let per = k.ticks / RT_PERIOD;
-    if get(k.sys, SYS_RTPER + me) != per {
-      k.sys = set(k.sys, SYS_RTPER + me, per);
+  let rt = rt_prio(k.procs, p) > 0;
+  if me < 64 && get(k.sys, SYS_RTON) != 0 {
+    let n = sat_add(get(k.sys, SYS_RTPER + me), 1);
+    if n >= RT_PERIOD {
+      k.sys = set(k.sys, SYS_RTPER + me, 0);
       k.sys = set(k.sys, SYS_RTUSE + me, 0);
+    } else {
+      k.sys = set(k.sys, SYS_RTPER + me, n);
     }
-    k.sys = set(k.sys, SYS_RTUSE + me, sat_add(get(k.sys, SYS_RTUSE + me), 1));
+    if rt {
+      k.sys = set(k.sys, SYS_RTUSE + me, sat_add(get(k.sys, SYS_RTUSE + me), 1));
+    }
+  }
+  if !rt {
+    return nice_tick(&mut k, p);
   }
   if pget(k.procs, p, F_SCHED) % 256 == SCHED_RR {
     let n = sat_add(get(k.sys, SYS_SLICE + p), 1);
