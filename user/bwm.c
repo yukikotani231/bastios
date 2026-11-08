@@ -109,6 +109,7 @@ struct win {
     int hidden;                          /* minimized: only its task bar button shows */
     int desk;                            /* minimized by Alt-F5, which Alt-F5 again brings back */
     int maxed;                           /* maximized: sx, sy, sw, sh are the frame it goes back to */
+    int ontop;                           /* kept above the windows that are not (the window menu's Keep on top) */
     int sx, sy, sw, sh;
     int pend;                            /* a BWM_RESIZE has been sent and not answered */
     int want_cw, want_ch;                /* the size of the contents the pointer is asking for */
@@ -663,9 +664,9 @@ static void draw_menu(void)
 }
 
 /* The window menu: a right click on a title bar offers Maximize or Restore, Minimize, the two halves of the screen, and Close. */
-enum { WM_MAX, WM_MIN, WM_LEFT, WM_RIGHT, WM_CLOSE };
+enum { WM_MAX, WM_MIN, WM_LEFT, WM_RIGHT, WM_TOP, WM_CLOSE };
 static int wm_n, wm_x0, wm_y0, wm_sel, wm_mx, wm_my;
-static unsigned char wm_act[5];
+static unsigned char wm_act[6];
 
 static const char *wm_label(int act, const struct win *w)
 {
@@ -674,6 +675,7 @@ static const char *wm_label(int act, const struct win *w)
     case WM_MIN: return w->hidden ? "Show" : "Minimize";
     case WM_LEFT: return "Snap left";
     case WM_RIGHT: return "Snap right";
+    case WM_TOP: return w->ontop ? "Not on top" : "Keep on top";
     default: return "Close";
     }
 }
@@ -688,6 +690,7 @@ static void wm_show(struct win *w, int x, int y)
         wm_act[wm_n++] = WM_LEFT;
         wm_act[wm_n++] = WM_RIGHT;
     }
+    wm_act[wm_n++] = WM_TOP;
     wm_act[wm_n++] = WM_CLOSE;
     wm_win = w;
     wm_x0 = x + MENU_ITEM_W > (int)W ? (int)W - MENU_ITEM_W : x;
@@ -1234,6 +1237,20 @@ static struct win *focus(void)
     return NULL;
 }
 
+/* The windows that are kept on top go to the end of the stacking order, the others below them, each group in the order it was. */
+static void fix_top(void)
+{
+    struct win *t[MAXWIN];
+    int n = 0;
+    for (int i = 0; i < nz; i++)
+        if (!z[i]->ontop)
+            t[n++] = z[i];
+    for (int i = 0; i < nz; i++)
+        if (z[i]->ontop)
+            t[n++] = z[i];
+    memcpy(z, t, (size_t)nz * sizeof z[0]);
+}
+
 static void raise_win(struct win *w)
 {
     w->hidden = 0;
@@ -1241,10 +1258,13 @@ static void raise_win(struct win *w)
     int i = 0;
     while (i < nz && z[i] != w)
         i++;
-    if (i >= nz || i == nz - 1)
+    if (i >= nz || i == nz - 1) {
+        fix_top();
         return;
+    }
     memmove(&z[i], &z[i + 1], (nz - 1 - i) * sizeof z[0]);
     z[nz - 1] = w;
+    fix_top();
 }
 
 /* Alt-Tab and the wheel over the task bar: the window at the bottom comes up
@@ -1839,6 +1859,10 @@ static void wm_do(int it)
     case WM_RIGHT:
         raise_win(w);
         snap_win(w, 1);
+        break;
+    case WM_TOP:
+        w->ontop = !w->ontop;
+        raise_win(w);
         break;
     default:
         close_win(w);

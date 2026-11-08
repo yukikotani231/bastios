@@ -52,7 +52,7 @@ const ACC_MMAP_IL: u64 = 1;             // bit 0: SNDRV_PCM_ACCESS_MMAP_INTERLEA
 const ACC_RW_IL: u64 = 8;               // bit 3: SNDRV_PCM_ACCESS_RW_INTERLEAVED
 const PCM_MIN_PERIOD: u64 = 32;
 const PCM_MAX_PERIOD: u64 = 2048;
-const PCM_MAX_BUFFER: u64 = 4096;
+const PCM_MAX_BUFFER: u64 = 3840;
 
 // ioctl requests.
 const PCM_PVERSION: u64 = 0x80044100;
