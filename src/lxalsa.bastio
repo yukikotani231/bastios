@@ -335,6 +335,17 @@ fn pcm_refine(k: &mut Kernel) -> bool
     let mut fl = IVF_INTEGER;
     if i == IV_PTIME || i == IV_BTIME || i == IV_TICK {
       fl = 0;
+      // A time that is not whole when the size and the rate are fixed is the
+      // open interval between its neighbours, as Linux reports it (alsa-lib's
+      // dmix hands it back as its own constraint).
+      if i != IV_TICK && iv_min(k, IV_RATE) == iv_max(k, IV_RATE) && iv_min(k, i) < iv_max(k, i) {
+        if i == IV_PTIME && iv_min(k, IV_PSIZE) == iv_max(k, IV_PSIZE) {
+          fl = 3;
+        }
+        if i == IV_BTIME && iv_min(k, IV_BSIZE) == iv_max(k, IV_BSIZE) {
+          fl = 3;
+        }
+      }
     }
     store_le32(&mut k.fs.xfer, HP_IV + 12 * i + 8, cast[u32](fl));
     i = i + 1;

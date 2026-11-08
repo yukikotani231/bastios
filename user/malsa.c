@@ -137,7 +137,7 @@ static int setup(int fd, uint32_t access)
 /* Records 4800 frames (a tenth of a second) of 48 kHz stereo S16_LE through
  * /dev/snd/pcmC0D0c the way arecord -D hw does: negotiates, prepares,
  * starts and reads. Returns 0 (also without an input: ENODEV), or 1. */
-static int capture(void)
+static int capture(int mmapped)
 {
     int fd = open("/dev/snd/pcmC0D0c", O_RDWR | O_NONBLOCK);
     if (fd < 0 && errno == ENODEV)
@@ -160,7 +160,7 @@ static int capture(void)
         return 1;
     }
     memset(&hw.masks[0], 0, sizeof hw.masks[0]);
-    hw.masks[0].bits[0] = 1u << 3;
+    hw.masks[0].bits[0] = mmapped ? 1u : 1u << 3;
     memset(&hw.masks[1], 0, sizeof hw.masks[1]);
     hw.masks[1].bits[0] = 1u << 2;
     fix(&hw, CH, 2);
@@ -169,9 +169,16 @@ static int capture(void)
         printf("malsa: capture refine to 48 kHz stereo: errno %d\n", errno);
         return 1;
     }
-    fix(&hw, PTIME, 21312);
+    fix(&hw, PSIZE, 1023);
     if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
         printf("malsa: capture period time: errno %d\n", errno);
+        return 1;
+    }
+    /* 1023 frames last 21312.5 us: the time is the open interval (21312, 21313), as Linux reports it */
+    if (hw.intervals[PSIZE].min != 1023 || hw.intervals[PTIME].min != 21312 || hw.intervals[PTIME].max != 21313
+        || (hw.intervals[PTIME].flags & 3) != 3) {
+        printf("malsa: capture period time interval %u..%u flags %u, size %u\n", hw.intervals[PTIME].min,
+               hw.intervals[PTIME].max, hw.intervals[PTIME].flags, hw.intervals[PSIZE].min);
         return 1;
     }
     fix(&hw, BTIME, 85250);
@@ -187,26 +194,72 @@ static int capture(void)
     memset(sw, 0, sizeof sw);
     sw[2] = 1200;
     sw[4] = 1;
-    if (ioctl(fd, PCM_SW_PARAMS, sw) != 0 || ioctl(fd, PCM_PREPARE, 0) != 0 || ioctl(fd, PCM_START, 0) != 0) {
+    if (ioctl(fd, PCM_SW_PARAMS, sw) != 0 || ioctl(fd, PCM_PREPARE, 0) != 0 || (!mmapped && ioctl(fd, PCM_START, 0) != 0)) {
         printf("malsa: capture start: errno %d\n", errno);
         return 1;
     }
     static short buf[4800 * 2];
     size_t got = 0;
-    while (got < 4800) {
-        struct xferi x = {0, buf + got * 2, 4800 - got};
-        if (ioctl(fd, PCM_READI, &x) != 0 || x.result <= 0) {
-            printf("malsa: readi: errno %d, result %ld\n", errno, x.result);
+    if (!mmapped) {
+        while (got < 4800) {
+            struct xferi x = {0, buf + got * 2, 4800 - got};
+            if (ioctl(fd, PCM_READI, &x) != 0 || x.result <= 0) {
+                printf("malsa: readi: errno %d, result %ld\n", errno, x.result);
+                return 1;
+            }
+            got += x.result;
+        }
+    } else {
+        /* the way alsa-lib's mmap read goes: map the buffer, start, then SYNC_PTR for
+         * hw_ptr and commit appl_ptr as the frames are consumed */
+        unsigned long bsize = hw.intervals[BSIZE].min;
+        short *map = mmap(NULL, bsize * 4, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+        if (map == MAP_FAILED) {
+            printf("malsa: capture mmap: errno %d\n", errno);
             return 1;
         }
-        got += x.result;
+        if (ioctl(fd, PCM_START, 0) != 0) {
+            printf("malsa: capture mmap start: errno %d\n", errno);
+            return 1;
+        }
+        uint64_t appl = 0;
+        for (int spins = 0; appl < 4800 && spins < 4000; spins++) {
+            unsigned char sync[136];
+            memset(sync, 0, sizeof sync);
+            *(uint64_t *)(sync + 72) = appl;
+            *(uint32_t *)sync = 2;
+            if (ioctl(fd, PCM_SYNC_PTR, sync) != 0) {
+                printf("malsa: capture sync_ptr: errno %d\n", errno);
+                return 1;
+            }
+            uint64_t hwp = *(uint64_t *)(sync + 16);
+            if (hwp - appl > bsize) {
+                printf("malsa: capture hw_ptr %lu appl %lu\n", (unsigned long)hwp, (unsigned long)appl);
+                return 1;
+            }
+            if (hwp == appl) {
+                usleep(5000);
+                continue;
+            }
+            unsigned long n = hwp - appl;
+            if (n > 4800 - appl)
+                n = 4800 - appl;
+            for (unsigned long i = 0; i < n; i++)
+                buf[(appl + i) * 2] = map[((appl + i) % bsize) * 2];
+            appl += n;
+        }
+        got = appl;
+        if (got != 4800) {
+            printf("malsa: capture mmap got %zu frames\n", got);
+            return 1;
+        }
     }
     if (ioctl(fd, PCM_DROP, 0) != 0) {
         printf("malsa: capture drop: errno %d\n", errno);
         return 1;
     }
     close(fd);
-    printf("malsa: captured %zu frames\n", got);
+    printf("malsa: captured %zu frames%s\n", got, mmapped ? " through mmap" : "");
     return 0;
 }
 
@@ -378,7 +431,7 @@ int main(int argc, char **argv)
 done:
     close(fd);
     close(ctl);
-    if (capture() != 0)
+    if (capture(0) != 0 || capture(1) != 0)
         return 1;
     usleep(300000);
     printf("malsa: ok, %zu frames\n", frames);
