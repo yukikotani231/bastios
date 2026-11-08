@@ -172,6 +172,9 @@ debian: debian: util-linux mount tools see the mount table
 alsa: alsa: SDL2 plays through its ALSA backend
 alsa: alsa: aplay plays through dmix
 alsa: alsa: amixer lists the volume control
+alsa: alsa: sox converts a file
+alsa: alsa: sox plays a tone through the ALSA output
+alsa: alsa: sox records through the ALSA input
 alsa: alsa: the default device converts the rate of a recording
 alsa: alsa: aplay lists the card
 alsa: alsa: aplay plays mono 24 kHz on the hardware device
@@ -1904,6 +1907,7 @@ t_rtc: sysfs: date is the UTC date of since_epoch
 t_rtc: sysfs: time is the UTC time of since_epoch
 t_rtc: sysfs: max_user_freq is a number
 t_rtc: RTC_WKALM_SET arms an alarm
+t_rtc: RTC_WKALM_RD gives back the time set, whenever in a second it is read
 t_rtc: RTC_WKALM_RD says armed, not yet pending, and the same time
 t_rtc: a nonblocking read before the alarm is EAGAIN
 t_rtc: poll does not report it ready
@@ -2213,6 +2217,9 @@ t_thread: a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its proces
 t_thread: ITIMER_PROF set by one thread runs down with another thread's time
 t_thread: FUTEX_WAKE wakes the waiter of the highest real-time priority first
 t_thread: a SCHED_FIFO thread woken on another processor runs there at once, not at its next tick
+t_thread: a SCHED_FIFO thread whose sleep ends runs on its processor at once, not at its next tick
+t_thread: SCHED_FIFO threads of one priority keep their order, and a preempted one goes on first
+t_thread: FUTEX_WAKE wakes SCHED_FIFO waiters of one priority in the order they began to wait
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
 t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
@@ -3190,3 +3197,15 @@ t_landlock: a ruleset is made
 t_landlock: an unknown access is EINVAL
 t_landlock: the ABI version is 1
 t_landlock: the parent is not restricted
+server: server: unpack the root, make the device nodes
+server: server: redis answers PING, SET and GET
+server: server: redis keeps lists, hashes and expiry
+server: server: redis saves a snapshot in a forked child
+server: server: redis restarts and loads the snapshot
+server: server: redis replays its append-only file
+server: server: redis replicates to a second server
+server: server: nginx runs workers under a master
+server: server: haproxy forwards requests to nginx
+server: server: dnsmasq answers DNS queries
+server: server: memcached stores and returns a value
+server: server: nginx serves a page

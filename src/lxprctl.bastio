@@ -102,6 +102,7 @@ fn pr_fork(k: &mut Kernel, p: u64, c: u64)
   k.sys = set(k.sys, SYS_IOP + c, get(k.sys, SYS_IOP + p));   // and the I/O priority (src/lxprio.bastio)
   k.sys = set(k.sys, SYS_AFF + c, get(k.sys, SYS_AFF + p));   // and the processor mask (src/lxprio.bastio)
   k.sys = set(k.sys, SYS_SLICE + c, 0);   // owing nothing for its nice value
+  pset(&mut k.procs, c, F_RTSEQ, 0);
   k.sys = set(k.sys, SYS_ONCPU + c, get(k.sys, SYS_ONCPU + p));
   k.sys = set(k.sys, SYS_OOM + c, get(k.sys, SYS_OOM + p));   // and oom_score_adj (src/lxprocfs.bastio)
   sc_fork(&mut k, p, c);                  // and the seccomp filters (src/lxseccomp.bastio)
@@ -176,6 +177,7 @@ fn pr_clear(k: &mut Kernel, p: u64)
   k.sys = set(k.sys, SYS_IOP + p, 0);
   k.sys = set(k.sys, SYS_AFF + p, 0);
   k.sys = set(k.sys, SYS_SLICE + p, 0);
+  pset(&mut k.procs, p, F_RTSEQ, 0);
   k.sys = set(k.sys, SYS_CSW + 2 * p, 0);
   k.sys = set(k.sys, SYS_CSW + 2 * p + 1, 0);
   k.sys = set(k.sys, SYS_IO + 4 * p, 0);

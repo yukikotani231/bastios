@@ -86,6 +86,19 @@ Recording raw data '/rec6.raw' : Signed 16 bit Little Endian, Rate 16000 Hz, Ste
 status 0
 64000
 
+== alsa: sox plays a tone through the ALSA output
+$ bb chroot /disk/s /usr/bin/play -q -n synth 1 sine 440 2>/dev/null; echo status $?
+status 0
+
+== alsa: sox records through the ALSA input
+$ bb chroot /disk/s /usr/bin/rec -q -r 48000 -c 2 -b 16 /r.wav trim 0 1 2>/dev/null; echo status $?; bb chroot /disk/s /usr/bin/soxi -D /r.wav
+status 0
+1.000000
+
+== alsa: sox converts a file
+$ bb chroot /disk/s /usr/bin/sox -n -r 8000 -c 1 /t.wav synth 1 sine 300 2>&1; bb chroot /disk/s /usr/bin/soxi -r /t.wav
+8000
+
 == alsa: amixer lists the volume control
 $ bb chroot /disk/s /usr/bin/amixer controls; bb chroot /disk/s /usr/bin/amixer cset numid=1 200,100 >/dev/null; bb chroot /disk/s /usr/bin/amixer cget numid=1 | bb grep ': values'
 numid=1,iface=MIXER,name='PCM Playback Volume'

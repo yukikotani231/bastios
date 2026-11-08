@@ -855,6 +855,7 @@ def main():
     ap.add_argument("--registry-image", help="the layer list (JSON) of an image in the cache, which the web server serves as a registry for ocipull.sh")
     ap.add_argument("--debian-disk", help="the Debian disk (a glibc root file system) for debian.txt")
     ap.add_argument("--alsa-disk", help="the ALSA disk (Ubuntu's alsa-utils and glibc) for alsa.txt")
+    ap.add_argument("--server-disk", help="the server disk (Ubuntu's Redis, memcached and nginx, with glibc) for server.txt")
     ap.add_argument("--node-disk", help="the Node disk (the root of the node:alpine image) for node.txt")
     ap.add_argument("--go-disk", help="the Go disk (the Go toolchain of the golang image) for go.txt")
     ap.add_argument("--python-disk", help="the Python disk (the root of the python:alpine image) for python.txt")
@@ -881,7 +882,7 @@ def main():
     ap.add_argument("programs", nargs="*")
     args = ap.parse_args()
     # --lanes and --skip-lanes pick lanes by name, before any disk is copied.
-    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "alsa", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "python2", "python3", "podman", "docker", "gitsuite"]
+    lane_names = ["main1", "main2", "dev", "bastio", "alpine", "alpine2", "alpine3", "alpine4", "alpine5", "debian", "alsa", "server", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "python2", "python3", "podman", "docker", "gitsuite"]
     pick = args.lanes.split(",") if args.lanes else lane_names
     skip = args.skip_lanes.split(",") if args.skip_lanes else []
     unknown = [n for n in pick + skip if n not in lane_names]
@@ -902,6 +903,7 @@ def main():
     alpine = load_applets(os.path.join(HERE, "alpine.txt"))
     debian = load_applets(os.path.join(HERE, "debian.txt"))
     alsa = load_applets(os.path.join(HERE, "alsa.txt"))
+    server = load_applets(os.path.join(HERE, "server.txt"))
     node = load_applets(os.path.join(HERE, "node.txt"))
     go = load_applets(os.path.join(HERE, "go.txt"))
     python = load_applets(os.path.join(HERE, "python.txt"))
@@ -1140,6 +1142,11 @@ def main():
         disk = os.path.join(args.out, "alsa-run.img")
         disk_copy(args.alsa_disk, disk)
         lanes.append(("alsa", disk, [("alsa", "Sound (alsa-utils)", applets_lane(alsa, 120))]))
+    if args.server_disk and lane_chosen("server") and args.arch == "x86_64":
+        # Ubuntu's Redis, memcached and nginx (glibc), reached over loopback.
+        disk = os.path.join(args.out, "server-run.img")
+        disk_copy(args.server_disk, disk)
+        lanes.append(("server", disk, [("server", "Servers (Redis, memcached, nginx)", applets_lane(server, 300))]))
     if args.node_disk and lane_chosen("node"):
         # V8 reserves a large range of address space and wants more memory
         # than the other lanes; the cases write the disk, so on a copy.
@@ -1260,7 +1267,7 @@ def main():
                 if c["name"] not in merged or python_owner.get(c["name"]) == k:
                     merged[c["name"]] = c
         results["python"] = sorted(merged.values(), key=lambda c: py_at.get(c["name"], len(py_at)))
-    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "alsa", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
+    results = {k: results[k] for k in order + ["dev", "bastio", "alpine", "alpine-tty", "debian", "alsa", "server", "node", "go", "java", "ruby", "x11", "x11b", "rust", "python", "podman", "docker", "gitsuite"] if k in results}
     report(results, names, args.out, time.time() - t0)
 
     ids = [f"{g}: {c['name']}" for g, cs in results.items() for c in cs if c["result"] == "pass"]
