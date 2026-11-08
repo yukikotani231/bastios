@@ -3201,5 +3201,6 @@ server: server: nginx runs workers under a master
 server: server: haproxy forwards requests to nginx
 server: server: dnsmasq answers DNS queries
 server: server: sshd accepts a key login and runs a command
+server: server: sshd forwards a port, copies a file and gives a terminal
 server: server: memcached stores and returns a value
 server: server: nginx serves a page
