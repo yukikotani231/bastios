@@ -880,6 +880,88 @@ out:
 static int rt_wake_now(void) { return rt_wake_how(0); }
 static int rt_wake_sleep(void) { return rt_wake_how(1); }
 
+/* Threads of one SCHED_FIFO priority go in the order they became ready,
+ * and one that a thread of a higher priority takes the processor from
+ * goes on first afterwards (the head of its queue), as on Linux. B spins
+ * on the processor; A, woken after it, waits behind it; a higher thread
+ * wakes, runs and blocks again: B must go on, and A must not run. */
+static int fh_go, fh_hi, fh_stop, fh_ran_a, fh_hi_done;
+static void fh_pin(int c, int prio) {
+    cpu_set_t m;
+    CPU_ZERO(&m);
+    CPU_SET(c, &m);
+    struct sched_param sp = { .sched_priority = prio };
+    pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp);
+    sched_setaffinity(0, sizeof m, &m);
+}
+static void *fh_a(void *a) {
+    fh_pin((int)(long)a, 10);
+    while (!__atomic_load_n(&fh_go, __ATOMIC_SEQ_CST))
+        syscall(SYS_futex, &fh_go, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+    __atomic_store_n(&fh_ran_a, 1, __ATOMIC_SEQ_CST);
+    return 0;
+}
+static void *fh_b(void *a) {
+    fh_pin((int)(long)a, 10);
+    __atomic_add_fetch(&spin_ready, 1, __ATOMIC_SEQ_CST);
+    while (!__atomic_load_n(&fh_stop, __ATOMIC_RELAXED)) {}
+    return 0;
+}
+static void *fh_high(void *a) {
+    fh_pin((int)(long)a, 20);
+    while (!__atomic_load_n(&fh_hi, __ATOMIC_SEQ_CST))
+        syscall(SYS_futex, &fh_hi, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+    __atomic_store_n(&fh_hi_done, 1, __ATOMIC_SEQ_CST);
+    return 0;                               /* it ends: the processor goes back to the queue of 10 */
+}
+static int fifo_head(void) {
+    int c = last_cpu();
+    cpu_set_t all, other;
+    if (c < 1 || sched_getaffinity(0, sizeof all, &all) != 0) return 0;
+    CPU_ZERO(&other);
+    CPU_SET(0, &other);
+    if (sched_setaffinity(0, sizeof other, &other) != 0) return 0;
+    fh_go = fh_hi = fh_stop = fh_ran_a = fh_hi_done = 0;
+    spin_ready = 0;
+    pthread_t a, b, h;
+    struct timespec gap = { 0, 50000000 };
+    int ok = 0;
+    /* The high one first and A before B, so that a round robin from the
+     * high one's slot, as the scheduler did before, would find A first. */
+    if (pthread_create(&h, 0, fh_high, (void *)(long)c) != 0) goto out;
+    nanosleep(&gap, 0);                     /* the high one waits on fh_hi */
+    if (pthread_create(&a, 0, fh_a, (void *)(long)c) != 0) goto out_h;
+    nanosleep(&gap, 0);                     /* A waits on fh_go */
+    if (pthread_create(&b, 0, fh_b, (void *)(long)c) != 0) goto out_a;
+    while (__atomic_load_n(&spin_ready, __ATOMIC_SEQ_CST) < 1) usleep(1000);
+    nanosleep(&gap, 0);                     /* B spins on c */
+    __atomic_store_n(&fh_go, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fh_go, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    nanosleep(&gap, 0);                     /* A is ready, behind B */
+    int a_early = fh_ran_a;
+    __atomic_store_n(&fh_hi, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fh_hi, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    for (int i = 0; i < 100 && !fh_hi_done; i++) nanosleep(&gap, 0);
+    struct timespec more = { 0, 200000000 };
+    nanosleep(&more, 0);                    /* B should still have the processor */
+    int a_after = fh_ran_a;
+    ok = fh_hi_done && !a_early && !a_after;
+    snprintf(spin_note, sizeof spin_note, "high ran %d; A ran before the high one %d, after it %d", fh_hi_done, a_early, a_after);
+    __atomic_store_n(&fh_stop, 1, __ATOMIC_SEQ_CST);
+    pthread_join(b, 0);
+out_a:
+    __atomic_store_n(&fh_go, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fh_go, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    pthread_join(a, 0);
+out_h:
+    __atomic_store_n(&fh_hi, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fh_hi, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    pthread_join(h, 0);
+out:
+    sched_setaffinity(0, sizeof all, &all);
+    return ok;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -932,6 +1014,7 @@ int main(void) {
     EXPECT("FUTEX_WAKE wakes the waiter of the highest real-time priority first", futex_wake_prio());
     EXPECT_SHARE("a SCHED_FIFO thread woken on another processor runs there at once, not at its next tick", rt_wake_now);
     EXPECT_SHARE("a SCHED_FIFO thread whose sleep ends runs on its processor at once, not at its next tick", rt_wake_sleep);
+    EXPECT_SHARE("SCHED_FIFO threads of one priority keep their order, and a preempted one goes on first", fifo_head);
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");

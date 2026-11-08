@@ -556,6 +556,7 @@ fn sched_tick(k: &mut Kernel, p: u64, me: u64) -> bool
     let n = sat_add(get(k.sys, SYS_SLICE + p), 1);
     if n >= RR_TICKS {
       k.sys = set(k.sys, SYS_SLICE + p, 0);
+      rt_requeue(&mut k, p);
       return false;
     }
     k.sys = set(k.sys, SYS_SLICE + p, n);
@@ -571,6 +572,7 @@ fn sched_changed(k: &mut Kernel, t: u64)
   ensures kok(k)
 {
   k.sys = set(k.sys, SYS_SLICE + t, 0);
+  rt_requeue(&mut k, t);
   if rt_prio(k.procs, t) != 0 {
     k.sys = set(k.sys, SYS_RTON, 1);
   }
@@ -687,15 +689,47 @@ fn rt_preempt_kick(k: &mut Kernel, except: u64) -> bool
   return true;
 }
 
+/// Where real-time thread p stands in the queue of its priority: the
+/// stamp it got when it became ready (rt_pick hands them out in order),
+/// stamping it now if it has none. A thread taken off its processor by
+/// one of a higher priority keeps its stamp, so it goes on first (the
+/// head of its queue, as on Linux); one that blocks, yields, or ends its
+/// SCHED_RR slice loses it (rt_requeue) and goes to the tail.
+fn rt_seq(k: &mut Kernel, p: u64) -> u64
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  let s = get(k.sys, SYS_RTSEQ + p);
+  if s != 0 {
+    return s;
+  }
+  let n = sat_add(get(k.sys, SYS_RTSEQ + NPROC), 1);
+  k.sys = set(k.sys, SYS_RTSEQ + NPROC, n);
+  k.sys = set(k.sys, SYS_RTSEQ + p, n);
+  return n;
+}
+
+/// Thread p blocked, yielded or used up its SCHED_RR slice: it goes to the
+/// tail of its priority's queue when it is next ready.
+fn rt_requeue(k: &mut Kernel, p: u64)
+  requires kok(k) && p < NPROC
+  ensures kok(k)
+{
+  k.sys = set(k.sys, SYS_RTSEQ + p, 0);
+}
+
 /// The READY real-time thread of the highest priority that may run on
-/// processor `me`, the first such from `base` round robin (cap as in
-/// lx_pick), or 0.
+/// processor `me`, the one at the head of that priority's queue (rt_seq),
+/// or 0. (cap as in lx_pick; base is where the scan starts, which only
+/// decides the order in which threads that became ready together are
+/// stamped.)
 fn rt_pick(k: &mut Kernel, base: u64, cap: u64, me: u64) -> u64
   requires kok(k) && base < cap && cap <= NPROC
   ensures kok(k) && result < NPROC
 {
   let mut best = 0;
   let mut bp = 0;
+  let mut bs = 0;
   let mut i = 0;
   while i < cap
     invariant i <= cap && base < cap && cap <= NPROC && bp < NPROC && kok(k)
@@ -709,9 +743,16 @@ fn rt_pick(k: &mut Kernel, base: u64, cap: u64, me: u64) -> u64
     // real-time reader of an empty pipe would keep the writer from running.
     if p != 0 && rt_ready(k, p) {
       let r = rt_prio(k.procs, p);
-      if r > best && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
-        best = r;
-        bp = p;
+      let mut q = 0;
+      if r > 0 {
+        q = rt_seq(&mut k, p);          // every ready one, so that the stamps keep the order they became ready in
+      }
+      if r > 0 && r >= best && aff_ok(k, p, me) && !cg_held(k, p) && group_free(&mut k, p) {
+        if r > best || q < bs {
+          best = r;
+          bp = p;
+          bs = q;
+        }
       }
     }
     i = i + 1;

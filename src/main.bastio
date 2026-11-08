@@ -672,6 +672,7 @@ fn linux_trap(s: &mut Sys, cpu: &mut Cpu, mmu: &Mmu, p: u64) -> u64
   sock_wake(&mut s.k);
   if what == SWITCH {
     csw_count(&mut s.k, p, false);        // the call blocked or yielded
+    rt_requeue(&mut s.k, p);              // to the tail of its real-time priority's queue
     sig_wake_now(&mut s.k, p);            // a signal posted while it ran is not lost to its sleep
   }
   if disk_hold(&mut s.k, p, EIO) || what == SWITCH || ino_pressed(s.k) {
