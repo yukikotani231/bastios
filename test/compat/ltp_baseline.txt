@@ -1584,6 +1584,7 @@ posix-pthread_attr_setschedparam_1-4
 posix-pthread_attr_setschedpolicy_1-1
 posix-pthread_attr_setschedpolicy_1-2
 posix-pthread_attr_setschedpolicy_1-3
+posix-pthread_attr_setschedpolicy_2-1
 posix-pthread_attr_setschedpolicy_5-1
 posix-pthread_attr_setscope_1-1
 posix-pthread_attr_setscope_4-1

@@ -170,6 +170,7 @@ debian: debian: mount --make-shared, findmnt shows the propagation
 debian: debian: unshare gives a mount namespace of its own
 debian: debian: util-linux mount tools see the mount table
 alsa: alsa: SDL2 plays through its ALSA backend
+alsa: alsa: aplay plays through dmix
 alsa: alsa: amixer lists the volume control
 alsa: alsa: aplay lists the card
 alsa: alsa: aplay plays mono 24 kHz on the hardware device
@@ -2200,6 +2201,8 @@ t_thread: a SCHED_FIFO thread of priority 20 keeps one of priority 10 on its pro
 t_thread: two SCHED_RR threads of one priority take turns on one processor
 t_thread: a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent
 t_thread: ITIMER_PROF set by one thread runs down with another thread's time
+t_thread: FUTEX_WAKE wakes the waiter of the highest real-time priority first
+t_thread: a SCHED_FIFO thread woken on another processor runs there at once, not at its next tick
 t_thread: threads that ended and began one after another have different ids
 t_thread: /proc/self/fd/N read by another thread after a chroot names the file from the new root
 t_thread: /proc/self/fd/N read by a thread in a mount namespace of its own names the file from its root
