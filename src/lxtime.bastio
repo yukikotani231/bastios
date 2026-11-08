@@ -259,6 +259,18 @@ fn cpu_clock(procs: &Buf, sys: &Buf, pid: u64, clk: u64) -> u64
   return cpu_ns(procs, sys, t, clk % 8 < 4);
 }
 
+/// A clock id is an int in a register: the CPU-time clocks of pthread_getcpuclockid
+/// and clock_getcpuclockid are negative, and arrive as 32 bits with the top one
+/// set (GHC's getCurrentThreadCPUTime asks for -6 this way). Sign-extended.
+fn clk32(c: u64) -> u64
+  ensures c < 0x80000000 || c >= 0x100000000 ==> result == c
+{
+  if c >= 0x80000000 && c < 0x100000000 {
+    return c + 0xFFFFFFFF00000000;
+  }
+  return c;
+}
+
 /// What clock `clk` reads now, or FOREVER for a clock there is not. A
 /// negative clock is another process's or thread's CPU-time clock
 /// (clock_getcpuclockid, pthread_getcpuclockid): the bitwise not of its
@@ -1181,10 +1193,11 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     return lx_sleep(&mut k, pid, n, was, 1, 0, a);
   }
   if n == LX_CLOCK_NANOSLEEP {
-    return lx_sleep(&mut k, pid, n, was, a, b, c);
+    return lx_sleep(&mut k, pid, n, was, clk32(a), b, c);
   }
   if n == LX_CLOCK_GETTIME || n == LX_CLOCK_GETRES {
-    let t = clock_now(k, pid, a);
+    let clk = clk32(a);
+    let t = clock_now(k, pid, clk);
     if t == FOREVER {
       ret(&mut k.procs, pid, EINVAL);
       return KEEP;
@@ -1195,7 +1208,7 @@ fn lx_time_rest(k: &mut Kernel, pid: u64, n: u64, was: u64, a: u64, b: u64, c: u
     }
     if n == LX_CLOCK_GETRES {
       let mut res = 1;                      // the clock is kept in ns
-      if a == CLOCK_REALTIME_COARSE || a == CLOCK_MONOTONIC_COARSE {
+      if clk == CLOCK_REALTIME_COARSE || clk == CLOCK_MONOTONIC_COARSE {
         res = NS_PER_TICK;
       }
       ret(&mut k.procs, pid, time_out(&mut k, pid, b, res, 1));
