@@ -1043,7 +1043,7 @@ fn futex_rt_first(k: &Kernel, pid: u64, g: u64, addr: u64) -> u64
   {
     if q != pid && (futex_waiting(k.procs, q, g, addr) || futex_polling(k.procs, q, g, addr)) {
       let r = rt_prio(k.procs, q);
-      let at = get(k.sys, SYS_FXSEQ + q);
+      let at = pget(k.procs, q, F_FXSEQ);
       if r > bp || (r > 0 && r == bp && at < bat) {
         best = q;
         bp = r;

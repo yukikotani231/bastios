@@ -719,13 +719,13 @@ fn rt_seq(k: &mut Kernel, p: u64) -> u64
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  let s = get(k.sys, SYS_RTSEQ + p);
+  let s = pget(k.procs, p, F_RTSEQ);
   if s != 0 {
     return s;
   }
-  let n = sat_add(get(k.sys, SYS_RTSEQ + NPROC), 1);
-  k.sys = set(k.sys, SYS_RTSEQ + NPROC, n);
-  k.sys = set(k.sys, SYS_RTSEQ + p, n);
+  let n = sat_add(pget(k.procs, 0, F_RTSEQ), 1);
+  pset(&mut k.procs, 0, F_RTSEQ, n);
+  pset(&mut k.procs, p, F_RTSEQ, n);
   return n;
 }
 
@@ -736,9 +736,9 @@ fn futex_queued(k: &mut Kernel, p: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  let n = sat_add(get(k.sys, SYS_FXSEQ + NPROC), 1);
-  k.sys = set(k.sys, SYS_FXSEQ + NPROC, n);
-  k.sys = set(k.sys, SYS_FXSEQ + p, n);
+  let n = sat_add(pget(k.procs, 0, F_FXSEQ), 1);
+  pset(&mut k.procs, 0, F_FXSEQ, n);
+  pset(&mut k.procs, p, F_FXSEQ, n);
 }
 
 /// Thread p blocked, yielded or used up its SCHED_RR slice: it goes to the
@@ -747,7 +747,7 @@ fn rt_requeue(k: &mut Kernel, p: u64)
   requires kok(k) && p < NPROC
   ensures kok(k)
 {
-  k.sys = set(k.sys, SYS_RTSEQ + p, 0);
+  pset(&mut k.procs, p, F_RTSEQ, 0);
 }
 
 /// The READY real-time thread of the highest priority that may run on
