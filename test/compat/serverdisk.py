@@ -82,18 +82,24 @@ def fetch(path, digest, cache):
     dest = os.path.join(cache, digest + ".deb")
     if os.path.exists(dest) and sha256(dest) == digest:
         return dest
+    # alsadisk.py and serverdisk.py run at once under make -j and share
+    # some .debs (libc6 and the like): each writes its own part file, so
+    # neither renames the other's away.
+    part = f"{dest}.{os.getpid()}.part"
     for mirror in MIRRORS:
         try:
-            with urllib.request.urlopen(mirror + path, timeout=120) as r, open(dest + ".part", "wb") as f:
+            with urllib.request.urlopen(mirror + path, timeout=120) as r, open(part, "wb") as f:
                 shutil.copyfileobj(r, f)
         except OSError as e:
-            print(f"alsadisk: {mirror}{path}: {e}", file=sys.stderr)
+            print(f"serverdisk: {mirror}{path}: {e}", file=sys.stderr)
             continue
-        if sha256(dest + ".part") == digest:
-            os.rename(dest + ".part", dest)
+        if sha256(part) == digest:
+            os.replace(part, dest)
             return dest
-        print(f"alsadisk: {mirror}{path}: wrong checksum", file=sys.stderr)
-    sys.exit(f"alsadisk: cannot get {path}")
+        print(f"serverdisk: {mirror}{path}: wrong checksum", file=sys.stderr)
+    if os.path.exists(part):
+        os.remove(part)
+    sys.exit(f"serverdisk: cannot get {path}")
 
 
 def main():
