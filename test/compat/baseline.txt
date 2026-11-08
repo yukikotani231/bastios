@@ -295,6 +295,13 @@ t_algskc: the result goes only to the buffer read into: the sent memory is not c
 t_algskc: xts(aes) gives IEEE 1619 vector 1 and decrypts it
 t_algskc: xts(aes) takes 64-byte keys and refuses 16- and 33-byte ones and a partial block
 t_algskc: xts(aes) with two different keys and a tweak gives vector 2
+t_avx: AVX state can be changed in the signal frame
+t_avx: AVX state is in the signal frame
+t_avx: AVX state is inherited by fork
+t_avx: AVX state is per process
+t_avx: AVX state is per thread
+t_avx: AVX state survives a signal handler
+t_avx: AVX state survives system calls
 t_cloned: /proc/self/exe opens and is not sealed
 t_cloned: /proc/sys/kernel/cap_last_cap is readable and numeric
 t_cloned: F_ADD_SEALS seals it

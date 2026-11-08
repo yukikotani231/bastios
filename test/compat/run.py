@@ -376,8 +376,9 @@ class Guest:
         else:
             # qemu64 plus the x86-64-v2 instruction set (SSSE3, SSE4, POPCNT): what
             # most distributions build their programs for (the Alpaquita gdb, say).
-            # Nothing past SSE: the kernel keeps a process's FXSAVE state only.
-            cmd = ["qemu-system-x86_64", "-cpu", "qemu64,+ssse3,+sse4.1,+sse4.2,+popcnt",
+            # And XSAVE with AVX: the kernel keeps the upper halves of the YMM
+            # registers (t_avx). Nothing past that (no AVX2, no AVX-512).
+            cmd = ["qemu-system-x86_64", "-cpu", os.environ.get("COMPAT_X86_CPU", "SandyBridge"),
                    "-kernel", self.kernel, "-m", self.mem, "-smp", "2",
                    "-display", "none", "-no-reboot", "-device", "isa-debug-exit,iobase=0xf4,iosize=0x04",
                    "-serial", "stdio", "-monitor", "none",

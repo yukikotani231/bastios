@@ -364,8 +364,15 @@ static uint64_t has_ibpb(void) {
 /* Processor i's task state segment: user-mode traps land on the trap stack
  * at the end of its block. No I/O permission map. Also points
  * KERNEL_GS_BASE at the block for the `syscall` entry. */
+extern uint64_t bst_platform_xsave_mask;
 static void core_init(uint64_t i) {
     uint8_t *core = cores[i];
+    if (bst_platform_xsave_mask) {                  /* the extended state user code may use (platform.c) */
+        uint64_t cr4;
+        __asm__ volatile ("mov %%cr4, %0" : "=r"(cr4));
+        __asm__ volatile ("mov %0, %%cr4" : : "r"(cr4 | (1ull << 18)));    /* OSXSAVE */
+        __asm__ volatile ("xsetbv" : : "c"(0), "a"((uint32_t)bst_platform_xsave_mask), "d"(0));
+    }
     uint64_t alias = ALIAS_CORES + i * CORE_BLOCK;  /* the block, as user mode's traps see it */
     uint64_t top = alias + CORE_BLOCK;
     *(uint64_t *)(core + CORE_ALIAS) = alias;

@@ -90,11 +90,24 @@ static int cmdline_has(const char *w) {
  * bst_cpu_enter). Read by bst_cpu_enter on each processor. */
 uint64_t bst_pcid_on;
 
+/* The extended state components the kernel saves for user code (XCR0): 7 =
+ * x87 | SSE | AVX (the upper halves of the YMM registers) when the processor
+ * has XSAVE and AVX and the command line does not say `noavx`; 0 = FXSAVE
+ * state only, as before. Each processor turns on CR4.OSXSAVE and loads XCR0
+ * from it in core_init (smp.c); the compiler's cpu_fpu_save and cpu_fpu_load
+ * then use xsave64 and xrstor64 (the weak symbol bst_platform_xsave_mask). */
+uint64_t bst_platform_xsave_mask;
+
 void bst_platform_init(void) {
     alias_init();
     uint32_t a = 1, b, c = 0, d;
     __asm__ volatile ("cpuid" : "+a"(a), "=b"(b), "+c"(c), "=d"(d));
     bst_pcid_on = (c >> 17 & 1) && !cmdline_has("nopcid");
+    if ((c >> 26 & 1) && (c >> 28 & 1) && !cmdline_has("noavx")) {   /* XSAVE and AVX */
+        uint32_t ea = 0xD, eb, ec = 0, ed;
+        __asm__ volatile ("cpuid" : "+a"(ea), "=b"(eb), "+c"(ec), "=d"(ed));
+        if ((ea & 7) == 7 && eb <= 4096) bst_platform_xsave_mask = 7;   /* the area (832 bytes) fits the page */
+    }
 
     /* Each processor's task state segment is set up by bst_core_init (smp.c). */
 

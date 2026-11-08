@@ -5,7 +5,8 @@
 import "linux.bastio";
 
 // The frame, from the address the handler sees in rsp: the return address
-// (8 bytes), the ucontext (UC_SIZE), the siginfo (128), the FPU state (512).
+// (8 bytes), the ucontext (UC_SIZE), the siginfo (128), the FPU state (512, then the 64-byte XSAVE header and the
+// upper halves of the YMM registers, 256: 832 in all, as XSAVE with x87, SSE and AVX leaves them).
 const UC_AT: u64 = 8;
 const UC_SIZE: u64 = 304;
 const UC_REGS: u64 = 40;              // uc_mcontext: 23 registers, then fpstate
@@ -13,7 +14,8 @@ const UC_FPPTR: u64 = 224;            // UC_REGS + 23 * 8
 const UC_MASK: u64 = 296;             // uc_sigmask
 const INFO_AT: u64 = 312;
 const FP_AT: u64 = 440;               // 16-byte aligned when rsp is 8 past a multiple of 16
-const FRAME_SIZE: u64 = 952;
+const FPU_WORDS: u64 = 104;            // the 832 bytes of XSAVE state, in 8-byte words (the first 64 are FXSAVE's)
+const FRAME_SIZE: u64 = 1272;          // FP_AT + 8 * FPU_WORDS
 const FLAGS_USER: u64 = 0xCD5;        // CF PF AF ZF SF DF OF
 const MXCSR_OK: u64 = 0xFFBF;
 
@@ -85,13 +87,13 @@ fn sig_frame(k: &mut Kernel, p: u64, s: u64, rsp: u64, red: u64, restorer: u64, 
   if wget(k.sigsave, sender_at(p, s)) < FAULT_MARK && nsk_of(k, NSK_PID, p) != 0 {
     xfer_u64(&mut fr, INFO_AT + 16, vpid_of(k, p, wget(k.sigsave, sender_at(p, s)) % 256));   // as p's PID namespace names the sender
   }
-  // The FPU state, as fxsave left it.
+  // The FPU state, as xsave left it (without AVX, the bytes past 512 are zero).
   match take_fpu(&mut k.fpus, p) {
     Fpu::None => {},
     Fpu::State(f) => {
       let mut w = 0;
-      while w < 64
-        invariant w <= 64 && blen(fr) == FRAME_SIZE
+      while w < FPU_WORDS
+        invariant w <= FPU_WORDS && blen(fr) == FRAME_SIZE
       {
         xfer_u64(&mut fr, FP_AT + 8 * w, frame_read(f, w));
         w = w + 1;
@@ -130,14 +132,23 @@ fn lx_sigreturn(k: &mut Kernel, pid: u64) -> u64
   }
   let fp = rd64(fr, UC_FPPTR);
   if fp != 0 {
-    let mut fx = balloc(512);
-    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fp, &mut fx, 512) == 512 {
+    let mut fx = balloc(832);
+    // The 832 bytes of XSAVE state; a frame with only the 512 of FXSAVE (a
+    // program that points the context at its own buffer) keeps the rest.
+    let mut n = FPU_WORDS * 8;
+    if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fp, &mut fx, 832) != 832 {
+      n = 512;
+      if copy_from_user(&mut k.spaces, &mut k.mem, k.anon, pid, fp, &mut fx, 512) != 512 {
+        n = 0;
+      }
+    }
+    if n != 0 {
       match take_fpu(&mut k.fpus, pid) {
         Fpu::None => {},
         Fpu::State(mut f) => {
           let mut w = 0;
-          while w < 64
-            invariant w <= 64 && blen(fx) == 512
+          while w < n / 8
+            invariant w <= n / 8 && n <= 832 && blen(fx) == 832
           {
             let mut v = rd64(fx, 8 * w);
             if w == 3 {

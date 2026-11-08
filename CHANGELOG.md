@@ -15,6 +15,7 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
+- AVX. The kernel enables XSAVE (CR4.OSXSAVE, XCR0 = x87, SSE and AVX) where the processor has it and saves the upper halves of the YMM registers with each process, thread and signal frame (the frame grew from 952 to 1272 bytes, with the XSAVE area where Linux puts it). Programs built for AVX, such as MongoDB 8, no longer die with an invalid opcode. `noavx` on the kernel command line turns it off. AVX2 and AVX-512 programs still need the matching state components.
 - `pread64` on a `/proc` file reads its text from the offset and keeps the descriptor's position (it was `EBADF`; `maps` and `smaps`, read from a cursor, still are). The .NET runtime reads `/proc/PID/stat` this way, and `dotnet` stopped in `Process.StartTime`.
 - bterm: clipboard history. The four selections before the current one are kept in `/tmp/bwm.clip.1` to `.4`, and Alt-Shift-1 to Alt-Shift-4 paste them.
 - bwm: Keep on top in the window menu keeps a window above the others, however they are raised.
