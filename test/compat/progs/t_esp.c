@@ -1,4 +1,5 @@
-/* IPsec ESP between two network namespaces joined by a veth pair: UDP echoed
+/* compat-timeout: 180
+ * IPsec ESP between two network namespaces joined by a veth pair: UDP echoed
  * through security associations and policies in transport and in tunnel mode,
  * and then ESP packets the test seals itself (with AF_ALG gcm(aes)) and sends
  * on a raw socket, as an attacker who has seen the traffic would: valid ones
