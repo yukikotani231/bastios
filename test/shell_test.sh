@@ -2766,7 +2766,7 @@ text = out.decode(errors="replace").replace("\r", "")
 good = ok and "mrec: ok, 96000 bytes" in text
 print(("ok  " if good else "FAIL"), "(record) mrec records half a second from /dev/dsp")
 fails += not good
-good = ok and "malsa: captured 4800 frames" in text and "malsa: ok, 24000 frames" in text
+good = ok and "malsa: captured 4800 frames\n" in text and "malsa: captured 4800 frames through mmap" in text and "malsa: ok, 24000 frames" in text
 print(("ok  " if good else "FAIL"), "(record) malsa records 4800 frames through pcmC0D0c")
 fails += not good
 
