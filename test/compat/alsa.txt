@@ -12,7 +12,7 @@
 # The cases run in order: the first unpacks the root.
 
 == alsa: unpack the root, make the device nodes
-$ mkdir -p /disk/s && cd /disk/s && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; bb mkdir dev/snd; bb mknod dev/snd/controlC0 c 116 0; bb mknod dev/snd/pcmC0D0p c 116 16; bb mknod dev/snd/pcmC0D0c c 116 24; bb chmod 666 dev/null dev/zero dev/snd/*; cd /; bb chroot /disk/s /usr/bin/aplay --version; echo status $?
+$ mkdir -p /disk/s && cd /disk/s && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; bb mkdir dev/snd; bb mknod dev/snd/controlC0 c 116 0; bb mknod dev/snd/pcmC0D0p c 116 16; bb mknod dev/snd/pcmC0D0c c 116 24; bb mknod dev/snd/timer c 116 33; echo 'audio:x:29:' >> etc/group; bb chmod 666 dev/null dev/zero dev/snd/*; cd /; bb chroot /disk/s /usr/bin/aplay --version; echo status $?
 aplay: version 1.2.9 by Jaroslav Kysela <perex@perex.cz>
 status 0
 
@@ -74,6 +74,11 @@ $ bb chroot /disk/s /usr/bin/arecord -d 1 -f S16_LE -r 48000 -c 1 -t raw /rec5.r
 Recording raw data '/rec5.raw' : Signed 16 bit Little Endian, Rate 48000 Hz, Mono
 status 0
 96000
+
+== alsa: aplay plays through dmix
+$ bb chroot /disk/s /usr/bin/aplay -D dmix -d 1 -f S16_LE -r 48000 -c 2 /dev/zero 2>&1; echo status $?
+Playing raw data '/dev/zero' : Signed 16 bit Little Endian, Rate 48000 Hz, Stereo
+status 0
 
 == alsa: amixer lists the volume control
 $ bb chroot /disk/s /usr/bin/amixer controls; bb chroot /disk/s /usr/bin/amixer cset numid=1 200,100 >/dev/null; bb chroot /disk/s /usr/bin/amixer cget numid=1 | bb grep ': values'
