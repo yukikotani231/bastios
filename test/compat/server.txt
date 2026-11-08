@@ -1,0 +1,59 @@
+# Servers on BastiOS, for the compatibility suite (test/compat): Ubuntu's
+# Redis, memcached and nginx, linked against glibc, entered with chroot and
+# talking to their own clients over the loopback interface. The server disk
+# (serverdisk.py) holds the root as /disk/root.tar and a BusyBox as
+# /disk/busybox. The format is applets.txt's:
+#
+#   == NAME
+#   $ COMMAND        (one line, run by ash in /)
+#   expected output, line by line, compared exactly
+#
+# The cases run in order: the first unpacks the root.
+
+== server: unpack the root, make the device nodes
+$ mkdir -p /disk/s && cd /disk/s && bb tar -xf /disk/root.tar && for d in null:1:3 zero:1:5 random:1:8 urandom:1:9 tty:5:0; do set -- $(echo $d | bb tr : ' '); bb mknod dev/$1 c $2 $3; done; bb chmod 666 dev/*; printf 'root:x:0:0::/:/bin/sh\nnobody:x:65534:65534::/:/bin/false\n' > etc/passwd; printf 'root:x:0:\nnobody:x:65534:\nnogroup:x:65534:\n' > etc/group; bb mkdir -p proc; bb mount -t proc proc /disk/s/proc; cd /; bb chroot /disk/s /usr/bin/redis-server --version | bb cut -c1-30; bb chroot /disk/s /usr/bin/memcached --version; bb chroot /disk/s /usr/sbin/nginx -v 2>&1
+Redis server v=7.0.15 sha=0000
+memcached 1.6.24
+nginx version: nginx/1.24.0 (Ubuntu)
+
+== server: redis answers PING, SET and GET
+$ bb chroot /disk/s /usr/bin/redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp --logfile /tmp/redis.log --save '' >/dev/null 2>&1; bb sleep 2; bb chroot /disk/s /usr/bin/redis-cli ping; bb chroot /disk/s /usr/bin/redis-cli set k hello; bb chroot /disk/s /usr/bin/redis-cli get k; bb chroot /disk/s /usr/bin/redis-cli incr n; bb chroot /disk/s /usr/bin/redis-cli incr n
+PONG
+OK
+"hello"
+(integer) 1
+(integer) 2
+
+== server: redis keeps lists, hashes and expiry
+$ R="bb chroot /disk/s /usr/bin/redis-cli"; $R rpush l a b c >/dev/null; $R lrange l 0 -1 | bb tr '\n' ' '; echo; $R hset h f v >/dev/null; $R hgetall h | bb tr '\n' ' '; echo; $R set e x px 300 >/dev/null; bb sleep 1; $R exists e
+a b c 
+f v 
+(integer) 0
+
+== server: redis saves a snapshot in a forked child
+$ R="bb chroot /disk/s /usr/bin/redis-cli"; $R set persist yes >/dev/null; $R bgsave; bb sleep 2; $R info persistence | bb grep -e rdb_last_bgsave_status; bb ls /disk/s/tmp/dump.rdb
+Background saving started
+rdb_last_bgsave_status:ok
+/disk/s/tmp/dump.rdb
+
+== server: redis restarts and loads the snapshot
+$ R="bb chroot /disk/s /usr/bin/redis-cli"; $R shutdown nosave; bb sleep 1; bb chroot /disk/s /usr/bin/redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp --logfile /tmp/redis.log --save '' >/dev/null 2>&1; bb sleep 2; $R get persist; $R shutdown nosave
+"yes"
+
+== server: redis replays its append-only file
+$ R="bb chroot /disk/s /usr/bin/redis-cli"; S="bb chroot /disk/s /usr/bin/redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp/aof --logfile /tmp/redis.log --save '' --appendonly yes --appendfsync always"; bb mkdir -p /disk/s/tmp/aof; $S >/dev/null 2>&1; bb sleep 2; $R set kept yes >/dev/null; $R incr n >/dev/null; $R incr n >/dev/null; $R shutdown nosave; bb sleep 1; $S >/dev/null 2>&1; bb sleep 2; $R get kept; $R get n; $R shutdown nosave
+"yes"
+"2"
+
+== server: memcached stores and returns a value
+$ bb chroot /disk/s /usr/bin/memcached -u root -l 127.0.0.1 -p 11211 -d; bb sleep 1; printf 'set k 0 0 5\r\nhello\r\nget k\r\nquit\r\n' | bb nc 127.0.0.1 11211 | bb tr -d '\r'
+STORED
+VALUE k 0 5
+hello
+END
+
+== server: nginx serves a page
+$ bb mkdir -p /disk/s/www /disk/s/etc/nginx; echo 'hello from nginx' > /disk/s/www/index.html; printf 'daemon off;\nmaster_process off;\nerror_log /tmp/nginx.err;\npid /tmp/nginx.pid;\nevents { worker_connections 64; }\nhttp { access_log off; client_body_temp_path /tmp/c; proxy_temp_path /tmp/p; fastcgi_temp_path /tmp/f; uwsgi_temp_path /tmp/u; scgi_temp_path /tmp/s; server { listen 127.0.0.1:8080; root /www; } }\n' > /disk/s/etc/nginx/nginx.conf; bb chroot /disk/s /usr/sbin/nginx >/tmp/ng.out 2>&1 & bb sleep 2; bb cat /tmp/ng.out; bb wget -q -O - http://127.0.0.1:8080/index.html; bb wget -q -O /dev/null http://127.0.0.1:8080/missing; echo status $?
+hello from nginx
+wget: server returned error: HTTP/1.1 404 Not Found
+status 1
