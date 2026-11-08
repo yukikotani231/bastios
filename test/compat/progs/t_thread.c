@@ -738,6 +738,100 @@ static int futex_wake_prio(void) {
     return w1 == 1 && first == 20 && r0 == (void *)1 && r1 == (void *)1;
 }
 
+/* A SCHED_FIFO thread woken by a futex on another processor, where a
+ * thread that is not real-time spins, runs at once: the waker interrupts
+ * that processor instead of leaving the woken thread for its next tick.
+ * Measured in that processor's own ticks, not the clock (a busy host
+ * delays both): CPU time is counted per tick, so the spinner's CPU time
+ * is the same just before the wake and when the woken thread runs only if
+ * no tick came in between. Without the interrupt, every wake-up waits for
+ * a tick, which charges the spinner. Most of 21 must come before one. */
+static int kw_word, kw_ack, kw_stop;
+static clockid_t kw_clk;
+static long long kw_seen;
+static long long clk_ns(clockid_t c) {
+    struct timespec ts;
+    if (clock_gettime(c, &ts) != 0) return -1;
+    return ts.tv_sec * 1000000000LL + ts.tv_nsec;
+}
+static void *kw_waiter(void *a) {
+    int c = (int)(long)a;
+    cpu_set_t m;
+    CPU_ZERO(&m);
+    CPU_SET(c, &m);
+    struct sched_param sp = { .sched_priority = 30 };
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0 || sched_setaffinity(0, sizeof m, &m) != 0) {
+        __atomic_store_n(&kw_ack, -1, __ATOMIC_SEQ_CST);
+        return 0;
+    }
+    int seen = 0;
+    __atomic_store_n(&kw_ack, 0, __ATOMIC_SEQ_CST);
+    while (!__atomic_load_n(&kw_stop, __ATOMIC_SEQ_CST)) {
+        syscall(SYS_futex, &kw_word, FUTEX_WAIT_PRIVATE, seen, 0, 0, 0);
+        int now = __atomic_load_n(&kw_word, __ATOMIC_SEQ_CST);
+        if (now == seen) continue;
+        kw_seen = clk_ns(kw_clk);
+        seen = now;
+        __atomic_store_n(&kw_ack, now, __ATOMIC_SEQ_CST);
+    }
+    return 0;
+}
+/* Spins without a system call (sched_getcpu would be one), so that only
+ * an interrupt takes its processor from it. */
+static void *kw_spin(void *a) {
+    int c = (int)(long)a;
+    cpu_set_t m;
+    CPU_ZERO(&m);
+    CPU_SET(c, &m);
+    if (sched_setaffinity(0, sizeof m, &m) != 0) return 0;
+    __atomic_add_fetch(&spin_ready, 1, __ATOMIC_SEQ_CST);
+    while (!__atomic_load_n(&kw_stop, __ATOMIC_RELAXED)) {}
+    return (void *)1;
+}
+static int rt_wake_now(void) {
+    int c = last_cpu();
+    cpu_set_t all, other;
+    if (c < 1 || sched_getaffinity(0, sizeof all, &all) != 0) return 0;
+    CPU_ZERO(&other);
+    CPU_SET(0, &other);
+    if (sched_setaffinity(0, sizeof other, &other) != 0) return 0;
+    spin_ready = 0;
+    kw_word = 0; kw_stop = 0; kw_ack = -2;
+    pthread_t w, sp;
+    int ok = 0, early = 0, done = 0;
+    if (pthread_create(&sp, 0, kw_spin, (void *)(long)c) != 0) goto out;
+    while (__atomic_load_n(&spin_ready, __ATOMIC_SEQ_CST) < 1) usleep(1000);
+    if (pthread_getcpuclockid(sp, &kw_clk) != 0 || pthread_create(&w, 0, kw_waiter, (void *)(long)c) != 0) {
+        kw_stop = 1;
+        pthread_join(sp, 0);
+        goto out;
+    }
+    while (__atomic_load_n(&kw_ack, __ATOMIC_SEQ_CST) == -2) usleep(1000);
+    if (kw_ack == 0) {
+        for (done = 0; done < 21; done++) {
+            struct timespec gap = { 0, 30000000 };
+            nanosleep(&gap, 0);             /* the waiter is back in FUTEX_WAIT */
+            long long before = clk_ns(kw_clk);
+            __atomic_store_n(&kw_word, done + 1, __ATOMIC_SEQ_CST);
+            syscall(SYS_futex, &kw_word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+            int n = 0;
+            while (__atomic_load_n(&kw_ack, __ATOMIC_SEQ_CST) != done + 1 && n++ < 50000) usleep(100);
+            if (kw_ack != done + 1) break;
+            if (before >= 0 && kw_seen == before) early++;
+        }
+    }
+    __atomic_store_n(&kw_stop, 1, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&kw_word, 1000, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &kw_word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    pthread_join(w, 0);
+    pthread_join(sp, 0);
+    ok = done == 21 && early > 10;
+    snprintf(spin_note, sizeof spin_note, "%d of %d wake-ups came before the processor's next tick", early, done);
+out:
+    sched_setaffinity(0, sizeof all, &all);
+    return ok;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -788,6 +882,7 @@ int main(void) {
     EXPECT_SHARE("a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent", rt_share);
     EXPECT("ITIMER_PROF set by one thread runs down with another thread's time", prof_other_thread());
     EXPECT("FUTEX_WAKE wakes the waiter of the highest real-time priority first", futex_wake_prio());
+    EXPECT_SHARE("a SCHED_FIFO thread woken on another processor runs there at once, not at its next tick", rt_wake_now);
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");

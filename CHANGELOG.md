@@ -15,6 +15,7 @@ The version is the one the kernel prints at boot (`BastiOS X.Y` in
 What will be 0.3.0. It needs bastiolang 0.2.0.
 
 ### Added
+- A real-time thread woken by `FUTEX_WAKE` runs at once on the processor it may use: the waker interrupts the other processors (as for a signal) instead of leaving it for that processor's next 10 ms tick. A processor with nothing more urgent keeps its thread.
 - `FUTEX_WAKE` wakes real-time (`SCHED_FIFO`/`SCHED_RR`) waiters first, highest priority first, as Linux does; the rest still wake in thread order. A mutex or condition variable released with real-time threads waiting hands over to the most urgent one (Open POSIX `pthread_attr_setschedpolicy` 2-1 now passes).
 - `ioctl(FIONREAD)` on TCP connections and unix stream sockets returns the bytes waiting to be read (a listener answers `EINVAL`, a datagram socket still `ENOTTY`). The Dart VM sizes its reads by it and read one byte at a time when it failed.
 - An edge-triggered epoll entry on a TCP connection is reported once per edge (data or the peer's FIN arrived, an acknowledgement freed send buffer room, the state changed), not on every `epoll_wait` as a level-triggered one would be. The Dart VM counts events against a token budget and stopped listening to a socket that kept flooding it, so a `dart:io` echo over loopback never finished (`test/compat/progs/t_etsock.c`).

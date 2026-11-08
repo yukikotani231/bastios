@@ -1002,6 +1002,7 @@ fn futex_end(k: &mut Kernel, q: u64)
   pset(&mut k.procs, q, F_FUTEX, 0);
   pset(&mut k.procs, q, F_STATE, READY);
   pt_woken(&mut k, q);                    // its tracer sees the call end (src/lxptrace.bastio)
+  rt_kick(&mut k, q);
 }
 
 /// Wakes waiter q of key addr (group g) if it is one, a plain waiter or one

@@ -565,6 +565,20 @@ fn sched_changed(k: &mut Kernel, t: u64)
   }
 }
 
+/// A real-time thread q was just made READY: the call that did it
+/// interrupts the other processors (SYS_KICK, V_WAKE), so that one running
+/// a thread of a lower priority, or idle, picks q now rather than at its
+/// next tick, up to 10 ms later. One that has nothing better to run keeps
+/// its thread (finish returns it, and lx_pick starts from it).
+fn rt_kick(k: &mut Kernel, q: u64)
+  requires kok(k) && q < NPROC
+  ensures kok(k)
+{
+  if get(k.sys, SYS_RTON) != 0 && rt_prio(k.procs, q) > 0 {
+    k.sys = set(k.sys, SYS_KICK, 1);
+  }
+}
+
 /// The READY real-time thread of the highest priority that may run on
 /// processor `me`, the first such from `base` round robin (cap as in
 /// lx_pick), or 0.
