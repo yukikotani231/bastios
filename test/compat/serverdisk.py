@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Writes the server disk for the compat suite (test/compat/server.txt):
-Redis, memcached, nginx and HAProxy of Ubuntu 24.04, with the glibc and the
+Redis, memcached, nginx, HAProxy and dnsmasq of Ubuntu 24.04, with the glibc and the
 libraries they link against, as a tar file (/disk/root.tar) next to a
 static BusyBox at /disk/busybox. The checks unpack the root under /disk/s,
 chroot into it and run the servers and their clients.
@@ -71,6 +71,34 @@ PACKAGES = (
      "6a520259e5b06e86191a25af6d448387cdd2b3d291a0aa956ce272e84d071260"),
     ("pool/main/h/haproxy/haproxy_2.8.5-1ubuntu3_amd64.deb",
      "861bf08a4f55a87663cb56597991ad995e2e4b1a1fff2ce5cd31fd6bf559fbb5"),
+    ("pool/main/d/dnsmasq/dnsmasq-base_2.90-2build2_amd64.deb",
+     "8d3629fbfddff8eab66d9d912a63876f3927138de6b24622398f9c2a126f51dd"),
+    ("pool/main/n/nftables/libnftables1_1.0.9-1build1_amd64.deb",
+     "f74276e2b0a6ab97ac1187d38f5b22a5e742e9d17bf67c1d66dacc4ede6ff923"),
+    ("pool/main/i/iptables/libxtables12_1.8.10-3ubuntu2_amd64.deb",
+     "c94063499d1b0b336f39607107efb7de95d52a5d4e7e6a9368a5f7308f05b714"),
+    ("pool/main/libn/libnftnl/libnftnl11_1.2.6-2build1_amd64.deb",
+     "e5bde5c9cbb95082700011f0b7ef2c0a41900b0a9fd7434f6e90448e2a7b4e50"),
+    ("pool/main/libm/libmnl/libmnl0_1.0.5-2build1_amd64.deb",
+     "5170658bf0eaf54a8c7d53061ca6b47a6cf33a83543a75fa521de7046cb7197a"),
+    ("pool/main/j/jansson/libjansson4_2.14-2build2_amd64.deb",
+     "0cf79113f5d193ce9af2be2ff4b2c3b30dd4e55a0b6c47f7d28f6c849ff3aa60"),
+    ("pool/main/g/gmp/libgmp10_6.3.0+dfsg-2ubuntu6_amd64.deb",
+     "649a5ee5f74f0aa1e1b9c4f169eabbae56a79aa5aac51ef733eb9e18700bd8fc"),
+    ("pool/main/n/nettle/libnettle8t64_3.9.1-2.2build1_amd64.deb",
+     "4cac2064e2984c4bc5a31659d4f00c7efe0c4b691559d536dd726c05d3632a57"),
+    ("pool/main/libn/libnetfilter-conntrack/libnetfilter-conntrack3_1.0.9-6build1_amd64.deb",
+     "6d32a4c4618eb7d6c0d989591d28637a9acdfa86dfe22e42e9ac9cc25d882a97"),
+    ("pool/main/libn/libnfnetlink/libnfnetlink0_1.0.2-2build1_amd64.deb",
+     "f557a287af2ca00df5dbf632c6b77d77479139ffb51c83e3de9766eb609b5d63"),
+    ("pool/main/libi/libidn2/libidn2-0_2.3.7-2build1_amd64.deb",
+     "f1be32391a2fabf06c27618a2000ae8f9a26c30fad1b482a007049ae8156d19c"),
+    ("pool/main/libu/libunistring/libunistring5_1.1-2build1_amd64.deb",
+     "78acc4c141a499e0c1e4cc47ca8e9082996f3972662c4d92337669ecc9b0a519"),
+    ("pool/main/n/nettle/libhogweed6t64_3.9.1-2.2build1_amd64.deb",
+     "594a82d7b70ecff393753ee0ab6611b0b18226c4f922d27ccb3f66caeae3d5d1"),
+    ("pool/main/d/dbus/libdbus-1-3_1.14.10-4ubuntu4_amd64.deb",
+     "bbb55111182a44d0fe97a84120407e17bb6e23d41e2670d73aa78f619e29efa2"),
 )
 
 
