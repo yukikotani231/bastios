@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <pthread.h>
 
 int main(void) {
     setup();
@@ -121,6 +122,17 @@ int main(void) {
         struct timespec r;
         EXPECT("monotonic does not go back", clock_gettime(CLOCK_MONOTONIC, &a) == 0 && clock_gettime(CLOCK_MONOTONIC, &r) == 0 &&
                (r.tv_sec > a.tv_sec || (r.tv_sec == a.tv_sec && r.tv_nsec >= a.tv_nsec)));
+    }
+    {
+        /* A clock id is an int: a thread's CPU-time clock (pthread_getcpuclockid) is
+         * negative, and a program that makes the system call itself passes it as 32
+         * bits (GHC's getCurrentThreadCPUTime does). */
+        clockid_t c;
+        struct timespec t1, t2;
+        int ok = pthread_getcpuclockid(pthread_self(), &c) == 0 && c < 0;
+        unsigned long raw = (unsigned int)c;
+        EXPECT("clock_getres and clock_gettime take a negative clock id as 32 bits",
+               ok && syscall(SYS_clock_getres, raw, &t1) == 0 && syscall(SYS_clock_gettime, raw, &t2) == 0 && t1.tv_nsec > 0);
     }
     return done();
 }
