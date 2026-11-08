@@ -985,7 +985,7 @@ t_maps: every line of /proc/self/maps parses with Crashpad's format
 t_maps: /proc/self/maps read 100 bytes at a time is the same text
 t_maps: every line of another process's maps parses too
 t_maps: a few thousand mappings read back as that many parseable lines, in order, in pieces
-t_maps: another process with thousands of mappings reads back whole in 64 KiB, 4096 and 100 byte pieces
+t_maps: another process with thousands of mappings reads back whole in 64 KiB and 4096 byte pieces
 t_mem: 64 MiB of address space
 t_mem: FUTEX_CMP_REQUEUE moves timed waiters across processes
 t_mem: FUTEX_CMP_REQUEUE with a negative count is EINVAL
