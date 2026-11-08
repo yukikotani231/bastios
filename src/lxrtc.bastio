@@ -49,7 +49,49 @@ fn rtc_alarm(k: &Kernel) -> u64
 fn rtc_armed(k: &Kernel) -> bool
   requires kok(k)
 {
-  return get(k.sys, SYS_RTCA + 1) == 1;
+  return get(k.sys, SYS_RTCA + 1) % 2 == 1;
+}
+
+/// The time the clock will show when the alarm is due, as it was set (0
+/// for none): kept, rather than worked out again from the wall-clock
+/// second, because the clock and the kernel's wall clock do not turn over
+/// their seconds together, so that a read back could be a second off.
+fn rtc_shown(k: &Kernel) -> u64
+  requires kok(k)
+{
+  return get(k.sys, SYS_RTCA + 1) / 2;
+}
+
+/// Arms (or disarms) the alarm, keeping its time.
+fn rtc_arm(k: &mut Kernel, on: bool)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut v = get(k.sys, SYS_RTCA + 1) / 2 * 2;
+  if on {
+    v = v + 1;
+  }
+  k.sys = set(k.sys, SYS_RTCA + 1, v);
+}
+
+/// Sets the alarm for when the clock shows `at` (it shows `now` now; 0
+/// for none), armed or not.
+fn rtc_set(k: &mut Kernel, at: u64, now: u64, on: bool)
+  requires kok(k)
+  ensures kok(k)
+{
+  let mut shown = 0;
+  if at > now {
+    k.sys = set(k.sys, SYS_RTCA, rtc_due(k, at, now));
+    shown = smaller(at, 0x100000000000);
+  } else {
+    k.sys = set(k.sys, SYS_RTCA, 0);
+  }
+  let mut v = shown * 2;
+  if on {
+    v = v + 1;
+  }
+  k.sys = set(k.sys, SYS_RTCA + 1, v);
 }
 
 /// The kernel's wall clock, in seconds.
@@ -150,7 +192,7 @@ fn rtc_read(k: &mut Kernel, pid: u64, n: u64, fd: u64, va: u64, len: u64) -> u64
     }
     return wait_asleep(&mut k, pid, n, FOREVER);   // looks again on the next tick
   }
-  k.sys = set(k.sys, SYS_RTCA + 1, 0);
+  rtc_arm(&mut k, false);
   xfer_u64(&mut k.fs.xfer, 0, 0x1A0);   // RTC_AF | RTC_IRQF, one alarm
   let done = copy_to_user(&mut k.spaces, &mut k.mem, k.anon, pid, va, k.fs.xfer, 8);
   if done != 8 {
@@ -203,11 +245,7 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     return 0;
   }
   if req == RTC_AIE_ON || req == RTC_AIE_OFF {
-    if req == RTC_AIE_ON {
-      k.sys = set(k.sys, SYS_RTCA + 1, 1);
-    } else {
-      k.sys = set(k.sys, SYS_RTCA + 1, 0);
-    }
+    rtc_arm(&mut k, req == RTC_AIE_ON);
     return 0;
   }
   if req == RTC_ALM_SET {
@@ -225,7 +263,7 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     if at <= now {
       at = at + 86400;                  // the next time the clock shows it
     }
-    k.sys = set(k.sys, SYS_RTCA, rtc_due(k, at, now));
+    rtc_set(&mut k, at, now, rtc_armed(k));
     return 0;
   }
   if req == RTC_ALM_READ || req == RTC_WKALM_RD {
@@ -234,13 +272,8 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
       at = 4;
     }
     xfer_zero(&mut k, RTC_WK_SIZE);
-    if rtc_alarm(k) != 0 {
-      let now = hw_get(&mut k.hwc);
-      let due = smaller(rtc_alarm(k), 5000000000);
-      let wall = rtc_wall(k);
-      if due + now < wall || !rtc_tm_fill(&mut k, at, due + now - wall) {
-        return EINVAL;
-      }
+    if rtc_alarm(k) != 0 && !rtc_tm_fill(&mut k, at, rtc_shown(k)) {
+      return EINVAL;
     }
     if req == RTC_WKALM_RD {
       if rtc_armed(k) {
@@ -266,16 +299,7 @@ fn rtc_ioctl(k: &mut Kernel, pid: u64, req: u64, arg: u64) -> u64
     if on != 0 && secs <= now {
       return EINVAL;                    // an alarm in the past (Linux: ETIME)
     }
-    if secs > now {
-      k.sys = set(k.sys, SYS_RTCA, rtc_due(k, secs, now));
-    } else {
-      k.sys = set(k.sys, SYS_RTCA, 0);
-    }
-    if on != 0 {
-      k.sys = set(k.sys, SYS_RTCA + 1, 1);
-    } else {
-      k.sys = set(k.sys, SYS_RTCA + 1, 0);
-    }
+    rtc_set(&mut k, secs, now, on != 0);
     return 0;
   }
   return ENOTTY;

@@ -102,6 +102,35 @@ int main(void) {
     }
 
     {
+        /* An alarm a minute away reads back as set at any moment of a
+         * second: the clock and the kernel's wall clock turn over their
+         * seconds at different moments. */
+        struct rtc_wkalrm w;
+        memset(&w, 0, sizeof w);
+        ioctl(fd, RTC_RD_TIME, &w.time);
+        time_t due = as_time(&w.time) + 60;
+        struct tm dt;
+        gmtime_r(&due, &dt);
+        w.enabled = 1;
+        w.time = (struct rtc_time){.sec = dt.tm_sec, .min = dt.tm_min, .hour = dt.tm_hour, .mday = dt.tm_mday, .mon = dt.tm_mon, .year = dt.tm_year};
+        int set = ioctl(fd, RTC_WKALM_SET, &w) == 0, same = 0;
+        long off = 0;
+        for (int i = 0; set && i < 12; i++) {
+            struct rtc_wkalrm g;
+            memset(&g, 0, sizeof g);
+            if (ioctl(fd, RTC_WKALM_RD, &g) == 0 && as_time(&g.time) == due) same++;
+            else off = (long)(as_time(&g.time) - due);
+            usleep(90000);
+        }
+        w.enabled = 0;
+        ioctl(fd, RTC_WKALM_SET, &w);
+        if (begin("RTC_WKALM_RD gives back the time set, whenever in a second it is read")) {
+            if (set && same == 12) pass();
+            else fail("set %d, %d of 12 reads gave the time set (one was %ld s off)", set, same, off);
+        }
+    }
+
+    {
         /* The alarm: due 3 seconds from now. */
         struct rtc_wkalrm w;
         memset(&w, 0, sizeof w);
