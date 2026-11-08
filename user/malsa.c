@@ -169,9 +169,16 @@ static int capture(int mmapped)
         printf("malsa: capture refine to 48 kHz stereo: errno %d\n", errno);
         return 1;
     }
-    fix(&hw, PTIME, 21312);
+    fix(&hw, PSIZE, 1023);
     if (ioctl(fd, PCM_HW_REFINE, &hw) != 0) {
         printf("malsa: capture period time: errno %d\n", errno);
+        return 1;
+    }
+    /* 1023 frames last 21312.5 us: the time is the open interval (21312, 21313), as Linux reports it */
+    if (hw.intervals[PSIZE].min != 1023 || hw.intervals[PTIME].min != 21312 || hw.intervals[PTIME].max != 21313
+        || (hw.intervals[PTIME].flags & 3) != 3) {
+        printf("malsa: capture period time interval %u..%u flags %u, size %u\n", hw.intervals[PTIME].min,
+               hw.intervals[PTIME].max, hw.intervals[PTIME].flags, hw.intervals[PSIZE].min);
         return 1;
     }
     fix(&hw, BTIME, 85250);
