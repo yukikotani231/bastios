@@ -2409,11 +2409,11 @@ x11: x11: a Qt file manager, Krusader, draws its window on the X screen
 x11: x11: a GTK PDF viewer, Evince, draws its window on the X screen
 x11: x11: a media player, VLC, draws its window on the X screen
 x11b: x11b: unpack the server and the client roots
-x11b: x11b: an image editor, GIMP, draws its window on the X screen
+x11b: x11b: an image editor, GIMP, draws its window and opens its Open dialog
 x11b: x11b: an office suite, LibreOffice Writer, draws its window on the X screen
 x11b: x11b: LibreOffice Writer saves a document through its Save dialog
 x11b: x11b: LibreOffice Writer exports a PDF through its menu and a file dialog
-x11b: x11b: a vector graphics editor, Inkscape, draws its window on the X screen
+x11b: x11b: a vector graphics editor, Inkscape, draws its window and opens its Open dialog
 x11b: x11b: a network protocol analyser, Wireshark, draws its window on the X screen
 x11b: x11b: LibreOffice turns a text file into a PDF, fonts and all
 x11b: x11b: Inkscape exports an SVG drawing as a PNG
