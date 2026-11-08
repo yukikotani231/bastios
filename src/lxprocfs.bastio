@@ -4207,6 +4207,15 @@ fn proc_read(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
   if is_mem_file(f) {
     return mem_io(&mut k, pid, fd, f, va, n, false);
   }
+  return proc_read_text(&mut k, pid, fd, f, va, n);
+}
+
+/// The text of /proc file f (not /proc/PID/mem), as generated now, from the
+/// description's offset, into the user's buffer at va.
+fn proc_read_text(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
   let m = proc_fill(&mut k, pid, fd, f, n);
   if m == 0 || m > XFER {
     return m;
@@ -4276,6 +4285,9 @@ fn mem_io(k: &mut Kernel, pid: u64, fd: u64, f: u64, va: u64, n: u64, write: boo
   requires kok(k) && pid < NPROC
   ensures kok(k)
 {
+  if !is_mem_file(f) && !write {
+    return proc_read_text(&mut k, pid, fd, f, va, n);    // pread on any other /proc file (lx_pio)
+  }
   if f < PROC_DEV + 16 {
     return EBADF;
   }

@@ -590,8 +590,9 @@ fn lx_pio(con: &mut Con, k: &mut Kernel, pid: u64, write: bool, fd: u64, va: u64
     of_set(&mut k.ofd, h, 3, at);
     return r;
   }
-  if d.kind == K_DEV && is_mem_file(d.x) {
-    // /proc/PID/mem: at off, leaving the descriptor's position as it was.
+  if d.kind == K_DEV && (is_mem_file(d.x) || (!write && d.x >= PROC_DEV)) {
+    // /proc/PID/mem, or the text of another /proc file (the .NET runtime reads /proc/PID/stat
+    // this way): at off, leaving the descriptor's position as it was.
     let h = fd_ofd(k, pid, fd);
     if h >= OFD_N {
       return EBADF;
@@ -1089,6 +1090,44 @@ fn lx_statfs_path(k: &mut Kernel, pid: u64, a: u64, b: u64) -> u64
   return r;
 }
 
+/// fchown, fsync, fdatasync and syncfs: the calls that take a descriptor and little else
+/// (apart from lx_misc_call so that its long chain of cases stays provable).
+fn lx_fd_misc(k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
+  requires kok(k) && pid < NPROC
+  ensures kok(k)
+{
+  let mut r = 0;
+  if n == LX_FCHOWN {
+    let f = fd_handle(&mut k, pid, a);
+    let d = fd_look(k, pid, a);
+    if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK {
+      r = chown_own_fd(&mut k, pid, b, c);
+    } else if f != NO_RESULT && handle_ro(&mut k, f) {
+      r = EROFS;
+    } else {
+      r = chown_handle(&mut k, pid, f, b, c);
+    }
+  } else if n == LX_FSYNC || n == LX_FDATASYNC {
+    let d = fd_look(k, pid, a);
+    if d.kind == K_BAD {
+      r = EBADF;                            // writes go straight through
+    } else if d.kind != K_FILE && d.kind != K_DIR {
+      r = EINVAL;                           // a pipe, socket or device has nothing to sync
+    } else {
+      sync_files(&mut k);                  // commits the batch of writes; the caller waits for it
+    }
+  } else {
+    // One file system's worth of sync is everything's: the descriptor only has to be open.
+    let sd = fd_look(k, pid, a);
+    if sd.kind == K_BAD {
+      r = EBADF;
+    } else {
+      sync_files(&mut k);
+    }
+  }
+  return r;
+}
+
 /// System call n of process pid, with its first three arguments.
 fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64, c: u64) -> u64
   requires con_ok(con) && kok(k) && pid < NPROC
@@ -1127,25 +1166,8 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_MSYNC {
     r = lx_msync(&mut k, pid, a, b, c);
     sync_files(&mut k);
-  } else if n == LX_FCHOWN {
-    let f = fd_handle(&mut k, pid, a);
-    let d = fd_look(k, pid, a);
-    if d.kind == K_PIPE_R || d.kind == K_PIPE_W || d.kind == K_SOCK {
-      r = chown_own_fd(&mut k, pid, b, c);
-    } else if f != NO_RESULT && handle_ro(&mut k, f) {
-      r = EROFS;
-    } else {
-      r = chown_handle(&mut k, pid, f, b, c);
-    }
-  } else if n == LX_FSYNC || n == LX_FDATASYNC {
-    let d = fd_look(k, pid, a);
-    if d.kind == K_BAD {
-      r = EBADF;                            // writes go straight through
-    } else if d.kind != K_FILE && d.kind != K_DIR {
-      r = EINVAL;                           // a pipe, socket or device has nothing to sync
-    } else {
-      sync_files(&mut k);                  // commits the batch of writes; the caller waits for it
-    }
+  } else if n == LX_FCHOWN || n == LX_FSYNC || n == LX_FDATASYNC {
+    r = lx_fd_misc(&mut k, pid, n, a, b, c);
   } else if n == LX_MINCORE {
     r = lx_mincore(&mut k, pid, a, b, c);
   } else if n == LX_SYSLOG {
@@ -1160,13 +1182,7 @@ fn lx_misc_call(con: &mut Con, k: &mut Kernel, pid: u64, n: u64, a: u64, b: u64,
   } else if n == LX_SYNC {
     sync_files(&mut k);
   } else if n == LX_SYNCFS {
-    // One file system's worth of sync is everything's: the descriptor only has to be open.
-    let sd = fd_look(k, pid, a);
-    if sd.kind == K_BAD {
-      r = EBADF;
-    } else {
-      sync_files(&mut k);
-    }
+    r = lx_fd_misc(&mut k, pid, n, a, b, c);
   } else if is_meta_call(n) {
     r = lx_meta_call(&mut k, pid, n, a, b, c, r10);
   } else if n == LX_UMASK {

@@ -15,6 +15,7 @@
 #include <sys/eventfd.h>
 #include <sys/inotify.h>
 #include <sys/mman.h>
+#include <string.h>
 #include <sys/syscall.h>
 
 /* Reads up to n - 1 bytes of path into b as a string; the count, or -1. */
@@ -429,5 +430,16 @@ int main(int argc, char **argv) {
            }
            if (m >= 0) close(m);
            ok; }));
+    /* pread on a /proc file reads its text from an offset and leaves the position alone
+     * (the .NET runtime reads /proc/PID/stat this way). */
+    EXPECT("pread reads a /proc file from an offset and keeps the descriptor's position",
+           ({ char a[256], b[256], c[8]; int ok = 0, f = open("/proc/self/stat", O_RDONLY);
+              if (f >= 0) {
+                  ssize_t n = pread(f, a, sizeof a - 1, 0), m = pread(f, c, 4, 2);
+                  ssize_t r = read(f, b, 4);
+                  ok = n > 8 && m == 4 && r == 4 && memcmp(c, a + 2, 4) == 0 && memcmp(b, a, 4) == 0;
+                  close(f);
+              }
+              ok; }));
     return done();
 }
