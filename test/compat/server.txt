@@ -57,3 +57,16 @@ $ bb mkdir -p /disk/s/www /disk/s/etc/nginx; echo 'hello from nginx' > /disk/s/w
 hello from nginx
 wget: server returned error: HTTP/1.1 404 Not Found
 status 1
+
+== server: redis replicates to a second server
+$ R="bb chroot /disk/s /usr/bin/redis-cli"; bb mkdir -p /disk/s/tmp/r1 /disk/s/tmp/r2; bb chroot /disk/s /usr/bin/redis-server --port 6379 --bind 127.0.0.1 --daemonize yes --dir /tmp/r1 --logfile /tmp/redis.log --save '' --repl-diskless-sync-delay 0 >/dev/null 2>&1; bb sleep 2; $R set shared one >/dev/null; bb chroot /disk/s /usr/bin/redis-server --port 6380 --bind 127.0.0.1 --daemonize yes --dir /tmp/r2 --logfile /tmp/redis2.log --save '' --replicaof 127.0.0.1 6379 >/dev/null 2>&1; bb sleep 4; $R -p 6380 get shared; $R -p 6380 info replication | bb grep -e '^role' -e master_link_status | bb tr -d '\r'; $R set later two >/dev/null; bb sleep 1; $R -p 6380 get later; $R -p 6380 shutdown nosave; $R shutdown nosave
+"one"
+role:slave
+master_link_status:up
+"two"
+
+== server: nginx runs workers under a master
+$ bb printf 'worker_processes 2;\nerror_log /tmp/w.err;\npid /tmp/w.pid;\nevents { worker_connections 64; }\nhttp { access_log off; client_body_temp_path /tmp/c; proxy_temp_path /tmp/p; fastcgi_temp_path /tmp/f; uwsgi_temp_path /tmp/u; scgi_temp_path /tmp/s; server { listen 127.0.0.1:8081; root /www; } }\n' > /disk/s/etc/nginx/w.conf; bb chroot /disk/s /usr/sbin/nginx -c /etc/nginx/w.conf; bb sleep 2; bb wget -q -O - http://127.0.0.1:8081/index.html; bb ps | bb grep -c '[n]ginx: worker'; bb kill $(bb cat /disk/s/tmp/w.pid); bb sleep 2; bb wget -q -O /dev/null http://127.0.0.1:8081/index.html 2>/dev/null; echo status $?
+hello from nginx
+2
+status 1
