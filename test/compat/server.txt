@@ -70,3 +70,10 @@ $ bb printf 'worker_processes 2;\nerror_log /tmp/w.err;\npid /tmp/w.pid;\nevents
 hello from nginx
 2
 status 1
+
+== server: haproxy forwards requests to nginx
+$ bb printf 'global\n  maxconn 64\ndefaults\n  mode http\n  timeout connect 3s\n  timeout client 10s\n  timeout server 10s\nfrontend web\n  bind 127.0.0.1:8090\n  default_backend app\nbackend app\n  server n1 127.0.0.1:8080\n' > /disk/s/etc/haproxy.cfg; bb chroot /disk/s /usr/sbin/haproxy -f /etc/haproxy.cfg -D -p /tmp/haproxy.pid; bb sleep 2; bb wget -q -O - http://127.0.0.1:8090/index.html; bb wget -q -O /dev/null http://127.0.0.1:8090/missing; echo status $?; bb kill $(bb cat /disk/s/tmp/haproxy.pid); bb sleep 1; bb wget -q -O /dev/null http://127.0.0.1:8090/index.html 2>/dev/null; echo status $?
+hello from nginx
+wget: server returned error: HTTP/1.1 404 Not Found
+status 1
+status 1
