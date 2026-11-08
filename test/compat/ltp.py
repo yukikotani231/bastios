@@ -457,6 +457,7 @@ def main():
         if args.shard:
             want = [w for w in want if w in {t[0] for t in tests}]
         lost = sorted(set(want) - set(ids))
+        why = {r["name"]: r for r in results}
         # A few tests depend on timing and fail now and then (clock_gettime04,
         # shmctl01). A test that stopped passing runs again, twice at most,
         # alone on a fresh kernel; one that passes then is reported as flaky,
@@ -469,13 +470,16 @@ def main():
             with open(os.path.join(args.out, "serial.log"), "ab") as log:
                 rerun = run_guest(args, again, progs, log, None)
             fixed = sorted(r["name"] for r in rerun if r["result"] == "pass")
+            why.update({r["name"]: r for r in rerun})
             for n in fixed:
                 print(f"ltp: FLAKY, {n} failed once and passed on a second run")
             lost = sorted(set(lost) - set(fixed))
         if lost:
             print("ltp: REGRESSION, these tests passed before:")
             for i in lost:
-                print("  " + i)
+                r = why.get(i, {})
+                # What it said the last time, so that a regression can be read from the log alone.
+                print(f"  {i}: {r.get('result', 'not run')}: {r.get('detail', '')}")
             return 1
     return 0
 
