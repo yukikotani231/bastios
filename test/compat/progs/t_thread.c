@@ -698,6 +698,46 @@ static int prof_other_thread(void) {
     return prof_fired;
 }
 
+/* FUTEX_WAKE of one wakes the waiter of the highest real-time priority,
+ * not the one that waited first: a SCHED_FIFO 10 thread waits, then a
+ * SCHED_FIFO 20 one, and the 20 one must come out first. */
+#ifndef FUTEX_WAIT_PRIVATE
+#define FUTEX_WAIT_PRIVATE 128
+#define FUTEX_WAKE_PRIVATE 129
+#endif
+static int fw_word, fw_ready, fw_n, fw_order[2];
+static void *fw_waiter(void *a) {
+    struct sched_param sp = { .sched_priority = (int)(long)a };
+    if (pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp) != 0) return 0;
+    __atomic_add_fetch(&fw_ready, 1, __ATOMIC_SEQ_CST);
+    syscall(SYS_futex, &fw_word, FUTEX_WAIT_PRIVATE, 0, 0, 0, 0);
+    int i = __atomic_fetch_add(&fw_n, 1, __ATOMIC_SEQ_CST);
+    if (i < 2) fw_order[i] = sp.sched_priority;
+    return (void *)1;
+}
+static int futex_wake_prio(void) {
+    pthread_t t[2];
+    void *r0 = 0, *r1 = 0;
+    fw_word = 0; fw_ready = 0; fw_n = 0; fw_order[0] = fw_order[1] = 0;
+    struct timespec gap = { 0, 100000000 };
+    for (int i = 0; i < 2; i++) {
+        int want = i + 1;
+        if (pthread_create(&t[i], 0, fw_waiter, (void *)(long)(i ? 20 : 10)) != 0) return 0;
+        while (__atomic_load_n(&fw_ready, __ATOMIC_SEQ_CST) < want) usleep(1000);
+        nanosleep(&gap, 0);                 /* now in FUTEX_WAIT */
+    }
+    long w1 = syscall(SYS_futex, &fw_word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+    for (int i = 0; i < 1000 && __atomic_load_n(&fw_n, __ATOMIC_SEQ_CST) < 1; i++) usleep(1000);
+    int first = fw_order[0];
+    while (__atomic_load_n(&fw_n, __ATOMIC_SEQ_CST) < 2) {
+        syscall(SYS_futex, &fw_word, FUTEX_WAKE_PRIVATE, 1, 0, 0, 0);
+        usleep(1000);
+    }
+    pthread_join(t[0], &r0);
+    pthread_join(t[1], &r1);
+    return w1 == 1 && first == 20 && r0 == (void *)1 && r1 == (void *)1;
+}
+
 int main(void) {
     setup();
     pthread_t t[4];
@@ -747,6 +787,7 @@ int main(void) {
     EXPECT_SHARE("two SCHED_RR threads of one priority take turns on one processor", rr_share);
     EXPECT_SHARE("a spinning SCHED_FIFO thread leaves a SCHED_OTHER thread on its processor a few percent", rt_share);
     EXPECT("ITIMER_PROF set by one thread runs down with another thread's time", prof_other_thread());
+    EXPECT("FUTEX_WAKE wakes the waiter of the highest real-time priority first", futex_wake_prio());
     if (begin("exit_group while another thread runs keeps its code")) {
         int r = group_exit_code();
         if (r == 1) pass(); else if (r == 0) fail("fork or waitpid failed");
