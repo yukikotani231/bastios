@@ -254,6 +254,7 @@ What will be 0.3.0. It needs bastiolang 0.2.0.
 
 
 ### Fixed
+- An RTC alarm (`RTC_WKALM_RD`, `RTC_ALM_READ`, `/sys/class/rtc/rtc0/wakealarm`) reads back the time it was set for. It was stored as a kernel wall-clock second and turned back into clock time on each read; the CMOS clock and the kernel's wall clock turn their seconds at different moments, so a read in part of a second gave a time 1 s off.
 - The real-time share (95%) counts its period in the processor's own ticks, not the bootstrap processor's: under an emulator on a busy host a processor's ticks lag, and its non-real-time threads then got no turn at all while a `SCHED_FIFO` thread spun.
 
 - `setitimer(ITIMER_PROF)` and `ITIMER_VIRTUAL` count the time of every thread in the process, as on Linux, wherever they were set from. They used to be kept in the row of the thread that set them, so they only ran down while that thread ran. A thread that set one and then waited for another thread never got its signal; that hung the Open POSIX test `pthread_create` 1-6. The signal goes to the thread that was running when the timer ran out, unless that thread blocks it (`test/compat/progs/t_thread.c`).

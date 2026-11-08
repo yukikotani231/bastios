@@ -1900,6 +1900,7 @@ t_rtc: sysfs: date is the UTC date of since_epoch
 t_rtc: sysfs: time is the UTC time of since_epoch
 t_rtc: sysfs: max_user_freq is a number
 t_rtc: RTC_WKALM_SET arms an alarm
+t_rtc: RTC_WKALM_RD gives back the time set, whenever in a second it is read
 t_rtc: RTC_WKALM_RD says armed, not yet pending, and the same time
 t_rtc: a nonblocking read before the alarm is EAGAIN
 t_rtc: poll does not report it ready

@@ -1238,13 +1238,10 @@ fn rtc_sys_text(k: &mut Kernel, t: u64, o: &mut Bytes) -> u64
   }
   if t == 5 {
     // The alarm, as the clock will show it, while one is armed (empty otherwise).
-    let at = smaller(get(k.sys, SYS_RTCA), 5000000000);
-    let wall = rtc_wall(k);
-    let now = hw_get(&mut k.hwc);
-    if get(k.sys, SYS_RTCA + 1) != 1 || at == 0 || at + now < wall {
+    if !rtc_armed(k) || rtc_alarm(k) == 0 {
       return 0;
     }
-    return put_c(&mut o, put_n(&mut o, 0, at + now - wall), 10);
+    return put_c(&mut o, put_n(&mut o, 0, smaller(rtc_shown(k), 5000000000)), 10);
   }
   let s = hw_get(&mut k.hwc);
   let days = s / 86400;
@@ -5246,7 +5243,7 @@ fn rtc_wake_write(k: &mut Kernel, n: u64, start: u64) -> u64
     return EINVAL;
   }
   if v == 0 && !rel {
-    k.sys = set(k.sys, SYS_RTCA + 1, 0);
+    rtc_arm(&mut k, false);
     return n;
   }
   let now = hw_get(&mut k.hwc);
@@ -5257,8 +5254,7 @@ fn rtc_wake_write(k: &mut Kernel, n: u64, start: u64) -> u64
   if at <= now {
     return EINVAL;                          // an alarm in the past
   }
-  k.sys = set(k.sys, SYS_RTCA, rtc_due(k, at, now));
-  k.sys = set(k.sys, SYS_RTCA + 1, 1);
+  rtc_set(&mut k, at, now, true);
   return n;
 }
 
