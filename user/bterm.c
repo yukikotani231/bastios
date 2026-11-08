@@ -96,6 +96,7 @@ static long click_ms;
 static int sel_on, selecting;             /* a selection is lit; the button is still down */
 static int sel_ar, sel_ac, sel_br, sel_bc;   /* where it began and where the pointer is, as cells */
 #define CLIP_FILE "/tmp/bwm.clip"         /* what is selected, for any terminal to paste */
+#define CLIP_KEEP 4                       /* older selections kept as CLIP_FILE.1 (the latest of them) to CLIP_FILE.4 */
 
 static void put_cell(int r, int c, unsigned ch)
 {
@@ -818,6 +819,19 @@ static void copy_selection(void)
         if (r < br)
             text[n++] = '\n';
     }
+    struct stat cst;
+    if (stat(CLIP_FILE, &cst) == 0 && cst.st_size > 0) {       /* the clipboard so far becomes the newest of the older entries */
+        char from[32], to[32];
+        for (int i = CLIP_KEEP; i >= 1; i--) {
+            snprintf(to, sizeof to, CLIP_FILE ".%d", i);
+            if (i == 1)
+                rename(CLIP_FILE, to);
+            else {
+                snprintf(from, sizeof from, CLIP_FILE ".%d", i - 1);
+                rename(from, to);
+            }
+        }
+    }
     int f = open(CLIP_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (f >= 0) {
         (void)!write(f, text, n);
@@ -861,10 +875,13 @@ static void click_select(int r, int c)
     copy_selection();
 }
 
-/* Types the clipboard into the shell, between ESC [ 200 ~ and ESC [ 201 ~ when the program asked for that. */
-static void paste(int m)
+/* Types the clipboard (OLDER 0), or the OLDER-th earlier selection, into the shell, between ESC [ 200 ~ and ESC [ 201 ~ when the program asked for that. */
+static void paste(int m, int older)
 {
-    int f = open(CLIP_FILE, O_RDONLY);
+    char path[32] = CLIP_FILE;
+    if (older > 0)
+        snprintf(path, sizeof path, CLIP_FILE ".%d", older);
+    int f = open(path, O_RDONLY);
     if (f < 0)
         return;
     char b[512];
@@ -1161,7 +1178,9 @@ int main(int argc, char **argv)
                     continue;
                 }
                 if (k->ch == BWM_KEY_PASTE)
-                    paste(m);
+                    paste(m, 0);
+                else if (k->ch >= BWM_KEY_PASTE_OLD && k->ch < BWM_KEY_PASTE_OLD + CLIP_KEEP)
+                    paste(m, (int)(k->ch - BWM_KEY_PASTE_OLD) + 1);
                 else if (write(m, &c, 1) != 1)
                     break;
             } else if (t == BWM_DROP) {
@@ -1219,7 +1238,7 @@ int main(int argc, char **argv)
                     memset(dirty, 1, sizeof dirty);
                 }
                 if ((e->buttons & 4) && !mid) {
-                    paste(m);                    /* the middle button */
+                    paste(m, 0);                 /* the middle button */
                 }
                 mid = e->buttons & 4;
                 if (repaint(fd, id, &ocx, &ocy) != 0)
