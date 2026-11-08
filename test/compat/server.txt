@@ -77,3 +77,10 @@ hello from nginx
 wget: server returned error: HTTP/1.1 404 Not Found
 status 1
 status 1
+
+== server: dnsmasq answers DNS queries
+$ bb printf '10.9.8.7 host.test\n' > /disk/s/etc/dnsmasq.hosts; bb chroot /disk/s /usr/sbin/dnsmasq --conf-file=/dev/null --no-resolv --no-hosts --addn-hosts=/etc/dnsmasq.hosts --address=/example.test/10.1.2.3 --listen-address=127.0.0.1 --bind-interfaces --user=root --pid-file=/tmp/dnsmasq.pid; bb sleep 1; bb nslookup example.test 127.0.0.1 | bb grep -c 10.1.2.3; bb nslookup host.test 127.0.0.1 | bb grep -c 10.9.8.7; bb nslookup other.test 127.0.0.1 >/dev/null 2>&1; echo status $?; bb kill $(bb cat /disk/s/tmp/dnsmasq.pid); bb sleep 1; bb nslookup example.test 127.0.0.1 >/dev/null 2>&1; echo status $?
+1
+1
+status 1
+status 1

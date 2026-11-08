@@ -104,7 +104,7 @@ the real programs, and `script` (util-linux, only for `compat-host`).
   checked by `test/shell_test.sh`.
 - `server.txt`: servers, from a disk of its own (`serverdisk.py`). Ubuntu 24.04's
   Redis (snapshot, append-only file and replication),
-  memcached, nginx and HAProxy (glibc), unpacked from `.deb`s pinned by SHA-256, entered
+  memcached, nginx, HAProxy and dnsmasq (glibc), unpacked from `.deb`s pinned by SHA-256, entered
   with `chroot` and reached over the loopback interface.
 - `debian.txt`: Debian 13, from a fifth disk (`debiandisk.py`). The first
   case unpacks Debian's root file system (the `debian:stable-slim` image,
