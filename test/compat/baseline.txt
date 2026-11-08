@@ -172,6 +172,9 @@ debian: debian: util-linux mount tools see the mount table
 alsa: alsa: SDL2 plays through its ALSA backend
 alsa: alsa: aplay plays through dmix
 alsa: alsa: amixer lists the volume control
+alsa: alsa: sox converts a file
+alsa: alsa: sox plays a tone through the ALSA output
+alsa: alsa: sox records through the ALSA input
 alsa: alsa: the default device converts the rate of a recording
 alsa: alsa: aplay lists the card
 alsa: alsa: aplay plays mono 24 kHz on the hardware device
