@@ -3084,7 +3084,19 @@ fn lx_mmap(k: &mut Kernel, pid: u64, addr: u64, n: u64, prot: u64, flags: u64, f
       }
     }
   }
-  let r = lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+  let mut r = lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+  // Out of pages: the page cache gives back what no mapping holds, and
+  // swap takes some, as for a page fault (oom_fault), and the call runs
+  // once more. Linux reclaims the same way before it says ENOMEM. A
+  // shared file mapping needs the cache's pages, so a machine full of
+  // cached file data made it fail.
+  if r == ENOMEM && count_free(k.mem.bm) < smaller(n / 4096, WPAGES) + 64 {
+    let cached = pc_reclaim(&mut k);
+    let swapped = swap_out(&mut k, 32);
+    if cached > 0 || swapped > 0 {
+      r = lx_mmap_core(&mut k, pid, addr, n, prot, flags, fd, o);
+    }
+  }
   if flags / MAP_ANONYMOUS % 2 == 0 && r >= USER_BASE && r - USER_BASE < USER_SIZE {
     let pd = fd_look(k, pid, fd);
     if pd.kind == K_DEV && pd.x == DEV_PCM {
@@ -3273,6 +3285,13 @@ fn lx_mmap_fill(k: &mut Kernel, pid: u64, at: u64, pages: u64, prot: u64, flags:
     }
     let r = lx_map_file_shared(&mut k, pid, at / 4096, pages, f, off, can_write);
     if r != 0 {
+      // The pages mapped before memory ran out go again, and so does the
+      // address space, so that lx_mmap can try once more after the cache
+      // gave pages back. (While another processor runs the space, win_op
+      // leaves them: then the space stays taken, as before.)
+      if win_op(&mut k.mem, &mut k.spaces, pid, WOP_UNMAP, at / 4096, at / 4096 + pages, 0) <= WPAGES && at >= pget(k.procs, pid, F_MMAP) {
+        hole_add(&mut k, pid, at / 4096, at / 4096 + pages);
+      }
       return r;
     }
     if !map_record(&mut k, pid, fd, at / 4096, pages, off, !can_write) && !can_write {
